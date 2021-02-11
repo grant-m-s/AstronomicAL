@@ -1,0 +1,7 @@
+bokeh>=2.2.3
+panel>=0.10.3
+astropy>=4.1
+pandas>=1.1.5
+modAL>=0.4.1
+holoviews>=1.14.1
+datashader>=0.12.0
