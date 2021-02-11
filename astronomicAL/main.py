@@ -216,8 +216,6 @@ class PlotDashboard(param.Parameterized):
             cols.remove(settings["id_col"])
         if settings["label_col"] in cols:
             cols.remove(settings["label_col"])
-        if "color" in cols:
-            cols.remove("color")
 
         self.param.X_variable.objects = cols
         self.param.Y_variable.objects = cols
@@ -495,8 +493,6 @@ class ParameterAssignment(param.Parameterized):
         colours = labels.copy()
         for key in settings["label_colours"].keys():
             colours[colours == key] = settings["label_colours"][key]
-
-        self.src.data["color"] = colours
 
         settings["extra_info_cols"] = self.extra_info_selector.value
         self.confirm_settings_button.name = "Confirmed"
