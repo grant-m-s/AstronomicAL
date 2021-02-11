@@ -1,78 +1,56 @@
-from bokeh.models import TextAreaInput
-import numpy as np
-import panel as pn
-import holoviews as hv
-import holoviews.plotting.bokeh
-
-from functools import partial
 from astropy.table import Table
-import json
-from joblib import dump
-
-# import hvplot.pandas
-import param
-from itertools import combinations
-
-import time
-# from bokeh.sampledata.iris import flowers
-
-# from holoviews import opts, dim
-# from functools import partial
-# from bokeh.io import curdoc
-# from bokeh.layouts import column, row, Spacer, gridplot
-
-# from bokeh.events import Tap
 from bokeh.models import (
     ColumnDataSource,
-    TableColumn,
     DataTable,
+    TableColumn,
+    TextAreaInput
 )
-
-# from bokeh.models.callbacks import CustomJS
-# from bokeh.models.widgets import Button
 from bokeh.plotting import figure
-
+from datetime import datetime
+from functools import partial
 from holoviews.operation.datashader import (
     datashade,
-    # shade,
     dynspread,
-    # spread,
-    # rasterize,
 )
-
-# from holoviews.operation import decimate
-
-# import tools
-
-# import numpy as np
-
-import pandas as pd
-
-import datashader as ds
-
+from itertools import combinations
+from joblib import dump
+from modAL.uncertainty import (
+    entropy_sampling,
+    margin_sampling,
+    uncertainty_sampling
+)
+from modAL.models import ActiveLearner, Committee
 from sklearn.base import clone
-
 from sklearn.ensemble import (
-    RandomForestClassifier,
     AdaBoostClassifier,
     GradientBoostingClassifier,
+    RandomForestClassifier,
 )
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.tree import DecisionTreeClassifier
-
 from sklearn.preprocessing import RobustScaler
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import f1_score, precision_score, recall_score, confusion_matrix
-from modAL.uncertainty import entropy_sampling, margin_sampling, uncertainty_sampling
-from modAL.models import ActiveLearner, Committee
+from sklearn.metrics import (
+    confusion_matrix,
+    f1_score,
+    precision_score,
+    recall_score,
+)
 
+import datashader as ds
+import holoviews as hv
+import json
+import numpy as np
 import os
-from datetime import datetime
+import pandas as pd
+import panel as pn
+import param
+import time
 
 hv.extension("bokeh")
 hv.renderer("bokeh").webgl = True
 
-# SETTINGS PIPELINE
+############################### SETTINGS PIPELINE ##############################
 
 
 class SettingsDashboard(param.Parameterized):
@@ -367,10 +345,6 @@ class DataSelection(param.Parameterized):
             name="Load File", max_height=30, margin=(45, 0, 0, 0)
         )
         self.load_data_button.on_click(self.load_data_cb)
-
-    def get_data(self, filename, extra_columns=None):
-        df_all = tools.get_dataframe_from_fits_file(filename, extra_columns)
-        return df_all
 
     def get_dataframe_from_fits_file(self, filename):
         fits_table = Table.read(filename, format="fits")
@@ -2500,8 +2474,8 @@ pn.config.sizing_mode = "stretch_both"
 
 settings = {}
 
-if os.path.isfile("panel_test/layout.json"):
-    with open("panel_test/layout.json") as layout_file:
+if os.path.isfile("astronomicAL/layout.json"):
+    with open("astronomicAL/layout.json") as layout_file:
         data = json.load(layout_file)
         for p in data:
             start_row = data[p]["y"]
