@@ -55,9 +55,15 @@ hv.renderer("bokeh").webgl = True
 
 class SettingsDashboard(param.Parameterized):
 
-    def __init__(self, main, src, **params):
+    def __init__(self, main, src, df, ** params):
         super(SettingsDashboard, self).__init__(**params)
         self.row = pn.Row(pn.pane.Str("loading"))
+
+        self.src = src
+
+        self.df = None
+
+        self.pipeline_stage = 0
 
         self.close_settings_button = pn.widgets.Button(
             name="Close Settings",
@@ -72,13 +78,30 @@ class SettingsDashboard(param.Parameterized):
             "Select Your Data", DataSelection(src), ready_parameter="ready"
         ),
         self.pipeline.add_stage(
-            "Assign Parameters", ParameterAssignment(src),
+            "Assign Parameters", ParameterAssignment(df),
             ready_parameter="ready"
         ),
         self.pipeline.add_stage(
             "Active Learning Settings", ActiveLearningSettings(
                 src, self.close_settings_button)
         )
+
+        self.pipeline.layout[0][0][0].sizing_mode = "fixed"
+
+        self.pipeline.layout[0][0][0].max_height = 75
+
+        self.pipeline.layout[0][2][0].sizing_mode = "fixed"
+        self.pipeline.layout[0][2][1].sizing_mode = "fixed"
+        self.pipeline.layout[0][2][0].height = 30
+        self.pipeline.layout[0][2][1].height = 30
+        self.pipeline.layout[0][2][0].width = 100
+        self.pipeline.layout[0][2][1].width = 100
+
+        self.pipeline.layout[0][2][0].on_click(self.stage_previous_cb)
+
+        self.pipeline.layout[0][2][1].button_type = 'success'
+        self.pipeline.layout[0][2][1].on_click(self.stage_next_cb)
+
         print(self.pipeline)
         print(self.pipeline["Assign Parameters"].get_id_column())
 
@@ -101,28 +124,48 @@ class SettingsDashboard(param.Parameterized):
 
     def close_settings_cb(self, event, main):
         print("closing settings")
+
+        self.df = self.pipeline["Active Learning Settings"].get_df()
+
+        global main_df
+
+        main_df = self.df
+
+        src = {}
+        for col in self.df.columns:
+            src[f"{col}"] = []
+
+        self.src.data = src
+        print("\n\n\n\n")
+        print(len(list(self.src.data.keys())))
+
         self.close_settings_button.disabled = True
         self.close_settings_button.name = "Setting up training panels..."
 
-        self.df = self.pipeline["Select Your Data"].get_df()
         main.set_contents(updated="Active Learning")
+
+    def stage_previous_cb(self, event):
+
+        self.pipeline_stage -= 1
+
+    def stage_next_cb(self, event):
+
+        if self.df is None:
+            print("updating Settings df")
+            self.df = self.pipeline["Select Your Data"].get_df()
+
+        pipeline_list = list(self.pipeline._stages)
+        print("STAGE:")
+        current_stage = pipeline_list[self.pipeline_stage]
+
+        next_stage = pipeline_list[self.pipeline_stage + 1]
+        self.pipeline[next_stage].update_data(dataframe=self.df)
+
+        self.pipeline_stage += 1
 
     def panel(self):
         if self.pipeline["Active Learning Settings"].is_complete():
             self.close_settings_button.disabled = False
-
-        self.pipeline.layout[0][0][0].sizing_mode = "fixed"
-
-        self.pipeline.layout[0][0][0].max_height = 75
-
-        self.pipeline.layout[0][2][0].sizing_mode = "fixed"
-        self.pipeline.layout[0][2][1].sizing_mode = "fixed"
-        self.pipeline.layout[0][2][0].height = 30
-        self.pipeline.layout[0][2][1].height = 30
-        self.pipeline.layout[0][2][0].width = 100
-        self.pipeline.layout[0][2][1].width = 100
-
-        self.pipeline.layout[0][2][1].button_type = 'success'
 
         self.row[0] = pn.Card(
             pn.Column(
@@ -197,9 +240,13 @@ class PlotDashboard(param.Parameterized):
     def __init__(self, src, **params):
         super(PlotDashboard, self).__init__(**params)
 
+        global main_df
+
+        self.df = main_df
+        self.update_variable_lists()
         self.src = src
-        self.src.on_change("data", self.update_variable_lists_cb)
-        self.src.selected.on_change("indices", self.panel_cb)
+        self.src.on_change("data", self.panel_cb)
+        # self.src.selected.on_change("indices", self.panel_cb)
         self.update_variable_lists()
         self.row = pn.Row(pn.pane.Str("loading"))
 
@@ -210,7 +257,7 @@ class PlotDashboard(param.Parameterized):
 
         print(f"x_var currently is: {self.X_variable}")
 
-        cols = list(self.src.data.keys())
+        cols = list(self.df.columns)
 
         if settings["id_col"] in cols:
             cols.remove(settings["id_col"])
@@ -235,26 +282,32 @@ class PlotDashboard(param.Parameterized):
     def panel_cb(self, attr, old, new):
         self.panel()
 
-    @param.depends("X_variable", "Y_variable")
+    @ param.depends("X_variable", "Y_variable")
     def plot(self):
 
-        df = pd.DataFrame(
-            self.src.data,
-            columns=list(self.src.data.keys()),
-        )
+        print(self.df.columns)
 
         p = hv.Points(
-            df,
+            self.df,
             [self.X_variable, self.Y_variable],
         ).opts(active_tools=["pan", "wheel_zoom"])
 
-        selected = pd.DataFrame(df.loc[self.src.selected.indices])
+        print("problem after p")
+
+        keys = list(self.src.data.keys())
+
+        if len(self.src.data[keys[0]]) == 1:
+            selected = pd.DataFrame(
+                self.src.data, columns=keys, index=[0])
+        else:
+            selected = pd.DataFrame(columns=keys)
+
+        print(selected)
 
         selected_plot = hv.Scatter(
             selected,
             self.X_variable,
             self.Y_variable,
-
         ).opts(
             fill_color="black",
             marker="circle",
@@ -276,19 +329,31 @@ class PlotDashboard(param.Parameterized):
             }
         )
 
-        x_sd = np.std(df[self.X_variable])
-        x_mu = np.mean(df[self.X_variable])
-        y_sd = np.std(df[self.Y_variable])
-        y_mu = np.mean(df[self.Y_variable])
+        max_x = np.max(self.df[self.X_variable])
+        min_x = np.min(self.df[self.X_variable])
 
-        max_x = x_mu + 4*x_sd
-        min_x = x_mu - 4*x_sd
+        max_y = np.max(self.df[self.Y_variable])
+        min_y = np.min(self.df[self.Y_variable])
 
-        max_y = y_mu + 4*y_sd
-        min_y = y_mu - 4*y_sd
+        x_sd = np.std(self.df[self.X_variable])
+        x_mu = np.mean(self.df[self.X_variable])
+        y_sd = np.std(self.df[self.Y_variable])
+        y_mu = np.mean(self.df[self.Y_variable])
 
-        if len(selected) > 0:
+        max_x = np.min([x_mu + 4*x_sd, max_x])
+        min_x = np.max([x_mu - 4*x_sd, min_x])
 
+        max_y = np.min([y_mu + 4*y_sd, max_y])
+        min_y = np.max([y_mu - 4*y_sd, min_y])
+
+        print(f"shape: {selected.shape}")
+
+        if selected.shape[0] > 0:
+
+            print(f"shape: {selected.shape}")
+            print(
+                f"np.max(selected[self.X_variable]): {np.max(selected[self.X_variable])}")
+            print(f"max_x: {max_x}")
             max_x = np.max([max_x, np.max(selected[self.X_variable])])
             min_x = np.min([min_x, np.min(selected[self.X_variable])])
 
@@ -312,6 +377,8 @@ class PlotDashboard(param.Parameterized):
         return plot
 
     def panel(self):
+
+        print("Panel Plot")
 
         self.row[0] = pn.Card(
             pn.Row(self.plot, sizing_mode="stretch_both"),
@@ -360,12 +427,15 @@ class DataSelection(param.Parameterized):
         self.load_data_button.disabled = True
         self.load_data_button.name = "Loading File..."
         print("loading new dataset")
-        df = self.get_dataframe_from_fits_file(self.dataset)
-        print(f" dataset shape: {df.shape}")
+        global main_df
+        main_df = self.get_dataframe_from_fits_file(self.dataset)
+        self.df = main_df
+        self.src.data = dict(pd.DataFrame())
 
-        self.df = df
+        print(f" dataset shape: {self.df.shape}")
         print(f"Self.df: {self.df}")
-        self.update_src(df)
+        # FIXME :: Remove update_src
+        self.update_src(self.df)
         self.ready = True
         self.load_data_button.name = "File Loaded."
 
@@ -373,7 +443,8 @@ class DataSelection(param.Parameterized):
         return self.df
 
     def update_src(self, df):
-        self.src.data = dict(df)
+        new_df = pd.DataFrame([[0, 0], [0, 0]], columns=["test", "test"])
+        self.src.data = dict(new_df)
 
     def panel(self):
         return pn.Row(self.param.dataset, self.load_data_button, max_width=300)
@@ -400,11 +471,38 @@ class ParameterAssignment(param.Parameterized):
 
     label_strings_param = {}
 
-    def parameter_update_cb(self, attr, old, new):
+    def __init__(self, df, **params):
+        super(ParameterAssignment, self).__init__(**params)
+        self.column = pn.Column(pn.pane.Str("loading"))
+        # FIXME :: Remove src
+        self.src = ColumnDataSource()
+        # self.src.on_change("data", self.parameter_update_cb)
 
-        if self.initial_update:
+        self.df = None
+
+        self.confirm_settings_button = pn.widgets.Button(
+            name="Confirm Settings", max_height=30, margin=(25, 0, 0, 0)
+        )
+        self.confirm_settings_button.on_click(self.confirm_settings_cb)
+
+        self.extra_info_selector = pn.widgets.MultiChoice(
+            name="Extra Columns to display when inspecting a source:",
+            value=[],
+            options=[],
+        )
+
+    def update_data(self, dataframe=None):
+
+        if dataframe is not None:
+            self.df = dataframe
+
+        if (self.initial_update) and (self.df is not None):
+            print("Not None")
+            cols = list(self.df.columns)
+
+            if cols == []:
+                return
             self.initial_update = False
-            cols = list(self.src.data.keys())
 
             self.param.id_column.objects = cols
             self.param.id_column.default = cols[0]
@@ -426,7 +524,7 @@ class ParameterAssignment(param.Parameterized):
 
     @param.depends("label_column", watch=True)
     def update_labels(self):
-        self.labels = list(set(self.src.data[self.label_column]))
+        self.labels = sorted(self.df[self.label_column].unique())
         settings["labels"] = self.labels
 
         self.update_colours()
@@ -464,24 +562,6 @@ class ParameterAssignment(param.Parameterized):
             self.label_strings_param[f"{data_label}"] = pn.widgets.TextInput(
                 name=f"{data_label}", placeholder=f"{data_label}")
 
-    def __init__(self, src, **params):
-        super(ParameterAssignment, self).__init__(**params)
-        self.column = pn.Column(pn.pane.Str("loading"))
-
-        self.src = src
-        self.src.on_change("data", self.parameter_update_cb)
-
-        self.confirm_settings_button = pn.widgets.Button(
-            name="Confirm Settings", max_height=30, margin=(25, 0, 0, 0)
-        )
-        self.confirm_settings_button.on_click(self.confirm_settings_cb)
-
-        self.extra_info_selector = pn.widgets.MultiChoice(
-            name="Extra Columns to display when inspecting a source:",
-            value=[],
-            options=[],
-        )
-
     def confirm_settings_cb(self, event):
         print("Saving settings...")
         self.confirm_settings_button.name = "Assigning parameters..."
@@ -489,10 +569,14 @@ class ParameterAssignment(param.Parameterized):
         global settings
         settings = self.get_settings()
 
-        labels = self.src.data[settings["label_col"]]
-        colours = labels.copy()
-        for key in settings["label_colours"].keys():
-            colours[colours == key] = settings["label_colours"][key]
+        labels = self.df[settings["label_col"]]
+        # print("start colour copy")
+        # colours = labels.copy()
+        # print("finish copy")
+        # print("start colour loop")
+        # for key in settings["label_colours"].keys():
+        #     colours.loc[colours == key] = settings["label_colours"][key]
+        # print("finish loop")
 
         settings["extra_info_cols"] = self.extra_info_selector.value
         self.confirm_settings_button.name = "Confirmed"
@@ -610,7 +694,7 @@ class ActiveLearningSettings(param.Parameterized):
     def __init__(self, src, close_button, **params):
         super(ActiveLearningSettings, self).__init__(**params)
 
-        self.src = src
+        self.df = None
 
         self.close_button = close_button
 
@@ -654,6 +738,21 @@ class ActiveLearningSettings(param.Parameterized):
 
         self.completed = False
 
+    def update_data(self, dataframe=None):
+
+        if dataframe is not None:
+            self.df = dataframe
+
+        if (self.df is not None):
+
+            labels = settings["labels"]
+            options = []
+            for label in labels:
+                options.append(settings["labels_to_strings"][f"{label}"])
+            self.label_selector.options = options
+
+            self.feature_selector.options = list(self.df.columns)
+
     def confirm_settings_cb(self, event):
         print("Saving settings...")
         global settings
@@ -677,6 +776,9 @@ class ActiveLearningSettings(param.Parameterized):
 
         self.panel()
 
+    def get_df(self):
+        return self.df
+
     def is_complete(self):
         return self.completed
 
@@ -684,16 +786,11 @@ class ActiveLearningSettings(param.Parameterized):
         print("Rendering AL Settings Panel")
         global settings
         print(settings)
+
         if self.completed:
             self.column[0] = pn.pane.Str("Settings Saved.")
-        else:
-            labels = settings["labels"]
-            options = []
-            for label in labels:
-                options.append(settings["labels_to_strings"][f"{label}"])
-            self.label_selector.options = options
 
-            self.feature_selector.options = list(self.src.data.keys())
+        else:
 
             self.column[0] = pn.Column(
                 pn.Row(
@@ -738,6 +835,9 @@ class ActiveLearningTab(param.Parameterized):
         super(ActiveLearningTab, self).__init__(**params)
         print("init")
 
+        self.df = df
+
+        # FIXME :: Remove src
         self.src = src
         self.label = settings["strings_to_labels"][label]
         self.label_string = label
@@ -769,9 +869,10 @@ class ActiveLearningTab(param.Parameterized):
                              "prec": 0.00, "rec": 0.00, "f1": 0.00}
         self.val_scores = {"acc": 0.00, "prec": 0.00, "rec": 0.00, "f1": 0.00}
 
-        self.df = self.generate_features(df)
+        # FIXME :: Think this will remove evrything but trained features
+        self.df, self.data = self.generate_features(self.df)
 
-        self.x, self.y = self.split_x_y(self.df)
+        self.x, self.y = self.split_x_y(self.data)
 
         if settings["exclude_labels"]:
             for label in settings["unclassified_labels"]:
@@ -1031,7 +1132,8 @@ class ActiveLearningTab(param.Parameterized):
         end = time.time()
         print(f"queries {end - start}")
 
-        data = self.src.data
+        # FIXME :: Change to df
+        data = self.df
 
         start = time.time()
         queried_id = self.id_pool.iloc[query_idx][settings["id_col"]]
@@ -1046,7 +1148,15 @@ class ActiveLearningTab(param.Parameterized):
         print(f"np.where {end - start}")
         act_label = self.y_pool[query_idx]
         print(f"Should be a {act_label}")
-        self.src.selected.indices = sel_idx[0]
+        # FIXME :: Change how selected
+        selected_source = self.df[self.df[settings["id_col"]]
+                                  == queried_id.values[0]]
+        selected_dict = selected_source.set_index(
+            settings["id_col"]).to_dict('list')
+        self.src.data = selected_dict
+
+        print(f"\n\n\n src.data: {self.src.data} \n id:{queried_id.values[0]}")
+
         start = time.time()
         # self.src.data = dict(self.src.data)
         end = time.time()
@@ -1234,7 +1344,7 @@ class ActiveLearningTab(param.Parameterized):
 
         print("split_x_y")
 
-        print(df_data)
+        # print(df_data)
 
         df_data_y = df_data[[settings["label_col"], settings["id_col"]]]
         df_data_x = df_data.drop(
@@ -1285,8 +1395,7 @@ class ActiveLearningTab(param.Parameterized):
             )
 
         print("\n")
-        # test is now 10% of the initial data set
-        # validation is now 15% of the initial data set
+
         x_val, x_test, y_val, y_test = train_test_split(
             x_temp,
             y_temp,
@@ -1698,20 +1807,18 @@ class ActiveLearningTab(param.Parameterized):
 
         print(combs)
 
+        cols = list(df.columns)
+
         updated_columns = False
         for i, j in combs:
             df_data[f"{i}-{j}"] = df_data[i] - df_data[j]
             # print(df_data[f"{i}-{j}"])
-            if f"{i}-{j}" not in list(df.columns):
+            if f"{i}-{j}" not in cols:
                 df[f"{i}-{j}"] = df[i] - df[j]
-                updated_columns = True
-
-        if updated_columns:
-            self.src.data = dict(df)
 
         print("Feature generations complete")
 
-        return df_data
+        return df, df_data
 
     # CHANGED :: Remove static declarations
     def combine_data(self):
@@ -1802,6 +1909,7 @@ class ActiveLearningTab(param.Parameterized):
 
         if hasattr(self, "query_instance"):
             start = time.time()
+            # FIXME :: Useful
             query_point = pd.DataFrame(
                 self.query_instance, columns=self.x_train.columns
             )
@@ -2179,10 +2287,12 @@ class SelectedInfoDashboard(param.Parameterized):
 
     url_optical_image = ""
 
-    def __init__(self, src, **params):
+    def __init__(self, src, df, **params):
         super(SelectedInfoDashboard, self).__init__(**params)
 
+        #  FIXME :: remove src
         self.src = src
+        self.df = df
         self.row = pn.Row(pn.pane.Str("loading"))
 
         self.selected_history = []
@@ -2203,12 +2313,14 @@ class SelectedInfoDashboard(param.Parameterized):
         self.search_id.param.watch(self.change_selected, "value")
 
         self.image_zoom = 0.2
+        # FIXME :: update this
         self.src.on_change("data", self.panel_cb)
         self.src.selected.on_change("indices", self.panel_cb)
         self.panel()
 
     def change_selected(self, event):
 
+        # FIXME :: Change this
         selected_index = self.src.data[settings["id_col"]][
             self.src.data[settings["id_col"]] == event.new
         ].index[0]
@@ -2323,7 +2435,7 @@ class SelectedInfoDashboard(param.Parameterized):
             print(type(self.src.data["png_path_DR16"][index]))
 
             # CHANGED :: Slow after this...
-
+            # FIXME :: update this
             if not self.src.data["png_path_DR16"][index].isspace():
                 print("beginning if")
                 try:
@@ -2413,9 +2525,12 @@ class DataDashboard(param.Parameterized):
 
         self.src = src
         self.row = pn.Row(pn.pane.Str("loading"))
+        global main_df
+        self.df = main_df
 
         self.contents = contents
 
+    # FIXME :: update this
     def update_panel_contents_src(self, event):
         self.panel_contents.src.data = self.src.data
 
@@ -2427,7 +2542,7 @@ class DataDashboard(param.Parameterized):
         if self.contents == "Settings":
 
             self.panel_contents = SettingsDashboard(
-                self, self.src)
+                self, self.src, self.df)
 
         elif self.contents == "Menu":
 
@@ -2439,7 +2554,9 @@ class DataDashboard(param.Parameterized):
 
         elif self.contents == "Active Learning":
 
-            self.df = self.panel_contents.df
+            global main_df
+
+            self.df = main_df
             self.panel_contents = ActiveLearningDashboard(self.src, self.df)
 
         elif self.contents == "Selected Info":
@@ -2459,6 +2576,8 @@ class DataDashboard(param.Parameterized):
 
 
 source = ColumnDataSource()
+
+main_df = pd.DataFrame()
 
 ############################### CREATE TEMPLATE ###############################
 
