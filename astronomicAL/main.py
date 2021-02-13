@@ -45,6 +45,7 @@ import os
 import pandas as pd
 import panel as pn
 import param
+import sys
 import time
 
 hv.extension("bokeh")
@@ -102,8 +103,8 @@ class SettingsDashboard(param.Parameterized):
         self.pipeline.layout[0][2][1].button_type = 'success'
         self.pipeline.layout[0][2][1].on_click(self.stage_next_cb)
 
-        print(self.pipeline)
-        print(self.pipeline["Assign Parameters"].get_id_column())
+        # print(self.pipeline)
+        # print(self.pipeline["Assign Parameters"].get_id_column())
 
     def get_settings(self):
 
@@ -136,8 +137,8 @@ class SettingsDashboard(param.Parameterized):
             src[f"{col}"] = []
 
         self.src.data = src
-        print("\n\n\n\n")
-        print(len(list(self.src.data.keys())))
+        # print("\n\n\n\n")
+        # print(len(list(self.src.data.keys())))
 
         self.close_settings_button.disabled = True
         self.close_settings_button.name = "Setting up training panels..."
@@ -212,7 +213,7 @@ class MenuDashboard(param.Parameterized):
                     )
 
     def update_main_contents(self, event, main, updated, button):
-        print(updated)
+        # print(updated)
         button.name = "Loading..."
         main.set_contents(updated)
 
@@ -271,12 +272,6 @@ class PlotDashboard(param.Parameterized):
         self.Y_variable = settings["default_vars"][1]
         self.X_variable = settings["default_vars"][0]
 
-        print(f"len of cols {len(cols)}")
-        print(f"cols {cols}")
-
-        print(f"len of cols {len(cols)}")
-        print(f"cols {cols}")
-
         print(f"x_var has now changed to: {self.X_variable}")
 
     def panel_cb(self, attr, old, new):
@@ -285,14 +280,10 @@ class PlotDashboard(param.Parameterized):
     @ param.depends("X_variable", "Y_variable")
     def plot(self):
 
-        print(self.df.columns)
-
         p = hv.Points(
             self.df,
             [self.X_variable, self.Y_variable],
         ).opts(active_tools=["pan", "wheel_zoom"])
-
-        print("problem after p")
 
         keys = list(self.src.data.keys())
 
@@ -301,8 +292,6 @@ class PlotDashboard(param.Parameterized):
                 self.src.data, columns=keys, index=[0])
         else:
             selected = pd.DataFrame(columns=keys)
-
-        print(selected)
 
         selected_plot = hv.Scatter(
             selected,
@@ -346,14 +335,8 @@ class PlotDashboard(param.Parameterized):
         max_y = np.min([y_mu + 4*y_sd, max_y])
         min_y = np.max([y_mu - 4*y_sd, min_y])
 
-        print(f"shape: {selected.shape}")
-
         if selected.shape[0] > 0:
 
-            print(f"shape: {selected.shape}")
-            print(
-                f"np.max(selected[self.X_variable]): {np.max(selected[self.X_variable])}")
-            print(f"max_x: {max_x}")
             max_x = np.max([max_x, np.max(selected[self.X_variable])])
             min_x = np.min([min_x, np.min(selected[self.X_variable])])
 
@@ -400,6 +383,13 @@ class DataSelection(param.Parameterized):
 
     dataset = param.FileSelector(path="data/*.fits")
 
+    memory_optimisation_check = pn.widgets.Checkbox(
+        name="Optimise for memory?", value=True
+    )
+    memory_opt_tooltip = pn.pane.HTML(
+        "<span data-toggle='tooltip' title='(up to 0.5x memory consumption, however initial loading of data can take up to 10x longer).' style='border-radius: 15px;padding: 5px; background: #5e5e5e; ' >❔</span> ",
+        max_width=5,
+    )
     ready = param.Boolean(default=False)
 
     def __init__(self, src, **params):
@@ -411,15 +401,66 @@ class DataSelection(param.Parameterized):
         )
         self.load_data_button.on_click(self.load_data_cb)
 
+########################### dataframe optimisations ###########################
+    # Following optimisation functions credited to:
+    # https://medium.com/bigdatarepublic/advanced-pandas-optimize-speed-and-memory-a654b53be6c2
+    def optimise_floats(self, df):
+        start = time.time()
+        floats = df.select_dtypes(include=['float64']).columns.tolist()
+        df[floats] = df[floats].apply(pd.to_numeric, downcast='float')
+        end = time.time()
+        print(f"optimise_floats {end - start}")
+        return df
+
+    def optimise_ints(self, df):
+        start = time.time()
+        ints = df.select_dtypes(include=['int64']).columns.tolist()
+        df[ints] = df[ints].apply(pd.to_numeric, downcast='integer')
+        end = time.time()
+        print(f"optimise_ints {end - start}")
+        return df
+
+    def optimise_objects(self, df):
+        start = time.time()
+        for col in df.select_dtypes(include=['object']):
+            num_unique_values = len(df[col].unique())
+            num_total_values = len(df[col])
+            if float(num_unique_values) / num_total_values < 0.5:
+                df[col] = df[col].astype('category')
+        end = time.time()
+        print(f"optimise objects {end - start}")
+        return df
+
+    def optimise(self, df):
+        return self.optimise_floats(self.optimise_ints(self.optimise_objects(df)))
+
+################################################################################
+
     def get_dataframe_from_fits_file(self, filename):
+        start = time.time()
         fits_table = Table.read(filename, format="fits")
+        end = time.time()
+        print(f"Loading FITS Table {end - start}")
+        start = time.time()
         names = [name for name in fits_table.colnames if len(
             fits_table[name].shape) <= 1]
-        df = fits_table[names].to_pandas()
+        end = time.time()
+        print(f"names list {end - start}")
 
+        start = time.time()
+        if self.memory_optimisation_check.value:
+            df = self.optimise(fits_table[names].to_pandas())
+        else:
+            df = fits_table[names].to_pandas()
+        end = time.time()
+        print(f"Convert to Pandas {end - start}")
+
+        start = time.time()
         for col, dtype in df.dtypes.items():
             if dtype == np.object:  # Only process byte object columns.
                 df[col] = df[col].apply(lambda x: x.decode("utf-8"))
+        end = time.time()
+        print(f"Pandas object loop {end - start}")
 
         return df
 
@@ -433,7 +474,6 @@ class DataSelection(param.Parameterized):
         self.src.data = dict(pd.DataFrame())
 
         print(f" dataset shape: {self.df.shape}")
-        print(f"Self.df: {self.df}")
 
         self.update_src(self.df)
         self.ready = True
@@ -447,7 +487,7 @@ class DataSelection(param.Parameterized):
         self.src.data = dict(new_df)
 
     def panel(self):
-        return pn.Row(self.param.dataset, self.load_data_button, max_width=300)
+        return pn.Column(pn.Row(self.param.dataset, self.load_data_button, max_width=300), pn.Row(pn.Row(self.memory_optimisation_check), self.memory_opt_tooltip, max_width=300))
 
 
 class ParameterAssignment(param.Parameterized):
@@ -568,13 +608,6 @@ class ParameterAssignment(param.Parameterized):
         settings = self.get_settings()
 
         labels = self.df[settings["label_col"]]
-        # print("start colour copy")
-        # colours = labels.copy()
-        # print("finish copy")
-        # print("start colour loop")
-        # for key in settings["label_colours"].keys():
-        #     colours.loc[colours == key] = settings["label_colours"][key]
-        # print("finish loop")
 
         settings["extra_info_cols"] = self.extra_info_selector.value
         self.confirm_settings_button.name = "Confirmed"
@@ -651,7 +684,6 @@ class ParameterAssignment(param.Parameterized):
         if self.completed:
             self.column[0] = pn.pane.Str("Settings Saved.")
         else:
-            print(self.param.id_column)
             layout = pn.Column(
                 pn.Row(
                     self.param.id_column,
@@ -783,7 +815,6 @@ class ActiveLearningSettings(param.Parameterized):
     def panel(self):
         print("Rendering AL Settings Panel")
         global settings
-        print(settings)
 
         if self.completed:
             self.column[0] = pn.pane.Str("Settings Saved.")
@@ -835,6 +866,8 @@ class ActiveLearningTab(param.Parameterized):
 
         self.df = df
 
+        print(self.df.columns)
+
         self.src = src
         self.label = settings["strings_to_labels"][label]
         self.label_string = label
@@ -866,48 +899,65 @@ class ActiveLearningTab(param.Parameterized):
                              "prec": 0.00, "rec": 0.00, "f1": 0.00}
         self.val_scores = {"acc": 0.00, "prec": 0.00, "rec": 0.00, "f1": 0.00}
 
-        self.df, self.data = self.generate_features(self.df)
+        global ml_data
 
-        self.x, self.y = self.split_x_y(self.data)
+        if len(ml_data.keys()) == 0:
+            self.df, self.data = self.generate_features(self.df)
+            x, y = self.split_x_y(self.data)
 
-        if settings["exclude_labels"]:
-            for label in settings["unclassified_labels"]:
-                self.x, self.y, _, _ = self.exclude_unclassified_labels(
-                    self.x, self.y, label)
+            if settings["exclude_labels"]:
+                for label in settings["unclassified_labels"]:
+                    x, y, _, _ = self.exclude_unclassified_labels(
+                        x, y, label)
 
-        (
-            self.x_train,
-            self.y_train,
-            self.x_val,
-            self.y_val,
-            self.x_test,
-            self.y_test,
-        ) = self.train_dev_test_split(self.x, self.y, 0.6, 0.2)
-
-        self.x_cols = self.x_train.columns
-        self.y_cols = self.y_train.columns
-
-        if settings["scale_data"]:
-
-            (self.x_train, self.x_val, self.x_test,) = self.scale_data(
+            (
                 self.x_train,
                 self.y_train,
                 self.x_val,
                 self.y_val,
                 self.x_test,
                 self.y_test,
-                self.x_cols,
-                self.y_cols,
-            )
+            ) = self.train_dev_test_split(x, y, 0.6, 0.2)
 
-        (
-            self.y_train,
-            self.id_train,
-            self.y_val,
-            self.id_val,
-            self.y_test,
-            self.id_test,
-        ) = self.split_y_ids(self.y_train, self.y_val, self.y_test)
+            self.x_cols = self.x_train.columns
+            self.y_cols = self.y_train.columns
+
+            if settings["scale_data"]:
+
+                (self.x_train, self.x_val, self.x_test,) = self.scale_data(
+                    self.x_train,
+                    self.y_train,
+                    self.x_val,
+                    self.y_val,
+                    self.x_test,
+                    self.y_test,
+                    self.x_cols,
+                    self.y_cols,
+                )
+
+            (
+                self.y_train,
+                self.id_train,
+                self.y_val,
+                self.id_val,
+                self.y_test,
+                self.id_test,
+            ) = self.split_y_ids(self.y_train, self.y_val, self.y_test)
+
+            self.assign_global_data()
+
+        else:
+
+            self.y_train = ml_data["y_train"]
+            self.y_val = ml_data["y_val"]
+            self.y_test = ml_data["y_test"]
+
+            self.id_train = ml_data["id_train"]
+            self.id_val = ml_data["id_val"]
+            self.id_test = ml_data["id_test"]
+
+            global main_df
+            self.df = main_df
 
         self.convert_to_one_vs_rest()
 
@@ -1012,14 +1062,10 @@ class ActiveLearningTab(param.Parameterized):
 
         self.id_al_train = []
 
-        print(self.corr_train.data)
-        print(self.incorr_train.data)
-        print(self.metric_values.data)
-
-        x_sd = np.std(self.x_train[settings["default_vars"][0]])
-        x_mu = np.mean(self.x_train[settings["default_vars"][0]])
-        y_sd = np.std(self.x_train[settings["default_vars"][1]])
-        y_mu = np.mean(self.x_train[settings["default_vars"][1]])
+        x_sd = np.std(ml_data["x_train"][settings["default_vars"][0]])
+        x_mu = np.mean(ml_data["x_train"][settings["default_vars"][0]])
+        y_sd = np.std(ml_data["x_train"][settings["default_vars"][1]])
+        y_mu = np.mean(ml_data["x_train"][settings["default_vars"][1]])
 
         x_max = x_mu + 4*x_sd
         x_min = x_mu - 4*x_sd
@@ -1028,14 +1074,30 @@ class ActiveLearningTab(param.Parameterized):
         y_min = y_mu - 4*y_sd
 
         self.max_x = np.min(
-            [(x_max), np.max(self.x_train[settings["default_vars"][0]])])
+            [(x_max), np.max(ml_data["x_train"][settings["default_vars"][0]])])
         self.min_x = np.max(
-            [(x_min), np.min(self.x_train[settings["default_vars"][0]])])
+            [(x_min), np.min(ml_data["x_train"][settings["default_vars"][0]])])
 
         self.max_y = np.min(
-            [(y_max), np.max(self.x_train[settings["default_vars"][1]])])
+            [(y_max), np.max(ml_data["x_train"][settings["default_vars"][1]])])
         self.min_y = np.max(
-            [(y_min), np.min(self.x_train[settings["default_vars"][1]])])
+            [(y_min), np.min(ml_data["x_train"][settings["default_vars"][1]])])
+
+    def assign_global_data(self):
+
+        global ml_data
+
+        ml_data["x_train"] = self.x_train
+        ml_data["x_val"] = self.x_val
+        ml_data["x_test"] = self.x_test
+
+        ml_data["y_train"] = self.y_train
+        ml_data["y_val"] = self.y_val
+        ml_data["y_test"] = self.y_test
+
+        ml_data["id_train"] = self.id_train
+        ml_data["id_val"] = self.id_val
+        ml_data["id_test"] = self.id_test
 
     def remove_from_pool(self):
         print("remove_from_pool")
@@ -1077,7 +1139,7 @@ class ActiveLearningTab(param.Parameterized):
             dt_string = now.strftime("%Y%m-%d_%H:%M:%S")
             for i, clf in enumerate(self.learner):
                 model = clf
-                print(clf.__class__.__name__)
+
                 if checkpoint:
                     mod_dir = f"{filename}-{iteration}-{val_f1}-{dt_string}"
                     if not os.path.isdir(mod_dir):
@@ -1150,12 +1212,6 @@ class ActiveLearningTab(param.Parameterized):
         selected_dict[settings["id_col"]] = [queried_id.values[0]]
         self.src.data = selected_dict
 
-        print(f"\n\n\n src.data: {self.src.data} \n id:{queried_id.values[0]}")
-
-        start = time.time()
-        # self.src.data = dict(self.src.data)
-        end = time.time()
-        print(f"dict data {end - start}")
         plot_idx = [
             list(self.df.columns).index(settings["default_vars"][0]),
             list(self.df.columns).index(settings["default_vars"][1]),
@@ -1339,8 +1395,6 @@ class ActiveLearningTab(param.Parameterized):
 
         print("split_x_y")
 
-        # print(df_data)
-
         df_data_y = df_data[[settings["label_col"], settings["id_col"]]]
         df_data_x = df_data.drop(
             columns=[settings["label_col"], settings["id_col"]])
@@ -1366,7 +1420,6 @@ class ActiveLearningTab(param.Parameterized):
 
         print("train_dev_split")
 
-        # print(df_data_x)
         np.random.seed(0)
         rng = np.random.RandomState(seed=0)
 
@@ -1379,18 +1432,6 @@ class ActiveLearningTab(param.Parameterized):
             random_state=rng,
         )
 
-        print()
-
-        print("Expected:")
-        for i in settings["labels_to_train"]:
-            i_raw = settings["strings_to_labels"][i]
-            current = df_data_y[df_data_y[settings["label_col"]] == i_raw]
-            print(
-                f"{i}    {y_train[settings['label_col']].value_counts()[i_raw] - current[settings['label_col']].value_counts()[i_raw] * train_ratio}"
-            )
-
-        print("\n")
-
         x_val, x_test, y_val, y_test = train_test_split(
             x_temp,
             y_temp,
@@ -1398,26 +1439,6 @@ class ActiveLearningTab(param.Parameterized):
             stratify=y_temp[settings["label_col"]],
             random_state=rng,
         )
-
-        print()
-
-        print("Expected:")
-        for i in settings["labels_to_train"]:
-            i_raw = settings["strings_to_labels"][i]
-            current = df_data_y[df_data_y[settings["label_col"]] == i_raw]
-            print(
-                f"{i}    {y_val[settings['label_col']].value_counts()[i_raw]- current[settings['label_col']].value_counts()[i_raw] * val_ratio}"
-            )
-
-        print("\n")
-
-        print("Expected:")
-        for i in settings["labels_to_train"]:
-            i_raw = settings["strings_to_labels"][i]
-            current = df_data_y[df_data_y[settings["label_col"]] == i_raw]
-            print(
-                f"{i} {y_test[settings['label_col']].value_counts()[i_raw] - current[settings['label_col']].value_counts()[i_raw] * test_ratio}"
-            )
 
         print(f"train: {y_train[settings['label_col']].value_counts()}")
         print(f"val: {y_val[settings['label_col']].value_counts()}")
@@ -1483,21 +1504,18 @@ class ActiveLearningTab(param.Parameterized):
         is_label = y_tr[settings["label_col"]] == self.label
         isnt_label = y_tr[settings["label_col"]] != self.label
 
-        # y_tr.loc[isnt_label, settings["label_col"]] = 1000000
         y_tr.loc[is_label, settings["label_col"]] = 1
         y_tr.loc[isnt_label, settings["label_col"]] = 0
 
         is_label = y_val[settings["label_col"]] == self.label
         isnt_label = y_val[settings["label_col"]] != self.label
 
-        y_val.loc[isnt_label, settings["label_col"]] = 1000000
         y_val.loc[is_label, settings["label_col"]] = 1
         y_val.loc[isnt_label, settings["label_col"]] = 0
 
         is_label = y_test[settings["label_col"]] == self.label
         isnt_label = y_test[settings["label_col"]] != self.label
 
-        y_test.loc[isnt_label, settings["label_col"]] = 1000000
         y_test.loc[is_label, settings["label_col"]] = 1
         y_test.loc[isnt_label, settings["label_col"]] = 0
 
@@ -1523,36 +1541,46 @@ class ActiveLearningTab(param.Parameterized):
 
     def get_predictions(self, first=False):
 
+        global ml_data
+
         print("get_predicitions")
-
-        tr_pred = self.learner.predict(self.x_train).reshape((-1, 1))
-
+        start = time.time()
+        tr_pred = self.learner.predict(ml_data["x_train"]).reshape((-1, 1))
+        end = time.time()
+        print(f"predict {end - start}")
         temp = self.y_train.to_numpy().reshape((-1, 1))
-
+        start = time.time()
         is_correct = tr_pred == temp
+        end = time.time()
+        print(f"is_correct {end - start}")
 
-        g_j = self.x_train[settings["default_vars"]
-                           [0]].to_numpy().reshape((-1, 1))
-        y_w1 = self.x_train[settings["default_vars"]
-                            [1]].to_numpy().reshape((-1, 1))
-
+        start = time.time()
+        default_x = ml_data["x_train"][settings["default_vars"]
+                                       [0]].to_numpy().reshape((-1, 1))
+        default_y = ml_data["x_train"][settings["default_vars"]
+                                       [1]].to_numpy().reshape((-1, 1))
+        end = time.time()
+        print(f"def x_y {end - start}")
+        start = time.time()
         corr_data = {
-            f'{settings["default_vars"][0]}': g_j[is_correct],
-            f'{settings["default_vars"][1]}': y_w1[is_correct],
+            f'{settings["default_vars"][0]}': default_x[is_correct],
+            f'{settings["default_vars"][1]}': default_y[is_correct],
         }
         incorr_data = {
-            f'{settings["default_vars"][0]}': g_j[~is_correct],
-            f'{settings["default_vars"][1]}': y_w1[~is_correct],
+            f'{settings["default_vars"][0]}': default_x[~is_correct],
+            f'{settings["default_vars"][1]}': default_y[~is_correct],
         }
-
+        end = time.time()
+        print(f"corr and incorr {end - start}")
         self.corr_train.data = corr_data
         self.incorr_train.data = incorr_data
-
-        curr_tr_acc = self.learner.score(self.x_train, self.y_train)
+        start = time.time()
+        curr_tr_acc = self.learner.score(ml_data["x_train"], self.y_train)
         curr_tr_f1 = f1_score(self.y_train, tr_pred)
         curr_tr_prec = precision_score(self.y_train, tr_pred)
         curr_tr_rec = recall_score(self.y_train, tr_pred)
-
+        end = time.time()
+        print(f"scores {end - start}")
         self.train_scores = {
             "acc": "%.3f" % round(curr_tr_acc, 3),
             "prec": "%.3f" % round(curr_tr_prec, 3),
@@ -1560,39 +1588,40 @@ class ActiveLearningTab(param.Parameterized):
             "f1": "%.3f" % round(curr_tr_f1, 3),
         }
 
-        print(self.train_scores)
-
         self.accuracy_list["train"]["score"].append(curr_tr_acc)
         self.f1_list["train"]["score"].append(curr_tr_f1)
         self.precision_list["train"]["score"].append(curr_tr_prec)
         self.recall_list["train"]["score"].append(curr_tr_rec)
-
+        start = time.time()
         t_conf = confusion_matrix(self.y_train, tr_pred)
-
-        val_pred = self.learner.predict(self.x_val).reshape((-1, 1))
-
+        end = time.time()
+        print(f"conf matrix {end - start}")
+        start = time.time()
+        val_pred = self.learner.predict(ml_data["x_val"]).reshape((-1, 1))
+        end = time.time()
+        print(f"pred val {end - start}")
         temp = self.y_val.to_numpy().reshape((-1, 1))
 
         is_correct = val_pred == temp
 
-        g_j = self.x_val[settings["default_vars"]
-                         [0]].to_numpy().reshape((-1, 1))
-        y_w1 = self.x_val[settings["default_vars"]
-                          [1]].to_numpy().reshape((-1, 1))
+        default_x = ml_data["x_val"][settings["default_vars"]
+                                     [0]].to_numpy().reshape((-1, 1))
+        default_y = ml_data["x_val"][settings["default_vars"]
+                                     [1]].to_numpy().reshape((-1, 1))
 
         corr_data = {
-            f'{settings["default_vars"][0]}': g_j[is_correct],
-            f'{settings["default_vars"][1]}': y_w1[is_correct],
+            f'{settings["default_vars"][0]}': default_x[is_correct],
+            f'{settings["default_vars"][1]}': default_y[is_correct],
         }
         incorr_data = {
-            f'{settings["default_vars"][0]}': g_j[~is_correct],
-            f'{settings["default_vars"][1]}': y_w1[~is_correct],
+            f'{settings["default_vars"][0]}': default_x[~is_correct],
+            f'{settings["default_vars"][1]}': default_y[~is_correct],
         }
 
         self.corr_val.data = corr_data
         self.incorr_val.data = incorr_data
 
-        curr_val_acc = self.learner.score(self.x_val, self.y_val)
+        curr_val_acc = self.learner.score(ml_data["x_val"], self.y_val)
         curr_val_f1 = f1_score(self.y_val, val_pred)
         curr_val_prec = precision_score(self.y_val, val_pred)
         curr_val_rec = recall_score(self.y_val, val_pred)
@@ -1604,7 +1633,7 @@ class ActiveLearningTab(param.Parameterized):
             "f1": "%.3f" % round(curr_val_f1, 3),
         }
         self.accuracy_list["val"]["score"].append(curr_val_acc)
-        print(f'APPENDED VAR - {self.accuracy_list["val"]["score"]}')
+
         self.f1_list["val"]["score"].append(curr_val_f1)
         self.precision_list["val"]["score"].append(curr_val_prec)
         self.recall_list["val"]["score"].append(curr_val_rec)
@@ -1622,9 +1651,6 @@ class ActiveLearningTab(param.Parameterized):
         self.precision_list["val"]["num_points"] = self.num_points_list
         self.recall_list["val"]["num_points"] = self.num_points_list
 
-        print(self.y_val.shape)
-        print(val_pred.shape)
-
         self.conf_mat_tr_tn = str(t_conf[0][0])
         self.conf_mat_tr_fp = str(t_conf[0][1])
         self.conf_mat_tr_fn = str(t_conf[1][0])
@@ -1634,15 +1660,17 @@ class ActiveLearningTab(param.Parameterized):
         self.conf_mat_val_fp = str(v_conf[0][1])
         self.conf_mat_val_fn = str(v_conf[1][0])
         self.conf_mat_val_tp = str(v_conf[1][1])
-
-        proba = self.learner.predict_proba(self.x_train)
-
-        print(proba.shape)
-
+        start = time.time()
+        proba = self.learner.predict_proba(ml_data["x_train"])
+        end = time.time()
+        print(f"pred proba {end - start}")
+        start = time.time()
         proba = 1 - np.max(proba, axis=1)
+        end = time.time()
+        print(f"1-proba {end - start}")
 
-        x_axis = self.x_train[settings["default_vars"][0]].to_numpy()
-        y_axis = self.x_train[settings["default_vars"][1]].to_numpy()
+        x_axis = ml_data["x_train"][settings["default_vars"][0]].to_numpy()
+        y_axis = ml_data["x_train"][settings["default_vars"][1]].to_numpy()
 
         print(f"tr_pred:{tr_pred.shape}")
         print(f"y_train:{self.y_train.shape}")
@@ -1654,17 +1682,17 @@ class ActiveLearningTab(param.Parameterized):
         self.model_output_data_tr["y"] = self.y_train.to_numpy().flatten()
         self.model_output_data_tr["metric"] = proba
 
-        x_axis = self.x_val[settings["default_vars"][0]].to_numpy()
-        y_axis = self.x_val[settings["default_vars"][1]].to_numpy()
+        x_axis = ml_data["x_val"][settings["default_vars"][0]].to_numpy()
+        y_axis = ml_data["x_val"][settings["default_vars"][1]].to_numpy()
 
         self.model_output_data_val[settings["default_vars"][0]] = x_axis
         self.model_output_data_val[settings["default_vars"][1]] = y_axis
         self.model_output_data_val["pred"] = val_pred.flatten()
         self.model_output_data_val["y"] = self.y_val.to_numpy().flatten()
 
-        # print(self.model_output_data_tr)
-
     def create_pool(self):
+
+        global ml_data
 
         print("create_pool")
 
@@ -1672,16 +1700,16 @@ class ActiveLearningTab(param.Parameterized):
 
         initial_points = int(self.starting_num_points.value)
 
-        if initial_points >= len(self.x_train.index):
-            self.starting_num_points.value = len(self.x_train.index)
+        if initial_points >= len(ml_data["x_train"].index):
+            self.starting_num_points.value = len(ml_data["x_train"].index)
 
-            initial_points = len(self.x_train.index)
+            initial_points = len(ml_data["x_train"].index)
 
         y_tr = self.y_train.copy()
 
         # y_tr = y_tr.to_numpy()
 
-        X_pool = self.x_train.to_numpy()
+        X_pool = ml_data["x_train"].to_numpy()
         y_pool = self.y_train.to_numpy().ravel()
         id_pool = self.id_train.to_numpy()
 
@@ -1692,9 +1720,7 @@ class ActiveLearningTab(param.Parameterized):
                 range(X_pool.shape[0]), size=initial_points - 2, replace=False
             )
         )
-        print(f"y_tr = {y_tr}")
-        print(f"y_tr==0: {np.where(y_tr == 0)}")
-        print(f"y_tr==1: {np.where(y_tr == 1)}")
+
         c0 = np.random.choice(np.where(y_tr == 0)[0])
         c1 = np.random.choice(np.where(y_tr == 1)[0])
 
@@ -1704,15 +1730,9 @@ class ActiveLearningTab(param.Parameterized):
         y_train = y_pool[train_idx]
         id_train = self.id_train.iloc[train_idx]
 
-        print(y_train)
-        print(id_train)
-
         X_pool = np.delete(X_pool, train_idx, axis=0)
         y_pool = np.delete(y_pool, train_idx)
         id_pool = self.id_train.drop(self.id_train.index[train_idx])
-
-        print(X_train.shape)
-        print(X_pool.shape)
 
         self.x_pool = X_pool
         self.y_pool = y_pool
@@ -1807,7 +1827,7 @@ class ActiveLearningTab(param.Parameterized):
         updated_columns = False
         for i, j in combs:
             df_data[f"{i}-{j}"] = df_data[i] - df_data[j]
-            # print(df_data[f"{i}-{j}"])
+
             if f"{i}-{j}" not in cols:
                 df[f"{i}-{j}"] = df[i] - df[j]
 
@@ -1821,8 +1841,7 @@ class ActiveLearningTab(param.Parameterized):
         print("combine_data")
         data = np.array(
             self.model_output_data_tr[settings["default_vars"][0]]).reshape((-1, 1))
-        print(data)
-        print(data.shape)
+
         data = np.concatenate(
             (data, np.array(self.model_output_data_tr[settings["default_vars"][1]]).reshape((-1, 1))), axis=1
         )
@@ -1841,14 +1860,15 @@ class ActiveLearningTab(param.Parameterized):
             (data, np.array(self.model_output_data_tr["acc"]).reshape((-1, 1))), axis=1
         )
 
-        print(list(self.model_output_data_tr.keys()))
-
         data = pd.DataFrame(data, columns=list(
             self.model_output_data_tr.keys()))
 
         return data
 
     def train_tab(self):
+
+        global ml_data
+
         print("train_tab")
         start = time.time()
         self.model_output_data_tr["acc"] = np.equal(
@@ -1879,7 +1899,7 @@ class ActiveLearningTab(param.Parameterized):
         if hasattr(self, "x_al_train"):
             start = time.time()
             x_al_train = pd.DataFrame(
-                self.x_al_train, columns=self.x_train.columns)
+                self.x_al_train, columns=ml_data["x_train"].columns)
             end = time.time()
             print(f"hasattr {end - start}")
         else:
@@ -1905,7 +1925,7 @@ class ActiveLearningTab(param.Parameterized):
         if hasattr(self, "query_instance"):
             start = time.time()
             query_point = pd.DataFrame(
-                self.query_instance, columns=self.x_train.columns
+                self.query_instance, columns=ml_data["x_train"].columns
             )
             end = time.time()
             print(f"query_point {end - start}")
@@ -2019,12 +2039,10 @@ class ActiveLearningTab(param.Parameterized):
         ).opts(active_tools=["pan", "wheel_zoom"])
         end = time.time()
         print(f"p-val {end - start}")
-        # print(self.model_output_data_tr)
 
         color_key = {1: "#2eb800", 0: "#c20000"}
         start = time.time()
         plot = dynspread(
-            # datashade(p).opts(responsive=True),
             datashade(
                 p,
                 color_key=color_key,
@@ -2057,9 +2075,6 @@ class ActiveLearningTab(param.Parameterized):
                 np.array(self.model_output_data_tr["y"]),
             )
 
-        for i in self.model_output_data_tr.keys():
-            print(f"{i}:{len(self.model_output_data_tr[i])}")
-
         df = pd.DataFrame(
             self.model_output_data_tr, columns=list(
                 self.model_output_data_tr.keys())
@@ -2067,7 +2082,6 @@ class ActiveLearningTab(param.Parameterized):
 
         end = time.time()
         print(f"df {end - start}")
-        # print(df.columns)
 
         start = time.time()
         p = hv.Points(
@@ -2076,12 +2090,10 @@ class ActiveLearningTab(param.Parameterized):
 
         end = time.time()
         print(f"p {end - start}")
-        # print(self.model_output_data_tr)
 
         start = time.time()
 
         plot = dynspread(
-            # datashade(p).opts(responsive=True),
             datashade(
                 p, cmap="RdYlGn_r", aggregator=ds.max("metric"),
                 normalization="linear"
@@ -2099,16 +2111,6 @@ class ActiveLearningTab(param.Parameterized):
 
     def scores_tab(self):
         print("scores_tab")
-
-        print(f'accnum_points{len(self.accuracy_list["train"]["num_points"])}')
-        print(f'accscore{len(self.accuracy_list["train"]["score"])}')
-        print(f'recnum_points{len(self.recall_list["train"]["num_points"])}')
-        print(f'recscore{len(self.recall_list["train"]["score"])}')
-        print(
-            f'precnum_points{len(self.precision_list["train"]["num_points"])}')
-        print(f'precscore{len(self.precision_list["train"]["score"])}')
-        print(f'f1num_points{len(self.f1_list["train"]["num_points"])}')
-        print(f'f1score{len(self.f1_list["train"]["score"])}')
 
         return (
             hv.Path(self.accuracy_list["train"], ["num_points", "score"])
@@ -2200,7 +2202,7 @@ class ActiveLearningTab(param.Parameterized):
         print("panel")
 
         self.assign_label_group.value = self.last_label
-        print(f"PANEL - {self.training}")
+
         start = time.time()
         self.setup_panel()
         end = time.time()
@@ -2279,6 +2281,13 @@ class SelectedSourceDashboard(param.Parameterized):
         sizing_mode="scale_height",
     )
 
+    radio_image = pn.pane.GIF(
+        alt_text="Image Unavailable",
+        min_width=200,
+        min_height=200,
+        sizing_mode="scale_height",
+    )
+
     url_optical_image = ""
 
     def __init__(self, src, **params):
@@ -2318,22 +2327,19 @@ class SelectedSourceDashboard(param.Parameterized):
         if event.new == "":
             return
 
-        print(f"SELECTED INFO-df: {self.df}")
-
-        print(f"SELECTED INFO-event.new: {event.new}")
-
         selected_source = self.df[self.df[settings["id_col"]] == event.new]
-
-        print(f"SELECTED INFO: {selected_source}")
 
         selected_dict = selected_source.set_index(
             settings["id_col"]).to_dict('list')
         selected_dict[settings["id_col"]] = [event.new]
         self.src.data = selected_dict
 
+        print("Changed selected")
+
         self.panel()
 
     def panel_cb(self, attr, old, new):
+        print("panel_cb")
         self.panel()
 
     def check_valid_selected(self):
@@ -2440,15 +2446,14 @@ class SelectedSourceDashboard(param.Parameterized):
         if selected:
 
             self.add_selected_to_history()
-
-            url = "http://skyserver.sdss.org/dr16/SkyServerWS/ImgCutout/getjpeg?TaskName=Skyserver.Explore.Image&ra="
-            # TODO :: Set Ra Dec Columns
-            ra_dec = self.src.data["ra_dec"][0]
-            ra = ra_dec[: ra_dec.index(",")]
-            print(f"RA_DEC:{ra_dec}")
-            dec = ra_dec[ra_dec.index(",") + 1:]
-
             try:
+                url = "http://skyserver.sdss.org/dr16/SkyServerWS/ImgCutout/getjpeg?TaskName=Skyserver.Explore.Image&ra="
+                # TODO :: Set Ra Dec Columns
+                ra_dec = self.src.data["ra_dec"][0]
+                ra = ra_dec[: ra_dec.index(",")]
+                print(f"RA_DEC:{ra_dec}")
+                dec = ra_dec[ra_dec.index(",") + 1:]
+
                 self.url_optical_image = (
                     f"{url}{ra}&dec={dec}&opt=G&scale={self.image_zoom}"
                 )
@@ -2459,6 +2464,7 @@ class SelectedSourceDashboard(param.Parameterized):
             try:
                 url_radio_image = generate_radio_url(ra, dec)
             except:
+                url_radio_image = "No Radio Image Available"
                 print("\n\n\n\n Radio Image Timeout \n\n\n\n")
 
             zoom_increase = pn.widgets.Button(
@@ -2469,15 +2475,11 @@ class SelectedSourceDashboard(param.Parameterized):
                 name="Zoom Out", max_height=30, max_width=50
             )
             zoom_decrease.on_click(partial(change_zoom_cb, oper="-"))
+            try:
+                # CHANGED :: Slow after this...
+                if not self.src.data["png_path_DR16"][0].isspace():
+                    print("beginning if")
 
-            print(len(self.src.data["png_path_DR16"][0]))
-            print(self.src.data["png_path_DR16"][0])
-            print(type(self.src.data["png_path_DR16"][0]))
-
-            # CHANGED :: Slow after this...
-            if not self.src.data["png_path_DR16"][0].isspace():
-                print("beginning if")
-                try:
                     spectra_image = pn.pane.PNG(
                         self.src.data["png_path_DR16"][0],
                         alt_text="Image Unavailable",
@@ -2485,9 +2487,11 @@ class SelectedSourceDashboard(param.Parameterized):
                         min_height=400,
                         sizing_mode="scale_height",
                     )
-                except:
-                    print("\n\n\n\n Radio Image Timeout \n\n\n\n")
+
+            except:
+                print("\n\n\n\n Radio Image Timeout \n\n\n\n")
                 print("leaving if")
+                spectra_image = "No spectra available"
 
             else:
                 print("beginning else")
@@ -2501,7 +2505,7 @@ class SelectedSourceDashboard(param.Parameterized):
             print("setting extra row")
             extra_data_row = pn.Row()
             for col in settings["extra_info_cols"]:
-                print(f"inside for: {col}")
+
                 info = f"**{col}**: {str(self.src.data[f'{col}'][0])}"
                 extra_data_row.append(
                     pn.pane.Markdown(info, max_width=12
@@ -2518,13 +2522,7 @@ class SelectedSourceDashboard(param.Parameterized):
                     pn.Column(
                         pn.Row(
                             self.optical_image,
-                            pn.pane.GIF(
-                                url_radio_image,
-                                alt_text="Image Unavailable",
-                                min_width=200,
-                                min_height=200,
-                                sizing_mode="scale_height",
-                            ),
+                            self.radio_image,
                         ),
                         pn.Row(
                             zoom_increase,
@@ -2541,7 +2539,7 @@ class SelectedSourceDashboard(param.Parameterized):
 
         else:
             print("Nothing is selected!")
-            print(self.src.data)
+            # print(self.src.data)
             self.row[0] = pn.Card(
                 pn.Column(
                     self.search_id,
@@ -2549,6 +2547,8 @@ class SelectedSourceDashboard(param.Parameterized):
                                  columns=["Selected IDs"]),
                 )
             )
+
+        print("selected source rendered...")
 
         return self.row
 
@@ -2618,6 +2618,8 @@ class DataDashboard(param.Parameterized):
 source = ColumnDataSource()
 
 main_df = pd.DataFrame()
+
+ml_data = {}
 
 ############################### CREATE TEMPLATE ###############################
 
