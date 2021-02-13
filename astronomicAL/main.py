@@ -56,7 +56,7 @@ hv.renderer("bokeh").webgl = True
 
 class SettingsDashboard(param.Parameterized):
 
-    def __init__(self, main, src, df, ** params):
+    def __init__(self, main, src, df, **params):
         super(SettingsDashboard, self).__init__(**params)
         self.row = pn.Row(pn.pane.Str("loading"))
 
