@@ -207,7 +207,7 @@ class MenuDashboard(param.Parameterized):
         self.add_selected_info_button.on_click(
             partial(self.update_main_contents,
                     main=main,
-                    updated="Selected Info",
+                    updated="Selected Source",
                     button=self.add_selected_info_button)
                     )
 
@@ -1153,6 +1153,7 @@ class ActiveLearningTab(param.Parameterized):
                                   == queried_id.values[0]]
         selected_dict = selected_source.set_index(
             settings["id_col"]).to_dict('list')
+        selected_dict[settings["id_col"]] = [queried_id.values[0]]
         self.src.data = selected_dict
 
         print(f"\n\n\n src.data: {self.src.data} \n id:{queried_id.values[0]}")
@@ -2276,7 +2277,7 @@ class ActiveLearningDashboard(param.Parameterized):
         return self.row
 
 
-class SelectedInfoDashboard(param.Parameterized):
+class SelectedSourceDashboard(param.Parameterized):
 
     optical_image = pn.pane.JPG(
         alt_text="Image Unavailable",
@@ -2287,12 +2288,15 @@ class SelectedInfoDashboard(param.Parameterized):
 
     url_optical_image = ""
 
-    def __init__(self, src, df, **params):
-        super(SelectedInfoDashboard, self).__init__(**params)
+    def __init__(self, src, **params):
+        super(SelectedSourceDashboard, self).__init__(**params)
 
-        #  FIXME :: remove src
+        global main_df
+        self.df = main_df
+
         self.src = src
-        self.df = df
+        self.src.on_change("data", self.panel_cb)
+
         self.row = pn.Row(pn.pane.Str("loading"))
 
         self.selected_history = []
@@ -2302,10 +2306,10 @@ class SelectedInfoDashboard(param.Parameterized):
         self.add_selected_info()
 
     def add_selected_info(self):
-        self.contents = "Selected Info"
+        self.contents = "Selected Source"
         self.search_id = pn.widgets.AutocompleteInput(
             name="Select ID",
-            options=list(self.src.data[settings["id_col"]].values),
+            options=list(self.df[settings["id_col"]].values),
             placeholder="Select a source by ID",
             max_height=50,
         )
@@ -2313,31 +2317,72 @@ class SelectedInfoDashboard(param.Parameterized):
         self.search_id.param.watch(self.change_selected, "value")
 
         self.image_zoom = 0.2
-        # FIXME :: update this
-        self.src.on_change("data", self.panel_cb)
-        self.src.selected.on_change("indices", self.panel_cb)
+
         self.panel()
 
     def change_selected(self, event):
 
+        if event.new == "":
+            return
+
+        print(f"SELECTED INFO-df: {self.df}")
+
+        print(f"SELECTED INFO-event.new: {event.new}")
+
         # FIXME :: Change this
-        selected_index = self.src.data[settings["id_col"]][
-            self.src.data[settings["id_col"]] == event.new
-        ].index[0]
+        selected_source = self.df[self.df[settings["id_col"]] == event.new]
 
-        self.src.selected.indices = [selected_index]
+        print(f"SELECTED INFO: {selected_source}")
 
-    def panel_cb(self, attr, old, new):
-
-        if len(self.src.selected.indices) > 0:
-            self.selected_history = [
-                self.src.data[settings["id_col"]][self.src.selected.indices[0]]
-            ] + self.selected_history
+        selected_dict = selected_source.set_index(
+            settings["id_col"]).to_dict('list')
+        selected_dict[settings["id_col"]] = [event.new]
+        self.src.data = selected_dict
 
         self.panel()
 
-    def empty_selected(self, event):
-        self.src.selected.indices = []
+    def panel_cb(self, attr, old, new):
+        self.panel()
+
+    def check_valid_selected(self):
+        selected = False
+
+        print("checking valid selection")
+
+        if settings["id_col"] in list(self.src.data.keys()):
+            if len(self.src.data[settings["id_col"]]) > 0:
+                selected = True
+
+        return selected
+
+    def add_selected_to_history(self):
+
+        add_source_to_list = True
+
+        if len(self.selected_history) > 0:
+            selected_id = self.src.data[settings["id_col"]][0]
+            top_of_history = self.selected_history[0]
+            if (selected_id == top_of_history):
+                add_source_to_list = False
+            elif selected_id == "":
+                add_source_to_list = False
+
+        if add_source_to_list:
+            self.selected_history = [
+                self.src.data[settings["id_col"]][0]
+            ] + self.selected_history
+
+    def deselect_source_cb(self, event):
+        self.search_id.value = ""
+        self.empty_selected()
+
+    def empty_selected(self):
+
+        empty = {}
+        for key in list(self.src.data.keys()):
+            empty[key] = []
+
+        self.src.data = empty
 
     def panel(self):
         # CHANGED :: Remove need to rerender with increases + decreases
@@ -2398,12 +2443,15 @@ class SelectedInfoDashboard(param.Parameterized):
 
             return url
 
-        if len(self.src.selected.indices) > 0:
-            index = self.src.selected.indices[0]
+        selected = self.check_valid_selected()
+
+        if selected:
+
+            self.add_selected_to_history()
 
             url = "http://skyserver.sdss.org/dr16/SkyServerWS/ImgCutout/getjpeg?TaskName=Skyserver.Explore.Image&ra="
             # TODO :: Set Ra Dec Columns
-            ra_dec = self.src.data["ra_dec"][index]
+            ra_dec = self.src.data["ra_dec"][0]
             ra = ra_dec[: ra_dec.index(",")]
             print(f"RA_DEC:{ra_dec}")
             dec = ra_dec[ra_dec.index(",") + 1:]
@@ -2430,17 +2478,17 @@ class SelectedInfoDashboard(param.Parameterized):
             )
             zoom_decrease.on_click(partial(change_zoom_cb, oper="-"))
 
-            print(len(self.src.data["png_path_DR16"][index]))
-            print(self.src.data["png_path_DR16"][index])
-            print(type(self.src.data["png_path_DR16"][index]))
+            print(len(self.src.data["png_path_DR16"][0]))
+            print(self.src.data["png_path_DR16"][0])
+            print(type(self.src.data["png_path_DR16"][0]))
 
             # CHANGED :: Slow after this...
             # FIXME :: update this
-            if not self.src.data["png_path_DR16"][index].isspace():
+            if not self.src.data["png_path_DR16"][0].isspace():
                 print("beginning if")
                 try:
                     spectra_image = pn.pane.PNG(
-                        self.src.data["png_path_DR16"][index],
+                        self.src.data["png_path_DR16"][0],
                         alt_text="Image Unavailable",
                         min_width=400,
                         min_height=400,
@@ -2457,13 +2505,13 @@ class SelectedInfoDashboard(param.Parameterized):
 
             print("creating deselect")
             deselect_buttton = pn.widgets.Button(name="Deselect")
-            deselect_buttton.on_click(self.empty_selected)
+            deselect_buttton.on_click(self.deselect_source_cb)
 
             print("setting extra row")
             extra_data_row = pn.Row()
             for col in settings["extra_info_cols"]:
                 print(f"inside for: {col}")
-                info = f"**{col}**: {str(self.src.data[f'{col}'][index])}"
+                info = f"**{col}**: {str(self.src.data[f'{col}'][0])}"
                 extra_data_row.append(
                     pn.pane.Markdown(info, max_width=12
                                      * len(info), max_height=10)
@@ -2472,7 +2520,7 @@ class SelectedInfoDashboard(param.Parameterized):
             self.row[0] = pn.Card(
                 pn.Column(
                     pn.pane.Markdown(
-                        f'**Source ID**: {self.src.data[settings["id_col"]][index]}',
+                        f'**Source ID**: {self.src.data[settings["id_col"]][0]}',
                         max_height=10,
                     ),
                     extra_data_row,
@@ -2501,6 +2549,8 @@ class SelectedInfoDashboard(param.Parameterized):
             print("row set")
 
         else:
+            print("Nothing is selected!")
+            print(self.src.data)
             self.row[0] = pn.Card(
                 pn.Column(
                     self.search_id,
@@ -2559,9 +2609,9 @@ class DataDashboard(param.Parameterized):
             self.df = main_df
             self.panel_contents = ActiveLearningDashboard(self.src, self.df)
 
-        elif self.contents == "Selected Info":
+        elif self.contents == "Selected Source":
 
-            self.panel_contents = SelectedInfoDashboard(self.src)
+            self.panel_contents = SelectedSourceDashboard(self.src)
 
         self.panel()
 
@@ -2632,7 +2682,7 @@ save_layout_button = pn.widgets.Button(name="Save current layout")
 def save_layout_cb(attr, old, new):
     print("json updated")
     layout = json.loads(new)
-    with open('panel_test/layout.json', 'w') as fp:
+    with open('astronomicAL/layout.json', 'w') as fp:
         json.dump(layout, fp)
 
 
