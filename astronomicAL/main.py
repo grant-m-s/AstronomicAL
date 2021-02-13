@@ -434,7 +434,7 @@ class DataSelection(param.Parameterized):
 
         print(f" dataset shape: {self.df.shape}")
         print(f"Self.df: {self.df}")
-        # FIXME :: Remove update_src
+
         self.update_src(self.df)
         self.ready = True
         self.load_data_button.name = "File Loaded."
@@ -474,9 +474,7 @@ class ParameterAssignment(param.Parameterized):
     def __init__(self, df, **params):
         super(ParameterAssignment, self).__init__(**params)
         self.column = pn.Column(pn.pane.Str("loading"))
-        # FIXME :: Remove src
         self.src = ColumnDataSource()
-        # self.src.on_change("data", self.parameter_update_cb)
 
         self.df = None
 
@@ -837,7 +835,6 @@ class ActiveLearningTab(param.Parameterized):
 
         self.df = df
 
-        # FIXME :: Remove src
         self.src = src
         self.label = settings["strings_to_labels"][label]
         self.label_string = label
@@ -869,7 +866,6 @@ class ActiveLearningTab(param.Parameterized):
                              "prec": 0.00, "rec": 0.00, "f1": 0.00}
         self.val_scores = {"acc": 0.00, "prec": 0.00, "rec": 0.00, "f1": 0.00}
 
-        # FIXME :: Think this will remove evrything but trained features
         self.df, self.data = self.generate_features(self.df)
 
         self.x, self.y = self.split_x_y(self.data)
@@ -1132,7 +1128,6 @@ class ActiveLearningTab(param.Parameterized):
         end = time.time()
         print(f"queries {end - start}")
 
-        # FIXME :: Change to df
         data = self.df
 
         start = time.time()
@@ -1148,7 +1143,6 @@ class ActiveLearningTab(param.Parameterized):
         print(f"np.where {end - start}")
         act_label = self.y_pool[query_idx]
         print(f"Should be a {act_label}")
-        # FIXME :: Change how selected
         selected_source = self.df[self.df[settings["id_col"]]
                                   == queried_id.values[0]]
         selected_dict = selected_source.set_index(
@@ -1910,7 +1904,6 @@ class ActiveLearningTab(param.Parameterized):
 
         if hasattr(self, "query_instance"):
             start = time.time()
-            # FIXME :: Useful
             query_point = pd.DataFrame(
                 self.query_instance, columns=self.x_train.columns
             )
@@ -2329,7 +2322,6 @@ class SelectedSourceDashboard(param.Parameterized):
 
         print(f"SELECTED INFO-event.new: {event.new}")
 
-        # FIXME :: Change this
         selected_source = self.df[self.df[settings["id_col"]] == event.new]
 
         print(f"SELECTED INFO: {selected_source}")
@@ -2483,7 +2475,6 @@ class SelectedSourceDashboard(param.Parameterized):
             print(type(self.src.data["png_path_DR16"][0]))
 
             # CHANGED :: Slow after this...
-            # FIXME :: update this
             if not self.src.data["png_path_DR16"][0].isspace():
                 print("beginning if")
                 try:
@@ -2580,7 +2571,6 @@ class DataDashboard(param.Parameterized):
 
         self.contents = contents
 
-    # FIXME :: update this
     def update_panel_contents_src(self, event):
         self.panel_contents.src.data = self.src.data
 
@@ -2741,13 +2731,4 @@ react.servable()
 
 # CHANGED :: Keep axis the same on refresh (stop zooming out - outliers)
 # CHANGED :: Save React Layout (likely need to wait for Panel update)
-# CHANGED :: Fix Datashader Colours to match Bokeh
-# CHANGED :: Fix Datashader Colours to match Bokeh
-# CHANGED :: Fix Datashader Colours to match Bokeh
-# CHANGED :: Fix Datashader Colours to match Bokeh
-# CHANGED :: Fix Datashader Colours to match Bokeh
-# CHANGED :: Fix Datashader Colours to match Bokeh
-# CHANGED :: Fix Datashader Colours to match Bokeh
-# CHANGED :: Fix Datashader Colours to match Bokeh
-# CHANGED :: Fix Datashader Colours to match Bokeh
 # CHANGED :: Fix Datashader Colours to match Bokeh
