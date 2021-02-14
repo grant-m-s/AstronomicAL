@@ -1,9 +1,10 @@
 from astropy.table import Table
+from utils.optimise import optimise
+
+import config
 import numpy as np
 import pandas as pd
 import panel as pn
-
-import config
 import param
 import time
 
@@ -30,41 +31,6 @@ class DataSelection(param.Parameterized):
         )
         self.load_data_button.on_click(self.load_data_cb)
 
-########################### dataframe optimisations ###########################
-    # Following optimisation functions credited to:
-    # https://medium.com/bigdatarepublic/advanced-pandas-optimize-speed-and-memory-a654b53be6c2
-    def optimise_floats(self, df):
-        start = time.time()
-        floats = df.select_dtypes(include=['float64']).columns.tolist()
-        df[floats] = df[floats].apply(pd.to_numeric, downcast='float')
-        end = time.time()
-        print(f"optimise_floats {end - start}")
-        return df
-
-    def optimise_ints(self, df):
-        start = time.time()
-        ints = df.select_dtypes(include=['int64']).columns.tolist()
-        df[ints] = df[ints].apply(pd.to_numeric, downcast='integer')
-        end = time.time()
-        print(f"optimise_ints {end - start}")
-        return df
-
-    def optimise_objects(self, df):
-        start = time.time()
-        for col in df.select_dtypes(include=['object']):
-            num_unique_values = len(df[col].unique())
-            num_total_values = len(df[col])
-            if float(num_unique_values) / num_total_values < 0.5:
-                df[col] = df[col].astype('category')
-        end = time.time()
-        print(f"optimise objects {end - start}")
-        return df
-
-    def optimise(self, df):
-        return self.optimise_floats(self.optimise_ints(self.optimise_objects(df)))
-
-################################################################################
-
     def get_dataframe_from_fits_file(self, filename):
         start = time.time()
         fits_table = Table.read(filename, format="fits")
@@ -78,7 +44,7 @@ class DataSelection(param.Parameterized):
 
         start = time.time()
         if self.memory_optimisation_check.value:
-            df = self.optimise(fits_table[names].to_pandas())
+            df = optimise(fits_table[names].to_pandas())
         else:
             df = fits_table[names].to_pandas()
         end = time.time()

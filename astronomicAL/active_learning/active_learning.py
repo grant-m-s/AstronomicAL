@@ -32,7 +32,7 @@ from sklearn.metrics import (
     precision_score,
     recall_score,
 )
-
+from utils.optimise import optimise
 import config
 import datashader as ds
 import holoviews as hv
@@ -41,6 +41,7 @@ import os
 import pandas as pd
 import panel as pn
 import param
+import sys
 import time
 
 
@@ -87,6 +88,9 @@ class ActiveLearningTab(param.Parameterized):
 
         if len(config.ml_data.keys()) == 0:
             self.df, self.data = self.generate_features(self.df)
+            print(f"df:{sys.getsizeof(self.df)}")
+            print(f"data df:{sys.getsizeof(self.data)}")
+
             x, y = self.split_x_y(self.data)
 
             if config.settings["exclude_labels"]:
@@ -129,6 +133,21 @@ class ActiveLearningTab(param.Parameterized):
             ) = self.split_y_ids(self.y_train, self.y_val, self.y_test)
 
             self.assign_global_data()
+
+            total = 0
+            total += sys.getsizeof(config.ml_data)
+            for dataframe in config.ml_data.keys():
+                total += sys.getsizeof(config.ml_data[dataframe])
+            print(f"config.ml_data :{total}")
+
+            for dataframe in config.ml_data.keys():
+                config.ml_data[dataframe] = optimise(config.ml_data[dataframe])
+
+            total = 0
+            total += sys.getsizeof(config.ml_data)
+            for dataframe in config.ml_data.keys():
+                total += sys.getsizeof(config.ml_data[dataframe])
+            print(f"optimised ml_data :{total}")
 
         else:
 
