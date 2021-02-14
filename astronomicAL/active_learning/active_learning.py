@@ -56,98 +56,15 @@ class ActiveLearningTab(param.Parameterized):
         print(self.df.columns)
 
         self.src = src
-        self.label = config.settings["strings_to_labels"][label]
-        self.label_string = label
+        self._label = config.settings["strings_to_labels"][label]
 
-        self.last_label = str(label)
-        self.current_tab = 0
+        self._last_label = str(label)
 
-        self.training = False
-        self.assigned_label = False
-
-        self.accuracy_list = {
-            "train": {"score": [], "num_points": []},
-            "val": {"score": [], "num_points": []},
-        }
-        self.f1_list = {
-            "train": {"score": [], "num_points": []},
-            "val": {"score": [], "num_points": []},
-        }
-        self.precision_list = {
-            "train": {"score": [], "num_points": []},
-            "val": {"score": [], "num_points": []},
-        }
-        self.recall_list = {
-            "train": {"score": [], "num_points": []},
-            "val": {"score": [], "num_points": []},
-        }
-
-        self.train_scores = {"acc": 0.00,
-                             "prec": 0.00, "rec": 0.00, "f1": 0.00}
-        self.val_scores = {"acc": 0.00, "prec": 0.00, "rec": 0.00, "f1": 0.00}
+        self._training = False
+        self._assigned_label = False
 
         if len(config.ml_data.keys()) == 0:
-            self.df, self.data = self.generate_features(self.df)
-            print(f"df:{sys.getsizeof(self.df)}")
-            print(f"data df:{sys.getsizeof(self.data)}")
-
-            x, y = self.split_x_y(self.data)
-
-            if config.settings["exclude_labels"]:
-                for label in config.settings["unclassified_labels"]:
-                    x, y, _, _ = self.exclude_unclassified_labels(
-                        x, y, label)
-
-            (
-                self.x_train,
-                self.y_train,
-                self.x_val,
-                self.y_val,
-                self.x_test,
-                self.y_test,
-            ) = self.train_dev_test_split(x, y, 0.6, 0.2)
-
-            self.x_cols = self.x_train.columns
-            self.y_cols = self.y_train.columns
-
-            if config.settings["scale_data"]:
-
-                (self.x_train, self.x_val, self.x_test,) = self.scale_data(
-                    self.x_train,
-                    self.y_train,
-                    self.x_val,
-                    self.y_val,
-                    self.x_test,
-                    self.y_test,
-                    self.x_cols,
-                    self.y_cols,
-                )
-
-            (
-                self.y_train,
-                self.id_train,
-                self.y_val,
-                self.id_val,
-                self.y_test,
-                self.id_test,
-            ) = self.split_y_ids(self.y_train, self.y_val, self.y_test)
-
-            self.assign_global_data()
-
-            total = 0
-            total += sys.getsizeof(config.ml_data)
-            for dataframe in config.ml_data.keys():
-                total += sys.getsizeof(config.ml_data[dataframe])
-            print(f"config.ml_data :{total}")
-
-            for dataframe in config.ml_data.keys():
-                config.ml_data[dataframe] = optimise(config.ml_data[dataframe])
-
-            total = 0
-            total += sys.getsizeof(config.ml_data)
-            for dataframe in config.ml_data.keys():
-                total += sys.getsizeof(config.ml_data[dataframe])
-            print(f"optimised ml_data :{total}")
+            self.preprocess_data()
 
         else:
 
@@ -163,7 +80,7 @@ class ActiveLearningTab(param.Parameterized):
 
         self.convert_to_one_vs_rest()
 
-        self.model_output_data_tr = {
+        self._model_output_data_tr = {
             f'{config.settings["default_vars"][0]}': [],
             f'{config.settings["default_vars"][1]}': [],
             "metric": [],
@@ -171,14 +88,86 @@ class ActiveLearningTab(param.Parameterized):
             "pred": [],
         }
 
-        self.model_output_data_val = {
+        self._model_output_data_val = {
             f'{config.settings["default_vars"][0]}': [],
             f'{config.settings["default_vars"][1]}': [],
             "y": [],
             "pred": [],
         }
 
-        # CHANGED :: Make labels dynamic
+        self._construct_panel()
+
+        self._initialise_placeholders()
+
+        self._resize_plot_scales()
+
+    def _resize_plot_scales(self):
+
+        x_axis = config.settings["default_vars"][0]
+        y_axis = config.settings["default_vars"][1]
+
+        x_sd = np.std(config.ml_data["x_train"][x_axis])
+        x_mu = np.mean(config.ml_data["x_train"][x_axis])
+        y_sd = np.std(config.ml_data["x_train"][y_axis])
+        y_mu = np.mean(config.ml_data["x_train"][y_axis])
+
+        x_max = x_mu + 4*x_sd
+        x_min = x_mu - 4*x_sd
+
+        y_max = y_mu + 4*y_sd
+        y_min = y_mu - 4*y_sd
+
+        self._max_x = np.min(
+            [(x_max), np.max(config.ml_data["x_train"][x_axis])])
+        self._min_x = np.max(
+            [(x_min), np.min(config.ml_data["x_train"][x_axis])])
+
+        self._max_y = np.min(
+            [(y_max), np.max(config.ml_data["x_train"][y_axis])])
+        self._min_y = np.max(
+            [(y_min), np.min(config.ml_data["x_train"][y_axis])])
+
+    def _initialise_placeholders(self):
+
+        self._accuracy_list = {
+            "train": {"score": [], "num_points": []},
+            "val": {"score": [], "num_points": []},
+        }
+        self._f1_list = {
+            "train": {"score": [], "num_points": []},
+            "val": {"score": [], "num_points": []},
+        }
+        self._precision_list = {
+            "train": {"score": [], "num_points": []},
+            "val": {"score": [], "num_points": []},
+        }
+        self._recall_list = {
+            "train": {"score": [], "num_points": []},
+            "val": {"score": [], "num_points": []},
+        }
+
+        self._train_scores = {"acc": 0.00,
+                              "prec": 0.00, "rec": 0.00, "f1": 0.00}
+        self._val_scores = {"acc": 0.00, "prec": 0.00, "rec": 0.00, "f1": 0.00}
+
+        self.corr_train = ColumnDataSource(self.empty_data())
+        self.incorr_train = ColumnDataSource(self.empty_data())
+        self.corr_val = ColumnDataSource(self.empty_data())
+        self.incorr_val = ColumnDataSource(self.empty_data())
+        self.metric_values = ColumnDataSource(
+            {
+                f'{config.settings["default_vars"][0]}': [],
+                f'{config.settings["default_vars"][1]}': [],
+                "metric": [],
+            }
+        )
+
+        self.queried_points = ColumnDataSource(self.empty_data())
+
+        self.id_al_train = []
+
+    def _construct_panel(self):
+
         options = []
         for label in config.settings["labels_to_train"]:
             options.append(label)
@@ -249,45 +238,69 @@ class ActiveLearningTab(param.Parameterized):
         self.conf_mat_val_fp = "FP"
         self.conf_mat_val_tp = "TP"
 
-        self.corr_train = ColumnDataSource(self.empty_data())
-        self.incorr_train = ColumnDataSource(self.empty_data())
-        self.corr_val = ColumnDataSource(self.empty_data())
-        self.incorr_val = ColumnDataSource(self.empty_data())
-        self.metric_values = ColumnDataSource(
-            {
-                f'{config.settings["default_vars"][0]}': [],
-                f'{config.settings["default_vars"][1]}': [],
-                "metric": [],
-            }
-        )
-        self.queried_points = ColumnDataSource(self.empty_data())
+    def preprocess_data(self):
 
-        self.id_al_train = []
+        self.df, self.data = self.generate_features(self.df)
+        print(f"df:{sys.getsizeof(self.df)}")
+        print(f"data df:{sys.getsizeof(self.data)}")
 
-        x_sd = np.std(config.ml_data["x_train"]
-                      [config.settings["default_vars"][0]])
-        x_mu = np.mean(config.ml_data["x_train"]
-                       [config.settings["default_vars"][0]])
-        y_sd = np.std(config.ml_data["x_train"]
-                      [config.settings["default_vars"][1]])
-        y_mu = np.mean(config.ml_data["x_train"]
-                       [config.settings["default_vars"][1]])
+        x, y = self.split_x_y(self.data)
 
-        x_max = x_mu + 4*x_sd
-        x_min = x_mu - 4*x_sd
+        if config.settings["exclude_labels"]:
+            for label in config.settings["unclassified_labels"]:
+                x, y, _, _ = self.exclude_unclassified_labels(
+                    x, y, label)
 
-        y_max = y_mu + 4*y_sd
-        y_min = y_mu - 4*y_sd
+        (
+            self.x_train,
+            self.y_train,
+            self.x_val,
+            self.y_val,
+            self.x_test,
+            self.y_test,
+        ) = self.train_dev_test_split(x, y, 0.6, 0.2)
 
-        self.max_x = np.min(
-            [(x_max), np.max(config.ml_data["x_train"][config.settings["default_vars"][0]])])
-        self.min_x = np.max(
-            [(x_min), np.min(config.ml_data["x_train"][config.settings["default_vars"][0]])])
+        self.x_cols = self.x_train.columns
+        self.y_cols = self.y_train.columns
 
-        self.max_y = np.min(
-            [(y_max), np.max(config.ml_data["x_train"][config.settings["default_vars"][1]])])
-        self.min_y = np.max(
-            [(y_min), np.min(config.ml_data["x_train"][config.settings["default_vars"][1]])])
+        if config.settings["scale_data"]:
+
+            (self.x_train, self.x_val, self.x_test,) = self.scale_data(
+                self.x_train,
+                self.y_train,
+                self.x_val,
+                self.y_val,
+                self.x_test,
+                self.y_test,
+                self.x_cols,
+                self.y_cols,
+            )
+
+        (
+            self.y_train,
+            self.id_train,
+            self.y_val,
+            self.id_val,
+            self.y_test,
+            self.id_test,
+        ) = self.split_y_ids(self.y_train, self.y_val, self.y_test)
+
+        self.assign_global_data()
+
+        total = 0
+        total += sys.getsizeof(config.ml_data)
+        for dataframe in config.ml_data.keys():
+            total += sys.getsizeof(config.ml_data[dataframe])
+        print(f"config.ml_data :{total}")
+
+        for dataframe in config.ml_data.keys():
+            config.ml_data[dataframe] = optimise(config.ml_data[dataframe])
+
+        total = 0
+        total += sys.getsizeof(config.ml_data)
+        for dataframe in config.ml_data.keys():
+            total += sys.getsizeof(config.ml_data[dataframe])
+        print(f"optimised ml_data :{total}")
 
     def assign_global_data(self):
 
@@ -333,10 +346,10 @@ class ActiveLearningTab(param.Parameterized):
 
         clfs_shortened = clfs_shortened[:-1]
         iteration = self.curr_num_points
-        val_f1 = int(float(self.val_scores["f1"]) * 100)
+        val_f1 = int(float(self._val_scores["f1"]) * 100)
 
         dir = "models/"
-        filename = f"{dir}{self.label}-{clfs_shortened}"
+        filename = f"{dir}{self._label}-{clfs_shortened}"
 
         if self.committee:
             now = datetime.now()
@@ -465,11 +478,11 @@ class ActiveLearningTab(param.Parameterized):
     def assign_label_cb(self, event):
 
         selected_label = self.assign_label_group.value
-        self.last_label = selected_label
+        self._last_label = selected_label
 
         if not selected_label == "Unsure":
 
-            self.assigned_label = True
+            self._assigned_label = True
             self.next_iteration_button.name = "Next Iteration"
 
             if self.assign_label_button.name == "Assigned!":
@@ -478,7 +491,7 @@ class ActiveLearningTab(param.Parameterized):
 
             self.assign_label_button.name = "Assigned!"
 
-            if int(config.settings["strings_to_labels"][selected_label]) == self.label:
+            if int(config.settings["strings_to_labels"][selected_label]) == self._label:
                 selected_label = 1
             else:
                 selected_label = 0
@@ -542,14 +555,14 @@ class ActiveLearningTab(param.Parameterized):
 
         self.checkpoint_button.name = "Checkpoint"
         self.checkpoint_button.disabled = False
-        self.assigned_label = False
+        self._assigned_label = False
 
         self.panel()
 
     def start_training_cb(self, event):
         print("start_training_cb")
 
-        self.training = True
+        self._training = True
         self.num_points_list = []
         self.curr_num_points = self.starting_num_points.value
 
@@ -714,20 +727,20 @@ class ActiveLearningTab(param.Parameterized):
         y_val = self.y_val.copy()
         y_test = self.y_test.copy()
 
-        is_label = y_tr[config.settings["label_col"]] == self.label
-        isnt_label = y_tr[config.settings["label_col"]] != self.label
+        is_label = y_tr[config.settings["label_col"]] == self._label
+        isnt_label = y_tr[config.settings["label_col"]] != self._label
 
         y_tr.loc[is_label, config.settings["label_col"]] = 1
         y_tr.loc[isnt_label, config.settings["label_col"]] = 0
 
-        is_label = y_val[config.settings["label_col"]] == self.label
-        isnt_label = y_val[config.settings["label_col"]] != self.label
+        is_label = y_val[config.settings["label_col"]] == self._label
+        isnt_label = y_val[config.settings["label_col"]] != self._label
 
         y_val.loc[is_label, config.settings["label_col"]] = 1
         y_val.loc[isnt_label, config.settings["label_col"]] = 0
 
-        is_label = y_test[config.settings["label_col"]] == self.label
-        isnt_label = y_test[config.settings["label_col"]] != self.label
+        is_label = y_test[config.settings["label_col"]] == self._label
+        isnt_label = y_test[config.settings["label_col"]] != self._label
 
         y_test.loc[is_label, config.settings["label_col"]] = 1
         y_test.loc[isnt_label, config.settings["label_col"]] = 0
@@ -794,17 +807,17 @@ class ActiveLearningTab(param.Parameterized):
         curr_tr_rec = recall_score(self.y_train, tr_pred)
         end = time.time()
         print(f"scores {end - start}")
-        self.train_scores = {
+        self._train_scores = {
             "acc": "%.3f" % round(curr_tr_acc, 3),
             "prec": "%.3f" % round(curr_tr_prec, 3),
             "rec": "%.3f" % round(curr_tr_rec, 3),
             "f1": "%.3f" % round(curr_tr_f1, 3),
         }
 
-        self.accuracy_list["train"]["score"].append(curr_tr_acc)
-        self.f1_list["train"]["score"].append(curr_tr_f1)
-        self.precision_list["train"]["score"].append(curr_tr_prec)
-        self.recall_list["train"]["score"].append(curr_tr_rec)
+        self._accuracy_list["train"]["score"].append(curr_tr_acc)
+        self._f1_list["train"]["score"].append(curr_tr_f1)
+        self._precision_list["train"]["score"].append(curr_tr_prec)
+        self._recall_list["train"]["score"].append(curr_tr_rec)
         start = time.time()
         t_conf = confusion_matrix(self.y_train, tr_pred)
         end = time.time()
@@ -840,30 +853,30 @@ class ActiveLearningTab(param.Parameterized):
         curr_val_prec = precision_score(self.y_val, val_pred)
         curr_val_rec = recall_score(self.y_val, val_pred)
 
-        self.val_scores = {
+        self._val_scores = {
             "acc": "%.3f" % round(curr_val_acc, 3),
             "prec": "%.3f" % round(curr_val_prec, 3),
             "rec": "%.3f" % round(curr_val_rec, 3),
             "f1": "%.3f" % round(curr_val_f1, 3),
         }
-        self.accuracy_list["val"]["score"].append(curr_val_acc)
+        self._accuracy_list["val"]["score"].append(curr_val_acc)
 
-        self.f1_list["val"]["score"].append(curr_val_f1)
-        self.precision_list["val"]["score"].append(curr_val_prec)
-        self.recall_list["val"]["score"].append(curr_val_rec)
+        self._f1_list["val"]["score"].append(curr_val_f1)
+        self._precision_list["val"]["score"].append(curr_val_prec)
+        self._recall_list["val"]["score"].append(curr_val_rec)
 
         v_conf = confusion_matrix(self.y_val, val_pred)
 
         self.num_points_list.append(self.curr_num_points)
 
-        self.accuracy_list["train"]["num_points"] = self.num_points_list
-        self.f1_list["train"]["num_points"] = self.num_points_list
-        self.precision_list["train"]["num_points"] = self.num_points_list
-        self.recall_list["train"]["num_points"] = self.num_points_list
-        self.accuracy_list["val"]["num_points"] = self.num_points_list
-        self.f1_list["val"]["num_points"] = self.num_points_list
-        self.precision_list["val"]["num_points"] = self.num_points_list
-        self.recall_list["val"]["num_points"] = self.num_points_list
+        self._accuracy_list["train"]["num_points"] = self.num_points_list
+        self._f1_list["train"]["num_points"] = self.num_points_list
+        self._precision_list["train"]["num_points"] = self.num_points_list
+        self._recall_list["train"]["num_points"] = self.num_points_list
+        self._accuracy_list["val"]["num_points"] = self.num_points_list
+        self._f1_list["val"]["num_points"] = self.num_points_list
+        self._precision_list["val"]["num_points"] = self.num_points_list
+        self._recall_list["val"]["num_points"] = self.num_points_list
 
         self.conf_mat_tr_tn = str(t_conf[0][0])
         self.conf_mat_tr_fp = str(t_conf[0][1])
@@ -892,21 +905,21 @@ class ActiveLearningTab(param.Parameterized):
         print(f"y_train:{self.y_train.shape}")
         print(f"metric:{proba.shape}")
 
-        self.model_output_data_tr[config.settings["default_vars"][0]] = x_axis
-        self.model_output_data_tr[config.settings["default_vars"][1]] = y_axis
-        self.model_output_data_tr["pred"] = tr_pred.flatten()
-        self.model_output_data_tr["y"] = self.y_train.to_numpy().flatten()
-        self.model_output_data_tr["metric"] = proba
+        self._model_output_data_tr[config.settings["default_vars"][0]] = x_axis
+        self._model_output_data_tr[config.settings["default_vars"][1]] = y_axis
+        self._model_output_data_tr["pred"] = tr_pred.flatten()
+        self._model_output_data_tr["y"] = self.y_train.to_numpy().flatten()
+        self._model_output_data_tr["metric"] = proba
 
         x_axis = config.ml_data["x_val"][config.settings["default_vars"][0]].to_numpy(
         )
         y_axis = config.ml_data["x_val"][config.settings["default_vars"][1]].to_numpy(
         )
 
-        self.model_output_data_val[config.settings["default_vars"][0]] = x_axis
-        self.model_output_data_val[config.settings["default_vars"][1]] = y_axis
-        self.model_output_data_val["pred"] = val_pred.flatten()
-        self.model_output_data_val["y"] = self.y_val.to_numpy().flatten()
+        self._model_output_data_val[config.settings["default_vars"][0]] = x_axis
+        self._model_output_data_val[config.settings["default_vars"][1]] = y_axis
+        self._model_output_data_val["pred"] = val_pred.flatten()
+        self._model_output_data_val["y"] = self.y_val.to_numpy().flatten()
 
     def create_pool(self):
 
@@ -1058,28 +1071,28 @@ class ActiveLearningTab(param.Parameterized):
 
         print("combine_data")
         data = np.array(
-            self.model_output_data_tr[config.settings["default_vars"][0]]).reshape((-1, 1))
+            self._model_output_data_tr[config.settings["default_vars"][0]]).reshape((-1, 1))
 
         data = np.concatenate(
-            (data, np.array(self.model_output_data_tr[config.settings["default_vars"][1]]).reshape((-1, 1))), axis=1
+            (data, np.array(self._model_output_data_tr[config.settings["default_vars"][1]]).reshape((-1, 1))), axis=1
         )
         data = np.concatenate(
             (data, np.array(
-                self.model_output_data_tr["metric"]).reshape((-1, 1))),
+                self._model_output_data_tr["metric"]).reshape((-1, 1))),
             axis=1,
         )
         data = np.concatenate(
-            (data, np.array(self.model_output_data_tr["y"]).reshape((-1, 1))), axis=1
+            (data, np.array(self._model_output_data_tr["y"]).reshape((-1, 1))), axis=1
         )
         data = np.concatenate(
-            (data, np.array(self.model_output_data_tr["pred"]).reshape((-1, 1))), axis=1
+            (data, np.array(self._model_output_data_tr["pred"]).reshape((-1, 1))), axis=1
         )
         data = np.concatenate(
-            (data, np.array(self.model_output_data_tr["acc"]).reshape((-1, 1))), axis=1
+            (data, np.array(self._model_output_data_tr["acc"]).reshape((-1, 1))), axis=1
         )
 
         data = pd.DataFrame(data, columns=list(
-            self.model_output_data_tr.keys()))
+            self._model_output_data_tr.keys()))
 
         return data
 
@@ -1087,9 +1100,9 @@ class ActiveLearningTab(param.Parameterized):
 
         print("train_tab")
         start = time.time()
-        self.model_output_data_tr["acc"] = np.equal(
-            np.array(self.model_output_data_tr["pred"]),
-            np.array(self.model_output_data_tr["y"]),
+        self._model_output_data_tr["acc"] = np.equal(
+            np.array(self._model_output_data_tr["pred"]),
+            np.array(self._model_output_data_tr["y"]),
         )
         end = time.time()
         print(f"equal {end - start}")
@@ -1097,8 +1110,8 @@ class ActiveLearningTab(param.Parameterized):
         start = time.time()
 
         df = pd.DataFrame(
-            self.model_output_data_tr, columns=list(
-                self.model_output_data_tr.keys())
+            self._model_output_data_tr, columns=list(
+                self._model_output_data_tr.keys())
         )
 
         end = time.time()
@@ -1165,18 +1178,8 @@ class ActiveLearningTab(param.Parameterized):
         )
         end = time.time()
         print(f"query_point_plot {end - start}")
-        # print(self.model_output_data_tr)
-        color_key = {1: "#2eb800", 0: "#c20000", "q": "yellow", "t": "black"}
-        # label_key = {1: "Correct", 0: "Incorrect",
-        #              "q": "Queried", "t": "Trained"}
 
-        # color_points = hv.NdOverlay(
-        #     {
-        #         label_key[n]: hv.Points([0, 0], label=label_key[n]).opts(
-        #             style=dict(color=color_key[n], size=0, fontsize={"legend": 5}))
-        #         for n in color_key
-        #     }
-        # )
+        color_key = {1: "#2eb800", 0: "#c20000", "q": "yellow", "t": "black"}
 
         if len(x_al_train[config.settings["default_vars"][0]]) > 0:
 
@@ -1185,36 +1188,35 @@ class ActiveLearningTab(param.Parameterized):
                  np.max(x_al_train[config.settings["default_vars"][0]])]
                 )
 
-            max_x = np.max([self.max_x, max_x_temp])
+            max_x = np.max([self._max_x, max_x_temp])
 
             min_x_temp = np.min(
                 [np.min(query_point[config.settings["default_vars"][0]]),
                  np.min(x_al_train[config.settings["default_vars"][0]])]
                 )
 
-            min_x = np.min([self.min_x, min_x_temp])
+            min_x = np.min([self._min_x, min_x_temp])
 
             max_y_temp = np.max(
                 [np.max(query_point[config.settings["default_vars"][1]]),
                  np.max(x_al_train[config.settings["default_vars"][1]])]
                 )
 
-            max_y = np.max([self.max_y, max_y_temp])
+            max_y = np.max([self._max_y, max_y_temp])
 
             min_y_temp = np.min(
                 [np.min(query_point[config.settings["default_vars"][1]]),
                  np.min(x_al_train[config.settings["default_vars"][1]])]
                 )
 
-            min_y = np.min([self.min_y, min_y_temp])
+            min_y = np.min([self._min_y, min_y_temp])
         else:
             max_x, min_x, max_y, min_y = (
-                self.max_x, self.min_x, self.max_y, self.min_y)
+                self._max_x, self._min_x, self._max_y, self._min_y)
 
         start = time.time()
         plot = (
             dynspread(
-                # datashade(p).opts(responsive=True),
                 datashade(
                     p,
                     color_key=color_key,
@@ -1234,17 +1236,17 @@ class ActiveLearningTab(param.Parameterized):
     def val_tab(self):
         print("val_tab")
         start = time.time()
-        self.model_output_data_val["acc"] = np.equal(
-            np.array(self.model_output_data_val["pred"]),
-            np.array(self.model_output_data_val["y"]),
+        self._model_output_data_val["acc"] = np.equal(
+            np.array(self._model_output_data_val["pred"]),
+            np.array(self._model_output_data_val["y"]),
         )
         end = time.time()
         print(f"output_data_val {end - start}")
         start = time.time()
 
         df = pd.DataFrame(
-            self.model_output_data_val, columns=list(
-                self.model_output_data_val.keys())
+            self._model_output_data_val, columns=list(
+                self._model_output_data_val.keys())
         )
 
         end = time.time()
@@ -1265,8 +1267,8 @@ class ActiveLearningTab(param.Parameterized):
                 p,
                 color_key=color_key,
                 aggregator=ds.by("acc", ds.count()),
-            ).opts(xlim=(self.min_x, self.max_x),
-                   ylim=(self.min_y, self.max_y),
+            ).opts(xlim=(self._min_x, self._max_x),
+                   ylim=(self._min_y, self._max_y),
                    shared_axes=False, responsive=True,
                    active_tools=["pan", "wheel_zoom"]),
             threshold=0.75,
@@ -1281,21 +1283,21 @@ class ActiveLearningTab(param.Parameterized):
         print("metric_tab")
         start = time.time()
 
-        if "acc" not in self.model_output_data_tr.keys():
-            self.model_output_data_tr["acc"] = np.equal(
-                np.array(self.model_output_data_tr["pred"]),
-                np.array(self.model_output_data_tr["y"]),
+        if "acc" not in self._model_output_data_tr.keys():
+            self._model_output_data_tr["acc"] = np.equal(
+                np.array(self._model_output_data_tr["pred"]),
+                np.array(self._model_output_data_tr["y"]),
             )
 
-        elif len(self.model_output_data_tr["acc"]) == 0:
-            self.model_output_data_tr["acc"] = np.equal(
-                np.array(self.model_output_data_tr["pred"]),
-                np.array(self.model_output_data_tr["y"]),
+        elif len(self._model_output_data_tr["acc"]) == 0:
+            self._model_output_data_tr["acc"] = np.equal(
+                np.array(self._model_output_data_tr["pred"]),
+                np.array(self._model_output_data_tr["y"]),
             )
 
         df = pd.DataFrame(
-            self.model_output_data_tr, columns=list(
-                self.model_output_data_tr.keys())
+            self._model_output_data_tr, columns=list(
+                self._model_output_data_tr.keys())
         )
 
         end = time.time()
@@ -1317,8 +1319,8 @@ class ActiveLearningTab(param.Parameterized):
                 p, cmap="RdYlGn_r", aggregator=ds.max("metric"),
                 normalization="linear"
             ).opts(active_tools=["pan", "wheel_zoom"],
-                   xlim=(self.min_x, self.max_x),
-                   ylim=(self.min_y, self.max_y),
+                   xlim=(self._min_x, self._max_x),
+                   ylim=(self._min_y, self._max_y),
                    shared_axes=False, responsive=True),
             threshold=0.75,
             how="saturate",
@@ -1332,10 +1334,10 @@ class ActiveLearningTab(param.Parameterized):
         print("scores_tab")
 
         return (
-            hv.Path(self.accuracy_list["train"], ["num_points", "score"])
-            * hv.Path(self.recall_list["train"], ["num_points", "score"])
-            * hv.Path(self.precision_list["train"], ["num_points", "score"])
-            * hv.Path(self.f1_list["train"], ["num_points", "score"])
+            hv.Path(self._accuracy_list["train"], ["num_points", "score"])
+            * hv.Path(self._recall_list["train"], ["num_points", "score"])
+            * hv.Path(self._precision_list["train"], ["num_points", "score"])
+            * hv.Path(self._f1_list["train"], ["num_points", "score"])
         )
 
     def add_conf_matrices(self):
@@ -1343,7 +1345,7 @@ class ActiveLearningTab(param.Parameterized):
         return pn.Column(
             pn.pane.Markdown("Training Set:", sizing_mode="fixed"),
             pn.pane.Markdown(
-                f"Acc: {self.train_scores['acc']}, Prec: {self.train_scores['prec']}, Rec: {self.train_scores['rec']}, F1: {self.train_scores['f1']}",
+                f"Acc: {self._train_scores['acc']}, Prec: {self._train_scores['prec']}, Rec: {self._train_scores['rec']}, F1: {self._train_scores['f1']}",
                 sizing_mode="fixed",
             ),
             pn.Row(
@@ -1365,7 +1367,7 @@ class ActiveLearningTab(param.Parameterized):
             ),
             pn.pane.Markdown("Validation Set:", sizing_mode="fixed"),
             pn.pane.Markdown(
-                f"Acc: {self.val_scores['acc']}, Prec: {self.val_scores['prec']}, Rec: {self.val_scores['rec']}, F1: {self.val_scores['f1']}",
+                f"Acc: {self._val_scores['acc']}, Prec: {self._val_scores['prec']}, Rec: {self._val_scores['rec']}, F1: {self._val_scores['f1']}",
                 sizing_mode="fixed",
             ),
             pn.Row(
@@ -1390,7 +1392,7 @@ class ActiveLearningTab(param.Parameterized):
     def setup_panel(self):
         print("setup_panel")
 
-        if not self.training:
+        if not self._training:
             self.setup_row[0] = pn.Row(
                 pn.Column(
                     pn.Row(
@@ -1420,7 +1422,7 @@ class ActiveLearningTab(param.Parameterized):
     def panel(self):
         print("panel")
 
-        self.assign_label_group.value = self.last_label
+        self.assign_label_group.value = self._last_label
 
         start = time.time()
         self.setup_panel()
@@ -1429,8 +1431,8 @@ class ActiveLearningTab(param.Parameterized):
         start = time.time()
 
         buttons_row = pn.Row(max_height=30)
-        if self.training:
-            if self.assigned_label:
+        if self._training:
+            if self._assigned_label:
                 buttons_row.append(self.next_iteration_button)
             else:
                 buttons_row = pn.Row(self.assign_label_group,
