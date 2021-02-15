@@ -33,6 +33,7 @@ from sklearn.metrics import (
     recall_score,
 )
 from utils.optimise import optimise
+
 import config
 import datashader as ds
 import holoviews as hv
@@ -46,6 +47,54 @@ import time
 
 
 class ActiveLearningTab(param.Parameterized):
+    """This class handles the Machine Learning aspect of the codebase.
+      Based on the users settings, the required features will be extracted from
+      the data and split into train, validation and test sets. The user can
+      then specify which classifiers and query functions they would like to
+      use in the Active Learning Process. The results at each stage will be
+      displayed in various widgets and plots, allowing the user to select the
+      correct label for the newly queried source. Each instance will train a
+      separate one-vs-rest classifier.
+
+    Parameters
+    ----------
+    src : ColumnDataSource
+        The shared data source which holds the current selected source.
+    df : DataFrame
+        The shared dataframe which holds all the data.
+    label : str
+        The string alias of the label that will be the positive case in the
+        one-vs-rest classifier.
+
+    Attributes
+    ----------
+    _label : str
+        The string alias of the label that will be the positive case in the
+        one-vs-rest classifier.
+    _last_label : str
+        The string alias of the last assigned label in the Active Learing
+        process. Used for visual improvements.
+    _training : bool
+        Flag for whether the training process has begun.
+    _assigned : bool
+        Flag for whether the user has assigned a label to the current queried
+        source.
+    y_train : DataFrame
+        The labels for the training set.
+    y_val : DataFrame
+        The labels for the validation set.
+    y_test : DataFrame
+        The labels for the test set.
+    id_train : DataFrame
+        The ids of the sources in the training set.
+    id_val : DataFrame
+        The ids of the sources in the validation set.
+    id_test : DataFrame
+        The ids of the sources in the test set.
+    _model_output_data_tr : type
+        Description of attribute `_model_output_data_tr`.
+
+    """
 
     def __init__(self, src, df, label, **params):
         super(ActiveLearningTab, self).__init__(**params)
@@ -61,10 +110,11 @@ class ActiveLearningTab(param.Parameterized):
         self._last_label = str(label)
 
         self._training = False
-        self._assigned_label = False
+        self._assigned = False
 
         if len(config.ml_data.keys()) == 0:
-            self.preprocess_data()
+
+            self._preprocess_data()
 
         else:
 
@@ -78,22 +128,7 @@ class ActiveLearningTab(param.Parameterized):
 
             self.df = config.main_df
 
-        self.convert_to_one_vs_rest()
-
-        self._model_output_data_tr = {
-            f'{config.settings["default_vars"][0]}': [],
-            f'{config.settings["default_vars"][1]}': [],
-            "metric": [],
-            "y": [],
-            "pred": [],
-        }
-
-        self._model_output_data_val = {
-            f'{config.settings["default_vars"][0]}': [],
-            f'{config.settings["default_vars"][1]}': [],
-            "y": [],
-            "pred": [],
-        }
+        self._convert_to_one_vs_rest()
 
         self._construct_panel()
 
@@ -129,6 +164,21 @@ class ActiveLearningTab(param.Parameterized):
 
     def _initialise_placeholders(self):
 
+        self._model_output_data_tr = {
+            f'{config.settings["default_vars"][0]}': [],
+            f'{config.settings["default_vars"][1]}': [],
+            "metric": [],
+            "y": [],
+            "pred": [],
+        }
+
+        self._model_output_data_val = {
+            f'{config.settings["default_vars"][0]}': [],
+            f'{config.settings["default_vars"][1]}': [],
+            "y": [],
+            "pred": [],
+        }
+
         self._accuracy_list = {
             "train": {"score": [], "num_points": []},
             "val": {"score": [], "num_points": []},
@@ -150,10 +200,10 @@ class ActiveLearningTab(param.Parameterized):
                               "prec": 0.00, "rec": 0.00, "f1": 0.00}
         self._val_scores = {"acc": 0.00, "prec": 0.00, "rec": 0.00, "f1": 0.00}
 
-        self.corr_train = ColumnDataSource(self.empty_data())
-        self.incorr_train = ColumnDataSource(self.empty_data())
-        self.corr_val = ColumnDataSource(self.empty_data())
-        self.incorr_val = ColumnDataSource(self.empty_data())
+        self.corr_train = ColumnDataSource(self._empty_data())
+        self.incorr_train = ColumnDataSource(self._empty_data())
+        self.corr_val = ColumnDataSource(self._empty_data())
+        self.incorr_val = ColumnDataSource(self._empty_data())
         self.metric_values = ColumnDataSource(
             {
                 f'{config.settings["default_vars"][0]}': [],
@@ -162,7 +212,7 @@ class ActiveLearningTab(param.Parameterized):
             }
         )
 
-        self.queried_points = ColumnDataSource(self.empty_data())
+        self.queried_points = ColumnDataSource(self._empty_data())
 
         self.id_al_train = []
 
@@ -179,13 +229,13 @@ class ActiveLearningTab(param.Parameterized):
 
         self.assign_label_button = pn.widgets.Button(
             name="Assign Label", button_type='primary')
-        self.assign_label_button.on_click(self.assign_label_cb)
+        self.assign_label_button.on_click(self._assign_label_cb)
 
         self.checkpoint_button = pn.widgets.Button(name="Checkpoint")
-        self.checkpoint_button.on_click(self.checkpoint_cb)
+        self.checkpoint_button.on_click(self._checkpoint_cb)
 
         self.show_queried_button = pn.widgets.Button(name="Show Queried")
-        self.show_queried_button.on_click(self.show_queried_point)
+        self.show_queried_button.on_click(self._show_queried_point_cb)
 
         self.classifier_dropdown = pn.widgets.Select(
             name="Classifier",
@@ -217,14 +267,14 @@ class ActiveLearningTab(param.Parameterized):
         self.remove_classifier_button = pn.widgets.Button(
             name="<<", max_height=40)
 
-        self.add_classifier_button.on_click(self.add_classifier_cb)
-        self.remove_classifier_button.on_click(self.remove_classifier_cb)
+        self.add_classifier_button.on_click(self._add_classifier_cb)
+        self.remove_classifier_button.on_click(self._remove_classifier_cb)
 
         self.start_training_button = pn.widgets.Button(name="Start Training")
-        self.start_training_button.on_click(self.start_training_cb)
+        self.start_training_button.on_click(self._start_training_cb)
 
         self.next_iteration_button = pn.widgets.Button(name="Next Iteration")
-        self.next_iteration_button.on_click(self.next_iteration_cb)
+        self.next_iteration_button.on_click(self._next_iteration_cb)
 
         self.setup_row = pn.Row("Loading")
         self.panel_row = pn.Row("Loading")
@@ -238,13 +288,13 @@ class ActiveLearningTab(param.Parameterized):
         self.conf_mat_val_fp = "FP"
         self.conf_mat_val_tp = "TP"
 
-    def preprocess_data(self):
+    def _preprocess_data(self):
 
         self.df, self.data = self.generate_features(self.df)
         print(f"df:{sys.getsizeof(self.df)}")
         print(f"data df:{sys.getsizeof(self.data)}")
 
-        x, y = self.split_x_y(self.data)
+        x, y = self.split_x_y_ids(self.data)
 
         if config.settings["exclude_labels"]:
             for label in config.settings["unclassified_labels"]:
@@ -258,7 +308,7 @@ class ActiveLearningTab(param.Parameterized):
             self.y_val,
             self.x_test,
             self.y_test,
-        ) = self.train_dev_test_split(x, y, 0.6, 0.2)
+        ) = self.train_val_test_split(x, y, 0.6, 0.2)
 
         self.x_cols = self.x_train.columns
         self.y_cols = self.y_train.columns
@@ -267,13 +317,9 @@ class ActiveLearningTab(param.Parameterized):
 
             (self.x_train, self.x_val, self.x_test,) = self.scale_data(
                 self.x_train,
-                self.y_train,
                 self.x_val,
-                self.y_val,
                 self.x_test,
-                self.y_test,
                 self.x_cols,
-                self.y_cols,
             )
 
         (
@@ -303,6 +349,14 @@ class ActiveLearningTab(param.Parameterized):
         print(f"optimised ml_data :{total}")
 
     def assign_global_data(self):
+        """Assign the current train, validation and test sets to the shared
+         `ml_data` dictionary so that it can be used by other classifiers.
+
+        Returns
+        -------
+        None
+
+        """
 
         config.ml_data["x_train"] = self.x_train
         config.ml_data["x_val"] = self.x_val
@@ -317,6 +371,13 @@ class ActiveLearningTab(param.Parameterized):
         config.ml_data["id_test"] = self.id_test
 
     def remove_from_pool(self):
+        """Remove the current queried source from the active learning pool.
+
+        Returns
+        -------
+        None
+
+        """
         print("remove_from_pool")
 
         self.x_pool = np.delete(
@@ -333,8 +394,26 @@ class ActiveLearningTab(param.Parameterized):
 
         self.id_pool = self.id_pool.drop(self.id_pool.index[self.query_index])
 
-    def save_model(self, event=None, checkpoint=False):
+    def save_model(self, checkpoint=False):
+        """Save the current classifier(s) as a joblib file to the models/
+        directory. The classifier filename will include the classifier(s) used
+        and corresponding query function(s). If training a committee, a new
+        directory will be created where each of the committee modals will be
+        saved.
 
+        Parameters
+        ----------
+        checkpoint : bool, default = False
+            Flag whether or not the model is saving a checkpoint. If `True` the
+            filename will include the current size of the training set, the
+            current validation F1-score as well as the time and date to allow
+            for easy tracking and organisation of models.
+
+        Returns
+        -------
+        None
+
+        """
         list_c1 = self.classifier_table_source.data["classifier"]
         list_c2 = self.classifier_table_source.data["query"]
 
@@ -392,13 +471,24 @@ class ActiveLearningTab(param.Parameterized):
                 if (not os.path.isfile(f"{scaler_dir}.joblib") and (config.settings["scale_data"])):
                     dump(self.scaler, f"{scaler_dir}.joblib")
 
-    def checkpoint_cb(self, event):
+    def _checkpoint_cb(self, event):
 
         self.checkpoint_button.disabled = True
         self.checkpoint_button.name = "Saved!"
         self.save_model(checkpoint=True)
 
-    def show_queried_point(self, event=None):
+    def _show_queried_point_cb(self, event):
+        self.show_queried_point()
+
+    def show_queried_point(self):
+        """Assign the classifier's current queried point as the current selected
+        source.
+
+        Returns
+        -------
+        None
+
+        """
 
         print("show_queried_point")
         start = time.time()
@@ -442,6 +532,13 @@ class ActiveLearningTab(param.Parameterized):
         self.queried_points.data = q
 
     def iterate_AL(self):
+        """Iterate through one iteration of active learning.
+
+        Returns
+        -------
+        None
+
+        """
         print("iterate al")
 
         # self.assign_label = False
@@ -458,7 +555,7 @@ class ActiveLearningTab(param.Parameterized):
         self.save_model(checkpoint=False)
 
         print("getting predictions")
-        self.get_predictions()
+        self._update_predictions()
         print("got predictions")
 
         self.query_new_point()
@@ -471,18 +568,26 @@ class ActiveLearningTab(param.Parameterized):
         self.assign_label_button.name = "Assign"
 
     def query_new_point(self):
+        """Query the most informative point from the training pool based off the
+        chosen query metric.
+
+        Returns
+        -------
+        None
+
+        """
 
         self.query_index, self.query_instance = self.learner.query(self.x_pool)
         print("queried")
 
-    def assign_label_cb(self, event):
+    def _assign_label_cb(self, event):
 
         selected_label = self.assign_label_group.value
         self._last_label = selected_label
 
         if not selected_label == "Unsure":
 
-            self._assigned_label = True
+            self._assigned = True
             self.next_iteration_button.name = "Next Iteration"
 
             if self.assign_label_button.name == "Assigned!":
@@ -532,7 +637,7 @@ class ActiveLearningTab(param.Parameterized):
 
         self.panel()
 
-    def empty_data(self):
+    def _empty_data(self):
 
         print("empty_data")
 
@@ -543,7 +648,7 @@ class ActiveLearningTab(param.Parameterized):
 
         return empty
 
-    def next_iteration_cb(self, event):
+    def _next_iteration_cb(self, event):
         print("next_iter_cb")
 
         if self.next_iteration_button.name == "Training...":
@@ -555,11 +660,11 @@ class ActiveLearningTab(param.Parameterized):
 
         self.checkpoint_button.name = "Checkpoint"
         self.checkpoint_button.disabled = False
-        self._assigned_label = False
+        self._assigned = False
 
         self.panel()
 
-    def start_training_cb(self, event):
+    def _start_training_cb(self, event):
         print("start_training_cb")
 
         self._training = True
@@ -577,7 +682,7 @@ class ActiveLearningTab(param.Parameterized):
 
         self.panel()
 
-    def add_classifier_cb(self, event):
+    def _add_classifier_cb(self, event):
         print("add_classifier_cb")
 
         clf = self.classifier_dropdown.value
@@ -593,7 +698,7 @@ class ActiveLearningTab(param.Parameterized):
             "query": list_c2,
         }
 
-    def remove_classifier_cb(self, event):
+    def _remove_classifier_cb(self, event):
 
         print("remove_classifier_cb")
 
@@ -608,25 +713,67 @@ class ActiveLearningTab(param.Parameterized):
             "query": list_c2,
         }
 
-    def split_x_y(self, df_data):
+    def split_x_y_ids(self, df_data):
+        """Separate the data into X and [y,ids] dataframes.
 
-        print("split_x_y")
+        Parameters
+        ----------
+        df_data : DataFrame
+            A dataframe containing all the training features, the label column
+            and the id column.
 
-        df_data_y = df_data[[config.settings["label_col"],
-                             config.settings["id_col"]]]
+        Returns
+        -------
+        df_data_x : DataFrame
+            A dataframe containing only the features used for machine learning.
+        df_data_y_ids : DataFrame
+            A dataframe containing only the label and id columns corresponding
+            to `df_data_x`.
+
+        """
+
+        print("split_x_y_ids")
+
+        df_data_y_ids = df_data[[config.settings["label_col"],
+                                 config.settings["id_col"]]]
         df_data_x = df_data.drop(
             columns=[config.settings["label_col"], config.settings["id_col"]])
         assert (
-            df_data_y.shape[0] == df_data_x.shape[0]
-        ), f"df_data_y has different number of rows than df_data_x, {df_data_y.shape[0]} != {df_data_x.shape[0]}"
+            df_data_y_ids.shape[0] == df_data_x.shape[0]
+        ), f"df_data_y_ids has different number of rows than df_data_x, {df_data_y_ids.shape[0]} != {df_data_x.shape[0]}"
 
-        return df_data_x, df_data_y
+        return df_data_x, df_data_y_ids
 
     def exclude_unclassified_labels(self, df_data_x, df_data_y, excluded):
+        """Remove any sources that have a label that is not being trained on.
+
+        Parameters
+        ----------
+        df_data_x : DataFrame
+            A dataframe containing only the features used for machine learning.
+        df_data_y : DataFrame
+            A dataframe containing the label corresponding to `df_data_x`.
+        excluded : str
+            The label which should be removed from `df_data_x` and `df_data_y`.
+
+        Returns
+        -------
+        data_x : DataFrame
+            A subset of `df_data_x` which has had all rows with label `excluded`
+            removed.
+        data_y : DataFrame
+            A subset of `df_data_y` which has had all rows with label `excluded`
+            removed.
+        excluded_x : DataFrame
+            A subset of `df_data_x` which only has rows with label `excluded`.
+        excluded_y : DataFrame
+            A subset of `df_data_y` which only has rows with label `excluded`.
+
+        """
         excluded_label = config.settings["strings_to_labels"][excluded]
-        unknowns_x = df_data_x[df_data_y[config.settings["label_col"]]
+        excluded_x = df_data_x[df_data_y[config.settings["label_col"]]
                                == excluded_label]
-        unknowns_y = df_data_y[df_data_y[config.settings["label_col"]]
+        excluded_y = df_data_y[df_data_y[config.settings["label_col"]]
                                == excluded_label]
 
         data_x = df_data_x[df_data_y[config.settings["label_col"]]
@@ -634,9 +781,42 @@ class ActiveLearningTab(param.Parameterized):
         data_y = df_data_y[df_data_y[config.settings["label_col"]]
                            != excluded_label]
 
-        return data_x, data_y, unknowns_x, unknowns_y
+        return data_x, data_y, excluded_x, excluded_y
 
-    def train_dev_test_split(self, df_data_x, df_data_y, train_ratio, val_ratio):
+    def train_val_test_split(self, df_data_x, df_data_y, train_ratio, val_ratio):
+        """Split data into train, validation and test sets.
+        The method uses stratified sampling to ensure each set has the correct
+        distribution of points.
+
+        Parameters
+        ----------
+        df_data_x : DataFrame
+            A dataframe containing only the features used for machine learning.
+        df_data_y : DataFrame
+            A dataframe containing the labels corresponding to `df_data_x`.
+        train_ratio : float
+            The ratio of all the total dataset that should be used for the
+            training set.
+        val_ratio : float
+            The ratio of all the total dataset that should be used for the
+            validation set.
+
+        Returns
+        -------
+        x_train : DataFrame
+            A subset of `df_data_x` which will be used for training a model.
+        y_train : DataFrame
+            A dataframe containing the labels corresponding to `x_train`.
+        x_val : DataFrame
+            A subset of `df_data_x` which will be used for validating a model.
+        y_val : DataFrame
+            A dataframe containing the labels corresponding to `x_val`.
+        x_test : DataFrame
+            A subset of `df_data_x` which will be used for testing a model.
+        y_test : DataFrame
+            A dataframe containing the labels corresponding to `x_test`.
+
+        """
 
         print("train_dev_split")
 
@@ -666,9 +846,32 @@ class ActiveLearningTab(param.Parameterized):
 
         return x_train, y_train, x_val, y_val, x_test, y_test
 
-    def scale_data(
-        self, x_train, y_train, x_val, y_val, x_test, y_test, x_cols, y_cols
-    ):
+    def scale_data(self, x_train, x_val, x_test, x_cols):
+        """Scale the features of the data according to the training set.
+        A RobustScaler is used to limit the impact of outliers on the data.
+        Parameters
+        ----------
+        x_train : DataFrame
+            A dataframe containing the training set. All subsequent data will
+            be scaled according to this data.
+        x_val : DataFrame
+            A dataframe containing the validation set.
+        x_test : DataFrame
+            A dataframe containing the testing set.
+        x_cols : list of str
+            List containing all the column names in `x_train`,`x_val` and
+            `x_test`.
+
+        Returns
+        -------
+        data_x_tr : DataFrame
+            A dataframe containing the normalised training set.
+        data_x_val : DataFrame
+            A dataframe containing the normalised validation set.
+        data_x_test : DataFrame
+            A dataframe containing the normalised testing set.
+
+        """
 
         print("scale_data")
 
@@ -684,44 +887,67 @@ class ActiveLearningTab(param.Parameterized):
 
         data_x_test = pd.DataFrame(data_x_test, columns=x_cols)
 
-        return (
-            data_x_tr,
-            data_x_val,
-            data_x_test,
-        )
+        return data_x_tr, data_x_val, data_x_test
 
-    def split_y_ids(self, y_train, y_val, y_test):
+    def split_y_ids(self, y_id_train, y_id_val, y_id_test):
+        """Split label and id columns into separate dataframes.
 
-        print("split_y_ids")
+        Parameters
+        ----------
+        y_id_train : DataFrame
+            Dataframe containing label and id columns of the training set.
+        y_id_val : DataFrame
+            Dataframe containing label and id columns of the validation set.
+        y_id_test : DataFrame
+            Dataframe containing label and id columns of the test set.
+
+        Returns
+        -------
+        data_y_tr : DataFrame
+            Dataframe containing only the label column of `y_id_train`.
+        data_id_tr : DataFrame
+            Dataframe containing only the id column of `y_id_train`.
+        data_y_val : DataFrame
+            Dataframe containing only the label column of `y_id_val`.
+        data_id_val : DataFrame
+            Dataframe containing only the id column of `y_id_val`.
+        data_y_test : DataFrame
+            Dataframe containing only the label column of `y_id_test`.
+        data_id_test : DataFrame
+            Dataframe containing only the id column of `y_id_test`.
+
+        """
+
+        print("split_y_id_ids")
 
         data_y_tr = pd.DataFrame(
-            y_train[config.settings["label_col"]], columns=[
+            y_id_train[config.settings["label_col"]], columns=[
                 config.settings["label_col"]]
         )
         data_id_tr = pd.DataFrame(
-            y_train[config.settings["id_col"]], columns=[
+            y_id_train[config.settings["id_col"]], columns=[
                 config.settings["id_col"]]
         )
         data_y_val = pd.DataFrame(
-            y_val[config.settings["label_col"]], columns=[
+            y_id_val[config.settings["label_col"]], columns=[
                 config.settings["label_col"]]
         )
         data_id_val = pd.DataFrame(
-            y_val[config.settings["id_col"]], columns=[
+            y_id_val[config.settings["id_col"]], columns=[
                 config.settings["id_col"]]
         )
         data_y_test = pd.DataFrame(
-            y_test[config.settings["label_col"]], columns=[
+            y_id_test[config.settings["label_col"]], columns=[
                 config.settings["label_col"]]
         )
         data_id_test = pd.DataFrame(
-            y_test[config.settings["id_col"]], columns=[
+            y_id_test[config.settings["id_col"]], columns=[
                 config.settings["id_col"]]
         )
 
         return data_y_tr, data_id_tr, data_y_val, data_id_val, data_y_test, data_id_test
 
-    def convert_to_one_vs_rest(self):
+    def _convert_to_one_vs_rest(self):
 
         y_tr = self.y_train.copy()
         y_val = self.y_val.copy()
@@ -749,7 +975,7 @@ class ActiveLearningTab(param.Parameterized):
         self.y_val = y_val
         self.y_test = y_test
 
-    def get_blank_classifiers(self):
+    def _get_blank_classifiers(self):
 
         classifiers = {
             "KNN": KNeighborsClassifier(3, n_jobs=-1),
@@ -765,7 +991,7 @@ class ActiveLearningTab(param.Parameterized):
 
         return classifiers
 
-    def get_predictions(self, first=False):
+    def _update_predictions(self):
 
         print("get_predicitions")
         start = time.time()
@@ -922,6 +1148,17 @@ class ActiveLearningTab(param.Parameterized):
         self._model_output_data_val["y"] = self.y_val.to_numpy().flatten()
 
     def create_pool(self):
+        """Create the pool used for query points during active learning.
+        The training set will be split into the pool and the classifier's
+        training set. The number in the classifier's training set has already
+        been set by the user and these points will be chosen randomly from
+        the pool.
+
+        Returns
+        -------
+        None
+
+        """
 
         print("create_pool")
 
@@ -972,6 +1209,14 @@ class ActiveLearningTab(param.Parameterized):
         self.id_al_train = id_train
 
     def setup_learners(self):
+        """Initialise the classifiers used during active learning.
+        The classifiers used have already been chosen by the user.
+
+        Returns
+        -------
+        None
+
+        """
 
         print("setup_learners")
 
@@ -987,7 +1232,7 @@ class ActiveLearningTab(param.Parameterized):
             "Entropy Sampling": entropy_sampling,
         }
 
-        classifier_dict = self.get_blank_classifiers()
+        classifier_dict = self._get_blank_classifiers()
 
         self.create_pool()
 
@@ -1016,14 +1261,27 @@ class ActiveLearningTab(param.Parameterized):
 
             self.learner = Committee(learner_list=learners)
 
-        self.get_predictions(first=True)
-
-    def panel_cb(self, attr, old, new):
-        print("panel_cb")
-        self.panel()
+        self._update_predictions(first=True)
 
     # TODO :: Add bool to see if user wants this step
     def generate_features(self, df):
+        """Create the feature combinations that the user specified.
+
+        Parameters
+        ----------
+        df : DataFrame
+            A dataframe containing all of the dataset.
+
+        Returns
+        -------
+        df : DataFrame
+            An expanding dataframe of `df` with the inclusion of the feature
+            combinations.
+        df_al : DataFrame
+            A dataframe containing a subset of `df` with only the required
+            features for training.
+
+        """
         print("generate_features")
         np.random.seed(0)
 
@@ -1035,17 +1293,17 @@ class ActiveLearningTab(param.Parameterized):
         features = bands + [config.settings["label_col"],
                             config.settings["id_col"]]
         print(features[-5:])
-        df_data = df[features]
+        df_al = df[features]
 
-        shuffled = np.random.permutation(list(df_data.index.values))
+        shuffled = np.random.permutation(list(df_al.index.values))
 
         print("shuffled...")
 
-        df_data = df_data.reindex(shuffled)
+        df_al = df_al.reindex(shuffled)
 
         print("reindexed")
 
-        df_data = df_data.reset_index()
+        df_al = df_al.reset_index()
 
         print("reset index")
 
@@ -1055,19 +1313,18 @@ class ActiveLearningTab(param.Parameterized):
 
         cols = list(df.columns)
 
-        updated_columns = False
         for i, j in combs:
-            df_data[f"{i}-{j}"] = df_data[i] - df_data[j]
+            df_al[f"{i}-{j}"] = df_al[i] - df_al[j]
 
             if f"{i}-{j}" not in cols:
                 df[f"{i}-{j}"] = df[i] - df[j]
 
         print("Feature generations complete")
 
-        return df, df_data
+        return df, df_al
 
     # CHANGED :: Remove static declarations
-    def combine_data(self):
+    def _combine_data(self):
 
         print("combine_data")
         data = np.array(
@@ -1096,7 +1353,7 @@ class ActiveLearningTab(param.Parameterized):
 
         return data
 
-    def train_tab(self):
+    def _train_tab(self):
 
         print("train_tab")
         start = time.time()
@@ -1134,7 +1391,7 @@ class ActiveLearningTab(param.Parameterized):
             print(f"hasattr {end - start}")
         else:
             start = time.time()
-            x_al_train = self.empty_data()
+            x_al_train = self._empty_data()
             end = time.time()
             print(f"x_al_train {end - start}")
 
@@ -1161,7 +1418,7 @@ class ActiveLearningTab(param.Parameterized):
             print(f"query_point {end - start}")
         else:
             start = time.time()
-            query_point = self.empty_data()
+            query_point = self._empty_data()
             end = time.time()
             print(f"query_point {end - start}")
 
@@ -1233,8 +1490,8 @@ class ActiveLearningTab(param.Parameterized):
 
         return full_plot
 
-    def val_tab(self):
-        print("val_tab")
+    def _val_tab(self):
+        print("_val_tab")
         start = time.time()
         self._model_output_data_val["acc"] = np.equal(
             np.array(self._model_output_data_val["pred"]),
@@ -1278,9 +1535,9 @@ class ActiveLearningTab(param.Parameterized):
         print(f"plot-val {end - start}")
         return plot
 
-    def metric_tab(self):
+    def _metric_tab(self):
 
-        print("metric_tab")
+        print("_metric_tab")
         start = time.time()
 
         if "acc" not in self._model_output_data_tr.keys():
@@ -1330,8 +1587,8 @@ class ActiveLearningTab(param.Parameterized):
         print(f"plot {end - start}")
         return plot
 
-    def scores_tab(self):
-        print("scores_tab")
+    def _scores_tab(self):
+        print("_scores_tab")
 
         return (
             hv.Path(self._accuracy_list["train"], ["num_points", "score"])
@@ -1340,8 +1597,8 @@ class ActiveLearningTab(param.Parameterized):
             * hv.Path(self._f1_list["train"], ["num_points", "score"])
         )
 
-    def add_conf_matrices(self):
-        print("add_conf_matrices")
+    def _add_conf_matrices(self):
+        print("_add_conf_matrices")
         return pn.Column(
             pn.pane.Markdown("Training Set:", sizing_mode="fixed"),
             pn.pane.Markdown(
@@ -1390,6 +1647,15 @@ class ActiveLearningTab(param.Parameterized):
         )
 
     def setup_panel(self):
+        """Create the panel which will house all the classifier setup options.
+
+        Returns
+        -------
+        self.panel_row : Panel Row
+            The panel is housed in a row which will can then be rendered by the
+            respective Dashboard.
+
+        """
         print("setup_panel")
 
         if not self._training:
@@ -1420,6 +1686,15 @@ class ActiveLearningTab(param.Parameterized):
             )
 
     def panel(self):
+        """Create the active learning tab panel.
+
+        Returns
+        -------
+        self.panel_row : Panel Row
+            The panel is housed in a row which will can then be rendered by the
+            respective Dashboard.
+
+        """
         print("panel")
 
         self.assign_label_group.value = self._last_label
@@ -1432,7 +1707,7 @@ class ActiveLearningTab(param.Parameterized):
 
         buttons_row = pn.Row(max_height=30)
         if self._training:
-            if self._assigned_label:
+            if self._assigned:
                 buttons_row.append(self.next_iteration_button)
             else:
                 buttons_row = pn.Row(self.assign_label_group,
@@ -1446,13 +1721,13 @@ class ActiveLearningTab(param.Parameterized):
             pn.Row(self.setup_row),
             pn.Row(
                 pn.Tabs(
-                    ("Train", self.train_tab),
-                    ("Metric", self.metric_tab),
-                    ("Val", self.val_tab),
-                    ("Scores", self.scores_tab),
+                    ("Train", self._train_tab),
+                    ("Metric", self._metric_tab),
+                    ("Val", self._val_tab),
+                    ("Scores", self._scores_tab),
                     dynamic=True,
                 ),
-                self.add_conf_matrices(),
+                self._add_conf_matrices(),
             ),
             pn.Row(max_height=20),
             buttons_row,
