@@ -46,6 +46,8 @@ class SelectedSourceDashboard(param.Parameterized):
 
         self.image_zoom = 0.2
 
+        self.initialise_optical_zoom_buttons()
+
         self.add_selected_info()
 
     def add_selected_info(self):
@@ -53,12 +55,12 @@ class SelectedSourceDashboard(param.Parameterized):
         self.contents = "Selected Source"
         self.search_id = pn.widgets.AutocompleteInput(
             name="Select ID",
-            options=list(self.df[config.settings["id_col"]].values),
+            options=list(self.df[config.settings["id_col"]].values)[:5],
             placeholder="Select a source by ID",
             max_height=50,
         )
 
-        self.search_id.param.watch(self.change_selected, "value")
+        # self.search_id.param.watch(self.change_selected, "value")
 
         self.panel()
 
@@ -122,113 +124,123 @@ class SelectedSourceDashboard(param.Parameterized):
 
         self.src.data = empty
 
+    def generate_radio_url(self, ra, dec):
+        # TODO :: Verify
+        ra = float(ra)
+        dec = float(dec)
+        print(f"ra:{ra}, dec:{dec}")
+
+        h = np.floor(ra / 15.0)
+        d = ra - h * 15
+        m = np.floor(d / 0.25)
+        d = d - m * 0.25
+        s = d / (0.25 / 60.0)
+        ra_conv = f"{h} {m} {s}"
+
+        sign = 1
+        if dec < 0:
+            sign = -1
+
+        g = np.abs(dec)
+        d = np.floor(g) * sign
+        g = g - np.floor(g)
+        m = np.floor(g * 60.0)
+        g = g - m / 60.0
+        s = g * 3600.0
+
+        dec_conv = f"{d} {m} {s}"
+
+        print(f"ra_conv: {ra_conv}, dec_conv: {dec_conv}")
+
+        url1 = "https://third.ucllnl.org/cgi-bin/firstimage?RA="
+        url2 = "&Equinox=J2000&ImageSize=2.5&MaxInt=200&GIF=1"
+        url = f"{url1}{ra_conv} {dec_conv}{url2}"
+
+        print(url)
+
+        return url
+
+    def change_zoom_cb(self, event, oper):
+        if oper == "-":
+            self.image_zoom += 0.1
+            self.image_zoom = round(self.image_zoom, 1)
+        if oper == "+":
+            if self.image_zoom == 0.1:
+                pass
+            else:
+                self.image_zoom -= 0.1
+                self.image_zoom = round(self.image_zoom, 1)
+        try:
+            index = self.url_optical_image.rfind("&")
+            self.url_optical_image = (
+                f"{self.url_optical_image[:index]}&scale={self.image_zoom}"
+            )
+            self.optical_image.object = self.url_optical_image
+        except:
+
+            print("\n\n\n IMAGE ERROR: \n\n\n")
+            print(f"index:{self.url_optical_image.rfind('&')}")
+            print(
+                f"new url_optical_image: {self.url_optical_image[:self.url_optical_image.rfind('&')]}&scale={self.image_zoom}")
+
+    def update_default_images(self):
+        url = "http://skyserver.sdss.org/dr16/SkyServerWS/ImgCutout/getjpeg?TaskName=Skyserver.Explore.Image&ra="
+        # TODO :: Set Ra Dec Columns
+
+        if self.check_required_column("ra_dec"):
+            ra_dec = self.src.data["ra_dec"][0]
+            ra = ra_dec[: ra_dec.index(",")]
+            print(f"RA_DEC:{ra_dec}")
+            dec = ra_dec[ra_dec.index(",") + 1:]
+
+            self.url_optical_image = (
+                f"{url}{ra}&dec={dec}&opt=G&scale={self.image_zoom}"
+            )
+            self.optical_image.object = self.url_optical_image
+
+            self.url_radio_image = self.generate_radio_url(ra, dec)
+            self.radio_image.object = self.url_radio_image
+
+    def initialise_optical_zoom_buttons(self):
+
+        self.zoom_increase = pn.widgets.Button(
+            name="Zoom In", max_height=30, max_width=50
+        )
+        self.zoom_increase.on_click(partial(self.change_zoom_cb, oper="+"))
+        self.zoom_decrease = pn.widgets.Button(
+            name="Zoom Out", max_height=30, max_width=50
+        )
+        self.zoom_decrease.on_click(partial(self.change_zoom_cb, oper="-"))
+
+    def check_required_column(self, column):
+        has_required = False
+        if column in list(self.df.columns):
+            has_required = True
+
+        return has_required
+
     def panel(self):
         # CHANGED :: Remove need to rerender with increases + decreases
-        def change_zoom_cb(event, oper):
-            if oper == "-":
-                self.image_zoom += 0.1
-                self.image_zoom = round(self.image_zoom, 1)
-            if oper == "+":
-                if self.image_zoom == 0.1:
-                    pass
-                else:
-                    self.image_zoom -= 0.1
-                    self.image_zoom = round(self.image_zoom, 1)
-            try:
-                index = self.url_optical_image.rfind("&")
-                self.url_optical_image = (
-                    f"{self.url_optical_image[:index]}&scale={self.image_zoom}"
-                )
-                self.optical_image.object = self.url_optical_image
-            except:
-
-                print("\n\n\n IMAGE ERROR: \n\n\n")
-                print(f"index:{self.url_optical_image.rfind('&')}")
-                print(
-                    f"new url_optical_image: {self.url_optical_image[:self.url_optical_image.rfind('&')]}&scale={self.image_zoom}")
-
-        def generate_radio_url(ra, dec):
-            # TODO :: Verify
-            ra = float(ra)
-            dec = float(dec)
-            print(f"ra:{ra}, dec:{dec}")
-
-            h = np.floor(ra / 15.0)
-            d = ra - h * 15
-            m = np.floor(d / 0.25)
-            d = d - m * 0.25
-            s = d / (0.25 / 60.0)
-            ra_conv = f"{h} {m} {s}"
-
-            sign = 1
-            if dec < 0:
-                sign = -1
-
-            g = np.abs(dec)
-            d = np.floor(g) * sign
-            g = g - np.floor(g)
-            m = np.floor(g * 60.0)
-            g = g - m / 60.0
-            s = g * 3600.0
-
-            dec_conv = f"{d} {m} {s}"
-
-            print(f"ra_conv: {ra_conv}, dec_conv: {dec_conv}")
-
-            url1 = "https://third.ucllnl.org/cgi-bin/firstimage?RA="
-            url2 = "&Equinox=J2000&ImageSize=2.5&MaxInt=200&GIF=1"
-            url = f"{url1}{ra_conv} {dec_conv}{url2}"
-
-            return url
 
         selected = self.check_valid_selected()
 
         if selected:
 
             self.add_selected_to_history()
-            try:
-                url = "http://skyserver.sdss.org/dr16/SkyServerWS/ImgCutout/getjpeg?TaskName=Skyserver.Explore.Image&ra="
-                # TODO :: Set Ra Dec Columns
-                ra_dec = self.src.data["ra_dec"][0]
-                ra = ra_dec[: ra_dec.index(",")]
-                print(f"RA_DEC:{ra_dec}")
-                dec = ra_dec[ra_dec.index(",") + 1:]
 
-                self.url_optical_image = (
-                    f"{url}{ra}&dec={dec}&opt=G&scale={self.image_zoom}"
-                )
-                self.optical_image.object = self.url_optical_image
-            except:
-                print("\n\n\n\n Optical Image Timeout \n\n\n\n")
+            self.update_default_images()
 
-            try:
-                url_radio_image = generate_radio_url(ra, dec)
-            except:
-                url_radio_image = "No Radio Image Available"
-                print("\n\n\n\n Radio Image Timeout \n\n\n\n")
+            if self.check_required_column("png_path_DR16"):
 
-            zoom_increase = pn.widgets.Button(
-                name="Zoom In", max_height=30, max_width=50
-            )
-            zoom_increase.on_click(partial(change_zoom_cb, oper="+"))
-            zoom_decrease = pn.widgets.Button(
-                name="Zoom Out", max_height=30, max_width=50
-            )
-            zoom_decrease.on_click(partial(change_zoom_cb, oper="-"))
-            try:
-                # CHANGED :: Slow after this...
                 if not self.src.data["png_path_DR16"][0].isspace():
                     print("beginning if")
 
-            except:
-                print("\n\n\n\n Radio Image Timeout \n\n\n\n")
-                print("leaving if")
-                spectra_image = "No spectra available"
+                    self.spectra_image.object = self.src.data["png_path_DR16"][0]
 
-            else:
-                print("beginning else")
-                spectra_image = "No spectra available"
-                print("leaving else")
+                else:
+                    print("beginning else")
+                    self.spectra_image = "No spectra available"
+                    print("leaving else")
 
             print("creating deselect")
             deselect_buttton = pn.widgets.Button(name="Deselect")
@@ -257,10 +269,10 @@ class SelectedSourceDashboard(param.Parameterized):
                             self.radio_image,
                         ),
                         pn.Row(
-                            zoom_increase,
-                            zoom_decrease,
+                            self.zoom_increase,
+                            self.zoom_decrease,
                         ),
-                        spectra_image,
+                        self.spectra_image,
                     ),
                 ),
                 collapsible=False,
@@ -274,7 +286,7 @@ class SelectedSourceDashboard(param.Parameterized):
             # print(self.src.data)
             self.row[0] = pn.Card(
                 pn.Column(
-                    self.search_id,
+                    # self.search_id,
                     pd.DataFrame(self.selected_history,
                                  columns=["Selected IDs"]),
                 )
