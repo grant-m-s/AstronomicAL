@@ -9,6 +9,26 @@ import param
 
 
 class SettingsDashboard(param.Parameterized):
+    """A Dashboard used to display configuration settings for the user.
+
+    Parameters
+    ----------
+    main : Dashboard
+        The parent Dashboard view required for updating which dashboard is
+        rendered.
+    src : ColumnDataSource
+        The shared data source which holds the current selected source.
+    df : DataFrame
+        The shared dataframe which holds all the data.
+
+    Attributes
+    ----------
+    row : Panel Row
+        The panel is housed in a row which will can then be rendered by the
+        Panel layout.
+    pipeline : Panel Pipeline
+        A pipeline of stages for the user to assign key parameters.
+    """
 
     def __init__(self, main, src, df, **params):
         super(SettingsDashboard, self).__init__(**params)
@@ -18,16 +38,38 @@ class SettingsDashboard(param.Parameterized):
 
         self.df = None
 
-        self.pipeline_stage = 0
+        self._pipeline_stage = 0
 
-        self.close_settings_button = pn.widgets.Button(
+        self._initialise_widgets(main)
+
+        self.create_pipeline(src, df)
+
+        self._adjust_pipeline_layout()
+
+    def _initialise_widgets(self, main):
+        self._close_settings_button = pn.widgets.Button(
             name="Close Settings",
             max_width=100,
             disabled=True
         )
-        self.close_settings_button.on_click(
-            partial(self.close_settings_cb, main=main))
+        self._close_settings_button.on_click(
+            partial(self._close_settings_cb, main=main))
 
+    def create_pipeline(self, src, df):
+        """Create the pipeline of setting stages.
+
+        Parameters
+        ----------
+        src : ColumnDataSource
+            The shared data source which holds the current selected source.
+        df : DataFrame
+            The shared dataframe which holds all the data.
+
+        Returns
+        -------
+        None
+
+        """
         self.pipeline = pn.pipeline.Pipeline()
         self.pipeline.add_stage(
             "Select Your Data", DataSelection(src), ready_parameter="ready"
@@ -38,9 +80,10 @@ class SettingsDashboard(param.Parameterized):
         ),
         self.pipeline.add_stage(
             "Active Learning Settings", ActiveLearningSettings(
-                src, self.close_settings_button)
+                src, self._close_settings_button)
         )
 
+    def _adjust_pipeline_layout(self):
         self.pipeline.layout[0][0][0].sizing_mode = "fixed"
 
         self.pipeline.layout[0][0][0].max_height = 75
@@ -52,16 +95,20 @@ class SettingsDashboard(param.Parameterized):
         self.pipeline.layout[0][2][0].width = 100
         self.pipeline.layout[0][2][1].width = 100
 
-        self.pipeline.layout[0][2][0].on_click(self.stage_previous_cb)
+        self.pipeline.layout[0][2][0].on_click(self._stage_previous_cb)
 
         self.pipeline.layout[0][2][1].button_type = 'success'
-        self.pipeline.layout[0][2][1].on_click(self.stage_next_cb)
-
-        # print(self.pipeline)
-        # print(self.pipeline["Assign Parameters"].get_id_column())
+        self.pipeline.layout[0][2][1].on_click(self._stage_next_cb)
 
     def get_settings(self):
+        """Get the settings assigned during the pipeline stages.
 
+        Returns
+        -------
+        updated_settings : dict
+            A dictionary of assigned parameters.
+
+        """
         updated_settings = {}
         updated_settings["id_col"] = self.pipeline["Assign Parameters"].get_id_column(
         )
@@ -77,7 +124,7 @@ class SettingsDashboard(param.Parameterized):
 
         return updated_settings
 
-    def close_settings_cb(self, event, main):
+    def _close_settings_cb(self, event, main):
         print("closing settings")
 
         self.df = self.pipeline["Active Learning Settings"].get_df()
@@ -89,19 +136,17 @@ class SettingsDashboard(param.Parameterized):
             src[f"{col}"] = []
 
         self.src.data = src
-        # print("\n\n\n\n")
-        # print(len(list(self.src.data.keys())))
 
-        self.close_settings_button.disabled = True
-        self.close_settings_button.name = "Setting up training panels..."
+        self._close_settings_button.disabled = True
+        self._close_settings_button.name = "Setting up training panels..."
 
         main.set_contents(updated="Active Learning")
 
-    def stage_previous_cb(self, event):
+    def _stage_previous_cb(self, event):
 
-        self.pipeline_stage -= 1
+        self._pipeline_stage -= 1
 
-    def stage_next_cb(self, event):
+    def _stage_next_cb(self, event):
 
         if self.df is None:
             print("updating Settings df")
@@ -109,16 +154,25 @@ class SettingsDashboard(param.Parameterized):
 
         pipeline_list = list(self.pipeline._stages)
         print("STAGE:")
-        current_stage = pipeline_list[self.pipeline_stage]
+        current_stage = pipeline_list[self._pipeline_stage]
 
-        next_stage = pipeline_list[self.pipeline_stage + 1]
+        next_stage = pipeline_list[self._pipeline_stage + 1]
         self.pipeline[next_stage].update_data(dataframe=self.df)
 
-        self.pipeline_stage += 1
+        self._pipeline_stage += 1
 
     def panel(self):
+        """Render the current view.
+
+        Returns
+        -------
+        row : Panel Row
+            The panel is housed in a row which will can then be rendered by the
+            parent Dashboard.
+
+        """
         if self.pipeline["Active Learning Settings"].is_complete():
-            self.close_settings_button.disabled = False
+            self._close_settings_button.disabled = False
 
         self.row[0] = pn.Card(
             pn.Column(
@@ -132,7 +186,7 @@ class SettingsDashboard(param.Parameterized):
                 name="Settings Panel",
                 value="Please choose the appropriate settings for your data",
                 ),
-                self.close_settings_button,
+                self._close_settings_button,
             ),
             collapsible=False,
         )
