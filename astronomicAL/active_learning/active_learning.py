@@ -27,6 +27,7 @@ from sklearn.tree import DecisionTreeClassifier
 from sklearn.preprocessing import RobustScaler
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import (
+    accuracy_score,
     confusion_matrix,
     f1_score,
     precision_score,
@@ -1004,10 +1005,16 @@ class ActiveLearningTab(param.Parameterized):
 
     def _update_predictions(self):
 
+        start = time.time()
+        proba = self.learner.predict_proba(config.ml_data["x_train"])
+        end = time.time()
+        print(f"pred proba {end - start}")
+
         print("get_predicitions")
         start = time.time()
-        tr_pred = self.learner.predict(
-            config.ml_data["x_train"]).reshape((-1, 1))
+        tr_pred = np.argmax(proba, axis=1).reshape((-1, 1))
+        print(tr_pred.reshape)
+        print(tr_pred)
         end = time.time()
         print(f"predict {end - start}")
         temp = self.y_train.to_numpy().reshape((-1, 1))
@@ -1037,8 +1044,7 @@ class ActiveLearningTab(param.Parameterized):
         self.corr_train.data = corr_data
         self.incorr_train.data = incorr_data
         start = time.time()
-        curr_tr_acc = self.learner.score(
-            config.ml_data["x_train"], self.y_train)
+        curr_tr_acc = accuracy_score(self.y_train, tr_pred)
         curr_tr_f1 = f1_score(self.y_train, tr_pred)
         curr_tr_prec = precision_score(self.y_train, tr_pred)
         curr_tr_rec = recall_score(self.y_train, tr_pred)
@@ -1085,7 +1091,7 @@ class ActiveLearningTab(param.Parameterized):
         self.corr_val.data = corr_data
         self.incorr_val.data = incorr_data
 
-        curr_val_acc = self.learner.score(config.ml_data["x_val"], self.y_val)
+        curr_val_acc = accuracy_score(self.y_val, val_pred)
         curr_val_f1 = f1_score(self.y_val, val_pred)
         curr_val_prec = precision_score(self.y_val, val_pred)
         curr_val_rec = recall_score(self.y_val, val_pred)
@@ -1124,10 +1130,7 @@ class ActiveLearningTab(param.Parameterized):
         self.conf_mat_val_fp = str(v_conf[0][1])
         self.conf_mat_val_fn = str(v_conf[1][0])
         self.conf_mat_val_tp = str(v_conf[1][1])
-        start = time.time()
-        proba = self.learner.predict_proba(config.ml_data["x_train"])
-        end = time.time()
-        print(f"pred proba {end - start}")
+
         start = time.time()
         proba = 1 - np.max(proba, axis=1)
         end = time.time()
