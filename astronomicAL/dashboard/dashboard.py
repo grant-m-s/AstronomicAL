@@ -10,14 +10,37 @@ import panel as pn
 import param
 
 
-class DataDashboard(param.Parameterized):
+class Dashboard(param.Parameterized):
+    """Top-level Dashboard which holds an instance of any other Dashboard.
+
+    This will initialize and render any of the other instances of the
+    dashboards and handles the interactions of switching from one dashboard
+    view to another.
+
+    Parameters
+    ----------
+    src : ColumnDataSource
+        The shared data source which holds the current selected source.
+    contents : param.String, default = "Menu"
+        The identifier for which of the dashboard views should be initialised
+        and rendered.
+
+    Attributes
+    ----------
+    row : Panel Row
+        The panel is housed in a row which will can then be rendered by the
+        Panel layout.
+    df : DataFrame
+        The shared dataframe which holds all the data.
+
+    """
 
     src = ColumnDataSource(data={"0": [], "1": []})
 
     contents = param.String()
 
-    def __init__(self, src, contents="Menu", main_plot=None, **params):
-        super(DataDashboard, self).__init__(**params)
+    def __init__(self, src, contents="Menu", **params):
+        super(Dashboard, self).__init__(**params)
 
         self.src = src
         self.row = pn.Row(pn.pane.Str("loading"))
@@ -25,11 +48,8 @@ class DataDashboard(param.Parameterized):
 
         self.contents = contents
 
-    def update_panel_contents_src(self, event):
-        self.panel_contents.src.data = self.src.data
-
     @param.depends("contents", watch=True)
-    def update_contents(self):
+    def _update_contents(self):
 
         print("Updating contents")
 
@@ -58,9 +78,30 @@ class DataDashboard(param.Parameterized):
         self.panel()
 
     def set_contents(self, updated):
+        """Update the current dashboard by setting a new `contents`.
+
+        Parameters
+        ----------
+        updated : str
+            The new contents view required.
+
+        Returns
+        -------
+        None
+
+        """
         self.contents = updated
 
     def panel(self):
+        """Render the current view.
+
+        Returns
+        -------
+        row : Panel Row
+            The panel contents is housed in a row which will can then be
+            rendered by the Panel layout.
+
+        """
 
         self.row[0] = self.panel_contents.panel()
 

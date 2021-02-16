@@ -6,6 +6,23 @@ import param
 
 
 class ActiveLearningDashboard(param.Parameterized):
+    """A dashboard for initialising and rendering panels for Active Learning.
+
+    Parameters
+    ----------
+    src : ColumnDataSource
+        The shared data source which holds the current selected source.
+    df : DataFrame
+        The shared dataframe which holds all the data.
+    active_learning : list of ActiveLearningTab
+        List of all classifier tab views.
+
+    Attributes
+    ----------
+    row : Panel Row
+        The layout of the dashboard is housed in this row.
+
+    """
 
     def __init__(self, src, df, **params):
         super(ActiveLearningDashboard, self).__init__(**params)
@@ -13,12 +30,18 @@ class ActiveLearningDashboard(param.Parameterized):
         self.df = df
         self.src = src
         self.row = pn.Row(pn.pane.Str("loading"))
+        self.active_learning = []
 
         self.add_active_learning()
 
     def add_active_learning(self):
+        """Initialise all required ActiveLearningTab classifiers and views.
 
-        self.active_learning = []
+        Returns
+        -------
+        None
+
+        """
         # CHANGED :: Add to AL settings
         for label in config.settings["labels_to_train"]:
             print(f"Label is {label} with type: {type(label)}")
@@ -33,5 +56,14 @@ class ActiveLearningDashboard(param.Parameterized):
         self.panel()
 
     def panel(self):
+        """Render the current view.
+
+        Returns
+        -------
+        row : Panel Row
+            The panel is housed in a row which will can then be rendered by the
+            parent Dashboard.
+
+        """
         self.row[0] = pn.Card(self.al_tabs)
         return self.row

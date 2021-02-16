@@ -14,6 +14,26 @@ import param
 
 
 class PlotDashboard(param.Parameterized):
+    """A Dashboard used for rendering dynamic plots of the data.
+
+    Parameters
+    ----------
+    src : ColumnDataSource
+        The shared data source which holds the current selected source.
+
+    Attributes
+    ----------
+    X_variable : param.Selector
+        A Dropdown list of columns the user can use for the x-axis of the plot.
+    Y_variable : DataFrame
+        A Dropdown list of columns the user can use for the x-axis of the plot.
+    row : Panel Row
+        The panel is housed in a row which will can then be rendered by the
+        parent Dashboard.
+    df : DataFrame
+        The shared dataframe which holds all the data.
+
+    """
 
     X_variable = param.Selector(
         objects=["0"],
@@ -30,15 +50,24 @@ class PlotDashboard(param.Parameterized):
 
         self.row = pn.Row(pn.pane.Str("loading"))
         self.src = src
-        self.src.on_change("data", self.panel_cb)
+        self.src.on_change("data", self._panel_cb)
         self.df = config.main_df
         self.update_variable_lists()
 
-    def update_variable_lists_cb(self, attr, old, new):
+    def _update_variable_lists_cb(self, attr, old, new):
         self.update_variable_lists()
 
     def update_variable_lists(self):
+        """Update the list of options used inside `X_variable` and `Y_variable`.
 
+        This method retrieves an up-to-date list of columns inside `df` and
+        assigns them to both Selector objects.
+
+        Returns
+        -------
+        None
+
+        """
         print(f"x_var currently is: {self.X_variable}")
 
         cols = list(self.df.columns)
@@ -57,11 +86,23 @@ class PlotDashboard(param.Parameterized):
 
         print(f"x_var has now changed to: {self.X_variable}")
 
-    def panel_cb(self, attr, old, new):
+    def _panel_cb(self, attr, old, new):
         self.panel()
 
     @param.depends("X_variable", "Y_variable")
     def plot(self):
+        """Create a basic scatter plot of the data with the selected axis.
+
+        The data is represented as a Holoviews Datashader object allowing for
+        large numbers of points to be rendered at once. Plotted using a Bokeh
+        renderer, the user has full manuverabilty of the data in the plot.
+
+        Returns
+        -------
+        plot : Holoviews Object
+            A Holoviews plot
+
+        """
 
         p = hv.Points(
             self.df,
@@ -143,6 +184,15 @@ class PlotDashboard(param.Parameterized):
         return plot
 
     def panel(self):
+        """Render the current view.
+
+        Returns
+        -------
+        row : Panel Row
+            The panel is housed in a row which will can then be rendered by the
+            parent Dashboard.
+
+        """
 
         print("Panel Plot")
 
