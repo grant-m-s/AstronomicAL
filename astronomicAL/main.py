@@ -2,7 +2,7 @@ from bokeh.models import (
     ColumnDataSource,
     TextAreaInput
 )
-from dashboard.data_dashboard import DataDashboard
+from dashboard.dashboard import Dashboard
 
 import config
 import holoviews as hv
@@ -48,29 +48,29 @@ if os.path.isfile("astronomicAL/layout.json"):
             end_col = data[p]["x"] + data[p]["w"]
 
             if int(p) == 0:
-                main_plot = DataDashboard(
+                main_plot = Dashboard(
                     name="Main Plot", src=config.source, contents="Settings"
                 )
                 react.main[start_row:end_row,
                            start_col:end_col] = main_plot.panel()
             else:
-                new_plot = DataDashboard(name=f"{p}", src=config.source)
+                new_plot = Dashboard(name=f"{p}", src=config.source)
                 react.main[start_row:end_row,
                            start_col:end_col] = new_plot.panel()
 
 else:
-    main_plot = DataDashboard(
+    main_plot = Dashboard(
         name="Main Plot", src=config.source, contents="Settings")
     react.main[:5, :6] = main_plot.panel()
 
     num = 0
     for i in [6]:
-        new_plot = DataDashboard(name=f"{num}", src=config.source)
+        new_plot = Dashboard(name=f"{num}", src=config.source)
         react.main[:5, 6:] = new_plot.panel()
         num += 1
 
     for i in [0, 4, 8]:
-        new_plot = DataDashboard(name=f"{num}", src=config.source)
+        new_plot = Dashboard(name=f"{num}", src=config.source)
         react.main[5:9, i: i + 4] = new_plot.panel()
         num += 1
 

@@ -75,6 +75,8 @@ class Dashboard(param.Parameterized):
 
             self.panel_contents = SelectedSourceDashboard(self.src)
 
+        print("Successfully updated contents")
+
         self.panel()
 
     def set_contents(self, updated):
@@ -90,6 +92,7 @@ class Dashboard(param.Parameterized):
         None
 
         """
+        print(updated)
         self.contents = updated
 
     def panel(self):
@@ -104,5 +107,7 @@ class Dashboard(param.Parameterized):
         """
 
         self.row[0] = self.panel_contents.panel()
+
+        print("Returned panel")
 
         return self.row

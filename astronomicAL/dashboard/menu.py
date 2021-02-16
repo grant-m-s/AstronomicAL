@@ -28,14 +28,14 @@ class MenuDashboard(param.Parameterized):
 
         self._add_plot_button = pn.widgets.Button(name="Add Plot")
         self._add_plot_button.on_click(
-            partial(self.update_main_contents, main=main,
+            partial(self._update_main_contents, main=main,
                     updated="Plot", button=self._add_plot_button))
 
         self._add_selected_info_button = pn.widgets.Button(
             name="Add Selected Source Info"
         )
         self._add_selected_info_button.on_click(
-            partial(self.update_main_contents,
+            partial(self._update_main_contents,
                     main=main,
                     updated="Selected Source",
                     button=self._add_selected_info_button)
