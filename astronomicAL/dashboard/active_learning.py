@@ -52,7 +52,9 @@ class ActiveLearningDashboard(param.Parameterized):
             )
         self.al_tabs = pn.Tabs(dynamic=True)
         for i, al_tab in enumerate(self.active_learning):
-            self.al_tabs.append((al_tab.label_string, al_tab.panel()))
+            self.al_tabs.append((al_tab._label_alias, al_tab.panel()))
+
+        print("Added all classifiers")
         self.panel()
 
     def panel(self):

@@ -23,7 +23,12 @@ class SelectedSourceDashboard(param.Parameterized):
         sizing_mode="scale_height",
     )
 
-    url_optical_image = ""
+    spectra_image = pn.pane.PNG(
+        alt_text="Image Unavailable",
+        min_width=400,
+        min_height=400,
+        sizing_mode="scale_height",
+    )
 
     def __init__(self, src, **params):
         super(SelectedSourceDashboard, self).__init__(**params)
@@ -37,7 +42,9 @@ class SelectedSourceDashboard(param.Parameterized):
 
         self.selected_history = []
 
-        self.image_zoom = 1.0
+        self.url_optical_image = ""
+
+        self.image_zoom = 0.2
 
         self.add_selected_info()
 
@@ -52,8 +59,6 @@ class SelectedSourceDashboard(param.Parameterized):
         )
 
         self.search_id.param.watch(self.change_selected, "value")
-
-        self.image_zoom = 0.2
 
         self.panel()
 
@@ -214,14 +219,6 @@ class SelectedSourceDashboard(param.Parameterized):
                 # CHANGED :: Slow after this...
                 if not self.src.data["png_path_DR16"][0].isspace():
                     print("beginning if")
-
-                    spectra_image = pn.pane.PNG(
-                        self.src.data["png_path_DR16"][0],
-                        alt_text="Image Unavailable",
-                        min_width=400,
-                        min_height=400,
-                        sizing_mode="scale_height",
-                    )
 
             except:
                 print("\n\n\n\n Radio Image Timeout \n\n\n\n")

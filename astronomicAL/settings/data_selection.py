@@ -82,4 +82,10 @@ class DataSelection(param.Parameterized):
         self.src.data = dict(new_df)
 
     def panel(self):
-        return pn.Column(pn.Row(self.param.dataset, self.load_data_button, max_width=300), pn.Row(pn.Row(self.memory_optimisation_check), self.memory_opt_tooltip, max_width=300))
+        return pn.Column(
+            pn.Row(self.param.dataset, self.load_data_button, max_width=300),
+            pn.Row(
+                pn.Row(self.memory_optimisation_check),
+                self.memory_opt_tooltip,
+                max_width=300)
+            )

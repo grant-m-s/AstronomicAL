@@ -142,6 +142,8 @@ class SettingsDashboard(param.Parameterized):
 
         main.set_contents(updated="Active Learning")
 
+        print("\nswitched contents\n")
+
     def _stage_previous_cb(self, event):
 
         self._pipeline_stage -= 1

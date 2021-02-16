@@ -68,9 +68,8 @@ class ActiveLearningTab(param.Parameterized):
 
     Attributes
     ----------
-    _label : str
-        The string alias of the label that will be the positive case in the
-        one-vs-rest classifier.
+    _label : int
+        The label that will be the positive case in the one-vs-rest classifier.
     _last_label : str
         The string alias of the last assigned label in the Active Learing
         process. Used for visual improvements.
@@ -106,6 +105,7 @@ class ActiveLearningTab(param.Parameterized):
 
         self.src = src
         self._label = config.settings["strings_to_labels"][label]
+        self._label_alias = label
 
         self._last_label = str(label)
 
@@ -125,6 +125,10 @@ class ActiveLearningTab(param.Parameterized):
             self.id_train = config.ml_data["id_train"]
             self.id_val = config.ml_data["id_val"]
             self.id_test = config.ml_data["id_test"]
+
+            if config.settings["scale_data"]:
+
+                self.scaler = config.ml_data["scaler"]
 
             self.df = config.main_df
 
@@ -339,8 +343,9 @@ class ActiveLearningTab(param.Parameterized):
             total += sys.getsizeof(config.ml_data[dataframe])
         print(f"config.ml_data :{total}")
 
-        for dataframe in config.ml_data.keys():
-            config.ml_data[dataframe] = optimise(config.ml_data[dataframe])
+        for key in config.ml_data.keys():
+            if isinstance(config.ml_data[key], pd.DataFrame):
+                config.ml_data[key] = optimise(config.ml_data[key])
 
         total = 0
         total += sys.getsizeof(config.ml_data)
@@ -369,6 +374,9 @@ class ActiveLearningTab(param.Parameterized):
         config.ml_data["id_train"] = self.id_train
         config.ml_data["id_val"] = self.id_val
         config.ml_data["id_test"] = self.id_test
+
+        if config.settings["scale_data"]:
+            config.ml_data["scaler"] = self.scaler
 
     def remove_from_pool(self):
         """Remove the current queried source from the active learning pool.
@@ -668,10 +676,13 @@ class ActiveLearningTab(param.Parameterized):
         print("start_training_cb")
 
         self._training = True
+        self.start_training_button.name = "Beginning Training..."
+        self.start_training_button.disabled = True
+        self.add_classifier_button.disabled = True
+        self.remove_classifier_button.disabled = True
         self.num_points_list = []
         self.curr_num_points = self.starting_num_points.value
 
-        self.panel()
         self.setup_learners()
         query_idx, query_instance = self.learner.query(self.x_pool)
 
@@ -1261,7 +1272,7 @@ class ActiveLearningTab(param.Parameterized):
 
             self.learner = Committee(learner_list=learners)
 
-        self._update_predictions(first=True)
+        self._update_predictions()
 
     # TODO :: Add bool to see if user wants this step
     def generate_features(self, df):
@@ -1690,7 +1701,7 @@ class ActiveLearningTab(param.Parameterized):
 
         Returns
         -------
-        self.panel_row : Panel Row
+        panel_row : Panel Row
             The panel is housed in a row which will can then be rendered by the
             respective Dashboard.
 
