@@ -437,6 +437,9 @@ class ActiveLearningTab(param.Parameterized):
         val_f1 = int(float(self._val_scores["f1"]) * 100)
 
         dir = "models/"
+        if not os.path.isdir(dir):
+            os.mkdir(dir)
+
         filename = f"{dir}{self._label}-{clfs_shortened}"
 
         if self.committee:
