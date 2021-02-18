@@ -28,7 +28,7 @@ class PlotDashboard(param.Parameterized):
     Y_variable : DataFrame
         A Dropdown list of columns the user can use for the x-axis of the plot.
     row : Panel Row
-        The panel is housed in a row which will can then be rendered by the
+        The panel is housed in a row which can then be rendered by the
         parent Dashboard.
     df : DataFrame
         The shared dataframe which holds all the data.
@@ -189,7 +189,7 @@ class PlotDashboard(param.Parameterized):
         Returns
         -------
         row : Panel Row
-            The panel is housed in a row which will can then be rendered by the
+            The panel is housed in a row which can then be rendered by the
             parent Dashboard.
 
         """

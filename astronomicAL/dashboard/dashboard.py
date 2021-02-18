@@ -28,7 +28,7 @@ class Dashboard(param.Parameterized):
     Attributes
     ----------
     row : Panel Row
-        The panel is housed in a row which will can then be rendered by the
+        The panel is housed in a row which can then be rendered by the
         Panel layout.
     df : DataFrame
         The shared dataframe which holds all the data.
@@ -101,7 +101,7 @@ class Dashboard(param.Parameterized):
         Returns
         -------
         row : Panel Row
-            The panel contents is housed in a row which will can then be
+            The panel contents is housed in a row which can then be
             rendered by the Panel layout.
 
         """
