@@ -105,7 +105,7 @@ class DataSelection(param.Parameterized):
 
         print(f" dataset shape: {self.df.shape}")
 
-        self._initialise_src(self.df)
+        self._initialise_src()
         self.ready = True
         self.load_data_button.name = "File Loaded."
 
