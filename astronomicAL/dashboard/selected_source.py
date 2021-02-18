@@ -303,11 +303,15 @@ class SelectedSourceDashboard(param.Parameterized):
                     print("beginning if")
 
                     self.spectra_image.object = self.src.data["png_path_DR16"][0]
+                    spectra = self.spectra_image
 
                 else:
                     print("beginning else")
-                    self.spectra_image = "No spectra available"
+                    spectra = "No Spectra Image Available."
                     print("leaving else")
+
+            else:
+                spectra = ""
 
             button_row = pn.Row()
             if self.check_required_column("ra_dec"):
@@ -341,7 +345,7 @@ class SelectedSourceDashboard(param.Parameterized):
                             self.radio_image,
                         ),
                         button_row,
-                        self.spectra_image,
+                        spectra,
                     ),
                 ),
                 collapsible=False,
