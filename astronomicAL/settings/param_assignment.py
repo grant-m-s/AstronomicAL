@@ -132,6 +132,13 @@ class ParameterAssignment(param.Parameterized):
         None
 
         """
+        self.label_strings_param = {}
+        self.colours_param = {}
+
+        if len(self.df[self.label_column].unique()) > 20:
+            print("""You have chosen a column with too many unique values (possibly continous) please choose a column with a smaller set of labels (<=20)""")
+            self.panel()
+            return
         self.labels = sorted(self.df[self.label_column].unique())
         config.settings["labels"] = self.labels
 
@@ -183,6 +190,7 @@ class ParameterAssignment(param.Parameterized):
         self.confirm_settings_button.disabled = True
 
         config.settings = self.get_settings()
+        config.settings["confirmed"] = False
 
         labels = self.df[config.settings["label_col"]]
 

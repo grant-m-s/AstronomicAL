@@ -44,6 +44,7 @@ class MenuDashboard(param.Parameterized):
     def _update_main_contents(self, event, main, updated, button):
         # print(updated)
         button.name = "Loading..."
+
         main.set_contents(updated)
 
     def panel(self):

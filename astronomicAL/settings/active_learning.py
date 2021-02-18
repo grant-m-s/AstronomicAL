@@ -62,11 +62,11 @@ class ActiveLearningSettings(param.Parameterized):
     def _initialise_widgets(self):
 
         self.label_selector = pn.widgets.CrossSelector(
-            name="Labels", value=[], options=[], max_height=100
+            name="**Which Labels would you like to create a classifier for?**", value=[], options=[], max_height=100
         )
 
         self.feature_selector = pn.widgets.CrossSelector(
-            name="Features", value=[], options=[], max_height=100
+            name="**Which Features should be used for training?**", value=[], options=[], max_height=100
         )
 
         self.confirm_settings_button = pn.widgets.Button(
@@ -132,6 +132,7 @@ class ActiveLearningSettings(param.Parameterized):
 
         config.settings["unclassified_labels"] = unclassified_labels
         config.settings["scale_data"] = self.scale_features_checkbox.value
+        config.settings["confirmed"] = True
 
         self.completed = True
 
