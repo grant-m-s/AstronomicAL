@@ -146,6 +146,11 @@ class ActiveLearningTab(param.Parameterized):
         x_axis = config.settings["default_vars"][0]
         y_axis = config.settings["default_vars"][1]
 
+        assert x_axis in config.ml_data["x_train"].keys(
+        ), f"Your Default x axis variable doesn't seem to be in your set of features. (MISSING: {x_axis})"
+        assert y_axis in config.ml_data["x_train"].keys(
+        ), f"Your Default y axis variable doesn't seem to be in your set of features. (MISSING: {y_axis})"
+
         x_sd = np.std(config.ml_data["x_train"][x_axis])
         x_mu = np.mean(config.ml_data["x_train"][x_axis])
         y_sd = np.std(config.ml_data["x_train"][y_axis])

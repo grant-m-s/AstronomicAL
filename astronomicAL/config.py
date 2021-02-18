@@ -4,4 +4,4 @@ main_df = pd.DataFrame()
 
 ml_data = {}
 
-settings = {}
+settings = {"confirmed": False}

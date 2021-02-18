@@ -29,7 +29,7 @@ config.main_df = pd.DataFrame()
 
 config.ml_data = {}
 
-config.settings = {}
+config.settings = {"confirmed": False}
 
 files = pn.widgets.FileInput()
 

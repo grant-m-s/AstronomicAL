@@ -63,7 +63,10 @@ class Dashboard(param.Parameterized):
             self.panel_contents = MenuDashboard(self)
 
         elif self.contents == "Plot":
-
+            if not config.settings["confirmed"]:
+                self.contents = "Menu"
+                print("Please Complete Settings before accessing this view.")
+                return
             self.panel_contents = PlotDashboard(self.src)
 
         elif self.contents == "Active Learning":
@@ -72,7 +75,10 @@ class Dashboard(param.Parameterized):
             self.panel_contents = ActiveLearningDashboard(self.src, self.df)
 
         elif self.contents == "Selected Source":
-
+            if not config.settings["confirmed"]:
+                self.contents = "Menu"
+                print("Please Complete Settings before accessing this view.")
+                return
             self.panel_contents = SelectedSourceDashboard(self.src)
 
         print("Successfully updated contents")
