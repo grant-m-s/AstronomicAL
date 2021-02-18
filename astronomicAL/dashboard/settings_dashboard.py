@@ -24,7 +24,7 @@ class SettingsDashboard(param.Parameterized):
     Attributes
     ----------
     row : Panel Row
-        The panel is housed in a row which will can then be rendered by the
+        The panel is housed in a row which can then be rendered by the
         Panel layout.
     pipeline : Panel Pipeline
         A pipeline of stages for the user to assign key parameters.
@@ -169,7 +169,7 @@ class SettingsDashboard(param.Parameterized):
         Returns
         -------
         row : Panel Row
-            The panel is housed in a row which will can then be rendered by the
+            The panel is housed in a row which can then be rendered by the
             parent Dashboard.
 
         """

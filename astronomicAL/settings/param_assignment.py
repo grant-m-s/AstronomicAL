@@ -6,6 +6,40 @@ import param
 
 
 class ParameterAssignment(param.Parameterized):
+    """The Parameter Assignment Stage used in the settings pipeline.
+
+    Parameters
+    ----------
+    df : DataFrame
+        The shared dataframe which holds all the data.
+
+    Attributes
+    ----------
+    df : DataFrame
+        The shared dataframe which holds all the data.
+    label_column : Panel ObjectSelector
+        Dropdown for choosing which of the dataset columns is the label column.
+    id_column : Panel ObjectSelector
+        Dropdown for choosing which of the dataset columns is the id column.
+    default_x_variable : Panel ObjectSelector
+        Dropdown for choosing which of the dataset columns should be the
+        default x_axis variable in any plots.
+    default_y_variable : Panel ObjectSelector
+        Dropdown for choosing which of the dataset columns should be the
+        default y_axis variable in any plots.
+    completed : bool
+        Flag indicating all active learning settings have been chosen and
+        assigned.
+    ready : bool
+        Flag for whether the data has been loaded in and ready to progress to
+        the next settings stage.
+    colours_param : dict
+        Dictionary holding the colours to render each of the labels.
+    label_strings_param : dict
+        Dictionary holding the string aliases of the labels that are displayed
+        throughout the ui.
+
+    """
 
     label_column = param.ObjectSelector(objects=["default"], default="default")
     id_column = param.ObjectSelector(objects=["default"], default="default")
@@ -33,10 +67,13 @@ class ParameterAssignment(param.Parameterized):
 
         self.df = None
 
+        self._initialise_widgets()
+
+    def _initialise_widgets(self):
         self.confirm_settings_button = pn.widgets.Button(
             name="Confirm Settings", max_height=30, margin=(25, 0, 0, 0)
         )
-        self.confirm_settings_button.on_click(self.confirm_settings_cb)
+        self.confirm_settings_button.on_click(self._confirm_settings_cb)
 
         self.extra_info_selector = pn.widgets.MultiChoice(
             name="Extra Columns to display when inspecting a source:",
@@ -45,7 +82,18 @@ class ParameterAssignment(param.Parameterized):
         )
 
     def update_data(self, dataframe=None):
+        """Update the local copy of the data and update widgets accordingly.
 
+        Parameters
+        ----------
+        dataframe : DataFrame, default = None
+            The updated data to be used.
+
+        Returns
+        -------
+        None
+
+        """
         if dataframe is not None:
             self.df = dataframe
 
@@ -76,15 +124,29 @@ class ParameterAssignment(param.Parameterized):
             self.extra_info_selector.options = cols
 
     @param.depends("label_column", watch=True)
-    def update_labels(self):
+    def _update_labels_cb(self):
+        """Update label settings when the user changes the label column.
+
+        Returns
+        -------
+        None
+
+        """
         self.labels = sorted(self.df[self.label_column].unique())
         config.settings["labels"] = self.labels
 
         self.update_colours()
-        self.update_label_strings()
+        self._initialise_label_strings_input()
         self.panel()
 
     def update_colours(self):
+        """Update the colours used for rendering.
+
+        Returns
+        -------
+        None
+
+        """
         print("updating colours...")
         labels = config.settings["labels"]
 
@@ -108,14 +170,14 @@ class ParameterAssignment(param.Parameterized):
 
         print(self.colours_param)
 
-    def update_label_strings(self):
+    def _initialise_label_strings_input(self):
         print("Updating Label Strings...")
         labels = config.settings["labels"]
         for i, data_label in enumerate(labels):
             self.label_strings_param[f"{data_label}"] = pn.widgets.TextInput(
                 name=f"{data_label}", placeholder=f"{data_label}")
 
-    def confirm_settings_cb(self, event):
+    def _confirm_settings_cb(self, event):
         print("Saving settings...")
         self.confirm_settings_button.name = "Assigning parameters..."
         self.confirm_settings_button.disabled = True
@@ -129,15 +191,50 @@ class ParameterAssignment(param.Parameterized):
         self.ready = True
 
     def get_default_variables(self):
+        """Return the default x and y axis for plots.
+
+        Returns
+        -------
+        default_x_variable : str
+            The column used as the default x axis in any plots.
+        default_y_variable : str
+            The column used as the default x axis in any plots.
+
+        """
         return (self.default_x_variable, self.default_y_variable)
 
     def get_id_column(self):
+        """Return the name of the id column.
+
+        Returns
+        -------
+        id_column : str
+            The column name of the id column of the data.
+
+        """
         return self.id_column
 
     def get_label_column(self):
+        """Return the name of the column containing the labels in the data.
+
+        Returns
+        -------
+        label_column : str
+            The name of the column containing the labels in the data.
+
+        """
         return self.label_column
 
     def get_label_colours(self):
+        """Return the colours chosen to represent labels in plots.
+
+        Returns
+        -------
+        colours : dict
+            Dictionary containing the labels as keys and the corresponding
+            colours as values.
+
+        """
         colours = {}
 
         for key in self.colours_param.keys():
@@ -165,6 +262,18 @@ class ParameterAssignment(param.Parameterized):
         return colours
 
     def get_label_strings(self):
+        """Return the string aliases and the corresponding conversions of the
+        labels.
+
+        Returns
+        -------
+        labels_to_strings : dict
+            Dictionary containing labels as keys and the corresponding aliases
+            as values.
+        strings_to_labels : dict
+            Dictionary containing aliases as keys and the corresponding labels
+            as values.
+        """
         labels_to_strings = {}
         strings_to_labels = {}
 
@@ -178,6 +287,15 @@ class ParameterAssignment(param.Parameterized):
         return labels_to_strings, strings_to_labels
 
     def get_settings(self):
+        """Return all the saved parameter assignment settings.
+
+        Returns
+        -------
+        updated_settings : dict
+            Dictionary containing the setting saved throughout the parameter
+            assignment stage.
+
+        """
 
         updated_settings = {}
         updated_settings["id_col"] = self.get_id_column()
@@ -191,10 +309,28 @@ class ParameterAssignment(param.Parameterized):
         return updated_settings
 
     def is_complete(self):
+        """Check whether the parameter assignment stage is complete.
+
+        Returns
+        -------
+        completed : bool
+            Flag whether parameter assignment settings have been assigned and
+            saved.
+
+        """
         return self.completed
 
     @param.depends("completed", watch=True)
     def panel(self):
+        """Render the current settings view.
+
+        Returns
+        -------
+        column : Panel Column
+            The panel is housed in a column which can then be rendered by the
+            settings Dashboard.
+
+        """
         print("ASSIGN PARAMETERS IS RENDERING...")
         if self.completed:
             self.column[0] = pn.pane.Str("Settings Saved.")

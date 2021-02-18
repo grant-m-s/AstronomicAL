@@ -1669,7 +1669,7 @@ class ActiveLearningTab(param.Parameterized):
         Returns
         -------
         self.panel_row : Panel Row
-            The panel is housed in a row which will can then be rendered by the
+            The panel is housed in a row which can then be rendered by the
             respective Dashboard.
 
         """
@@ -1708,7 +1708,7 @@ class ActiveLearningTab(param.Parameterized):
         Returns
         -------
         panel_row : Panel Row
-            The panel is housed in a row which will can then be rendered by the
+            The panel is housed in a row which can then be rendered by the
             respective Dashboard.
 
         """
