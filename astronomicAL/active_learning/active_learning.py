@@ -537,9 +537,15 @@ class ActiveLearningTab(param.Parameterized):
         self.src.data = selected_dict
 
         plot_idx = [
-            list(self.df.columns).index(config.settings["default_vars"][0]),
-            list(self.df.columns).index(config.settings["default_vars"][1]),
+            list(config.ml_data["x_train"].columns).index(
+                config.settings["default_vars"][0]),
+            list(config.ml_data["x_train"].columns).index(
+                config.settings["default_vars"][1]),
         ]
+
+        print(plot_idx[0])
+        print(plot_idx[1])
+        print(query_instance)
 
         q = {
             f'{config.settings["default_vars"][0]}': query_instance[:, plot_idx[0]],
