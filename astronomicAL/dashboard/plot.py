@@ -12,6 +12,8 @@ import pandas as pd
 import panel as pn
 import param
 
+import dashboard.extension_plots as plots
+
 
 class PlotDashboard(param.Parameterized):
     """A Dashboard used for rendering dynamic plots of the data.
@@ -180,7 +182,6 @@ class PlotDashboard(param.Parameterized):
             * selected_plot
             * color_points
         )
-
         return plot
 
     def panel(self):
