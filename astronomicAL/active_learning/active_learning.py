@@ -4,26 +4,15 @@ from bokeh.models import (
     TableColumn,
 )
 from datetime import datetime
+from extensions import models, query_strategies, feature_generation
 from holoviews.operation.datashader import (
     datashade,
     dynspread,
 )
 from itertools import combinations
 from joblib import dump
-from modAL.uncertainty import (
-    entropy_sampling,
-    margin_sampling,
-    uncertainty_sampling
-)
 from modAL.models import ActiveLearner, Committee
 from sklearn.base import clone
-from sklearn.ensemble import (
-    AdaBoostClassifier,
-    GradientBoostingClassifier,
-    RandomForestClassifier,
-)
-from sklearn.neighbors import KNeighborsClassifier
-from sklearn.tree import DecisionTreeClassifier
 from sklearn.preprocessing import RobustScaler
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import (
@@ -146,9 +135,11 @@ class ActiveLearningTab(param.Parameterized):
         x_axis = config.settings["default_vars"][0]
         y_axis = config.settings["default_vars"][1]
 
-        assert x_axis in config.ml_data["x_train"].keys(
+        assert (
+            x_axis in config.ml_data["x_train"].keys()
         ), f"Your Default x axis variable doesn't seem to be in your set of features. (MISSING: {x_axis})"
-        assert y_axis in config.ml_data["x_train"].keys(
+        assert (
+            y_axis in config.ml_data["x_train"].keys()
         ), f"Your Default y axis variable doesn't seem to be in your set of features. (MISSING: {y_axis})"
 
         x_sd = np.std(config.ml_data["x_train"][x_axis])
@@ -156,21 +147,17 @@ class ActiveLearningTab(param.Parameterized):
         y_sd = np.std(config.ml_data["x_train"][y_axis])
         y_mu = np.mean(config.ml_data["x_train"][y_axis])
 
-        x_max = x_mu + 4*x_sd
-        x_min = x_mu - 4*x_sd
+        x_max = x_mu + 4 * x_sd
+        x_min = x_mu - 4 * x_sd
 
-        y_max = y_mu + 4*y_sd
-        y_min = y_mu - 4*y_sd
+        y_max = y_mu + 4 * y_sd
+        y_min = y_mu - 4 * y_sd
 
-        self._max_x = np.min(
-            [(x_max), np.max(config.ml_data["x_train"][x_axis])])
-        self._min_x = np.max(
-            [(x_min), np.min(config.ml_data["x_train"][x_axis])])
+        self._max_x = np.min([(x_max), np.max(config.ml_data["x_train"][x_axis])])
+        self._min_x = np.max([(x_min), np.min(config.ml_data["x_train"][x_axis])])
 
-        self._max_y = np.min(
-            [(y_max), np.max(config.ml_data["x_train"][y_axis])])
-        self._min_y = np.max(
-            [(y_min), np.min(config.ml_data["x_train"][y_axis])])
+        self._max_y = np.min([(y_max), np.max(config.ml_data["x_train"][y_axis])])
+        self._min_y = np.max([(y_min), np.min(config.ml_data["x_train"][y_axis])])
 
     def _initialise_placeholders(self):
 
@@ -206,8 +193,7 @@ class ActiveLearningTab(param.Parameterized):
             "val": {"score": [], "num_points": []},
         }
 
-        self._train_scores = {"acc": 0.00,
-                              "prec": 0.00, "rec": 0.00, "f1": 0.00}
+        self._train_scores = {"acc": 0.00, "prec": 0.00, "rec": 0.00, "f1": 0.00}
         self._val_scores = {"acc": 0.00, "prec": 0.00, "rec": 0.00, "f1": 0.00}
 
         self.corr_train = ColumnDataSource(self._empty_data())
@@ -238,7 +224,8 @@ class ActiveLearningTab(param.Parameterized):
         )
 
         self.assign_label_button = pn.widgets.Button(
-            name="Assign Label", button_type='primary')
+            name="Assign Label", button_type="primary"
+        )
         self.assign_label_button.on_click(self._assign_label_cb)
 
         self.checkpoint_button = pn.widgets.Button(name="Checkpoint")
@@ -253,15 +240,13 @@ class ActiveLearningTab(param.Parameterized):
         )
         self.query_strategy_dropdown = pn.widgets.Select(
             name="Query Strategy",
-            options=["Uncertainty Sampling",
-                     "Margin Sampling", "Entropy Sampling"],
+            options=["Uncertainty Sampling", "Margin Sampling", "Entropy Sampling"],
         )
         self.starting_num_points = pn.widgets.IntInput(
             name="How many initial points?", value=5, step=1, start=3
         )
 
-        self.classifier_table_source = ColumnDataSource(
-            dict(classifier=[], query=[]))
+        self.classifier_table_source = ColumnDataSource(dict(classifier=[], query=[]))
         table_column = [
             TableColumn(field="classifier", title="classifier"),
             TableColumn(field="query", title="query"),
@@ -272,10 +257,8 @@ class ActiveLearningTab(param.Parameterized):
             columns=table_column,
         )
 
-        self.add_classifier_button = pn.widgets.Button(
-            name=">>", max_height=40)
-        self.remove_classifier_button = pn.widgets.Button(
-            name="<<", max_height=40)
+        self.add_classifier_button = pn.widgets.Button(name=">>", max_height=40)
+        self.remove_classifier_button = pn.widgets.Button(name="<<", max_height=40)
 
         self.add_classifier_button.on_click(self._add_classifier_cb)
         self.remove_classifier_button.on_click(self._remove_classifier_cb)
@@ -308,8 +291,7 @@ class ActiveLearningTab(param.Parameterized):
 
         if config.settings["exclude_labels"]:
             for label in config.settings["unclassified_labels"]:
-                x, y, _, _ = self.exclude_unclassified_labels(
-                    x, y, label)
+                x, y, _, _ = self.exclude_unclassified_labels(x, y, label)
 
         (
             self.x_train,
@@ -461,7 +443,9 @@ class ActiveLearningTab(param.Parameterized):
                     mod_dir = f"{mod_dir}/{list_c1[i][:6]}_{i}"
                     dump(model, f"{mod_dir}.joblib")
 
-                    if (not os.path.isfile(f"{scaler_dir}.joblib") and (config.settings["scale_data"])):
+                    if not os.path.isfile(f"{scaler_dir}.joblib") and (
+                        config.settings["scale_data"]
+                    ):
                         dump(self.scaler, f"{scaler_dir}.joblib")
 
                 else:
@@ -469,7 +453,9 @@ class ActiveLearningTab(param.Parameterized):
                         os.mkdir(filename)
                     dump(model, f"{filename}/{list_c1[i][:6]}_{i}.joblib")
                     scaler_dir = f"{filename}/SCALER"
-                    if (not os.path.isfile(f"{scaler_dir}.joblib") and (config.settings["scale_data"])):
+                    if not os.path.isfile(f"{scaler_dir}.joblib") and (
+                        config.settings["scale_data"]
+                    ):
                         dump(self.scaler, f"{scaler_dir}.joblib")
 
         else:
@@ -477,15 +463,18 @@ class ActiveLearningTab(param.Parameterized):
             if checkpoint:
                 now = datetime.now()
                 dt_string = now.strftime("%Y%m-%d_%H:%M:%S")
-                dump(
-                    model, f"{filename}-{iteration}-{val_f1}-{dt_string}.joblib")
+                dump(model, f"{filename}-{iteration}-{val_f1}-{dt_string}.joblib")
                 scaler_dir = f"{filename}-{iteration}-{val_f1}-{dt_string}-SCALER"
-                if (not os.path.isfile(f"{scaler_dir}.joblib") and (config.settings["scale_data"])):
+                if not os.path.isfile(f"{scaler_dir}.joblib") and (
+                    config.settings["scale_data"]
+                ):
                     dump(self.scaler, f"{scaler_dir}.joblib")
             else:
                 dump(model, f"{filename}.joblib")
                 scaler_dir = f"{filename}-SCALER"
-                if (not os.path.isfile(f"{scaler_dir}.joblib") and (config.settings["scale_data"])):
+                if not os.path.isfile(f"{scaler_dir}.joblib") and (
+                    config.settings["scale_data"]
+                ):
                     dump(self.scaler, f"{scaler_dir}.joblib")
 
     def _checkpoint_cb(self, event):
@@ -523,24 +512,27 @@ class ActiveLearningTab(param.Parameterized):
 
         print(f"\n\n\n id is {queried_id.values} \n\n\n")
         start = time.time()
-        sel_idx = np.where(
-            data[f'{config.settings["id_col"]}'] == queried_id.values[0])
+        sel_idx = np.where(data[f'{config.settings["id_col"]}'] == queried_id.values[0])
         end = time.time()
         print(f"np.where {end - start}")
         act_label = self.y_pool[query_idx]
         print(f"Should be a {act_label}")
-        selected_source = self.df[self.df[config.settings["id_col"]]
-                                  == queried_id.values[0]]
-        selected_dict = selected_source.set_index(
-            config.settings["id_col"]).to_dict('list')
+        selected_source = self.df[
+            self.df[config.settings["id_col"]] == queried_id.values[0]
+        ]
+        selected_dict = selected_source.set_index(config.settings["id_col"]).to_dict(
+            "list"
+        )
         selected_dict[config.settings["id_col"]] = [queried_id.values[0]]
         self.src.data = selected_dict
 
         plot_idx = [
             list(config.ml_data["x_train"].columns).index(
-                config.settings["default_vars"][0]),
+                config.settings["default_vars"][0]
+            ),
             list(config.ml_data["x_train"].columns).index(
-                config.settings["default_vars"][1]),
+                config.settings["default_vars"][1]
+            ),
         ]
 
         print(plot_idx[0])
@@ -760,10 +752,12 @@ class ActiveLearningTab(param.Parameterized):
 
         print("split_x_y_ids")
 
-        df_data_y_ids = df_data[[config.settings["label_col"],
-                                 config.settings["id_col"]]]
+        df_data_y_ids = df_data[
+            [config.settings["label_col"], config.settings["id_col"]]
+        ]
         df_data_x = df_data.drop(
-            columns=[config.settings["label_col"], config.settings["id_col"]])
+            columns=[config.settings["label_col"], config.settings["id_col"]]
+        )
         assert (
             df_data_y_ids.shape[0] == df_data_x.shape[0]
         ), f"df_data_y_ids has different number of rows than df_data_x, {df_data_y_ids.shape[0]} != {df_data_x.shape[0]}"
@@ -797,15 +791,15 @@ class ActiveLearningTab(param.Parameterized):
 
         """
         excluded_label = config.settings["strings_to_labels"][excluded]
-        excluded_x = df_data_x[df_data_y[config.settings["label_col"]]
-                               == excluded_label]
-        excluded_y = df_data_y[df_data_y[config.settings["label_col"]]
-                               == excluded_label]
+        excluded_x = df_data_x[
+            df_data_y[config.settings["label_col"]] == excluded_label
+        ]
+        excluded_y = df_data_y[
+            df_data_y[config.settings["label_col"]] == excluded_label
+        ]
 
-        data_x = df_data_x[df_data_y[config.settings["label_col"]]
-                           != excluded_label]
-        data_y = df_data_y[df_data_y[config.settings["label_col"]]
-                           != excluded_label]
+        data_x = df_data_x[df_data_y[config.settings["label_col"]] != excluded_label]
+        data_y = df_data_y[df_data_y[config.settings["label_col"]] != excluded_label]
 
         return data_x, data_y, excluded_x, excluded_y
 
@@ -947,28 +941,25 @@ class ActiveLearningTab(param.Parameterized):
         print("split_y_id_ids")
 
         data_y_tr = pd.DataFrame(
-            y_id_train[config.settings["label_col"]], columns=[
-                config.settings["label_col"]]
+            y_id_train[config.settings["label_col"]],
+            columns=[config.settings["label_col"]],
         )
         data_id_tr = pd.DataFrame(
-            y_id_train[config.settings["id_col"]], columns=[
-                config.settings["id_col"]]
+            y_id_train[config.settings["id_col"]], columns=[config.settings["id_col"]]
         )
         data_y_val = pd.DataFrame(
-            y_id_val[config.settings["label_col"]], columns=[
-                config.settings["label_col"]]
+            y_id_val[config.settings["label_col"]],
+            columns=[config.settings["label_col"]],
         )
         data_id_val = pd.DataFrame(
-            y_id_val[config.settings["id_col"]], columns=[
-                config.settings["id_col"]]
+            y_id_val[config.settings["id_col"]], columns=[config.settings["id_col"]]
         )
         data_y_test = pd.DataFrame(
-            y_id_test[config.settings["label_col"]], columns=[
-                config.settings["label_col"]]
+            y_id_test[config.settings["label_col"]],
+            columns=[config.settings["label_col"]],
         )
         data_id_test = pd.DataFrame(
-            y_id_test[config.settings["id_col"]], columns=[
-                config.settings["id_col"]]
+            y_id_test[config.settings["id_col"]], columns=[config.settings["id_col"]]
         )
 
         return data_y_tr, data_id_tr, data_y_val, data_id_val, data_y_test, data_id_test
@@ -1002,19 +993,7 @@ class ActiveLearningTab(param.Parameterized):
         self.y_test = y_test
 
     def _get_blank_classifiers(self):
-
-        classifiers = {
-            "KNN": KNeighborsClassifier(3, n_jobs=-1),
-            "DTree": DecisionTreeClassifier(
-                random_state=0,
-            ),
-            "RForest": RandomForestClassifier(
-                n_jobs=-1, random_state=0, n_estimators=1000
-            ),
-            "AdaBoost": AdaBoostClassifier(random_state=0, n_estimators=500),
-            "GBTrees": GradientBoostingClassifier(random_state=0, n_estimators=1000),
-        }
-
+        classifiers = models.get_classifiers()
         return classifiers
 
     def _update_predictions(self):
@@ -1038,10 +1017,16 @@ class ActiveLearningTab(param.Parameterized):
         print(f"is_correct {end - start}")
 
         start = time.time()
-        default_x = config.ml_data["x_train"][config.settings["default_vars"]
-                                              [0]].to_numpy().reshape((-1, 1))
-        default_y = config.ml_data["x_train"][config.settings["default_vars"]
-                                              [1]].to_numpy().reshape((-1, 1))
+        default_x = (
+            config.ml_data["x_train"][config.settings["default_vars"][0]]
+            .to_numpy()
+            .reshape((-1, 1))
+        )
+        default_y = (
+            config.ml_data["x_train"][config.settings["default_vars"][1]]
+            .to_numpy()
+            .reshape((-1, 1))
+        )
         end = time.time()
         print(f"def x_y {end - start}")
         start = time.time()
@@ -1080,18 +1065,23 @@ class ActiveLearningTab(param.Parameterized):
         end = time.time()
         print(f"conf matrix {end - start}")
         start = time.time()
-        val_pred = self.learner.predict(
-            config.ml_data["x_val"]).reshape((-1, 1))
+        val_pred = self.learner.predict(config.ml_data["x_val"]).reshape((-1, 1))
         end = time.time()
         print(f"pred val {end - start}")
         temp = self.y_val.to_numpy().reshape((-1, 1))
 
         is_correct = val_pred == temp
 
-        default_x = config.ml_data["x_val"][config.settings["default_vars"]
-                                            [0]].to_numpy().reshape((-1, 1))
-        default_y = config.ml_data["x_val"][config.settings["default_vars"]
-                                            [1]].to_numpy().reshape((-1, 1))
+        default_x = (
+            config.ml_data["x_val"][config.settings["default_vars"][0]]
+            .to_numpy()
+            .reshape((-1, 1))
+        )
+        default_y = (
+            config.ml_data["x_val"][config.settings["default_vars"][1]]
+            .to_numpy()
+            .reshape((-1, 1))
+        )
 
         corr_data = {
             f'{config.settings["default_vars"][0]}': default_x[is_correct],
@@ -1150,10 +1140,12 @@ class ActiveLearningTab(param.Parameterized):
         end = time.time()
         print(f"1-proba {end - start}")
 
-        x_axis = config.ml_data["x_train"][config.settings["default_vars"][0]].to_numpy(
-        )
-        y_axis = config.ml_data["x_train"][config.settings["default_vars"][1]].to_numpy(
-        )
+        x_axis = config.ml_data["x_train"][
+            config.settings["default_vars"][0]
+        ].to_numpy()
+        y_axis = config.ml_data["x_train"][
+            config.settings["default_vars"][1]
+        ].to_numpy()
 
         print(f"tr_pred:{tr_pred.shape}")
         print(f"y_train:{self.y_train.shape}")
@@ -1165,10 +1157,8 @@ class ActiveLearningTab(param.Parameterized):
         self._model_output_data_tr["y"] = self.y_train.to_numpy().flatten()
         self._model_output_data_tr["metric"] = proba
 
-        x_axis = config.ml_data["x_val"][config.settings["default_vars"][0]].to_numpy(
-        )
-        y_axis = config.ml_data["x_val"][config.settings["default_vars"][1]].to_numpy(
-        )
+        x_axis = config.ml_data["x_val"][config.settings["default_vars"][0]].to_numpy()
+        y_axis = config.ml_data["x_val"][config.settings["default_vars"][1]].to_numpy()
 
         self._model_output_data_val[config.settings["default_vars"][0]] = x_axis
         self._model_output_data_val[config.settings["default_vars"][1]] = y_axis
@@ -1195,8 +1185,7 @@ class ActiveLearningTab(param.Parameterized):
         initial_points = int(self.starting_num_points.value)
 
         if initial_points >= len(config.ml_data["x_train"].index):
-            self.starting_num_points.value = len(
-                config.ml_data["x_train"].index)
+            self.starting_num_points.value = len(config.ml_data["x_train"].index)
 
             initial_points = len(config.ml_data["x_train"].index)
 
@@ -1254,11 +1243,7 @@ class ActiveLearningTab(param.Parameterized):
             return
 
         # TODO :: Move this
-        qs_dict = {
-            "Uncertainty Sampling": uncertainty_sampling,
-            "Margin Sampling": margin_sampling,
-            "Entropy Sampling": entropy_sampling,
-        }
+        qs_dict = query_strategies.get_strategy_dict()
 
         classifier_dict = self._get_blank_classifiers()
 
@@ -1318,9 +1303,20 @@ class ActiveLearningTab(param.Parameterized):
 
         print(bands)
 
-        features = bands + [config.settings["label_col"],
-                            config.settings["id_col"]]
+        features = bands + [config.settings["label_col"], config.settings["id_col"]]
         print(features[-5:])
+
+        oper_dict = feature_generation.get_oper_dict()
+
+        df, generated_features = oper_dict["subtract (a-b)"](df, 2)
+        features = features + generated_features
+
+        df, generated_features = oper_dict["add (a+b)"](df, 2)
+        features = features + generated_features
+
+        df, generated_features = oper_dict["multiply (a*b)"](df, 2)
+        features = features + generated_features
+
         df_al = df[features]
 
         shuffled = np.random.permutation(list(df_al.index.values))
@@ -1333,22 +1329,6 @@ class ActiveLearningTab(param.Parameterized):
 
         df_al = df_al.reset_index()
 
-        print("reset index")
-
-        combs = list(combinations(bands, 2))
-
-        print(combs)
-
-        cols = list(df.columns)
-
-        for i, j in combs:
-            df_al[f"{i}-{j}"] = df_al[i] - df_al[j]
-
-            if f"{i}-{j}" not in cols:
-                df[f"{i}-{j}"] = df[i] - df[j]
-
-        print("Feature generations complete")
-
         return df, df_al
 
     # CHANGED :: Remove static declarations
@@ -1356,28 +1336,34 @@ class ActiveLearningTab(param.Parameterized):
 
         print("combine_data")
         data = np.array(
-            self._model_output_data_tr[config.settings["default_vars"][0]]).reshape((-1, 1))
+            self._model_output_data_tr[config.settings["default_vars"][0]]
+        ).reshape((-1, 1))
 
         data = np.concatenate(
-            (data, np.array(self._model_output_data_tr[config.settings["default_vars"][1]]).reshape((-1, 1))), axis=1
+            (
+                data,
+                np.array(
+                    self._model_output_data_tr[config.settings["default_vars"][1]]
+                ).reshape((-1, 1)),
+            ),
+            axis=1,
         )
         data = np.concatenate(
-            (data, np.array(
-                self._model_output_data_tr["metric"]).reshape((-1, 1))),
+            (data, np.array(self._model_output_data_tr["metric"]).reshape((-1, 1))),
             axis=1,
         )
         data = np.concatenate(
             (data, np.array(self._model_output_data_tr["y"]).reshape((-1, 1))), axis=1
         )
         data = np.concatenate(
-            (data, np.array(self._model_output_data_tr["pred"]).reshape((-1, 1))), axis=1
+            (data, np.array(self._model_output_data_tr["pred"]).reshape((-1, 1))),
+            axis=1,
         )
         data = np.concatenate(
             (data, np.array(self._model_output_data_tr["acc"]).reshape((-1, 1))), axis=1
         )
 
-        data = pd.DataFrame(data, columns=list(
-            self._model_output_data_tr.keys()))
+        data = pd.DataFrame(data, columns=list(self._model_output_data_tr.keys()))
 
         return data
 
@@ -1395,8 +1381,7 @@ class ActiveLearningTab(param.Parameterized):
         start = time.time()
 
         df = pd.DataFrame(
-            self._model_output_data_tr, columns=list(
-                self._model_output_data_tr.keys())
+            self._model_output_data_tr, columns=list(self._model_output_data_tr.keys())
         )
 
         end = time.time()
@@ -1405,8 +1390,7 @@ class ActiveLearningTab(param.Parameterized):
         start = time.time()
         p = hv.Points(
             df,
-            [config.settings["default_vars"][0],
-                config.settings["default_vars"][1]],
+            [config.settings["default_vars"][0], config.settings["default_vars"][1]],
         ).opts(toolbar=None, default_tools=[])
         end = time.time()
         print(f"P {end - start}")
@@ -1414,7 +1398,8 @@ class ActiveLearningTab(param.Parameterized):
         if hasattr(self, "x_al_train"):
             start = time.time()
             x_al_train = pd.DataFrame(
-                self.x_al_train, columns=config.ml_data["x_train"].columns)
+                self.x_al_train, columns=config.ml_data["x_train"].columns
+            )
             end = time.time()
             print(f"hasattr {end - start}")
         else:
@@ -1430,9 +1415,7 @@ class ActiveLearningTab(param.Parameterized):
             config.settings["default_vars"][1],
             # sizing_mode="stretch_width",
         ).opts(
-            fill_color="black",
-            marker="circle",
-            size=10, toolbar=None, default_tools=[]
+            fill_color="black", marker="circle", size=10, toolbar=None, default_tools=[]
         )
         end = time.time()
         print(f"x_al_train_plot {end - start}")
@@ -1459,7 +1442,9 @@ class ActiveLearningTab(param.Parameterized):
         ).opts(
             fill_color="yellow",
             marker="circle",
-            size=10, toolbar=None, default_tools=[]
+            size=10,
+            toolbar=None,
+            default_tools=[],
         )
         end = time.time()
         print(f"query_point_plot {end - start}")
@@ -1469,52 +1454,70 @@ class ActiveLearningTab(param.Parameterized):
         if len(x_al_train[config.settings["default_vars"][0]]) > 0:
 
             max_x_temp = np.max(
-                [np.max(query_point[config.settings["default_vars"][0]]),
-                 np.max(x_al_train[config.settings["default_vars"][0]])]
-                )
+                [
+                    np.max(query_point[config.settings["default_vars"][0]]),
+                    np.max(x_al_train[config.settings["default_vars"][0]]),
+                ]
+            )
 
             max_x = np.max([self._max_x, max_x_temp])
 
             min_x_temp = np.min(
-                [np.min(query_point[config.settings["default_vars"][0]]),
-                 np.min(x_al_train[config.settings["default_vars"][0]])]
-                )
+                [
+                    np.min(query_point[config.settings["default_vars"][0]]),
+                    np.min(x_al_train[config.settings["default_vars"][0]]),
+                ]
+            )
 
             min_x = np.min([self._min_x, min_x_temp])
 
             max_y_temp = np.max(
-                [np.max(query_point[config.settings["default_vars"][1]]),
-                 np.max(x_al_train[config.settings["default_vars"][1]])]
-                )
+                [
+                    np.max(query_point[config.settings["default_vars"][1]]),
+                    np.max(x_al_train[config.settings["default_vars"][1]]),
+                ]
+            )
 
             max_y = np.max([self._max_y, max_y_temp])
 
             min_y_temp = np.min(
-                [np.min(query_point[config.settings["default_vars"][1]]),
-                 np.min(x_al_train[config.settings["default_vars"][1]])]
-                )
+                [
+                    np.min(query_point[config.settings["default_vars"][1]]),
+                    np.min(x_al_train[config.settings["default_vars"][1]]),
+                ]
+            )
 
             min_y = np.min([self._min_y, min_y_temp])
         else:
             max_x, min_x, max_y, min_y = (
-                self._max_x, self._min_x, self._max_y, self._min_y)
+                self._max_x,
+                self._min_x,
+                self._max_y,
+                self._min_y,
+            )
 
         start = time.time()
-        plot = (
-            dynspread(
-                datashade(
-                    p,
-                    color_key=color_key,
-                    aggregator=ds.by("acc", ds.count()),
-                ).opts(xlim=(min_x, max_x), ylim=(min_y, max_y), responsive=True, shared_axes=False, toolbar=None, default_tools=[]),
-                threshold=0.75,
-                how="saturate",
-            )
+        plot = dynspread(
+            datashade(
+                p,
+                color_key=color_key,
+                aggregator=ds.by("acc", ds.count()),
+            ).opts(
+                xlim=(min_x, max_x),
+                ylim=(min_y, max_y),
+                responsive=True,
+                shared_axes=False,
+                toolbar=None,
+                default_tools=[],
+            ),
+            threshold=0.75,
+            how="saturate",
         )
         end = time.time()
         print(f"plot {end - start}")
-        full_plot = (plot * x_al_train_plot
-                     * query_point_plot).opts(toolbar=None, default_tools=[])  # * color_points
+        full_plot = (plot * x_al_train_plot * query_point_plot).opts(
+            toolbar=None, default_tools=[]
+        )  # * color_points
 
         return full_plot
 
@@ -1530,8 +1533,8 @@ class ActiveLearningTab(param.Parameterized):
         start = time.time()
 
         df = pd.DataFrame(
-            self._model_output_data_val, columns=list(
-                self._model_output_data_val.keys())
+            self._model_output_data_val,
+            columns=list(self._model_output_data_val.keys()),
         )
 
         end = time.time()
@@ -1539,8 +1542,7 @@ class ActiveLearningTab(param.Parameterized):
         start = time.time()
         p = hv.Points(
             df,
-            [config.settings["default_vars"][0],
-                config.settings["default_vars"][1]],
+            [config.settings["default_vars"][0], config.settings["default_vars"][1]],
         ).opts(active_tools=["pan", "wheel_zoom"])
         end = time.time()
         print(f"p-val {end - start}")
@@ -1552,10 +1554,13 @@ class ActiveLearningTab(param.Parameterized):
                 p,
                 color_key=color_key,
                 aggregator=ds.by("acc", ds.count()),
-            ).opts(xlim=(self._min_x, self._max_x),
-                   ylim=(self._min_y, self._max_y),
-                   shared_axes=False, responsive=True,
-                   active_tools=["pan", "wheel_zoom"]),
+            ).opts(
+                xlim=(self._min_x, self._max_x),
+                ylim=(self._min_y, self._max_y),
+                shared_axes=False,
+                responsive=True,
+                active_tools=["pan", "wheel_zoom"],
+            ),
             threshold=0.75,
             how="saturate",
         )
@@ -1581,8 +1586,7 @@ class ActiveLearningTab(param.Parameterized):
             )
 
         df = pd.DataFrame(
-            self._model_output_data_tr, columns=list(
-                self._model_output_data_tr.keys())
+            self._model_output_data_tr, columns=list(self._model_output_data_tr.keys())
         )
 
         end = time.time()
@@ -1590,8 +1594,7 @@ class ActiveLearningTab(param.Parameterized):
 
         start = time.time()
         p = hv.Points(
-            df, [config.settings["default_vars"][0],
-                 config.settings["default_vars"][1]]
+            df, [config.settings["default_vars"][0], config.settings["default_vars"][1]]
         ).opts(active_tools=["pan", "wheel_zoom"])
 
         end = time.time()
@@ -1601,12 +1604,14 @@ class ActiveLearningTab(param.Parameterized):
 
         plot = dynspread(
             datashade(
-                p, cmap="RdYlGn_r", aggregator=ds.max("metric"),
-                normalization="linear"
-            ).opts(active_tools=["pan", "wheel_zoom"],
-                   xlim=(self._min_x, self._max_x),
-                   ylim=(self._min_y, self._max_y),
-                   shared_axes=False, responsive=True),
+                p, cmap="RdYlGn_r", aggregator=ds.max("metric"), normalization="linear"
+            ).opts(
+                active_tools=["pan", "wheel_zoom"],
+                xlim=(self._min_x, self._max_x),
+                ylim=(self._min_y, self._max_y),
+                shared_axes=False,
+                responsive=True,
+            ),
             threshold=0.75,
             how="saturate",
         )
@@ -1738,12 +1743,16 @@ class ActiveLearningTab(param.Parameterized):
             if self._assigned:
                 buttons_row.append(self.next_iteration_button)
             else:
-                buttons_row = pn.Row(self.assign_label_group,
-                                     pn.Row(self.assign_label_button,
-                                            self.show_queried_button,
-                                            self.checkpoint_button,
-                                            max_height=30),
-                                     max_height=30,)
+                buttons_row = pn.Row(
+                    self.assign_label_group,
+                    pn.Row(
+                        self.assign_label_button,
+                        self.show_queried_button,
+                        self.checkpoint_button,
+                        max_height=30,
+                    ),
+                    max_height=30,
+                )
 
         self.panel_row[0] = pn.Column(
             pn.Row(self.setup_row),
