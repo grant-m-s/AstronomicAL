@@ -12,8 +12,6 @@ import pandas as pd
 import panel as pn
 import param
 
-import dashboard.extension_plots as plots
-
 
 class PlotDashboard(param.Parameterized):
     """A Dashboard used for rendering dynamic plots of the data.
@@ -38,14 +36,12 @@ class PlotDashboard(param.Parameterized):
     """
 
     X_variable = param.Selector(
-        objects=["0"],
-        default="0",
-        doc="Selection box for the X axis of the plot.")
+        objects=["0"], default="0", doc="Selection box for the X axis of the plot."
+    )
 
     Y_variable = param.Selector(
-        objects=["1"],
-        default="1",
-        doc="Selection box for the Y axis of the plot.")
+        objects=["1"], default="1", doc="Selection box for the Y axis of the plot."
+    )
 
     def __init__(self, src, **params):
         super(PlotDashboard, self).__init__(**params)
@@ -114,16 +110,11 @@ class PlotDashboard(param.Parameterized):
         cols = list(self.df.columns)
 
         if len(self.src.data[cols[0]]) == 1:
-            selected = pd.DataFrame(
-                self.src.data, columns=cols, index=[0])
+            selected = pd.DataFrame(self.src.data, columns=cols, index=[0])
         else:
             selected = pd.DataFrame(columns=cols)
 
-        selected_plot = hv.Scatter(
-            selected,
-            self.X_variable,
-            self.Y_variable,
-        ).opts(
+        selected_plot = hv.Scatter(selected, self.X_variable, self.Y_variable,).opts(
             fill_color="black",
             marker="circle",
             size=10,
@@ -135,11 +126,9 @@ class PlotDashboard(param.Parameterized):
 
         color_points = hv.NdOverlay(
             {
-                config.settings['labels_to_strings'][f"{n}"]:
-                hv.Points([0, 0],
-                          label=config.settings['labels_to_strings'][f"{n}"]).opts(
-                    style=dict(color=color_key[n], size=0)
-                )
+                config.settings["labels_to_strings"][f"{n}"]: hv.Points(
+                    [0, 0], label=config.settings["labels_to_strings"][f"{n}"]
+                ).opts(style=dict(color=color_key[n], size=0))
                 for n in color_key
             }
         )
@@ -155,11 +144,11 @@ class PlotDashboard(param.Parameterized):
         y_sd = np.std(self.df[self.Y_variable])
         y_mu = np.mean(self.df[self.Y_variable])
 
-        max_x = np.min([x_mu + 4*x_sd, max_x])
-        min_x = np.max([x_mu - 4*x_sd, min_x])
+        max_x = np.min([x_mu + 4 * x_sd, max_x])
+        min_x = np.max([x_mu - 4 * x_sd, min_x])
 
-        max_y = np.min([y_mu + 4*y_sd, max_y])
-        min_y = np.max([y_mu - 4*y_sd, min_y])
+        max_y = np.min([y_mu + 4 * y_sd, max_y])
+        min_y = np.max([y_mu - 4 * y_sd, min_y])
 
         if selected.shape[0] > 0:
 

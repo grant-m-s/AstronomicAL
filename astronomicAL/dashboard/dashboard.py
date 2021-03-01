@@ -1,4 +1,5 @@
 from bokeh.models import ColumnDataSource
+from extensions import extension_plots
 from dashboard.active_learning import ActiveLearningDashboard
 from dashboard.menu import MenuDashboard
 from dashboard.plot import PlotDashboard
@@ -43,10 +44,17 @@ class Dashboard(param.Parameterized):
         super(Dashboard, self).__init__(**params)
 
         self.src = src
+        self.src.on_change("data", self._update_extension_plots_cb)
         self.row = pn.Row(pn.pane.Str("loading"))
         self.df = config.main_df
 
         self.contents = contents
+
+    def _update_extension_plots_cb(self, attr, old, new):
+        plot_dict = extension_plots.get_plot_dict()
+        if self.contents in list(plot_dict.keys()):
+            self.panel_contents = plot_dict[self.contents](config.main_df, self.src)
+            self.panel()
 
     @param.depends("contents", watch=True)
     def _update_contents(self):
@@ -55,31 +63,33 @@ class Dashboard(param.Parameterized):
 
         if self.contents == "Settings":
 
-            self.panel_contents = SettingsDashboard(
-                self, self.src, self.df)
+            self.panel_contents = SettingsDashboard(self, self.src, self.df)
 
         elif self.contents == "Menu":
 
             self.panel_contents = MenuDashboard(self)
-
-        elif self.contents == "Plot":
-            if not config.settings["confirmed"]:
-                self.contents = "Menu"
-                print("Please Complete Settings before accessing this view.")
-                return
-            self.panel_contents = PlotDashboard(self.src)
 
         elif self.contents == "Active Learning":
 
             self.df = config.main_df
             self.panel_contents = ActiveLearningDashboard(self.src, self.df)
 
-        elif self.contents == "Selected Source":
+        elif self.contents == "Basic Plot":
+            if not config.settings["confirmed"]:
+                self.contents = "Menu"
+                print("Please Complete Settings before accessing this view.")
+                return
+            self.panel_contents = PlotDashboard(self.src)
+
+        elif self.contents == "Selected Source Info":
             if not config.settings["confirmed"]:
                 self.contents = "Menu"
                 print("Please Complete Settings before accessing this view.")
                 return
             self.panel_contents = SelectedSourceDashboard(self.src)
+        else:
+            plot_dict = extension_plots.get_plot_dict()
+            self.panel_contents = plot_dict[self.contents](config.main_df, self.src)
 
         print("Successfully updated contents")
 
@@ -111,8 +121,10 @@ class Dashboard(param.Parameterized):
             rendered by the Panel layout.
 
         """
-
-        self.row[0] = self.panel_contents.panel()
+        if hasattr(self.panel_contents, "panel"):
+            self.row[0] = self.panel_contents.panel()
+        else:
+            self.row[0] = self.panel_contents
 
         print("Returned panel")
 
