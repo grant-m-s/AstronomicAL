@@ -1308,14 +1308,14 @@ class ActiveLearningTab(param.Parameterized):
 
         oper_dict = feature_generation.get_oper_dict()
 
-        df, generated_features = oper_dict["subtract (a-b)"](df, 2)
-        features = features + generated_features
+        if "feature_generation" in list(config.settings.keys()):
+            for generator in config.settings["feature_generation"]:
 
-        df, generated_features = oper_dict["add (a+b)"](df, 2)
-        features = features + generated_features
+                oper = generator[0]
+                n = generator[1]
 
-        df, generated_features = oper_dict["multiply (a*b)"](df, 2)
-        features = features + generated_features
+                df, generated_features = oper_dict[oper](df, n)
+                features = features + generated_features
 
         df_al = df[features]
 
