@@ -23,7 +23,14 @@ def get_plot_dict():
 
 
 def create_plot(
-    data, x, y, plot_type="scatter", selected=None, label_plot=True, colours=True
+    data,
+    x,
+    y,
+    plot_type="scatter",
+    selected=None,
+    label_plot=True,
+    colours=True,
+    smaller_axes_limits=False,
 ):
 
     print(type(data))
@@ -69,54 +76,72 @@ def create_plot(
                 for n in color_key
             }
         )
+    if smaller_axes_limits:
+        max_x = np.max(data[x])
+        min_x = np.min(data[x])
 
-    # max_x = np.max(data[x])
-    # min_x = np.min(data[x])
-    #
-    # max_y = np.max(data[y])
-    # min_y = np.min(data[y])
-    #
-    # x_sd = np.std(data[x])
-    # x_mu = np.mean(data[x])
-    # y_sd = np.std(data[y])
-    # y_mu = np.mean(data[y])
-    #
-    # max_x = np.min([x_mu + 4 * x_sd, max_x])
-    # min_x = np.max([x_mu - 4 * x_sd, min_x])
-    #
-    # max_y = np.min([y_mu + 4 * y_sd, max_y])
-    # min_y = np.max([y_mu - 4 * y_sd, min_y])
-    #
-    # if selected is not None:
-    #     if selected.shape[0] > 0:
-    #
-    #         max_x = np.max([max_x, np.max(selected[x])])
-    #         min_x = np.min([min_x, np.min(selected[x])])
-    #
-    #         max_y = np.max([max_y, np.max(selected[y])])
-    #         min_y = np.min([min_y, np.min(selected[y])])
+        max_y = np.max(data[y])
+        min_y = np.min(data[y])
+
+        x_sd = np.std(data[x])
+        x_mu = np.mean(data[x])
+        y_sd = np.std(data[y])
+        y_mu = np.mean(data[y])
+
+        max_x = np.min([x_mu + 4 * x_sd, max_x])
+        min_x = np.max([x_mu - 4 * x_sd, min_x])
+
+        max_y = np.min([y_mu + 4 * y_sd, max_y])
+        min_y = np.max([y_mu - 4 * y_sd, min_y])
+
+        if selected is not None:
+            if selected.shape[0] > 0:
+
+                max_x = np.max([max_x, np.max(selected[x])])
+                min_x = np.min([min_x, np.min(selected[x])])
+
+                max_y = np.max([max_y, np.max(selected[y])])
+                min_y = np.min([min_y, np.min(selected[y])])
 
     if colours:
-        plot = dynspread(
-            datashade(
-                p,
-                color_key=color_key,
-                aggregator=ds.by(config.settings["label_col"], ds.count()),
-            ).opts(  # xlim=(min_x, max_x), ylim=(min_y, max_y),
-                responsive=True
-            ),
-            threshold=0.75,
-            how="saturate",
-        )
+        if smaller_axes_limits:
+            plot = dynspread(
+                datashade(
+                    p,
+                    color_key=color_key,
+                    aggregator=ds.by(config.settings["label_col"], ds.count()),
+                ).opts(xlim=(min_x, max_x), ylim=(min_y, max_y), responsive=True),
+                threshold=0.75,
+                how="saturate",
+            )
+        else:
+            plot = dynspread(
+                datashade(
+                    p,
+                    color_key=color_key,
+                    aggregator=ds.by(config.settings["label_col"], ds.count()),
+                ).opts(responsive=True),
+                threshold=0.75,
+                how="saturate",
+            )
 
     else:
-        plot = dynspread(
-            datashade(p,).opts(  # xlim=(min_x, max_x), ylim=(min_y, max_y),
-                responsive=True
-            ),
-            threshold=0.75,
-            how="saturate",
-        )
+        if smaller_axes_limits:
+            plot = dynspread(
+                datashade(
+                    p,
+                ).opts(xlim=(min_x, max_x), ylim=(min_y, max_y), responsive=True),
+                threshold=0.75,
+                how="saturate",
+            )
+        else:
+            plot = dynspread(
+                datashade(
+                    p,
+                ).opts(responsive=True),
+                threshold=0.75,
+                how="saturate",
+            )
 
     if selected is not None:
         plot = plot * selected_plot
