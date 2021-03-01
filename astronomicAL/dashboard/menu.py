@@ -1,4 +1,5 @@
 from functools import partial
+from extensions import extension_plots
 
 import panel as pn
 import param
@@ -26,26 +27,41 @@ class MenuDashboard(param.Parameterized):
 
         self.row = pn.Row(pn.pane.Str("loading"))
 
+        plot_options = [
+            "Basic Plot",
+            "Selected Source Info",
+        ] + list(extension_plots.get_plot_dict().keys())
+
+        self._plot_selection = pn.widgets.Select(
+            name="Choose plot type:", options=plot_options
+        )
+
         self._add_plot_button = pn.widgets.Button(name="Add Plot")
         self._add_plot_button.on_click(
-            partial(self._update_main_contents, main=main,
-                    updated="Plot", button=self._add_plot_button))
-
-        self._add_selected_info_button = pn.widgets.Button(
-            name="Add Selected Source Info"
+            partial(
+                self._update_main_contents,
+                main=main,
+                button=self._add_plot_button,
+            )
         )
-        self._add_selected_info_button.on_click(
-            partial(self._update_main_contents,
-                    main=main,
-                    updated="Selected Source",
-                    button=self._add_selected_info_button)
-                    )
 
-    def _update_main_contents(self, event, main, updated, button):
+        # self._add_selected_info_button = pn.widgets.Button(
+        #     name="Add Selected Source Info"
+        # )
+        # self._add_selected_info_button.on_click(
+        #     partial(
+        #         self._update_main_contents,
+        #         main=main,
+        #         updated="Selected Source",
+        #         button=self._add_selected_info_button,
+        #     )
+        # )
+
+    def _update_main_contents(self, event, main, button):
         # print(updated)
         button.name = "Loading..."
 
-        main.set_contents(updated)
+        main.set_contents(self._plot_selection.value)
 
     def panel(self):
         """Render the current view.
@@ -58,7 +74,6 @@ class MenuDashboard(param.Parameterized):
 
         """
         self.row[0] = pn.Column(
-            self._add_plot_button,
-            self._add_selected_info_button,
+            self._plot_selection, self._add_plot_button, max_height=100
         )
         return self.row
