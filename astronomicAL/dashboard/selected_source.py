@@ -108,8 +108,9 @@ class SelectedSourceDashboard(param.Parameterized):
 
         selected_source = self.df[self.df[config.settings["id_col"]] == event.new]
 
-        selected_dict = selected_source.set_index(
-            config.settings["id_col"]).to_dict('list')
+        selected_dict = selected_source.set_index(config.settings["id_col"]).to_dict(
+            "list"
+        )
         selected_dict[config.settings["id_col"]] = [event.new]
         self.src.data = selected_dict
 
@@ -139,7 +140,7 @@ class SelectedSourceDashboard(param.Parameterized):
         if len(self.selected_history) > 0:
             selected_id = self.src.data[config.settings["id_col"]][0]
             top_of_history = self.selected_history[0]
-            if (selected_id == top_of_history):
+            if selected_id == top_of_history:
                 add_source_to_list = False
             elif selected_id == "":
                 add_source_to_list = False
@@ -224,7 +225,8 @@ class SelectedSourceDashboard(param.Parameterized):
             print("\n\n\n IMAGE ERROR: \n\n\n")
             print(f"index:{self._url_optical_image.rfind('&')}")
             print(
-                f"new url_optical_image: {self._url_optical_image[:self._url_optical_image.rfind('&')]}&scale={self._image_zoom}")
+                f"new url_optical_image: {self._url_optical_image[:self._url_optical_image.rfind('&')]}&scale={self._image_zoom}"
+            )
 
     def _update_default_images(self):
         url = "http://skyserver.sdss.org/dr16/SkyServerWS/ImgCutout/getjpeg?TaskName=Skyserver.Explore.Image&ra="
@@ -234,7 +236,7 @@ class SelectedSourceDashboard(param.Parameterized):
             ra_dec = self.src.data["ra_dec"][0]
             ra = ra_dec[: ra_dec.index(",")]
             print(f"RA_DEC:{ra_dec}")
-            dec = ra_dec[ra_dec.index(",") + 1:]
+            dec = ra_dec[ra_dec.index(",") + 1 :]
 
             self._url_optical_image = (
                 f"{url}{ra}&dec={dec}&opt=G&scale={self._image_zoom}"
@@ -328,8 +330,7 @@ class SelectedSourceDashboard(param.Parameterized):
 
                 info = f"**{col}**: {str(self.src.data[f'{col}'][0])}"
                 extra_data_row.append(
-                    pn.pane.Markdown(info, max_width=12
-                                     * len(info), max_height=10)
+                    pn.pane.Markdown(info, max_width=12 * len(info), max_height=10)
                 )
             print("setting row")
             self.row[0] = pn.Card(
@@ -360,8 +361,10 @@ class SelectedSourceDashboard(param.Parameterized):
             self.row[0] = pn.Card(
                 pn.Column(
                     # self.search_id,
-                    pd.DataFrame(self.selected_history,
-                                 columns=["Selected IDs"]),
+                    pn.widgets.DataFrame(
+                        pd.DataFrame(self.selected_history, columns=["Selected IDs"]),
+                        show_index=False,
+                    ),
                 )
             )
 
