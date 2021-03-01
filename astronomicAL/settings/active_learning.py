@@ -1,4 +1,7 @@
+from extensions import models, query_strategies, feature_generation
+
 import config
+import pandas as pd
 import panel as pn
 import param
 
@@ -42,6 +45,8 @@ class ActiveLearningSettings(param.Parameterized):
 
         self.df = None
 
+        self.feature_generator_selected = []
+
         self.close_button = close_button
 
         self.column = pn.Column("Loading")
@@ -62,19 +67,46 @@ class ActiveLearningSettings(param.Parameterized):
     def _initialise_widgets(self):
 
         self.label_selector = pn.widgets.CrossSelector(
-            name="**Which Labels would you like to create a classifier for?**", value=[], options=[], max_height=100
+            name="**Which Labels would you like to create a classifier for?**",
+            value=[],
+            options=[],
+            max_height=100,
         )
 
         self.feature_selector = pn.widgets.CrossSelector(
-            name="**Which Features should be used for training?**", value=[], options=[], max_height=100
+            name="**Which Features should be used for training?**",
+            value=[],
+            options=[],
+            max_height=100,
         )
 
-        self.confirm_settings_button = pn.widgets.Button(
-            name="Confirm Settings")
+        self.feature_generator = pn.widgets.Select(
+            name="Create Feature Combinations?",
+            options=list(feature_generation.get_oper_dict().keys()),
+        )
+
+        self.feature_generator_number = pn.widgets.IntInput(
+            name="How many features to combine?", value=2, step=1, start=2, end=5
+        )
+
+        self._add_feature_generator_button = pn.widgets.Button(name=">>")
+        self._add_feature_generator_button.on_click(self._add_feature_selector_cb)
+
+        self._remove_feature_generator_button = pn.widgets.Button(name="Remove")
+        self._remove_feature_generator_button.on_click(self._remove_feature_selector_cb)
+
+        self._feature_generator_dataframe = pn.widgets.DataFrame(
+            pd.DataFrame(self.feature_generator_selected, columns=["oper", "n"]),
+            name="",
+            show_index=False,
+        )
+
+        self.confirm_settings_button = pn.widgets.Button(name="Confirm Settings")
         self.confirm_settings_button.on_click(self._confirm_settings_cb)
 
         self.exclude_labels_checkbox = pn.widgets.Checkbox(
-            name="Should remaining labels be removed from Active Learning datasets?", value=True
+            name="Should remaining labels be removed from Active Learning datasets?",
+            value=True,
         )
 
         self._exclude_labels_tooltip = pn.pane.HTML(
@@ -107,16 +139,36 @@ class ActiveLearningSettings(param.Parameterized):
         if dataframe is not None:
             self.df = dataframe
 
-        if (self.df is not None):
+        if self.df is not None:
 
             labels = config.settings["labels"]
             options = []
             for label in labels:
-                options.append(
-                    config.settings["labels_to_strings"][f"{label}"])
+                options.append(config.settings["labels_to_strings"][f"{label}"])
             self.label_selector.options = options
 
             self.feature_selector.options = list(self.df.columns)
+
+    def _add_feature_selector_cb(self, event):
+
+        new_feature_generator = [
+            self.feature_generator.value,
+            self.feature_generator_number.value,
+        ]
+
+        if new_feature_generator not in self.feature_generator_selected:
+            self.feature_generator_selected.append(
+                [self.feature_generator.value, self.feature_generator_number.value]
+            )
+            self._feature_generator_dataframe.value = pd.DataFrame(
+                self.feature_generator_selected, columns=["oper", "n"]
+            )
+
+    def _remove_feature_selector_cb(self, event):
+        self.feature_generator_selected = self.feature_generator_selected[:-1]
+        self._feature_generator_dataframe.value = pd.DataFrame(
+            self.feature_generator_selected, columns=["oper", "n"]
+        )
 
     def _confirm_settings_cb(self, event):
         print("Saving settings...")
@@ -132,6 +184,7 @@ class ActiveLearningSettings(param.Parameterized):
 
         config.settings["unclassified_labels"] = unclassified_labels
         config.settings["scale_data"] = self.scale_features_checkbox.value
+        config.settings["feature_generation"] = self.feature_generator_selected
         config.settings["confirmed"] = True
 
         self.completed = True
@@ -188,10 +241,18 @@ class ActiveLearningSettings(param.Parameterized):
                     height=200,
                     sizing_mode="stretch_width",
                 ),
-                pn.Row(self.exclude_labels_checkbox,
-                       self._exclude_labels_tooltip),
-                pn.Row(self.scale_features_checkbox,
-                       self._scale_features_tooltip),
+                pn.Row(self.exclude_labels_checkbox, self._exclude_labels_tooltip),
+                pn.Row(self.scale_features_checkbox, self._scale_features_tooltip),
+                pn.Row(
+                    self.feature_generator,
+                    self.feature_generator_number,
+                    pn.Column(
+                        self._add_feature_generator_button,
+                        self._remove_feature_generator_button,
+                    ),
+                    self._feature_generator_dataframe,
+                    sizing_mode="stretch_width",
+                ),
                 pn.Row(self.confirm_settings_button, max_height=30),
             )
 
