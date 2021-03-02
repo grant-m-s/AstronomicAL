@@ -32,7 +32,7 @@ def create_plot(
     label_plot=True,
     colours=True,
     smaller_axes_limits=False,
-    limit_axes=None,
+    bounds=None,
 ):
 
     print(type(data))
@@ -41,11 +41,11 @@ def create_plot(
     assert x in list(data.columns), f"Column {x} is not a column in your dataframe."
     assert y in list(data.columns), f"Column {y} is not a column in your dataframe."
 
-    if limit_axes is not None:
-        data = data[data[x] >= limit_axes[0]]
-        data = data[data[y] <= limit_axes[1]]
-        data = data[data[x] <= limit_axes[2]]
-        data = data[data[y] >= limit_axes[3]]
+    if bounds is not None:
+        data = data[data[x] >= bounds[0]]
+        data = data[data[y] <= bounds[1]]
+        data = data[data[x] <= bounds[2]]
+        data = data[data[y] >= bounds[3]]
 
     if plot_type == "scatter":
         p = hv.Points(
@@ -62,12 +62,12 @@ def create_plot(
 
         if len(selected.data[cols[0]]) == 1:
             selected = pd.DataFrame(selected.data, columns=cols, index=[0])
-            if limit_axes is not None:
+            if bounds is not None:
                 if (
-                    (selected[x][0] < limit_axes[0])
-                    or (selected[y][0] > limit_axes[1])
-                    or (selected[x][0] > limit_axes[2])
-                    or (selected[y][0] < limit_axes[3])
+                    (selected[x][0] < bounds[0])
+                    or (selected[y][0] > bounds[1])
+                    or (selected[x][0] > bounds[2])
+                    or (selected[y][0] < bounds[3])
                 ):
                     selected = pd.DataFrame(columns=cols)
         else:
@@ -177,7 +177,7 @@ def bpt_plot(data, selected=None, **kwargs):
         plot_type="scatter",
         label_plot=True,
         selected=selected,
-        limit_axes=[-1.8, 1, 1, -1.2],
+        bounds=[-1.8, 1.25, 1, -2.2],
     )
 
     x1 = np.linspace(-1.6, -0.2, 60)
@@ -205,7 +205,7 @@ def bpt_plot(data, selected=None, **kwargs):
         plot_type="scatter",
         label_plot=True,
         selected=selected,
-        limit_axes=[-2.1, 1.2, 0.9, -2.1],
+        bounds=[-2.1, 1.2, 0.9, -2.1],
     )
 
     x1 = np.linspace(-2, 0.1, 60)
@@ -226,7 +226,7 @@ def bpt_plot(data, selected=None, **kwargs):
         plot_type="scatter",
         label_plot=True,
         selected=selected,
-        limit_axes=[-3.3, 1.25, 1.65, -2.3],
+        bounds=[-3.3, 1.25, 1.65, -2.3],
     )
 
     x1 = np.linspace(-3, -0.8, 60)
