@@ -17,6 +17,7 @@ def get_plot_dict():
 
     plot_dict = {
         "AGN Wedge": agn_wedge,
+        "BPT Plots": bpt_plot,
     }
 
     return plot_dict
@@ -150,6 +151,80 @@ def create_plot(
         plot = plot * color_points
 
     return plot
+
+
+def bpt_plot(data, selected=None, **kwargs):
+
+    plot_NII = create_plot(
+        data,
+        "Log10(NII_6584_FLUX/H_ALPHA_FLUX)",
+        "Log10(OIII_5007_FLUX/H_BETA_FLUX)",
+        plot_type="scatter",
+        label_plot=True,
+        selected=selected,
+    )
+
+    x1 = np.linspace(-1.6, -0.2, 200)
+    x2 = np.linspace(-1.6, 0.2, 200)
+    y1 = (0.61 / (x1 - 0.05)) + 1.3
+    y2 = (0.61 / (x2 - 0.47)) + 1.19
+
+    l1 = pd.DataFrame(np.array([x1, y1]).T, columns=["x", "y"])
+    l2 = pd.DataFrame(np.array([x2, y2]).T, columns=["x", "y"])
+
+    NII_line1 = create_plot(
+        l1, "x", "y", plot_type="line", label_plot=False, colours=False
+    )
+
+    NII_line2 = create_plot(
+        l2, "x", "y", plot_type="line", label_plot=False, colours=False
+    )
+
+    plot_NII = plot_NII * NII_line1 * NII_line2
+
+    plot_SII = create_plot(
+        data,
+        "Log10(SII_6717_FLUX/H_ALPHA_FLUX)",
+        "Log10(OIII_5007_FLUX/H_BETA_FLUX)",
+        plot_type="scatter",
+        label_plot=True,
+        selected=selected,
+    )
+
+    x1 = np.linspace(-2, 0.1, 150)
+    y1 = (0.72 / (x1 - 0.32)) + 1.30
+
+    l1 = pd.DataFrame(np.array([x1, y1]).T, columns=["x", "y"])
+
+    SII_line1 = create_plot(
+        l1, "x", "y", plot_type="line", label_plot=False, colours=False
+    )
+
+    plot_SII = plot_SII * SII_line1
+
+    plot_OI = create_plot(
+        data,
+        "Log10(OI_6300_FLUX/H_ALPHA_FLUX)",
+        "Log10(OIII_5007_FLUX/H_BETA_FLUX)",
+        plot_type="scatter",
+        label_plot=True,
+        selected=selected,
+    )
+
+    x1 = np.linspace(-3, -0.8, 100)
+    y1 = (0.73 / (x1 + 0.59)) + 1.33
+
+    l1 = pd.DataFrame(np.array([x1, y1]).T, columns=["x", "y"])
+
+    OI_line1 = create_plot(
+        l1, "x", "y", plot_type="line", label_plot=False, colours=False
+    )
+
+    plot_OI = plot_OI * OI_line1
+
+    tabs = pn.Tabs(("NII", plot_NII), ("SII", plot_SII), ("OI", plot_OI), dynamic=True)
+
+    return tabs
 
 
 def agn_wedge(data, selected=None, **kwargs):
