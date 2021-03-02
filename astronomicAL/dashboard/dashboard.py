@@ -48,7 +48,13 @@ class Dashboard(param.Parameterized):
         self.row = pn.Row(pn.pane.Str("loading"))
         self.df = config.main_df
 
+        self._close_button = pn.widgets.Button(name="Close", max_width=100)
+        self._close_button.on_click(self._close_button_cb)
+
         self.contents = contents
+
+    def _close_button_cb(self, event):
+        self.contents = "Menu"
 
     def _update_extension_plots_cb(self, attr, old, new):
         plot_dict = extension_plots.get_plot_dict()
@@ -124,7 +130,11 @@ class Dashboard(param.Parameterized):
         if hasattr(self.panel_contents, "panel"):
             self.row[0] = self.panel_contents.panel()
         else:
-            self.row[0] = pn.Card(self.panel_contents)
+            self.row[0] = pn.Card(
+                self.panel_contents,
+                header=pn.Row(self._close_button),
+                collapsible=False,
+            )
 
         print("Returned panel")
 

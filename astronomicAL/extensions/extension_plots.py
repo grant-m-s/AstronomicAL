@@ -32,6 +32,7 @@ def create_plot(
     label_plot=True,
     colours=True,
     smaller_axes_limits=False,
+    limit_axes=None,
 ):
 
     print(type(data))
@@ -39,6 +40,12 @@ def create_plot(
     print(data.columns)
     assert x in list(data.columns), f"Column {x} is not a column in your dataframe."
     assert y in list(data.columns), f"Column {y} is not a column in your dataframe."
+
+    if limit_axes is not None:
+        data = data[data[x] >= limit_axes[0]]
+        data = data[data[y] <= limit_axes[1]]
+        data = data[data[x] <= limit_axes[2]]
+        data = data[data[y] >= limit_axes[3]]
 
     if plot_type == "scatter":
         p = hv.Points(
@@ -55,6 +62,14 @@ def create_plot(
 
         if len(selected.data[cols[0]]) == 1:
             selected = pd.DataFrame(selected.data, columns=cols, index=[0])
+            if limit_axes is not None:
+                if (
+                    (selected[x][0] < limit_axes[0])
+                    or (selected[y][0] > limit_axes[1])
+                    or (selected[x][0] > limit_axes[2])
+                    or (selected[y][0] < limit_axes[3])
+                ):
+                    selected = pd.DataFrame(columns=cols)
         else:
             selected = pd.DataFrame(columns=cols)
 
@@ -162,10 +177,11 @@ def bpt_plot(data, selected=None, **kwargs):
         plot_type="scatter",
         label_plot=True,
         selected=selected,
+        limit_axes=[-1.8, 1, 1, -1.2],
     )
 
-    x1 = np.linspace(-1.6, -0.2, 200)
-    x2 = np.linspace(-1.6, 0.2, 200)
+    x1 = np.linspace(-1.6, -0.2, 60)
+    x2 = np.linspace(-1.6, 0.2, 60)
     y1 = (0.61 / (x1 - 0.05)) + 1.3
     y2 = (0.61 / (x2 - 0.47)) + 1.19
 
@@ -189,9 +205,10 @@ def bpt_plot(data, selected=None, **kwargs):
         plot_type="scatter",
         label_plot=True,
         selected=selected,
+        limit_axes=[-2.1, 1.2, 0.9, -2.1],
     )
 
-    x1 = np.linspace(-2, 0.1, 150)
+    x1 = np.linspace(-2, 0.1, 60)
     y1 = (0.72 / (x1 - 0.32)) + 1.30
 
     l1 = pd.DataFrame(np.array([x1, y1]).T, columns=["x", "y"])
@@ -209,9 +226,10 @@ def bpt_plot(data, selected=None, **kwargs):
         plot_type="scatter",
         label_plot=True,
         selected=selected,
+        limit_axes=[-3.3, 1.25, 1.65, -2.3],
     )
 
-    x1 = np.linspace(-3, -0.8, 100)
+    x1 = np.linspace(-3, -0.8, 60)
     y1 = (0.73 / (x1 + 0.59)) + 1.33
 
     l1 = pd.DataFrame(np.array([x1, y1]).T, columns=["x", "y"])
@@ -222,7 +240,7 @@ def bpt_plot(data, selected=None, **kwargs):
 
     plot_OI = plot_OI * OI_line1
 
-    tabs = pn.Tabs(("NII", plot_NII), ("SII", plot_SII), ("OI", plot_OI), dynamic=True)
+    tabs = pn.Tabs(("NII", plot_NII), ("SII", plot_SII), ("OI", plot_OI))
 
     return tabs
 
