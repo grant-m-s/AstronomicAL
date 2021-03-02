@@ -124,7 +124,7 @@ class Dashboard(param.Parameterized):
         if hasattr(self.panel_contents, "panel"):
             self.row[0] = self.panel_contents.panel()
         else:
-            self.row[0] = self.panel_contents
+            self.row[0] = pn.Card(self.panel_contents)
 
         print("Returned panel")
 
