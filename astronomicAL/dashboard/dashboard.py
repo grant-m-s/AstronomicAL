@@ -51,7 +51,21 @@ class Dashboard(param.Parameterized):
         self._close_button = pn.widgets.Button(name="Close", max_width=100)
         self._close_button.on_click(self._close_button_cb)
 
+        self._submit_button = pn.widgets.Button(name="Submit Column Names")
+        self._submit_button.on_click(self._submit_button_cb)
+
         self.contents = contents
+
+    def _submit_button_cb(self, event):
+        self._submit_button.name = "Loading Plot..."
+        self._submit_button.disabled = True
+        for i, row in enumerate(self.plot_dict[self.contents].col_selection):
+            if i == len(self.plot_dict[self.contents].col_selection) - 1:
+                continue
+            for selector in row:
+                config.settings[selector.name] = selector.value
+                print(selector)
+        self._update_contents()
 
     def _close_button_cb(self, event):
         self.contents = "Menu"
@@ -59,7 +73,9 @@ class Dashboard(param.Parameterized):
     def _update_extension_plots_cb(self, attr, old, new):
         plot_dict = extension_plots.get_plot_dict()
         if self.contents in list(plot_dict.keys()):
-            self.panel_contents = plot_dict[self.contents](config.main_df, self.src)
+            self.panel_contents = plot_dict[self.contents].plot(self._submit_button)(
+                config.main_df, self.src
+            )
             self.panel()
 
     @param.depends("contents", watch=True)
@@ -94,8 +110,10 @@ class Dashboard(param.Parameterized):
                 return
             self.panel_contents = SelectedSourceDashboard(self.src)
         else:
-            plot_dict = extension_plots.get_plot_dict()
-            self.panel_contents = plot_dict[self.contents](config.main_df, self.src)
+            self.plot_dict = extension_plots.get_plot_dict()
+            self.panel_contents = self.plot_dict[self.contents].plot(
+                self._submit_button
+            )(config.main_df, self.src)
 
         print("Successfully updated contents")
 
