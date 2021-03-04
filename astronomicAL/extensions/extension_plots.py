@@ -16,11 +16,77 @@ import param
 def get_plot_dict():
 
     plot_dict = {
-        "AGN Wedge": agn_wedge,
-        "BPT Plots": bpt_plot,
+        "AGN Wedge": CustomPlot(
+            agn_wedge, ["Log10(W3_Flux/W2_Flux)", "Log10(W2_Flux/W1_Flux)"]
+        ),
+        "BPT Plots": CustomPlot(
+            bpt_plot,
+            [
+                "Log10(NII_6584_FLUX/H_ALPHA_FLUX)",
+                "Log10(SII_6717_FLUX/H_ALPHA_FLUX)",
+                "Log10(OI_6300_FLUX/H_ALPHA_FLUX)",
+                "Log10(OIII_5007_FLUX/H_BETA_FLUX)",
+            ],
+        ),
     }
 
     return plot_dict
+
+
+class CustomPlot:
+    def __init__(self, plot_fn, extra_features):
+
+        self.plot_fn = plot_fn
+        self.extra_features = extra_features
+        self.row = pn.Row("Loading...")
+
+    def create_settings(self, unknown_cols):
+        print("creating settings...")
+        print(unknown_cols)
+        self.waiting = True
+        settings_column = pn.Column()
+        for i, col in enumerate(unknown_cols):
+
+            if i % 3 == 0:
+                settings_row = pn.Row()
+
+            settings_row.append(
+                pn.widgets.Select(
+                    name=col, options=list(config.main_df.columns), max_height=120
+                )
+            )
+
+            if (i % 3 == 2) or (i == len(unknown_cols) - 1):
+                settings_column.append(settings_row)
+
+            if i == len(unknown_cols) - 1:
+                settings_column.append(self.submit_button)
+
+        return settings_column
+
+    def render(self, data, selected=None):
+        self.data = data
+        self.selected = selected
+        self.row[0] = self.col_selection
+        return self.row
+
+    def plot(self, submit_button):
+        self.submit_button = submit_button
+
+        current_cols = config.main_df.columns
+
+        unknown_cols = []
+        for col in self.extra_features:
+            if col not in list(config.settings.keys()):
+                if col not in current_cols:
+                    unknown_cols.append(col)
+                else:
+                    config.settings[col] = col
+        if len(unknown_cols) > 0:
+            self.col_selection = self.create_settings(unknown_cols)
+            return self.render
+        else:
+            return self.plot_fn
 
 
 def create_plot(
@@ -35,9 +101,6 @@ def create_plot(
     bounds=None,
 ):
 
-    print(type(data))
-    print(data)
-    print(data.columns)
     assert x in list(data.columns), f"Column {x} is not a column in your dataframe."
     assert y in list(data.columns), f"Column {y} is not a column in your dataframe."
 
@@ -172,8 +235,8 @@ def bpt_plot(data, selected=None, **kwargs):
 
     plot_NII = create_plot(
         data,
-        "Log10(NII_6584_FLUX/H_ALPHA_FLUX)",
-        "Log10(OIII_5007_FLUX/H_BETA_FLUX)",
+        config.settings["Log10(NII_6584_FLUX/H_ALPHA_FLUX)"],
+        config.settings["Log10(OIII_5007_FLUX/H_BETA_FLUX)"],
         plot_type="scatter",
         label_plot=True,
         selected=selected,
@@ -200,8 +263,8 @@ def bpt_plot(data, selected=None, **kwargs):
 
     plot_SII = create_plot(
         data,
-        "Log10(SII_6717_FLUX/H_ALPHA_FLUX)",
-        "Log10(OIII_5007_FLUX/H_BETA_FLUX)",
+        config.settings["Log10(SII_6717_FLUX/H_ALPHA_FLUX)"],
+        config.settings["Log10(OIII_5007_FLUX/H_BETA_FLUX)"],
         plot_type="scatter",
         label_plot=True,
         selected=selected,
@@ -221,8 +284,8 @@ def bpt_plot(data, selected=None, **kwargs):
 
     plot_OI = create_plot(
         data,
-        "Log10(OI_6300_FLUX/H_ALPHA_FLUX)",
-        "Log10(OIII_5007_FLUX/H_BETA_FLUX)",
+        config.settings["Log10(OI_6300_FLUX/H_ALPHA_FLUX)"],
+        config.settings["Log10(OIII_5007_FLUX/H_BETA_FLUX)"],
         plot_type="scatter",
         label_plot=True,
         selected=selected,
@@ -249,14 +312,14 @@ def agn_wedge(data, selected=None, **kwargs):
 
     plot = create_plot(
         data,
-        "Log10(W3_Flux/W2_Flux)",
-        "Log10(W2_Flux/W1_Flux)",
+        config.settings["Log10(W3_Flux/W2_Flux)"],
+        config.settings["Log10(W2_Flux/W1_Flux)"],
         plot_type="scatter",
         label_plot=True,
         selected=selected,
     )
 
-    x = data["Log10(W3_Flux/W2_Flux)"]
+    x = data[config.settings["Log10(W3_Flux/W2_Flux)"]]
 
     top_y_orig = (0.315 * x) + 0.297
     bottom_y_orig = (0.315 * x) - 0.110
