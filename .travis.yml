@@ -4,6 +4,6 @@ python:
 install:
   - pip install -r requirements.txt
 script:
-  - coverage run -m pytest
+  - coverage run --timid --source=. tests/all_test.py
 after_success:
   - bash <(curl -s https://codecov.io/bash)
