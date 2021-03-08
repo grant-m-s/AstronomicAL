@@ -3,4 +3,4 @@ class TestClass:
         return x + 1
 
     def test_answer(self):
-        assert self.func(3) == 5
+        assert self.func(3) == 4
