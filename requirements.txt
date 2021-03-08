@@ -5,3 +5,4 @@ pandas>=1.1.5
 modAL>=0.4.1
 holoviews==1.14.1
 datashader==0.12.0
+coverage>=5.5
