@@ -1,6 +1,6 @@
 from itertools import combinations
 
-import config
+import astronomicAL.config as config
 import numpy as np
 
 

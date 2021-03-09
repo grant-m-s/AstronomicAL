@@ -1,12 +1,12 @@
+from astronomicAL.dashboard.active_learning import ActiveLearningDashboard
+from astronomicAL.dashboard.menu import MenuDashboard
+from astronomicAL.dashboard.plot import PlotDashboard
+from astronomicAL.dashboard.selected_source import SelectedSourceDashboard
+from astronomicAL.dashboard.settings_dashboard import SettingsDashboard
+from astronomicAL.extensions import extension_plots
 from bokeh.models import ColumnDataSource
-from extensions import extension_plots
-from dashboard.active_learning import ActiveLearningDashboard
-from dashboard.menu import MenuDashboard
-from dashboard.plot import PlotDashboard
-from dashboard.selected_source import SelectedSourceDashboard
-from dashboard.settings_dashboard import SettingsDashboard
 
-import config
+import astronomicAL.config as config
 import panel as pn
 import param
 

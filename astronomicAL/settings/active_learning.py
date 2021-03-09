@@ -1,6 +1,6 @@
-from extensions import models, query_strategies, feature_generation
+from astronomicAL.extensions import models, query_strategies, feature_generation
 
-import config
+import astronomicAL.config as config
 import pandas as pd
 import panel as pn
 import param

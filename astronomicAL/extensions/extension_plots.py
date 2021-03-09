@@ -6,7 +6,7 @@ from holoviews.operation.datashader import (
 import datashader as ds
 import holoviews as hv
 
-import config
+import astronomicAL.config as config
 import numpy as np
 import pandas as pd
 import panel as pn

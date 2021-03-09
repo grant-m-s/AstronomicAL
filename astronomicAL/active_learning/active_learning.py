@@ -1,10 +1,11 @@
+from astronomicAL.extensions import models, query_strategies, feature_generation
+from astronomicAL.utils.optimise import optimise
 from bokeh.models import (
     ColumnDataSource,
     DataTable,
     TableColumn,
 )
 from datetime import datetime
-from extensions import models, query_strategies, feature_generation
 from holoviews.operation.datashader import (
     datashade,
     dynspread,
@@ -22,9 +23,8 @@ from sklearn.metrics import (
     precision_score,
     recall_score,
 )
-from utils.optimise import optimise
 
-import config
+import astronomicAL.config as config
 import datashader as ds
 import holoviews as hv
 import numpy as np

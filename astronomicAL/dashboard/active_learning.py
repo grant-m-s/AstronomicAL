@@ -1,6 +1,6 @@
-from active_learning.active_learning import ActiveLearningTab
+from astronomicAL.active_learning.active_learning import ActiveLearningTab
 
-import config
+import astronomicAL.config as config
 import panel as pn
 import param
 
