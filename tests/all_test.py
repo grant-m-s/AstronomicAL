@@ -1,12 +1,8 @@
 import os, sys, inspect
 
-sys.path.insert(1, os.path.join(sys.path[0], "../astronomicAL"))
+sys.path.insert(1, os.path.join(sys.path[0], "../"))
 
-from dashboard.dashboard import Dashboard
-
-# import config
-
-# from bokeh.models import ColumnDataSource
+from astronomicAL.dashboard.dashboard import Dashboard
 
 
 class TestClass:
