@@ -1,9 +1,9 @@
+from astronomicAL.settings.active_learning import ActiveLearningSettings
+from astronomicAL.settings.data_selection import DataSelection
+from astronomicAL.settings.param_assignment import ParameterAssignment
 from functools import partial
-from settings.active_learning import ActiveLearningSettings
-from settings.data_selection import DataSelection
-from settings.param_assignment import ParameterAssignment
 
-import config
+import astronomicAL.config as config
 import panel as pn
 import param
 
@@ -48,12 +48,11 @@ class SettingsDashboard(param.Parameterized):
 
     def _initialise_widgets(self, main):
         self._close_settings_button = pn.widgets.Button(
-            name="Close Settings",
-            max_width=100,
-            disabled=True
+            name="Close Settings", max_width=100, disabled=True
         )
         self._close_settings_button.on_click(
-            partial(self._close_settings_cb, main=main))
+            partial(self._close_settings_cb, main=main)
+        )
 
     def create_pipeline(self, src, df):
         """Create the pipeline of setting stages.
@@ -75,12 +74,11 @@ class SettingsDashboard(param.Parameterized):
             "Select Your Data", DataSelection(src), ready_parameter="ready"
         ),
         self.pipeline.add_stage(
-            "Assign Parameters", ParameterAssignment(df),
-            ready_parameter="ready"
+            "Assign Parameters", ParameterAssignment(df), ready_parameter="ready"
         ),
         self.pipeline.add_stage(
-            "Active Learning Settings", ActiveLearningSettings(
-                src, self._close_settings_button)
+            "Active Learning Settings",
+            ActiveLearningSettings(src, self._close_settings_button),
         )
 
     def _adjust_pipeline_layout(self):
@@ -97,7 +95,7 @@ class SettingsDashboard(param.Parameterized):
 
         self.pipeline.layout[0][2][0].on_click(self._stage_previous_cb)
 
-        self.pipeline.layout[0][2][1].button_type = 'success'
+        self.pipeline.layout[0][2][1].button_type = "success"
         self.pipeline.layout[0][2][1].on_click(self._stage_next_cb)
 
     def get_settings(self):
@@ -110,8 +108,7 @@ class SettingsDashboard(param.Parameterized):
 
         """
         updated_settings = {}
-        updated_settings["id_col"] = self.pipeline["Assign Parameters"].get_id_column(
-        )
+        updated_settings["id_col"] = self.pipeline["Assign Parameters"].get_id_column()
         updated_settings["label_col"] = self.pipeline[
             "Assign Parameters"
         ].get_label_column()
@@ -184,9 +181,10 @@ class SettingsDashboard(param.Parameterized):
                 ),
                 self.pipeline.stage,
             ),
-            header=pn.Row(pn.widgets.StaticText(
-                name="Settings Panel",
-                value="Please choose the appropriate settings for your data",
+            header=pn.Row(
+                pn.widgets.StaticText(
+                    name="Settings Panel",
+                    value="Please choose the appropriate settings for your data",
                 ),
                 self._close_settings_button,
             ),

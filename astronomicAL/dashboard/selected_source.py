@@ -1,6 +1,6 @@
 from functools import partial
 
-import config
+import astronomicAL.config as config
 import numpy as np
 import pandas as pd
 import panel as pn

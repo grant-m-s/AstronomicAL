@@ -1,6 +1,6 @@
 from bokeh.models import ColumnDataSource
 
-import config
+import astronomicAL.config as config
 import panel as pn
 import param
 

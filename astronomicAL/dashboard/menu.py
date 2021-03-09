@@ -1,5 +1,5 @@
+from astronomicAL.extensions import extension_plots
 from functools import partial
-from extensions import extension_plots
 
 import panel as pn
 import param

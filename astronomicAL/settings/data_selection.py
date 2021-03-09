@@ -1,7 +1,7 @@
+from astronomicAL.utils.optimise import optimise
 from astropy.table import Table
-from utils.optimise import optimise
 
-import config
+import astronomicAL.config as config
 import numpy as np
 import pandas as pd
 import panel as pn
@@ -72,8 +72,9 @@ class DataSelection(param.Parameterized):
         end = time.time()
         print(f"Loading FITS Table {end - start}")
         start = time.time()
-        names = [name for name in fits_table.colnames if len(
-            fits_table[name].shape) <= 1]
+        names = [
+            name for name in fits_table.colnames if len(fits_table[name].shape) <= 1
+        ]
         end = time.time()
         print(f"names list {end - start}")
 
@@ -141,5 +142,6 @@ class DataSelection(param.Parameterized):
             pn.Row(
                 pn.Row(self.memory_optimisation_check),
                 self._memory_opt_tooltip,
-                max_width=300)
-            )
+                max_width=300,
+            ),
+        )
