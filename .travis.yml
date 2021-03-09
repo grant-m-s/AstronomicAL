@@ -3,7 +3,7 @@ python:
   - "3.6"
 install:
   - pip install -r requirements.txt
-script:
-  - coverage run --timid --source=. tests/all_test.py
 after_success:
-  - bash <(curl -s https://codecov.io/bash)
+  - coverage run --timid --source=. tests/all_test.py
+  - coverage xml
+  - bash <(curl -s https://codecov.io/bash) -t 235bf500-d739-4eb3-b349-7bea010a937d -f coverage.xml
