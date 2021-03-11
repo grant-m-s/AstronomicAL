@@ -1413,9 +1413,15 @@ class ActiveLearningTab(param.Parameterized):
             x_al_train,
             config.settings["default_vars"][0],
             config.settings["default_vars"][1],
+            label="Trained On",
             # sizing_mode="stretch_width",
         ).opts(
-            fill_color="black", marker="circle", size=10, toolbar=None, default_tools=[]
+            fill_color="black",
+            marker="circle",
+            size=10,
+            toolbar=None,
+            default_tools=[],
+            show_legend=True,
         )
         end = time.time()
         print(f"x_al_train_plot {end - start}")
@@ -1438,6 +1444,7 @@ class ActiveLearningTab(param.Parameterized):
             query_point,
             config.settings["default_vars"][0],
             config.settings["default_vars"][1],
+            label="Queried"
             # sizing_mode="stretch_width",
         ).opts(
             fill_color="yellow",
@@ -1445,6 +1452,7 @@ class ActiveLearningTab(param.Parameterized):
             size=10,
             toolbar=None,
             default_tools=[],
+            show_legend=True,
         )
         end = time.time()
         print(f"query_point_plot {end - start}")
@@ -1624,11 +1632,21 @@ class ActiveLearningTab(param.Parameterized):
         print("_scores_tab")
 
         return (
-            hv.Path(self._accuracy_list["train"], ["num_points", "score"])
-            * hv.Path(self._recall_list["train"], ["num_points", "score"])
-            * hv.Path(self._precision_list["train"], ["num_points", "score"])
-            * hv.Path(self._f1_list["train"], ["num_points", "score"])
-        )
+            hv.Path(
+                self._accuracy_list["train"], ["num_points", "score"], label="Acc"
+            ).options(show_legend=True)
+            * hv.Path(
+                self._recall_list["train"], ["num_points", "score"], label="Recall"
+            ).options(show_legend=True)
+            * hv.Path(
+                self._precision_list["train"],
+                ["num_points", "score"],
+                label="Precision",
+            ).options(show_legend=True)
+            * hv.Path(
+                self._f1_list["train"], ["num_points", "score"], label="F1"
+            ).options(show_legend=True)
+        ).opts(legend_position="top_left")
 
     def _add_conf_matrices(self):
         print("_add_conf_matrices")
