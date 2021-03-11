@@ -5,7 +5,7 @@
 Please remember to cite our software and user guide whenever relevant.
 
 Citing the Software
-==================
+---------------------
 
 |JOSS|_
 
@@ -21,4 +21,4 @@ published in JOSS_.
 astronomicAL has also been published as an arXiv_ preprint.
 
 Citing the Code
-==================
+------------------

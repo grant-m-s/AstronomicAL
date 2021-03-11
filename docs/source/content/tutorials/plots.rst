@@ -11,7 +11,7 @@ astronomicAL allows for fast plot creation with the use of the :code:`create_plo
 
 Optimised
 **********************************
-By default all custom plots have Datashader_. implemented, allowing millions of datapoints to be plotted at once whilst still remaining responsive.
+By default all custom plots have Datashader_ implemented, allowing millions of datapoints to be plotted at once whilst still remaining responsive.
 
 .. _Datashader: http://holoviews.org/user_guide/Large_Data.html
 
