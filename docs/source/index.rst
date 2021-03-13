@@ -82,11 +82,6 @@ Indices and tables
 * :ref:`modindex`
 * :ref:`search`
 
-.. Funding
-.. =================
-
-.. Grant Stevens acknowledges financial support from the `UKRI`_ for an `Interactive AI Centre for Doctoral Training`_ studentship at the
-.. `University of Bristol`_.
 
 .. image:: images/CDT-UOB-logo.png
    :width: 35%
