@@ -38,6 +38,7 @@ import time
 
 class ActiveLearningTab(param.Parameterized):
     """This class handles the Machine Learning aspect of the codebase.
+
       Based on the users settings, the required features will be extracted from
       the data and split into train, validation and test sets. The user can
       then specify which classifiers and query functions they would like to
@@ -431,7 +432,7 @@ class ActiveLearningTab(param.Parameterized):
 
         if self.committee:
             now = datetime.now()
-            dt_string = now.strftime("%Y%m-%d_%H:%M:%S")
+            dt_string = now.strftime("%Y%m%d_%H:%M:%S")
             for i, clf in enumerate(self.learner):
                 model = clf
 
@@ -462,7 +463,7 @@ class ActiveLearningTab(param.Parameterized):
             model = self.learner.estimator
             if checkpoint:
                 now = datetime.now()
-                dt_string = now.strftime("%Y%m-%d_%H:%M:%S")
+                dt_string = now.strftime("%Y%m%d_%H:%M:%S")
                 dump(model, f"{filename}-{iteration}-{val_f1}-{dt_string}.joblib")
                 scaler_dir = f"{filename}-{iteration}-{val_f1}-{dt_string}-SCALER"
                 if not os.path.isfile(f"{scaler_dir}.joblib") and (
