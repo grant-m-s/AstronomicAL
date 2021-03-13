@@ -1,3 +1,6 @@
+.. _custom_features:
+
+
 Adding custom features to your model
 ====================================================
 

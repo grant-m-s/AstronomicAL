@@ -21,4 +21,4 @@ published in JOSS_.
 astronomicAL has also been published as an arXiv_ preprint.
 
 Citing the Code
-------------------
+~~~~~~~~~~~~~~~~~~~~~~
