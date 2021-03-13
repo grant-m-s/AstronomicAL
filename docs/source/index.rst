@@ -10,12 +10,12 @@ An Interactive Dashboard for Active Learning in Astronomy.
 .. image:: https://codecov.io/gh/grant-m-s/astronomicAL/branch/master/graph/badge.svg?token=TCO9J2AD1Z
     :target: https://codecov.io/gh/grant-m-s/astronomicAL
 
-astronomicAL is an iteractive dashboard to enable Astronomy-based researchers to gain valuable insight into their data by showing them the key information they require to make accurate classifications of each source. Combining the use of the Panel_, Bokeh_, modAL_ and SKLearn_ packages, astronomicAL enables researchers to take full advantage of the benefits of Active Learning, high accuracy models using just a fraction of the total data, without the requirement of being well versed in the Machine Learning theory or implementations.
+astronomicAL is an iteractive dashboard to enable Astronomy-based researchers to gain valuable insight into their data by showing them the key information they require to make accurate classifications of each source. Combining the use of the Panel_, Bokeh_, modAL_ and `SciKit Learn`_ packages, astronomicAL enables researchers to take full advantage of the benefits of Active Learning, high accuracy models using just a fraction of the total data, without the requirement of being well versed in the Machine Learning theory or implementations.
 
 .. _Panel: https://panel.holoviz.org/
 .. _Bokeh: https://docs.bokeh.org/en/latest/index.html
 .. _modAL: https://github.com/modAL-python/modAL
-.. _SKLearn: https://scikit-learn.org/stable/
+.. _`SciKit Learn`: https://scikit-learn.org/stable/
 
 Statement of Need
 *****************
@@ -24,9 +24,9 @@ With the influx of billions of sources incoming from future surveys, automated c
 
 Installation
 ------------------
-To install astronomicAL and all its dependencies, the user can simply clone the repository and from within the repo folder run :code:`pip install -r requirements.txt`. It is recommended that the user creates a virtual environment using tools such as Virtualenvwrapper_ or Conda_, to prevent any conflicting package versions.
+To install astronomicAL and all its dependencies, the user can simply clone the repository and from within the repo folder run :code:`pip install -r requirements.txt`. It is recommended that the user creates a virtual environment using tools such as Virtualenv_ or Conda_, to prevent any conflicting package versions.
 
-.. _Virtualenvwrapper: https://virtualenvwrapper.readthedocs.io/en/latest/install.html
+.. _Virtualenv: https://packaging.python.org/guides/installing-using-pip-and-virtual-environments/#installing-virtualenv
 .. _Conda: https://docs.conda.io/projects/conda/en/latest/user-guide/tasks/manage-environments.html
 
 Quickstart Instructions
