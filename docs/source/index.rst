@@ -42,7 +42,23 @@ To make the integration of your data with the system as seamless as possible, we
   - :code:`RA` and :code:`DEC` columns - The location of your source will enable you to gain access to optical and radio images of your sources.
   - :code:`default_x` and :code:`default_y` columns - These are simply the default axes used for the active learning based plots.
 
-For a thorough tutorial on the training process from start to finish, see :ref:`Training a Classifier: From Start to Finish <Training a Classifier: From Start to Finish>`.
+For a thorough tutorial on the training process, see :ref:`Training a Classifier: From Start to Finish <Training a Classifier: From Start to Finish>`.
+
+.. raw:: html
+
+   <hr>
+
+Referencing the Package
+-------------------------
+
+Please remember to cite our software and user guide whenever relevant.
+
+See the :ref:`citing <citing>` page for instructions about referencing and citing the astronomicAL software.
+
+
+.. raw:: html
+
+   <hr>
 
 .. toctree::
    :maxdepth: 2
@@ -84,14 +100,10 @@ Indices and tables
 
 
 .. image:: images/CDT-UOB-logo.png
-   :width: 35%
-   :align: left
-   :target: https://www.bristol.ac.uk/
+   :width: 38%
+   :target: http://www.bristol.ac.uk/cdt/interactive-ai/
 
-.. raw:: html
-
-   <div class="img-break"></div>
 
 .. image:: images/EPSRC+logo.png
-   :width: 54%
-   :align: right
+   :width: 56%
+   :target: https://gtr.ukri.org/projects?ref=studentship-2466020

@@ -8,7 +8,7 @@ Developers
 Core Development
 **********************
 
-* `Grant Stevens <https://github.com/grant-m-s>`_
+* `Grant Stevens <https://research-information.bris.ac.uk/en/persons/grant-stevens>`_
 
 Technical Advisors
 **********************
@@ -27,11 +27,11 @@ Grant Stevens acknowledges financial support from the `UKRI`_ for an `Interactiv
 
 .. image:: ../../images/CDT-UOB-logo.png
    :width: 38%
-   :target: https://www.bristol.ac.uk/
+   :target: http://www.bristol.ac.uk/cdt/interactive-ai/
 
 .. image:: ../../images/EPSRC+logo.png
    :width: 56%
-
+   :target: https://gtr.ukri.org/projects?ref=studentship-2466020
 
 .. raw:: html
 
@@ -44,5 +44,5 @@ Please see the :ref:`citing <citing>` page for instructions about referencing an
 the astronomicAL software.
 
 .. _`University of Bristol`: https://www.bristol.ac.uk/
-.. _`UKRI`: https://gtr.ukri.org/person/D5D3EEFA-FC3C-4F95-AA7C-FD314E0651BB
+.. _`UKRI`: https://gtr.ukri.org/projects?ref=studentship-2466020
 .. _`Interactive AI Centre for Doctoral Training`: http://www.bristol.ac.uk/cdt/interactive-ai/
