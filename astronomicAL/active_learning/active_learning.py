@@ -237,11 +237,11 @@ class ActiveLearningTab(param.Parameterized):
 
         self.classifier_dropdown = pn.widgets.Select(
             name="Classifier",
-            options=["KNN", "DTree", "RForest", "AdaBoost", "GBTrees"],
+            options=list(models.get_classifiers().keys()),
         )
         self.query_strategy_dropdown = pn.widgets.Select(
             name="Query Strategy",
-            options=["Uncertainty Sampling", "Margin Sampling", "Entropy Sampling"],
+            options=list(query_strategies.get_strategy_dict().keys()),
         )
         self.starting_num_points = pn.widgets.IntInput(
             name="How many initial points?", value=5, step=1, start=3
