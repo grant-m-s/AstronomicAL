@@ -212,7 +212,7 @@ def create_plot(
                 ).opts(xlim=(min_x, max_x), ylim=(min_y, max_y), responsive=True),
                 threshold=0.75,
                 how="saturate",
-            )
+            ).redim.range(xdim=(min_x, max_x), ydim=(min_y, max_y))
         else:
             plot = dynspread(
                 datashade(
@@ -303,7 +303,11 @@ def bpt_plot(data, selected=None, **kwargs):
 
     plot_OI = plot_OI * OI_line1
 
-    tabs = pn.Tabs(("NII", plot_NII), ("SII", plot_SII), ("OI", plot_OI))
+    tabs = pn.Tabs(
+        ("NII", plot_NII.opt(shared_axes=False)),
+        ("SII", plot_SII.opt(shared_axes=False)),
+        ("OI", plot_OI.opt(shared_axes=False)),
+    )
 
     return tabs
 
