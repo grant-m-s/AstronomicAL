@@ -91,21 +91,23 @@ class SelectedSourceDashboard(param.Parameterized):
     def _add_selected_info(self):
 
         self.contents = "Selected Source"
-        self.search_id = pn.widgets.AutocompleteInput(
+        self.search_id = pn.widgets.TextInput(
             name="Select ID",
-            options=list(self.df[config.settings["id_col"]].values),
             placeholder="Select a source by ID",
             max_height=50,
         )
 
         # TODO :: Fix the weird printouts of the autocomplete search
-        # self.search_id.param.watch(self._change_selected, "value")
+        self.search_id.param.watch(self._change_selected, "value")
 
         self.panel()
 
     def _change_selected(self, event):
 
         if event.new == "":
+            return
+
+        if event.new not in list(self.df[config.settings["id_col"]].values):
             return
 
         selected_source = self.df[self.df[config.settings["id_col"]] == event.new]
@@ -363,7 +365,7 @@ class SelectedSourceDashboard(param.Parameterized):
             # print(self.src.data)
             self.row[0] = pn.Card(
                 pn.Column(
-                    # self.search_id,
+                    self.search_id,
                     pn.widgets.DataFrame(
                         pd.DataFrame(self.selected_history, columns=["Selected IDs"]),
                         show_index=False,
