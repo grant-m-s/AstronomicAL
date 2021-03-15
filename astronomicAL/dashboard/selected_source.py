@@ -61,8 +61,10 @@ class SelectedSourceDashboard(param.Parameterized):
 
     spectra_image = pn.pane.PNG(
         alt_text="Image Unavailable",
-        min_width=400,
-        min_height=400,
+        min_width=350,
+        min_height=350,
+        max_width=550,
+        max_height=550,
         sizing_mode="scale_height",
     )
 
@@ -325,13 +327,21 @@ class SelectedSourceDashboard(param.Parameterized):
             deselect_buttton.on_click(self._deselect_source_cb)
 
             print("setting extra row")
-            extra_data_row = pn.Row()
-            for col in config.settings["extra_info_cols"]:
+            extra_data_col = pn.Column()
+            for i, col in enumerate(config.settings["extra_info_cols"]):
+
+                if i % 3 == 0:
+                    extra_data_row = pn.Row()
 
                 info = f"**{col}**: {str(self.src.data[f'{col}'][0])}"
                 extra_data_row.append(
                     pn.pane.Markdown(info, max_width=12 * len(info), max_height=10)
                 )
+
+                if ((i + 1) % 3 == 0) or (
+                    (i + 1) == len(config.settings["extra_info_cols"])
+                ):
+                    extra_data_col.append(extra_data_row)
             print("setting row")
             self.row[0] = pn.Card(
                 pn.Column(
@@ -339,7 +349,7 @@ class SelectedSourceDashboard(param.Parameterized):
                         f'**Source ID**: {self.src.data[config.settings["id_col"]][0]}',
                         max_height=10,
                     ),
-                    extra_data_row,
+                    extra_data_col,
                     pn.Column(
                         pn.Row(
                             self.optical_image,
