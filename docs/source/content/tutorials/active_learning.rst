@@ -178,7 +178,7 @@ Creating Feature Combinations
 
 The next step is to create any of the feature combinations we require. By default, astronomicAL allows you to add, subtract, multiply and divide any :code:`n` features.
 
-.. warning::
+.. caution::
 
 	To find all the combinations of :math:`r` features of out all your baseline features of size :math:`n`, the following equation is used:
   .. math::
@@ -365,7 +365,22 @@ Let's look at some of the other generated features and see if they can visually 
 .. image:: ../../images/training_tutorial_AL_13.png
   :width: 70%
 
+All plots are rendered using Bokeh_ and optimised using Datashader_, enabling you to plot millions of points at once whilst still remaining responsive.
+
+.. _Datashader: http://holoviews.org/user_guide/Large_Data.html
+.. _Bokeh: https://docs.bokeh.org/en/latest/index.html
+
+
+.. image:: ../../images/interactive_plot.gif
+
+.. raw:: html
+
+   <hr>
+
+
 Once again, we can see clear clustering between the two sets of objects; however, the overlapping boundary is still problematic. That being said, taking all the information into consideration, I think we can assign this source the Star label and continue training.
+
+
 
 .. image:: ../../images/training_tutorial_AL_14_0.png
 
@@ -463,7 +478,7 @@ Score Tracking Plot
 
 .. image:: ../../images/training_tutorial_AL_20.png
 
-The score tracking plot does exactly that - tracks scores. This is useful for seeing the overall trend of your models improvement. As is commonly the case, you may start to notice your scores make smaller and smaller changes as more labelled data are added to the model, eventually possibly leading to basically a flat line over multiple iterations. Although there aren't specific stopping criteria for Active Learning, having your scores converge in this way with no changes in performance as you add more data might be a good time to stop.
+The score tracking plot does exactly that - tracks scores. This is useful for seeing the overall trend of your models improvement. As is commonly the case, you may start to notice your scores make smaller and smaller changes as more labelled data are added to the model, eventually possibly leading to basically a flat line over multiple iterations. Although there aren't specific stopping criteria for Active Learning, having your scores converge in this way, with no changes in performance as you add more data, might be a good time to stop.
 
 
 .. raw:: html
@@ -514,13 +529,28 @@ The model would likely improve further if we continued to add a few extra points
 Saving your model
 ----------------------------
 
-So the model has reached a suitable performance for us to apply to it new and unseen data, so it is important that we save it for reusability and portability.
+Now that the model has reached a suitable performance for us to apply it to new and unseen data, it is important that we save it for reusability and portability.
 
-We'll the good news is that after each iteration of Active Learning, astronomicAL automatically saves a copy of your model inside the :code:`models/` directory in the form :code:`label-Classifier_QueryStrategy.joblib`. This gets overwritten at each iteration, so it is always the most up-to-date. However, when you require something more permanent, you can use the :code:`Checkpoint` button.
+Well, the good news is that after each iteration of Active Learning, astronomicAL automatically saves a copy of your model inside the :code:`models/` directory in the form :code:`label-Classifier_QueryStrategy.joblib`. This gets overwritten at each iteration, so it is always the most up-to-date. However, when you require something more permanent, you can use the :code:`Checkpoint` button.
 
 .. image:: ../../images/training_tutorial_AL_28.png
 
 This can be pressed once per iteration and will save your current model in the form :code:`label-Classifier_QueryStrategy-iteration-validationF1score-YYYYMMDD_H:M:S.joblib`
 to allow you to choose your best performing or most recent model quickly.
 
-.. .. image:: ../../images/training_tutorial_AL_29.png
+What About The Other Classifiers?
+----------------------------------
+
+In this example, we only made use of the Star classifier; well, what about the Galaxy classifier?
+
+.. image:: ../../images/training_tutorial_AL_30.png
+
+As you can see, each classifier tab is independent of the others, allowing you to tailor each classifier for each label. The workflow for training multiple classifiers is down to preference. You could focus on a single classifier until you are happy with its performance, then move on to the next, or you could assign a label for a source on one classifier, then switch over tabs and label a source on one of the other classifiers, each will produce the same results.
+
+.. raw:: html
+
+   <hr>
+
+.. image:: ../../images/training_tutorial_AL_31.png
+
+If you lose track of which tab the selected source is from, you can simply select the :code:`Show Queried` button to reselect the current classifier's queried point.
