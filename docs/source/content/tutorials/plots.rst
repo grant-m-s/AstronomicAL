@@ -122,5 +122,84 @@ Once the columns have been chosen, the user is presented with the brand new :cod
 
 .. image:: ../../images/x_squared_example.png
 
-Optional plot flags
+Optional Plot Flags
 -------------------
+
+The :code:`create_plot` function allows users to specify a number of flags to ensure that the plot is as informative as possible.
+
+The following pairs of images are arrange so that the *Flag=On* is on the left and *Flag=Off* on the right.
+
+Colours
+********************
+
+.. image:: ../../images/fig_flags_colours.png
+    :width: 47%
+.. image:: ../../images/fig_flags_coloursN.png
+    :width: 47%
+
+The :code:`colours` flag will assign the colours the user specified in the opening settings. By choosing :code:`False`, all points remain the default colour assigned by Datashader.
+
+The default for this value is :code:`True`.
+
+.. raw:: html
+
+   <hr>
+
+Labels
+*******************
+
+.. image:: ../../images/fig_flags_labels.png
+    :width: 47%
+.. image:: ../../images/fig_flags_labelsN.png
+    :width: 47%
+
+The :code:`label_plot` flag will render a legend on the plot, using the user labels in the opening settings.
+
+The default for this value is :code:`True`.
+
+.. raw:: html
+
+   <hr>
+
+Smaller Axes Limits
+*************************
+
+.. image:: ../../images/fig_flags_smalleraxes.png
+    :width: 47%
+.. image:: ../../images/fig_flags_smalleraxesN.png
+    :width: 47%
+
+The :code:`smaller_axes_limits` flag will reduce the x and y axes limits so that the default ranges are between 4 standard deviations of the mean values. This can be used to reduce the negative impact on viewing from large outliers in the data, as can be seen above. However, all the data still remains and values outside this range can still be viewed by interacting with the plot. If the minimum or maximum of an axis is already within 4 standard deviations of the mean, then this will remain the limit for that axis.
+
+.. note::
+
+	If there is a selected source which falls outside the range of the new axes limits, the axes ranges will extend to show the user that selected points so that the user does not miss out on potentially vital information when labelling.
+
+The default for this value is :code:`None` and so no axes limits are changed.
+
+.. raw:: html
+
+   <hr>
+
+Bounded Axes
+**********************
+
+.. image:: ../../images/fig_flags_bounded.png
+    :width: 47%
+.. image:: ../../images/fig_flags_boundedN.png
+    :width: 47%
+
+
+The :code:`bounds` parameter, much like :code:`smaller_axes_limits`, will reduce the x and y axes limits, however it does this much more abruptly and any data points not within the specified bounds will be removed from the plot completely. The bound is specified as follows :code:`[xmin,ymax,xmax,ymin]` using the *[left,top,right,bottom]* style.
+
+In the example above we have specified assigned :code:`bounds=[0,1,1,0]` and as you can see below if you zoom out there exists not rendered points outside this region.
+
+.. image:: ../../images/fig_flags_bounded_1.png
+    :width: 47%
+    :align: center
+
+This parameter is useful when you have missing data that default to extreme values, allowing you to specify the region representing realistic values.
+
+If a selected source falls outside this region and is not shown on the plot, you can use this as a indication that the data for the chosen axes are not available for that datapoint.
+
+The default for this value is :code:`None` and so no axes limits are changed.
