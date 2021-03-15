@@ -327,36 +327,29 @@ class SelectedSourceDashboard(param.Parameterized):
             deselect_buttton.on_click(self._deselect_source_cb)
 
             print("setting extra row")
-            extra_data_col = pn.Column()
+            extra_data_list = [
+                ["Source ID", self.src.data[config.settings["id_col"]][0]]
+            ]
+
             for i, col in enumerate(config.settings["extra_info_cols"]):
 
-                if i % 3 == 0:
-                    extra_data_row = pn.Row()
+                extra_data_list.append([col, self.src.data[f"{col}"][0]])
 
-                info = f"**{col}**: {str(self.src.data[f'{col}'][0])}"
-                extra_data_row.append(
-                    pn.pane.Markdown(info, max_width=12 * len(info), max_height=10)
-                )
-
-                if ((i + 1) % 3 == 0) or (
-                    (i + 1) == len(config.settings["extra_info_cols"])
-                ):
-                    extra_data_col.append(extra_data_row)
             print("setting row")
+            extra_data_df = pd.DataFrame(extra_data_list, columns=["Column", "Value"])
+            extra_data_pn = pn.pane.DataFrame(extra_data_df, index=False, max_width=350)
             self.row[0] = pn.Card(
                 pn.Column(
-                    pn.pane.Markdown(
-                        f'**Source ID**: {self.src.data[config.settings["id_col"]][0]}',
-                        max_height=10,
-                    ),
-                    extra_data_col,
-                    pn.Column(
-                        pn.Row(
-                            self.optical_image,
-                            self.radio_image,
+                    pn.Row(
+                        pn.Column(
+                            pn.Row(
+                                self.optical_image,
+                                self.radio_image,
+                            ),
+                            button_row,
+                            spectra,
                         ),
-                        button_row,
-                        spectra,
+                        extra_data_pn,
                     ),
                 ),
                 collapsible=False,
