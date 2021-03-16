@@ -651,7 +651,7 @@ class ActiveLearningTab(param.Parameterized):
             self.y_al_train.shape[0] == self.id_al_train.shape[0]
         ), "AL_LABELS & IDs NOT EQUAL"
 
-        self.panel()
+        self.panel(button_update=True)
 
     def _empty_data(self):
 
@@ -667,18 +667,20 @@ class ActiveLearningTab(param.Parameterized):
     def _next_iteration_cb(self, event):
         print("next_iter_cb")
 
-        if self.next_iteration_button.name == "Training...":
-            return
+        self.next_iteration_button.disabled = True
 
         self.next_iteration_button.name = "Training..."
 
         self.iterate_AL()
 
+        self.next_iteration_button.name = "Querying..."
+
         self.checkpoint_button.name = "Checkpoint"
-        self.checkpoint_button.disabled = False
         self._assigned = False
 
+        self.next_iteration_button.disabled = False
         self.panel()
+        self.checkpoint_button.disabled = False
 
     def _start_training_cb(self, event):
         print("start_training_cb")
@@ -1552,7 +1554,7 @@ class ActiveLearningTab(param.Parameterized):
         p = hv.Points(
             df,
             [config.settings["default_vars"][0], config.settings["default_vars"][1]],
-        ).opts(active_tools=["pan", "wheel_zoom"])
+        ).opts(toolbar=None, default_tools=[])
         end = time.time()
         print(f"p-val {end - start}")
 
@@ -1568,14 +1570,19 @@ class ActiveLearningTab(param.Parameterized):
                 ylim=(self._min_y, self._max_y),
                 shared_axes=False,
                 responsive=True,
-                active_tools=["pan", "wheel_zoom"],
             ),
             threshold=0.75,
             how="saturate",
         )
         end = time.time()
         print(f"plot-val {end - start}")
-        return plot
+        return plot.opts(toolbar=None, default_tools=[])
+
+    def scale_range(self, input, min, max):
+        input += -(np.min(input))
+        input /= np.max(input) / (max - min)
+        input += min
+        return input
 
     def _metric_tab(self):
 
@@ -1601,21 +1608,55 @@ class ActiveLearningTab(param.Parameterized):
         end = time.time()
         print(f"df {end - start}")
 
+        print(f"MIN:{np.min(df['metric'])}")
+        print(f"MAX:{np.max(df['metric'])}")
+
+        if len(df) > 0:
+            bounds_list = []
+
+            bounds_list.append(
+                [
+                    np.mean(df[list(df.columns)[0]]) + np.random.rand(),
+                    np.mean(df[list(df.columns)[1]]) + np.random.rand(),
+                    0.5,
+                    0,
+                    0,
+                    False,
+                ]
+            )
+
+            bounds_list.append(
+                [
+                    np.mean(df[list(df.columns)[0]]) - np.random.rand(),
+                    np.mean(df[list(df.columns)[1]]) - np.random.rand(),
+                    0.0,
+                    0,
+                    0,
+                    False,
+                ]
+            )
+            bounds = pd.DataFrame(
+                bounds_list,
+                columns=list(self._model_output_data_tr.keys()),
+            )
+            df = df.append(bounds, ignore_index=True)
+
         start = time.time()
         p = hv.Points(
             df, [config.settings["default_vars"][0], config.settings["default_vars"][1]]
-        ).opts(active_tools=["pan", "wheel_zoom"])
+        ).opts(toolbar=None, default_tools=[])
 
         end = time.time()
         print(f"p {end - start}")
 
-        start = time.time()
+        print(f"MIN:{np.min(df['metric'])}")
+        print(f"MAX:{np.max(df['metric'])}")
 
+        start = time.time()
         plot = dynspread(
             datashade(
                 p, cmap="RdYlGn_r", aggregator=ds.max("metric"), normalization="linear"
             ).opts(
-                active_tools=["pan", "wheel_zoom"],
                 xlim=(self._min_x, self._max_x),
                 ylim=(self._min_y, self._max_y),
                 shared_axes=False,
@@ -1627,7 +1668,7 @@ class ActiveLearningTab(param.Parameterized):
 
         end = time.time()
         print(f"plot {end - start}")
-        return plot
+        return plot.opts(toolbar=None, default_tools=[])
 
     def _scores_tab(self):
         print("_scores_tab")
@@ -1647,7 +1688,7 @@ class ActiveLearningTab(param.Parameterized):
             * hv.Path(
                 self._f1_list["train"], ["num_points", "score"], label="F1"
             ).options(show_legend=True)
-        ).opts(legend_position="top_left")
+        ).opts(legend_position="top_left", toolbar=None, default_tools=[])
 
     def _add_conf_matrices(self):
         print("_add_conf_matrices")
@@ -1737,7 +1778,7 @@ class ActiveLearningTab(param.Parameterized):
                 ),
             )
 
-    def panel(self):
+    def panel(self, button_update=False):
         """Create the active learning tab panel.
 
         Returns
@@ -1748,47 +1789,66 @@ class ActiveLearningTab(param.Parameterized):
 
         """
         print("panel")
+        if not button_update:
+            self.assign_label_group.value = self._last_label
 
-        self.assign_label_group.value = self._last_label
+            start = time.time()
+            self.setup_panel()
+            end = time.time()
+            print(f"setup {end - start}")
+            start = time.time()
 
-        start = time.time()
-        self.setup_panel()
-        end = time.time()
-        print(f"setup {end - start}")
-        start = time.time()
-
-        buttons_row = pn.Row(max_height=30)
-        if self._training:
-            if self._assigned:
-                buttons_row.append(self.next_iteration_button)
-            else:
-                buttons_row = pn.Row(
-                    self.assign_label_group,
-                    pn.Row(
-                        self.assign_label_button,
-                        self.show_queried_button,
-                        self.checkpoint_button,
+            buttons_row = pn.Row(max_height=30)
+            if self._training:
+                if self._assigned:
+                    buttons_row.append(self.next_iteration_button)
+                else:
+                    buttons_row = pn.Row(
+                        self.assign_label_group,
+                        pn.Row(
+                            self.assign_label_button,
+                            self.show_queried_button,
+                            self.checkpoint_button,
+                            max_height=30,
+                        ),
                         max_height=30,
-                    ),
-                    max_height=30,
-                )
+                    )
 
-        self.panel_row[0] = pn.Column(
-            pn.Row(self.setup_row),
-            pn.Row(
-                pn.Tabs(
-                    ("Train", self._train_tab),
-                    ("Metric", self._metric_tab),
-                    ("Val", self._val_tab),
-                    ("Scores", self._scores_tab),
-                    dynamic=True,
+            self.panel_row[0] = pn.Column(
+                pn.Row(self.setup_row),
+                pn.Row(
+                    pn.Tabs(
+                        ("Train", self._train_tab),
+                        ("Metric", self._metric_tab),
+                        ("Val", self._val_tab),
+                        ("Scores", self._scores_tab),
+                        # dynamic=True,
+                    ),
+                    self._add_conf_matrices(),
                 ),
-                self._add_conf_matrices(),
-            ),
-            pn.Row(max_height=20),
-            buttons_row,
-        )
-        end = time.time()
-        print(f"panel_row {end - start}")
-        print("\n====================\n")
-        return self.panel_row
+                pn.Row(max_height=20),
+                buttons_row,
+            )
+            end = time.time()
+            print(f"panel_row {end - start}")
+            print("\n====================\n")
+            return self.panel_row
+        else:
+            buttons_row = pn.Row(max_height=30)
+            if self._training:
+                if self._assigned:
+                    buttons_row.append(self.next_iteration_button)
+                else:
+                    buttons_row = pn.Row(
+                        self.assign_label_group,
+                        pn.Row(
+                            self.assign_label_button,
+                            self.show_queried_button,
+                            self.checkpoint_button,
+                            max_height=30,
+                        ),
+                        max_height=30,
+                    )
+            self.panel_row[0][3] = buttons_row
+
+            return self.panel_row
