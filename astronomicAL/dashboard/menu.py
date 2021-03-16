@@ -74,6 +74,9 @@ class MenuDashboard(param.Parameterized):
 
         """
         self.row[0] = pn.Column(
-            self._plot_selection, self._add_plot_button, max_height=100
+            pn.layout.VSpacer(),
+            self._plot_selection,
+            self._add_plot_button,
+            max_height=100,
         )
         return self.row
