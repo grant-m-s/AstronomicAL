@@ -196,8 +196,6 @@ class ParameterAssignment(param.Parameterized):
         config.settings = self.get_settings()
         config.settings["confirmed"] = False
 
-        labels = self.df[config.settings["label_col"]]
-
         config.settings["extra_info_cols"] = self.extra_info_selector.value
         self.confirm_settings_button.name = "Confirmed"
         self.ready = True
