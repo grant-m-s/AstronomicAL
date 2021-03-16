@@ -43,10 +43,8 @@ class ParameterAssignment(param.Parameterized):
 
     label_column = param.ObjectSelector(objects=["default"], default="default")
     id_column = param.ObjectSelector(objects=["default"], default="default")
-    default_x_variable = param.ObjectSelector(
-        objects=["default"], default="default")
-    default_y_variable = param.ObjectSelector(
-        objects=["default"], default="default")
+    default_x_variable = param.ObjectSelector(objects=["default"], default="default")
+    default_y_variable = param.ObjectSelector(objects=["default"], default="default")
 
     completed = param.Boolean(
         default=False,
@@ -71,7 +69,10 @@ class ParameterAssignment(param.Parameterized):
 
     def _initialise_widgets(self):
         self.confirm_settings_button = pn.widgets.Button(
-            name="Confirm Settings", max_height=30, margin=(25, 0, 0, 0)
+            name="Confirm Settings",
+            max_height=30,
+            margin=(25, 0, 0, 0),
+            button_type="primary",
         )
         self.confirm_settings_button.on_click(self._confirm_settings_cb)
 
@@ -136,7 +137,9 @@ class ParameterAssignment(param.Parameterized):
         self.colours_param = {}
 
         if len(self.df[self.label_column].unique()) > 20:
-            print("""You have chosen a column with too many unique values (possibly continous) please choose a column with a smaller set of labels (<=20)""")
+            print(
+                """You have chosen a column with too many unique values (possibly continous) please choose a column with a smaller set of labels (<=20)"""
+            )
             self.panel()
             return
         self.labels = sorted(self.df[self.label_column].unique())
@@ -182,7 +185,8 @@ class ParameterAssignment(param.Parameterized):
         labels = config.settings["labels"]
         for i, data_label in enumerate(labels):
             self.label_strings_param[f"{data_label}"] = pn.widgets.TextInput(
-                name=f"{data_label}", placeholder=f"{data_label}")
+                name=f"{data_label}", placeholder=f"{data_label}"
+            )
 
     def _confirm_settings_cb(self, event):
         print("Saving settings...")
@@ -311,8 +315,10 @@ class ParameterAssignment(param.Parameterized):
         updated_settings["default_vars"] = self.get_default_variables()
         updated_settings["labels"] = self.labels
         updated_settings["label_colours"] = self.get_label_colours()
-        (updated_settings["labels_to_strings"],
-         updated_settings["strings_to_labels"]) = self.get_label_strings()
+        (
+            updated_settings["labels_to_strings"],
+            updated_settings["strings_to_labels"],
+        ) = self.get_label_strings()
 
         return updated_settings
 
@@ -372,7 +378,13 @@ class ParameterAssignment(param.Parameterized):
 
                 layout.append(self.extra_info_selector)
 
-                layout.append(self.confirm_settings_button)
+                layout.append(
+                    pn.Row(
+                        self.confirm_settings_button,
+                    )
+                )
+
+                layout.append(pn.Spacer(height=50))
 
             self.column[0] = layout
 
