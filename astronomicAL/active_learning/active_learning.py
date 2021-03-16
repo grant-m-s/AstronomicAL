@@ -10,7 +10,6 @@ from holoviews.operation.datashader import (
     datashade,
     dynspread,
 )
-from itertools import combinations
 from joblib import dump
 from modAL.models import ActiveLearner, Committee
 from sklearn.base import clone
@@ -1608,39 +1607,6 @@ class ActiveLearningTab(param.Parameterized):
         end = time.time()
         print(f"df {end - start}")
 
-        print(f"MIN:{np.min(df['metric'])}")
-        print(f"MAX:{np.max(df['metric'])}")
-
-        if len(df) > 0:
-            bounds_list = []
-
-            bounds_list.append(
-                [
-                    np.mean(df[list(df.columns)[0]]) + np.random.rand(),
-                    np.mean(df[list(df.columns)[1]]) + np.random.rand(),
-                    0.5,
-                    0,
-                    0,
-                    False,
-                ]
-            )
-
-            bounds_list.append(
-                [
-                    np.mean(df[list(df.columns)[0]]) - np.random.rand(),
-                    np.mean(df[list(df.columns)[1]]) - np.random.rand(),
-                    0.0,
-                    0,
-                    0,
-                    False,
-                ]
-            )
-            bounds = pd.DataFrame(
-                bounds_list,
-                columns=list(self._model_output_data_tr.keys()),
-            )
-            df = df.append(bounds, ignore_index=True)
-
         start = time.time()
         p = hv.Points(
             df, [config.settings["default_vars"][0], config.settings["default_vars"][1]]
@@ -1649,13 +1615,14 @@ class ActiveLearningTab(param.Parameterized):
         end = time.time()
         print(f"p {end - start}")
 
-        print(f"MIN:{np.min(df['metric'])}")
-        print(f"MAX:{np.max(df['metric'])}")
-
         start = time.time()
         plot = dynspread(
             datashade(
-                p, cmap="RdYlGn_r", aggregator=ds.max("metric"), normalization="linear"
+                p,
+                cmap="RdYlGn_r",
+                aggregator=ds.max("metric"),
+                normalization="linear",
+                clims=(0, 0.5),
             ).opts(
                 xlim=(self._min_x, self._max_x),
                 ylim=(self._min_y, self._max_y),
