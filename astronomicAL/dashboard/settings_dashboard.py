@@ -48,7 +48,7 @@ class SettingsDashboard(param.Parameterized):
 
     def _initialise_widgets(self, main):
         self._close_settings_button = pn.widgets.Button(
-            name="Close Settings", max_width=100, disabled=True
+            name="Close Settings", max_width=150, max_height=50, disabled=True
         )
         self._close_settings_button.on_click(
             partial(self._close_settings_cb, main=main)
@@ -90,8 +90,8 @@ class SettingsDashboard(param.Parameterized):
         self.pipeline.layout[0][2][1].sizing_mode = "fixed"
         self.pipeline.layout[0][2][0].height = 30
         self.pipeline.layout[0][2][1].height = 30
-        self.pipeline.layout[0][2][0].width = 100
-        self.pipeline.layout[0][2][1].width = 100
+        self.pipeline.layout[0][2][0].max_width = 150
+        self.pipeline.layout[0][2][1].max_width = 150
 
         self.pipeline.layout[0][2][0].on_click(self._stage_previous_cb)
 
@@ -177,15 +177,24 @@ class SettingsDashboard(param.Parameterized):
             pn.Column(
                 pn.Row(
                     self.pipeline.title,
-                    self.pipeline.buttons,
                 ),
-                self.pipeline.stage,
+                pn.Row(self.pipeline.stage),
+                pn.Row(
+                    pn.layout.HSpacer(),
+                    pn.layout.HSpacer(),
+                    self.pipeline.buttons,
+                    max_height=50,
+                ),
             ),
             header=pn.Row(
                 pn.widgets.StaticText(
                     name="Settings Panel",
                     value="Please choose the appropriate settings for your data",
                 ),
+                pn.layout.HSpacer(max_height=30),
+                pn.layout.HSpacer(max_height=30),
+                pn.layout.HSpacer(max_height=30),
+                pn.layout.HSpacer(max_height=30),
                 self._close_settings_button,
             ),
             collapsible=False,
