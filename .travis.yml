@@ -6,6 +6,6 @@ install:
 script:
   - pytest
 after_success:
-  - coverage run --timid --source=. tests/all_test.py
+  - coverage run --timid --source=. --omit="*/test*" tests/all_test.py
   - coverage xml
   - bash <(curl -s https://codecov.io/bash) -t 235bf500-d739-4eb3-b349-7bea010a937d -f coverage.xml
