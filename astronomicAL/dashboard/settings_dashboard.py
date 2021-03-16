@@ -74,7 +74,7 @@ class SettingsDashboard(param.Parameterized):
             "Select Your Data", DataSelection(src), ready_parameter="ready"
         ),
         self.pipeline.add_stage(
-            "Assign Parameters", ParameterAssignment(df), ready_parameter="ready"
+            "Assign Parameters", ParameterAssignment(), ready_parameter="ready"
         ),
         self.pipeline.add_stage(
             "Active Learning Settings",
