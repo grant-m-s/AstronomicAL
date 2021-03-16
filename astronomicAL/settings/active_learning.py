@@ -101,7 +101,9 @@ class ActiveLearningSettings(param.Parameterized):
             show_index=False,
         )
 
-        self.confirm_settings_button = pn.widgets.Button(name="Confirm Settings")
+        self.confirm_settings_button = pn.widgets.Button(
+            name="Confirm Settings", button_type="primary"
+        )
         self.confirm_settings_button.on_click(self._confirm_settings_cb)
 
         self.exclude_labels_checkbox = pn.widgets.Checkbox(
@@ -253,7 +255,9 @@ class ActiveLearningSettings(param.Parameterized):
                     self._feature_generator_dataframe,
                     sizing_mode="stretch_width",
                 ),
+                pn.layout.Divider(max_width=30),
                 pn.Row(self.confirm_settings_button, max_height=30),
+                pn.Row(pn.Spacer(height=50)),
             )
 
         return self.column
