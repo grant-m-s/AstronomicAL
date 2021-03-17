@@ -1,0 +1,137 @@
+{
+  "Author": "",
+  "doi": "",
+  "dataset_filepath": "data/test_data_cpz.fits",
+  "optimise_data": true,
+  "layout": {
+    "0": {
+      "x": 0,
+      "y": 0,
+      "w": 6,
+      "h": 5,
+      "contents": "Active Learning"
+    },
+    "1": {
+      "x": 6,
+      "y": 0,
+      "w": 6,
+      "h": 5,
+      "contents": "Selected Source Info"
+    },
+    "2": {
+      "x": 0,
+      "y": 5,
+      "w": 4,
+      "h": 4,
+      "contents": "Basic Plot",
+      "panel_contents": [
+        "u3-z3",
+        "z3-k3"
+      ]
+    },
+    "3": {
+      "x": 4,
+      "y": 5,
+      "w": 4,
+      "h": 4,
+      "contents": "Basic Plot",
+      "panel_contents": [
+        "u-g",
+        "w1-i3"
+      ]
+    },
+    "4": {
+      "x": 8,
+      "y": 5,
+      "w": 4,
+      "h": 4,
+      "contents": "Basic Plot",
+      "panel_contents": [
+        "j-h3",
+        "y-w1"
+      ]
+    },
+    "5": {
+      "x": 0,
+      "y": 9,
+      "w": 6,
+      "h": 5,
+      "contents": "AGN Wedge"
+    },
+    "6": {
+      "x": 6,
+      "y": 9,
+      "w": 6,
+      "h": 5,
+      "contents": "BPT Plots"
+    }
+  },
+  "id_col": "id",
+  "label_col": "labels",
+  "default_vars": [
+    "g-j",
+    "y-w1"
+  ],
+  "labels": [
+    -1,
+    0,
+    1
+  ],
+  "label_colours": {
+    "0": "#ffba0e",
+    "1": "#0035ff",
+    "-1": "#989898"
+  },
+  "labels_to_strings": {
+    "0": "S",
+    "1": "G",
+    "-1": "U"
+  },
+  "strings_to_labels": {
+    "U": -1,
+    "S": 0,
+    "G": 1
+  },
+  "extra_info_cols": [
+    "Lx",
+    "r",
+    "weirdness_BP16"
+  ],
+  "labels_to_train": [
+    "S",
+    "G"
+  ],
+  "features_for_training": [
+    "u",
+    "g",
+    "r",
+    "i",
+    "z",
+    "y",
+    "j",
+    "h",
+    "k",
+    "w1",
+    "w2",
+    "u3",
+    "g3",
+    "r3",
+    "i3",
+    "z3",
+    "y3",
+    "j3",
+    "h3",
+    "k3"
+  ],
+  "exclude_labels": true,
+  "unclassified_labels": [
+    "U"
+  ],
+  "scale_data": false,
+  "feature_generation": [
+    [
+      "subtract (a-b)",
+      2
+    ]
+  ]
+}
