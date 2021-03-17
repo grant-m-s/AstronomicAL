@@ -193,7 +193,9 @@ class ParameterAssignment(param.Parameterized):
         self.confirm_settings_button.name = "Assigning parameters..."
         self.confirm_settings_button.disabled = True
 
-        config.settings = self.get_settings()
+        updated_settings = self.get_settings()
+        for key in updated_settings.keys():
+            config.settings[key] = updated_settings[key]
         config.settings["confirmed"] = False
 
         config.settings["extra_info_cols"] = self.extra_info_selector.value
