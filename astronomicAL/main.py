@@ -10,10 +10,23 @@ import holoviews as hv
 import json
 import pandas as pd
 import panel as pn
-
+import numpy as np
 
 hv.extension("bokeh")
 hv.renderer("bokeh").webgl = True
+
+
+class NumpyEncoder(json.JSONEncoder):
+    """ Special json encoder for numpy types """
+
+    def default(self, obj):
+        if isinstance(obj, np.integer):
+            return int(obj)
+        elif isinstance(obj, np.floating):
+            return float(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return json.JSONEncoder.default(self, obj)
 
 
 def save_layout_cb(attr, old, new):
@@ -21,6 +34,28 @@ def save_layout_cb(attr, old, new):
     layout = json.loads(new)
     with open("astronomicAL/layout.json", "w") as fp:
         json.dump(layout, fp)
+
+    export_config = {}
+
+    export_config["Author"] = ""
+    export_config["doi"] = ""
+    export_config["id_col"] = config.settings["id_col"]
+    export_config["label_col"] = config.settings["label_col"]
+    export_config["default_vars"] = config.settings["default_vars"]
+    export_config["labels"] = config.settings["labels"]
+    export_config["label_colours"] = config.settings["label_colours"]
+    export_config["labels_to_strings"] = config.settings["labels_to_strings"]
+    export_config["strings_to_labels"] = config.settings["strings_to_labels"]
+    export_config["extra_info_cols"] = config.settings["extra_info_cols"]
+    export_config["labels_to_train"] = config.settings["labels_to_train"]
+    export_config["features_for_training"] = config.settings["features_for_training"]
+    export_config["exclude_labels"] = config.settings["exclude_labels"]
+    export_config["unclassified_labels"] = config.settings["unclassified_labels"]
+    export_config["scale_data"] = config.settings["scale_data"]
+    export_config["feature_generation"] = config.settings["feature_generation"]
+
+    with open("astronomicAL/export_config.json", "w") as fp:
+        json.dump(export_config, fp, cls=NumpyEncoder)
 
 
 config.source = ColumnDataSource()
@@ -38,39 +73,61 @@ react = pn.template.ReactTemplate(title="astronomicAL")
 pn.config.sizing_mode = "stretch_both"
 
 
-if os.path.isfile("astronomicAL/layout.json"):
-    with open("astronomicAL/layout.json") as layout_file:
-        data = json.load(layout_file)
-        for p in data:
-            start_row = data[p]["y"]
-            end_row = data[p]["y"] + data[p]["h"]
-            start_col = data[p]["x"]
-            end_col = data[p]["x"] + data[p]["w"]
+if config.initial_setup:
+    config.initial_setup = False
+    if os.path.isfile(config.layout_file):
+        with open(config.layout_file) as layout_file:
+            curr_layout = json.load(layout_file)
+            for p in curr_layout["layout"]:
+                start_row = curr_layout["layout"][p]["y"]
+                end_row = curr_layout["layout"][p]["y"] + curr_layout["layout"][p]["h"]
+                start_col = curr_layout["layout"][p]["x"]
+                end_col = curr_layout["layout"][p]["x"] + curr_layout["layout"][p]["w"]
 
-            if int(p) == 0:
-                main_plot = Dashboard(
-                    name="Main Plot", src=config.source, contents="Settings"
-                )
-                react.main[start_row:end_row, start_col:end_col] = main_plot.panel()
-            else:
-                new_plot = Dashboard(name=f"{p}", src=config.source)
-                react.main[start_row:end_row, start_col:end_col] = new_plot.panel()
+                if int(p) == 0:
+                    main_plot = Dashboard(
+                        name="Main Plot", src=config.source, contents="Settings"
+                    )
+                    react.main[start_row:end_row, start_col:end_col] = main_plot.panel()
+                else:
+                    new_plot = Dashboard(name=f"{p}", src=config.source)
+                    react.main[start_row:end_row, start_col:end_col] = new_plot.panel()
+
+    else:
+        main_plot = Dashboard(name="Main Plot", src=config.source, contents="Settings")
+        react.main[:5, :6] = main_plot.panel()
+
+        num = 0
+        for i in [6]:
+            new_plot = Dashboard(name=f"{num}", src=config.source)
+            react.main[:5, 6:] = new_plot.panel()
+            num += 1
+
+        for i in [0, 4, 8]:
+            new_plot = Dashboard(name=f"{num}", src=config.source)
+            react.main[5:9, i : i + 4] = new_plot.panel()
+            num += 1
 
 else:
-    main_plot = Dashboard(name="Main Plot", src=config.source, contents="Settings")
-    react.main[:5, :6] = main_plot.panel()
+    if os.path.isfile(config.layout_file):
+        with open(config.layout_file) as layout_file:
+            curr_layout = json.load(layout_file)
+            for p in curr_layout["layout"]:
+                start_row = curr_layout["layout"][p]["y"]
+                end_row = curr_layout["layout"][p]["y"] + curr_layout["layout"][p]["h"]
+                start_col = curr_layout["layout"][p]["x"]
+                end_col = curr_layout["layout"][p]["x"] + curr_layout["layout"][p]["w"]
 
-    num = 0
-    for i in [6]:
-        new_plot = Dashboard(name=f"{num}", src=config.source)
-        react.main[:5, 6:] = new_plot.panel()
-        num += 1
-
-    for i in [0, 4, 8]:
-        new_plot = Dashboard(name=f"{num}", src=config.source)
-        react.main[5:9, i : i + 4] = new_plot.panel()
-        num += 1
-
+                if int(p) == 0:
+                    main_plot = Dashboard(
+                        name="Main Plot", src=config.source, contents="Settings"
+                    )
+                    react.main[start_row:end_row, start_col:end_col] = main_plot.panel()
+                else:
+                    new_plot = Dashboard(
+                        name=f"{p}", src=config.source, contents="Basic Plot"
+                    )
+                    react.main[start_row:end_row, start_col:end_col] = new_plot.panel()
 
 save_layout_button = pn.widgets.Button(name="Save current layout")
 
