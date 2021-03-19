@@ -1,8 +1,8 @@
 import os, sys, inspect
 
 sys.path.insert(1, os.path.join(sys.path[0], "../"))
+sys.path.insert(1, os.path.join(sys.path[0], "../../"))
 import pandas as pd
-from astronomicAL.dashboard.dashboard import Dashboard
 from astronomicAL.settings.param_assignment import ParameterAssignment
 import astronomicAL.config as config
 
