@@ -1,11 +1,14 @@
 from astronomicAL.extensions import models, query_strategies, feature_generation
 from astronomicAL.utils.optimise import optimise
+from astronomicAL.utils import save_config
 from bokeh.models import (
     ColumnDataSource,
     DataTable,
     TableColumn,
+    TextAreaInput,
 )
 from datetime import datetime
+from functools import partial
 from holoviews.operation.datashader import (
     datashade,
     dynspread,
@@ -257,6 +260,30 @@ class ActiveLearningTab(param.Parameterized):
             columns=table_column,
         )
 
+        if "classifiers" in config.settings.keys():
+            if str(self._label) in config.settings["classifiers"].keys():
+                list_c1 = self.classifier_table_source.data["classifier"]
+                list_c2 = self.classifier_table_source.data["query"]
+
+                imported_classifiers = config.settings["classifiers"][f"{self._label}"][
+                    "classifier"
+                ]
+                imported_querys = config.settings["classifiers"][f"{self._label}"][
+                    "query"
+                ]
+
+                assert len(imported_classifiers) == len(imported_querys)
+
+                for i in range(len(imported_classifiers)):
+
+                    list_c1.append(imported_classifiers[i])
+                    list_c2.append(imported_querys[i])
+
+                self.classifier_table_source.data = {
+                    "classifier": list_c1,
+                    "query": list_c2,
+                }
+
         self.add_classifier_button = pn.widgets.Button(name=">>", max_height=40)
         self.remove_classifier_button = pn.widgets.Button(name="<<", max_height=40)
 
@@ -268,6 +295,21 @@ class ActiveLearningTab(param.Parameterized):
 
         self.next_iteration_button = pn.widgets.Button(name="Next Iteration")
         self.next_iteration_button.on_click(self._next_iteration_cb)
+
+        text_area_input = TextAreaInput(value="")
+        text_area_input.on_change(
+            "value",
+            partial(
+                save_config.save_config_file_cb,
+                trigger_text=text_area_input,
+                autosave=True,
+            ),
+        )
+
+        self.next_iteration_button.jscallback(
+            clicks=save_config.save_layout_js_cb,
+            args=dict(text_area_input=text_area_input),
+        )
 
         self.setup_row = pn.Row("Loading")
         self.panel_row = pn.Row("Loading")
@@ -569,6 +611,11 @@ class ActiveLearningTab(param.Parameterized):
 
         self.save_model(checkpoint=False)
 
+        config.settings["classifiers"][f"{self._label}"]["id"] = self.id_al_train[
+            "id"
+        ].values.tolist()
+        config.settings["classifiers"][f"{self._label}"]["y"] = self.y_al_train.tolist()
+
         print("getting predictions")
         self._update_predictions()
         print("got predictions")
@@ -684,6 +731,17 @@ class ActiveLearningTab(param.Parameterized):
     def _start_training_cb(self, event):
         print("start_training_cb")
 
+        table = self.classifier_table_source.data
+
+        if len(table["classifier"]) == 0:
+            print("No Classifiers Selected.")
+            self.start_training_button.disabled = True
+            self.start_training_button.name = "No Classifiers Selected"
+            time.sleep(1.5)
+            self.start_training_button.disabled = False
+            self.start_training_button.name = "Start Training"
+            return
+
         self._training = True
         self.start_training_button.name = "Beginning Training..."
         self.start_training_button.disabled = True
@@ -691,6 +749,11 @@ class ActiveLearningTab(param.Parameterized):
         self.remove_classifier_button.disabled = True
         self.num_points_list = []
         self.curr_num_points = self.starting_num_points.value
+
+        if "classifiers" not in config.settings.keys():
+            config.settings["classifiers"] = {}
+
+        config.settings["classifiers"][f"{self._label}"] = table
 
         self.setup_learners()
         query_idx, query_instance = self.learner.query(self.x_pool)
@@ -1227,6 +1290,11 @@ class ActiveLearningTab(param.Parameterized):
         self.y_al_train = y_train
         self.id_al_train = id_train
 
+        config.settings["classifiers"][f"{self._label}"]["id"] = self.id_al_train[
+            "id"
+        ].values.tolist()
+        config.settings["classifiers"][f"{self._label}"]["y"] = self.y_al_train.tolist()
+
     def setup_learners(self):
         """Initialise the classifiers used during active learning.
         The classifiers used have already been chosen by the user.
@@ -1244,7 +1312,6 @@ class ActiveLearningTab(param.Parameterized):
         if len(table["classifier"]) == 0:
             return
 
-        # TODO :: Move this
         qs_dict = query_strategies.get_strategy_dict()
 
         classifier_dict = self._get_blank_classifiers()
