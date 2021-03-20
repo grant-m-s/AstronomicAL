@@ -64,6 +64,23 @@ class ActiveLearningSettings(param.Parameterized):
         self.feature_selector._search[True].max_height = 20
         self.feature_selector._search[False].max_height = 20
 
+        self.feature_selector._buttons[True].max_width = 50
+        self.feature_selector._buttons[False].max_width = 50
+        self.feature_selector._buttons[True].width = 50
+        self.feature_selector._buttons[False].width = 50
+
+        self.feature_selector._buttons[True].margin = (0, 0, 0, 0)
+        self.feature_selector._buttons[False].margin = (0, 0, 0, 0)
+
+        self.feature_selector._composite[:] = [
+            self.feature_selector._unselected,
+            pn.Column(
+                self.feature_selector._buttons[True],
+                self.feature_selector._buttons[False],
+            ),
+            self.feature_selector._selected,
+        ]
+
     def _initialise_widgets(self):
 
         self.label_selector = pn.widgets.CrossSelector(

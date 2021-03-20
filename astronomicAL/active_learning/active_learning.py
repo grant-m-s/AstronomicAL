@@ -133,6 +133,11 @@ class ActiveLearningTab(param.Parameterized):
 
         self._resize_plot_scales()
 
+        if config.settings["config_load_level"] == 2:
+            keys = list(config.settings["classifiers"][f"{self._label}"].keys())
+            if ("y" in keys) and ("id" in keys):
+                self._start_training_cb(None)
+
     def _resize_plot_scales(self):
 
         x_axis = config.settings["default_vars"][0]
@@ -611,11 +616,6 @@ class ActiveLearningTab(param.Parameterized):
 
         self.save_model(checkpoint=False)
 
-        config.settings["classifiers"][f"{self._label}"]["id"] = self.id_al_train[
-            "id"
-        ].values.tolist()
-        config.settings["classifiers"][f"{self._label}"]["y"] = self.y_al_train.tolist()
-
         print("getting predictions")
         self._update_predictions()
         print("got predictions")
@@ -679,6 +679,13 @@ class ActiveLearningTab(param.Parameterized):
             self.x_al_train = new_train
             self.y_al_train = new_label
             self.id_al_train = new_id
+
+            config.settings["classifiers"][f"{self._label}"]["id"] = self.id_al_train[
+                "id"
+            ].values.tolist()
+            config.settings["classifiers"][f"{self._label}"][
+                "y"
+            ] = self.y_al_train.tolist()
 
         else:
             self.assign_label_button.name = "Querying..."
@@ -750,12 +757,23 @@ class ActiveLearningTab(param.Parameterized):
         self.num_points_list = []
         self.curr_num_points = self.starting_num_points.value
 
+        if config.settings["config_load_level"] == 2:
+            keys = list(config.settings["classifiers"][f"{self._label}"].keys())
+            if ("y" in keys) and ("id" in keys):
+                self.curr_num_points = len(
+                    config.settings["classifiers"][f"{self._label}"]["y"]
+                )
+
         if "classifiers" not in config.settings.keys():
             config.settings["classifiers"] = {}
 
-        config.settings["classifiers"][f"{self._label}"] = table
+        config.settings["classifiers"][f"{self._label}"]["classifier"] = table[
+            "classifier"
+        ]
+        config.settings["classifiers"][f"{self._label}"]["query"] = table["query"]
 
         self.setup_learners()
+
         query_idx, query_instance = self.learner.query(self.x_pool)
 
         self.query_instance = query_instance
@@ -1230,7 +1248,7 @@ class ActiveLearningTab(param.Parameterized):
         self._model_output_data_val["pred"] = val_pred.flatten()
         self._model_output_data_val["y"] = self.y_val.to_numpy().flatten()
 
-    def create_pool(self):
+    def create_pool(self, preselected=None):
         """Create the pool used for query points during active learning.
         The training set will be split into the pool and the classifier's
         training set. The number in the classifier's training set has already
@@ -1247,53 +1265,101 @@ class ActiveLearningTab(param.Parameterized):
 
         np.random.seed(0)
 
-        initial_points = int(self.starting_num_points.value)
+        if preselected is None:
+            initial_points = int(self.starting_num_points.value)
 
-        if initial_points >= len(config.ml_data["x_train"].index):
-            self.starting_num_points.value = len(config.ml_data["x_train"].index)
+            if initial_points >= len(config.ml_data["x_train"].index):
+                self.starting_num_points.value = len(config.ml_data["x_train"].index)
 
-            initial_points = len(config.ml_data["x_train"].index)
+                initial_points = len(config.ml_data["x_train"].index)
 
-        y_tr = self.y_train.copy()
+            y_tr = self.y_train.copy()
 
-        # y_tr = y_tr.to_numpy()
+            # y_tr = y_tr.to_numpy()
 
-        X_pool = config.ml_data["x_train"].to_numpy()
-        y_pool = self.y_train.to_numpy().ravel()
-        id_pool = self.id_train.to_numpy()
+            X_pool = config.ml_data["x_train"].to_numpy()
+            y_pool = self.y_train.to_numpy().ravel()
+            id_pool = self.id_train.to_numpy()
 
-        print(X_pool.shape)
+            print(X_pool.shape)
 
-        train_idx = list(
-            np.random.choice(
-                range(X_pool.shape[0]), size=initial_points - 2, replace=False
+            train_idx = list(
+                np.random.choice(
+                    range(X_pool.shape[0]), size=initial_points - 2, replace=False
+                )
             )
-        )
 
-        c0 = np.random.choice(np.where(y_tr == 0)[0])
-        c1 = np.random.choice(np.where(y_tr == 1)[0])
+            c0 = np.random.choice(np.where(y_tr == 0)[0])
+            c1 = np.random.choice(np.where(y_tr == 1)[0])
 
-        train_idx = train_idx + [c0] + [c1]
+            train_idx = train_idx + [c0] + [c1]
 
-        X_train = X_pool[train_idx]
-        y_train = y_pool[train_idx]
-        id_train = self.id_train.iloc[train_idx]
+            X_train = X_pool[train_idx]
+            y_train = y_pool[train_idx]
+            id_train = self.id_train.iloc[train_idx]
 
-        X_pool = np.delete(X_pool, train_idx, axis=0)
-        y_pool = np.delete(y_pool, train_idx)
-        id_pool = self.id_train.drop(self.id_train.index[train_idx])
+            X_pool = np.delete(X_pool, train_idx, axis=0)
+            y_pool = np.delete(y_pool, train_idx)
+            id_pool = self.id_train.drop(self.id_train.index[train_idx])
 
-        self.x_pool = X_pool
-        self.y_pool = y_pool
-        self.id_pool = id_pool
-        self.x_al_train = X_train
-        self.y_al_train = y_train
-        self.id_al_train = id_train
+            self.x_pool = X_pool
+            self.y_pool = y_pool
+            self.id_pool = id_pool
+            self.x_al_train = X_train
+            self.y_al_train = y_train
+            self.id_al_train = id_train
 
-        config.settings["classifiers"][f"{self._label}"]["id"] = self.id_al_train[
-            "id"
-        ].values.tolist()
-        config.settings["classifiers"][f"{self._label}"]["y"] = self.y_al_train.tolist()
+            config.settings["classifiers"][f"{self._label}"]["id"] = self.id_al_train[
+                "id"
+            ].values.tolist()
+            config.settings["classifiers"][f"{self._label}"][
+                "y"
+            ] = self.y_al_train.tolist()
+        else:
+
+            new_y = preselected[0]
+            new_id = preselected[1]
+
+            y_tr = self.y_train.copy()
+
+            # y_tr = y_tr.to_numpy()
+
+            X_pool = config.ml_data["x_train"].to_numpy()
+            y_pool = self.y_train.to_numpy().ravel()
+            id_pool = self.id_train.to_numpy()
+
+            print(X_pool.shape)
+
+            train_idx = []
+
+            for id in new_id:
+                train_idx.append(np.where(id_pool == id)[0][0])
+
+            print(train_idx)
+
+            X_train = X_pool[train_idx]
+            y_train = new_y
+            id_train = self.id_train.iloc[train_idx]
+
+            X_pool = np.delete(X_pool, train_idx, axis=0)
+            y_pool = np.delete(y_pool, train_idx)
+            id_pool = self.id_train.drop(self.id_train.index[train_idx])
+
+            self.x_pool = X_pool
+            self.y_pool = y_pool
+            self.id_pool = id_pool
+            self.x_al_train = X_train
+            self.y_al_train = y_train
+            self.id_al_train = id_train
+
+            config.settings["classifiers"][f"{self._label}"]["id"] = self.id_al_train[
+                "id"
+            ].values.tolist()
+            config.settings["classifiers"][f"{self._label}"]["y"] = self.y_al_train
+            print("\n\n\n\n\n\n")
+            print(self.id_al_train)
+            print(self.y_al_train)
+            print("\n\n\n\n\n\n")
 
     def setup_learners(self):
         """Initialise the classifiers used during active learning.
@@ -1316,8 +1382,29 @@ class ActiveLearningTab(param.Parameterized):
 
         classifier_dict = self._get_blank_classifiers()
 
-        self.create_pool()
+        setup = False
+        if config.settings["config_load_level"] == 2:
+            print("inside == 2")
+            keys = list(config.settings["classifiers"][f"{self._label}"].keys())
+            print(keys)
+            if ("y" in keys) and ("id" in keys):
+                print("inside inner loop")
 
+                new_y = config.settings["classifiers"][f"{self._label}"]["y"]
+                new_id = config.settings["classifiers"][f"{self._label}"]["id"]
+
+                preselected = [new_y, new_id]
+
+                print(preselected)
+
+                self.create_pool(preselected=preselected)
+                print("\n\n\n\n It Trained \n\n\n\n")
+                setup = True
+        if not setup:
+            print("Didnt Train")
+            self.create_pool()
+
+        print(f"{self._label_alias}: {self.y_al_train}, {self.id_al_train}")
         if len(table["classifier"]) == 1:
             self.committee = False
             learner = ActiveLearner(

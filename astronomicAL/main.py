@@ -14,14 +14,6 @@ from functools import partial
 hv.extension("bokeh")
 hv.renderer("bokeh").webgl = True
 
-config.source = ColumnDataSource()
-
-config.main_df = pd.DataFrame()
-
-config.ml_data = {}
-
-config.settings = {"confirmed": False}
-
 files = pn.widgets.FileInput()
 
 react = pn.template.ReactTemplate(title="astronomicAL")
