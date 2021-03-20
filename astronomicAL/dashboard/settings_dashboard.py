@@ -182,8 +182,10 @@ class SettingsDashboard(param.Parameterized):
                 pn.Row(
                     pn.layout.HSpacer(),
                     pn.layout.HSpacer(),
+                    pn.layout.HSpacer(),
                     self.pipeline.buttons,
                     max_height=50,
+                    max_width=500,
                 ),
             ),
             header=pn.Row(
@@ -191,8 +193,6 @@ class SettingsDashboard(param.Parameterized):
                     name="Settings Panel",
                     value="Please choose the appropriate settings for your data",
                 ),
-                pn.layout.HSpacer(max_height=30),
-                pn.layout.HSpacer(max_height=30),
                 pn.layout.HSpacer(max_height=30),
                 pn.layout.HSpacer(max_height=30),
                 self._close_settings_button,

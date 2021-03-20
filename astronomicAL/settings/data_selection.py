@@ -57,7 +57,15 @@ class DataSelection(param.Parameterized):
             max_width=5,
         )
 
-        self.load_config_check = pn.widgets.Checkbox(name="Only Load Layout?")
+        self.load_config_select = pn.widgets.Select(
+            name="How Much Would You Like To Load?",
+            options=[
+                "Only load layout. Let me choose all my own settings",
+                "Load all settings but let me train the model from scratch.",
+                "Load all settings and train model with provided labels.",
+            ],
+            max_width=400,
+        )
 
         self.load_data_button = pn.widgets.Button(
             name="Load Data File", max_height=30, margin=(45, 0, 0, 0)
@@ -76,7 +84,7 @@ class DataSelection(param.Parameterized):
                 button.disabled = true
 
                 var i;
-                for (i = 0; i < 50; i++) {
+                for (i = 0; i < 25; i++) {
                   if (i % 3 === 0) {
                       setTimeout(() => {  button.label = 'Loading New Layout - Please Wait, This may take a minute.'; }, 500*i);
                    } else if (i % 3 === 1) {
@@ -91,10 +99,14 @@ class DataSelection(param.Parameterized):
                 """,
         )
 
-        self.load_data_button_js.on_click(self._save_layout_file_cb)
+        self.load_data_button_js.on_click(self._update_layout_file_cb)
 
-    def _save_layout_file_cb(self, event):
+    def _update_layout_file_cb(self, event):
         config.layout_file = self.config_file
+        config.settings["config_load_level"] = list(
+            self.load_config_select.options
+        ).index(self.load_config_select.value)
+        print(f"Config load level: {config.settings['config_load_level']}")
         print(f"INSIDE CB: {config.layout_file}")
 
     def get_dataframe_from_fits_file(self, filename, optimise_data=None):
@@ -201,7 +213,7 @@ class DataSelection(param.Parameterized):
                 pn.layout.VSpacer(max_height=10),
                 pn.Row(self.param.load_layout_check, max_height=30),
                 pn.Row(self.param.config_file, max_width=300),
-                pn.Row(self.load_config_check),
+                pn.Row(self.load_config_select),
                 pn.Row(self.load_data_button_js),
                 pn.layout.VSpacer(),
                 pn.layout.VSpacer(),
@@ -216,11 +228,13 @@ class DataSelection(param.Parameterized):
                 pn.Row(
                     self.memory_optimisation_check,
                     self._memory_opt_tooltip,
+                    max_width=300,
                 ),
-                pn.Row(self.load_data_button),
-                pn.layout.VSpacer(),
-                pn.layout.VSpacer(),
-                pn.layout.VSpacer(),
+                pn.Row(self.load_data_button, max_width=300),
+                pn.layout.VSpacer(max_width=300),
+                pn.layout.VSpacer(max_width=300),
+                pn.layout.VSpacer(max_width=300),
+                max_width=300,
             )
 
         return self.panel_col
