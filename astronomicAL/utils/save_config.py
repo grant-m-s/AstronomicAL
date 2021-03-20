@@ -112,6 +112,7 @@ def save_config_file(layout_from_js, trigger_text, autosave=False):
     print(f"FINAL Export CONFIG SETTINGS: {export_config}")
 
     if autosave:
+        print("AUTOSAVING")
         with open("configs/autosave.json", "w") as fp:
             json.dump(export_config, fp, cls=NumpyEncoder)
     else:
@@ -135,7 +136,9 @@ def update_config_settings(imported_config):
             print(key)
             config.settings[key] = imported_config[key]
 
-        config.settings["confirmed"] = True
+    config.settings["confirmed"] = True
+
+    print(config.settings)
 
 
 def create_layout_from_file(react):
@@ -145,18 +148,23 @@ def create_layout_from_file(react):
         print(curr_config_file)
         if len(curr_config_file.keys()) > 1:
             print("IS LOADING NEW")
-            update_config_settings(curr_config_file)
-            load_data = DataSelection(config.source)
-            config.main_df = load_data.get_dataframe_from_fits_file(
-                curr_config_file["dataset_filepath"],
-                optimise_data=curr_config_file["optimise_data"],
-            )
 
-            src = {}
-            for col in config.main_df:
-                src[f"{col}"] = []
+            print(config.settings.keys())
 
-            config.source.data = src
+            if config.settings["config_load_level"] > 0:
+
+                update_config_settings(curr_config_file)
+                load_data = DataSelection(config.source)
+                config.main_df = load_data.get_dataframe_from_fits_file(
+                    curr_config_file["dataset_filepath"],
+                    optimise_data=curr_config_file["optimise_data"],
+                )
+
+                src = {}
+                for col in config.main_df:
+                    src[f"{col}"] = []
+
+                config.source.data = src
 
         curr_layout = curr_config_file["layout"]
 
@@ -167,13 +175,12 @@ def create_layout_from_file(react):
             end_col = curr_layout[p]["x"] + curr_layout[p]["w"]
 
             if "contents" in curr_layout[p].keys():
-                print("HAS CONTENTS")
                 contents = curr_layout[p]["contents"]
             else:
                 contents = "Menu"
 
             if int(p) == 0:
-                if contents == "Menu":
+                if (contents == "Menu") or (config.settings["config_load_level"] == 0):
                     contents = "Settings"
                 main_plot = Dashboard(
                     name="Main Plot", src=config.source, contents=contents
@@ -181,15 +188,25 @@ def create_layout_from_file(react):
                 config.dashboards[p] = main_plot
                 react.main[start_row:end_row, start_col:end_col] = main_plot.panel()
             else:
+                if "config_load_level" in list(config.settings.keys()):
+                    if config.settings["config_load_level"] == 0:
+                        contents = "Menu"
                 new_plot = Dashboard(name=f"{p}", src=config.source, contents=contents)
                 config.dashboards[p] = new_plot
                 if contents == "Basic Plot":
-                    new_plot.panel_contents.X_variable = curr_layout[p][
-                        "panel_contents"
-                    ][0]
-                    new_plot.panel_contents.Y_variable = curr_layout[p][
-                        "panel_contents"
-                    ][1]
+
+                    x_axis = curr_layout[p]["panel_contents"][0]
+                    y_axis = curr_layout[p]["panel_contents"][1]
+
+                    if x_axis in list(config.source.data.keys()):
+
+                        new_plot.panel_contents.X_variable = curr_layout[p][
+                            "panel_contents"
+                        ][0]
+                    if y_axis in list(config.source.data.keys()):
+                        new_plot.panel_contents.Y_variable = curr_layout[p][
+                            "panel_contents"
+                        ][1]
                 react.main[start_row:end_row, start_col:end_col] = new_plot.panel()
 
     return react
