@@ -58,10 +58,24 @@ class ActiveLearningSettings(param.Parameterized):
 
     def _adjust_widget_layouts(self):
 
+        self.label_selector.max_width = 750
+        self.label_selector.max_width = 750
+        self.feature_selector.max_width = 750
+        self.feature_selector.max_width = 750
+
         self.label_selector._search[True].max_height = 20
         self.label_selector._search[False].max_height = 20
         self.feature_selector._search[True].max_height = 20
         self.feature_selector._search[False].max_height = 20
+        self.label_selector._search[True].max_width = 300
+        self.label_selector._search[False].max_width = 300
+        self.feature_selector._search[True].max_width = 300
+        self.feature_selector._search[False].max_width = 300
+
+        self.label_selector._lists[True].max_width = 300
+        self.label_selector._lists[False].max_width = 300
+        self.feature_selector._lists[True].max_width = 300
+        self.feature_selector._lists[False].max_width = 300
 
         self.label_selector._buttons[True].max_width = 50
         self.label_selector._buttons[False].max_width = 50
@@ -289,9 +303,8 @@ class ActiveLearningSettings(param.Parameterized):
                     self._feature_generator_dataframe,
                     sizing_mode="stretch_width",
                 ),
-                pn.layout.Divider(max_width=30),
                 pn.Row(self.confirm_settings_button, max_height=30),
-                pn.Row(pn.Spacer(height=50)),
+                pn.Row(pn.Spacer(height=10)),
             )
 
         return self.column
