@@ -59,6 +59,12 @@ class SelectedSourceDashboard(param.Parameterized):
         sizing_mode="scale_height",
     )
 
+    style_dict = {
+        "position": "absolute",
+        "clip": "rect(47px,auto,auto,0px)",
+        "margin": "-47px 0px 0px 0px",
+    }
+
     spectra_image = pn.pane.PNG(
         alt_text="Image Unavailable",
         min_width=350,
@@ -66,15 +72,18 @@ class SelectedSourceDashboard(param.Parameterized):
         max_width=550,
         max_height=550,
         sizing_mode="scale_height",
+        style=style_dict,
     )
 
-    def __init__(self, src, **params):
+    def __init__(self, src, close_button, **params):
         super(SelectedSourceDashboard, self).__init__(**params)
 
         self.df = config.main_df
 
         self.src = src
         self.src.on_change("data", self._panel_cb)
+
+        self.close_button = close_button
 
         self.row = pn.Row(pn.pane.Str("loading"))
 
@@ -339,23 +348,25 @@ class SelectedSourceDashboard(param.Parameterized):
 
             print("setting row")
             extra_data_df = pd.DataFrame(extra_data_list, columns=["Column", "Value"])
-            extra_data_pn = pn.pane.DataFrame(extra_data_df, index=False, max_width=350)
+            extra_data_pn = pn.widgets.DataFrame(
+                extra_data_df, show_index=False, autosize_mode="fit_viewport"
+            )
             self.row[0] = pn.Card(
                 pn.Column(
                     pn.Row(
                         pn.Column(
+                            button_row,
                             pn.Row(
                                 self.optical_image,
                                 self.radio_image,
                             ),
-                            button_row,
                             spectra,
                         ),
-                        extra_data_pn,
+                        pn.Row(extra_data_pn, max_width=280),
                     ),
                 ),
                 collapsible=False,
-                header=deselect_buttton,
+                header=pn.Row(self.close_button, deselect_buttton, max_width=300),
             )
 
             print("row set")
@@ -366,11 +377,18 @@ class SelectedSourceDashboard(param.Parameterized):
             self.row[0] = pn.Card(
                 pn.Column(
                     self.search_id,
-                    pn.widgets.DataFrame(
-                        pd.DataFrame(self.selected_history, columns=["Selected IDs"]),
-                        show_index=False,
+                    pn.Row(
+                        pn.widgets.DataFrame(
+                            pd.DataFrame(
+                                self.selected_history, columns=["Selected IDs"]
+                            ),
+                            show_index=False,
+                        ),
+                        max_width=300,
                     ),
-                )
+                    # max_width=500,
+                ),
+                header=pn.Row(self.close_button, max_width=300),
             )
 
         print("selected source rendered...")
