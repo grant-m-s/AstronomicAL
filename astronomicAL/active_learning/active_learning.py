@@ -38,7 +38,7 @@ import sys
 import time
 
 
-class ActiveLearningTab(param.Parameterized):
+class ActiveLearningTab:
     """This class handles the Machine Learning aspect of the codebase.
 
       Based on the users settings, the required features will be extracted from
@@ -88,8 +88,8 @@ class ActiveLearningTab(param.Parameterized):
 
     """
 
-    def __init__(self, src, df, label, **params):
-        super(ActiveLearningTab, self).__init__(**params)
+    def __init__(self, src, df, label):
+
         print("init")
 
         self.df = df
@@ -133,10 +133,16 @@ class ActiveLearningTab(param.Parameterized):
 
         self._resize_plot_scales()
 
-        if config.settings["config_load_level"] == 2:
-            keys = list(config.settings["classifiers"][f"{self._label}"].keys())
-            if ("y" in keys) and ("id" in keys):
-                self._start_training_cb(None)
+        self.retrain = False
+
+        if "config_load_level" in list(config.settings.keys()):
+            if (config.settings["config_load_level"] == 2) and (
+                f"{self._label}" in config.settings["classifiers"]
+            ):
+                keys = list(config.settings["classifiers"][f"{self._label}"].keys())
+                if ("y" in keys) and ("id" in keys):
+                    self.retrain = True
+                    self._start_training_cb(None)
 
     def _resize_plot_scales(self):
 
@@ -557,7 +563,7 @@ class ActiveLearningTab(param.Parameterized):
         end = time.time()
         print(f"queried_id {end - start}")
 
-        print(f"\n\n\n id is {queried_id.values} \n\n\n")
+        # print(f"\n\n\n id is {queried_id.values} \n\n\n")
         start = time.time()
         sel_idx = np.where(data[f'{config.settings["id_col"]}'] == queried_id.values[0])
         end = time.time()
@@ -757,15 +763,17 @@ class ActiveLearningTab(param.Parameterized):
         self.num_points_list = []
         self.curr_num_points = self.starting_num_points.value
 
-        if config.settings["config_load_level"] == 2:
-            keys = list(config.settings["classifiers"][f"{self._label}"].keys())
-            if ("y" in keys) and ("id" in keys):
-                self.curr_num_points = len(
-                    config.settings["classifiers"][f"{self._label}"]["y"]
-                )
+        if self.retrain:
+
+            self.curr_num_points = len(
+                config.settings["classifiers"][f"{self._label}"]["y"]
+            )
 
         if "classifiers" not in config.settings.keys():
             config.settings["classifiers"] = {}
+
+        if f"{self._label}" not in config.settings["classifiers"]:
+            config.settings["classifiers"][f"{self._label}"] = {}
 
         config.settings["classifiers"][f"{self._label}"]["classifier"] = table[
             "classifier"
@@ -1356,10 +1364,10 @@ class ActiveLearningTab(param.Parameterized):
                 "id"
             ].values.tolist()
             config.settings["classifiers"][f"{self._label}"]["y"] = self.y_al_train
-            print("\n\n\n\n\n\n")
+            # print("\n\n\n\n\n\n")
             print(self.id_al_train)
             print(self.y_al_train)
-            print("\n\n\n\n\n\n")
+            # print("\n\n\n\n\n\n")
 
     def setup_learners(self):
         """Initialise the classifiers used during active learning.
@@ -1383,23 +1391,20 @@ class ActiveLearningTab(param.Parameterized):
         classifier_dict = self._get_blank_classifiers()
 
         setup = False
-        if config.settings["config_load_level"] == 2:
-            print("inside == 2")
-            keys = list(config.settings["classifiers"][f"{self._label}"].keys())
-            print(keys)
-            if ("y" in keys) and ("id" in keys):
-                print("inside inner loop")
 
-                new_y = config.settings["classifiers"][f"{self._label}"]["y"]
-                new_id = config.settings["classifiers"][f"{self._label}"]["id"]
+        if self.retrain:
+            print("inside inner loop")
 
-                preselected = [new_y, new_id]
+            new_y = config.settings["classifiers"][f"{self._label}"]["y"]
+            new_id = config.settings["classifiers"][f"{self._label}"]["id"]
 
-                print(preselected)
+            preselected = [new_y, new_id]
 
-                self.create_pool(preselected=preselected)
-                print("\n\n\n\n It Trained \n\n\n\n")
-                setup = True
+            print(preselected)
+
+            self.create_pool(preselected=preselected)
+            setup = True
+
         if not setup:
             print("Didnt Train")
             self.create_pool()
@@ -1683,6 +1688,8 @@ class ActiveLearningTab(param.Parameterized):
             toolbar=None, default_tools=[]
         )  # * color_points
 
+        print(f"FULL_PLOT:{full_plot}")
+
         return full_plot
 
     def _val_tab(self):
@@ -1934,15 +1941,15 @@ class ActiveLearningTab(param.Parameterized):
                         ),
                         max_height=30,
                     )
-
+            print("\n\n Should print correctly \n\n")
             self.panel_row[0] = pn.Column(
                 pn.Row(self.setup_row),
                 pn.Row(
                     pn.Tabs(
-                        ("Train", self._train_tab),
-                        ("Metric", self._metric_tab),
-                        ("Val", self._val_tab),
-                        ("Scores", self._scores_tab),
+                        ("Train", self._train_tab()),
+                        ("Metric", self._metric_tab()),
+                        ("Val", self._val_tab()),
+                        ("Scores", self._scores_tab()),
                         # dynamic=True,
                     ),
                     self._add_conf_matrices(),

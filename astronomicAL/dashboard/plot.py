@@ -43,8 +43,8 @@ class PlotDashboard(param.Parameterized):
         objects=["1"], default="1", doc="Selection box for the Y axis of the plot."
     )
 
-    def __init__(self, src, close_button, **params):
-        super(PlotDashboard, self).__init__(**params)
+    def __init__(self, src, close_button):
+        super(PlotDashboard, self).__init__()
 
         self.row = pn.Row(pn.pane.Str("loading"))
         self.src = src

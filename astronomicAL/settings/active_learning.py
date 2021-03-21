@@ -40,8 +40,7 @@ class ActiveLearningSettings(param.Parameterized):
 
     """
 
-    def __init__(self, src, close_button, **params):
-        super(ActiveLearningSettings, self).__init__(**params)
+    def __init__(self, src, close_button):
 
         self.df = None
 

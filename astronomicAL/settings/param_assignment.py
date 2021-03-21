@@ -58,8 +58,8 @@ class ParameterAssignment(param.Parameterized):
 
     label_strings_param = {}
 
-    def __init__(self, **params):
-        super(ParameterAssignment, self).__init__(**params)
+    def __init__(self):
+        super(ParameterAssignment, self).__init__()
         self.column = pn.Column(pn.pane.Str("loading"))
         self.src = ColumnDataSource()
 

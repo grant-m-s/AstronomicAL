@@ -38,8 +38,8 @@ class DataSelection(param.Parameterized):
 
     ready = param.Boolean(default=False)
 
-    def __init__(self, src, **params):
-        super(DataSelection, self).__init__(**params)
+    def __init__(self, src):
+        super(DataSelection, self).__init__()
 
         self._initialise_widgets()
         self.src = src

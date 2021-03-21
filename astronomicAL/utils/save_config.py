@@ -182,16 +182,14 @@ def create_layout_from_file(react):
             if int(p) == 0:
                 if (contents == "Menu") or (config.settings["config_load_level"] == 0):
                     contents = "Settings"
-                main_plot = Dashboard(
-                    name="Main Plot", src=config.source, contents=contents
-                )
+                main_plot = Dashboard(src=config.source, contents=contents)
                 config.dashboards[p] = main_plot
                 react.main[start_row:end_row, start_col:end_col] = main_plot.panel()
             else:
                 if "config_load_level" in list(config.settings.keys()):
                     if config.settings["config_load_level"] == 0:
                         contents = "Menu"
-                new_plot = Dashboard(name=f"{p}", src=config.source, contents=contents)
+                new_plot = Dashboard(src=config.source, contents=contents)
                 config.dashboards[p] = new_plot
                 if contents == "Basic Plot":
 
@@ -218,20 +216,20 @@ def create_default_layout(react):
         "No Layout File Found. Reverting to default found in astronomicAL/utils/save_config.py"
     )
 
-    main_plot = Dashboard(name="Main Plot", src=config.source, contents="Settings")
+    main_plot = Dashboard(src=config.source, contents="Settings")
     config.dashboards[0] = main_plot
     react.main[:5, :6] = main_plot.panel()
 
     num = 0
     for i in [6]:
-        new_plot = Dashboard(name=f"{num}", src=config.source)
+        new_plot = Dashboard(src=config.source)
         config.dashboards[f"{num}"] = new_plot
 
         react.main[:5, 6:] = new_plot.panel()
         num += 1
 
     for i in [0, 4, 8]:
-        new_plot = Dashboard(name=f"{num}", src=config.source)
+        new_plot = Dashboard(src=config.source)
         config.dashboards[f"{num}"] = new_plot
 
         react.main[5:9, i : i + 4] = new_plot.panel()
