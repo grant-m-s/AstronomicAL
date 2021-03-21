@@ -101,14 +101,14 @@ class Dashboard(param.Parameterized):
                 self.contents = "Menu"
                 print("Please Complete Settings before accessing this view.")
                 return
-            self.panel_contents = PlotDashboard(self.src)
+            self.panel_contents = PlotDashboard(self.src, self._close_button)
 
         elif self.contents == "Selected Source Info":
             if not config.settings["confirmed"]:
                 self.contents = "Menu"
                 print("Please Complete Settings before accessing this view.")
                 return
-            self.panel_contents = SelectedSourceDashboard(self.src)
+            self.panel_contents = SelectedSourceDashboard(self.src, self._close_button)
         else:
             self.plot_dict = extension_plots.get_plot_dict()
             self.panel_contents = self.plot_dict[self.contents].plot(

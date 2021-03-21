@@ -43,13 +43,14 @@ class PlotDashboard(param.Parameterized):
         objects=["1"], default="1", doc="Selection box for the Y axis of the plot."
     )
 
-    def __init__(self, src, **params):
+    def __init__(self, src, close_button, **params):
         super(PlotDashboard, self).__init__(**params)
 
         self.row = pn.Row(pn.pane.Str("loading"))
         self.src = src
         self.src.on_change("data", self._panel_cb)
         self.df = config.main_df
+        self.close_button = close_button
         self.update_variable_lists()
 
     def _update_variable_lists_cb(self, attr, old, new):
@@ -190,9 +191,10 @@ class PlotDashboard(param.Parameterized):
             pn.Row(self.plot, sizing_mode="stretch_both"),
             header=pn.Row(
                 pn.Spacer(width=25, sizing_mode="fixed"),
-                self.param.X_variable,
-                self.param.Y_variable,
-                width=200,
+                self.close_button,
+                pn.Row(self.param.X_variable, max_width=100),
+                pn.Row(self.param.Y_variable, max_width=100),
+                max_width=400,
                 sizing_mode="fixed",
             ),
             collapsible=False,
