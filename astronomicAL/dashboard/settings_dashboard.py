@@ -5,10 +5,9 @@ from functools import partial
 
 import astronomicAL.config as config
 import panel as pn
-import param
 
 
-class SettingsDashboard(param.Parameterized):
+class SettingsDashboard:
     """A Dashboard used to display configuration settings for the user.
 
     Parameters
@@ -30,8 +29,7 @@ class SettingsDashboard(param.Parameterized):
         A pipeline of stages for the user to assign key parameters.
     """
 
-    def __init__(self, main, src, df, **params):
-        super(SettingsDashboard, self).__init__(**params)
+    def __init__(self, main, src, df):
         self.row = pn.Row(pn.pane.Str("loading"))
 
         self.src = src

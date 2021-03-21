@@ -2,10 +2,9 @@ from astronomicAL.active_learning.active_learning import ActiveLearningTab
 
 import astronomicAL.config as config
 import panel as pn
-import param
 
 
-class ActiveLearningDashboard(param.Parameterized):
+class ActiveLearningDashboard:
     """A dashboard for initialising and rendering panels for Active Learning.
 
     Parameters
@@ -24,8 +23,7 @@ class ActiveLearningDashboard(param.Parameterized):
 
     """
 
-    def __init__(self, src, df, **params):
-        super(ActiveLearningDashboard, self).__init__(**params)
+    def __init__(self, src, df):
 
         self.df = df
         self.src = src

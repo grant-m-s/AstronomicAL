@@ -4,10 +4,9 @@ import astronomicAL.config as config
 import numpy as np
 import pandas as pd
 import panel as pn
-import param
 
 
-class SelectedSourceDashboard(param.Parameterized):
+class SelectedSourceDashboard:
     """A Dashboard used for showing detailed information about a source.
 
     Optical and Radio images of the source are provided free when the user has
@@ -75,8 +74,7 @@ class SelectedSourceDashboard(param.Parameterized):
         style=style_dict,
     )
 
-    def __init__(self, src, close_button, **params):
-        super(SelectedSourceDashboard, self).__init__(**params)
+    def __init__(self, src, close_button):
 
         self.df = config.main_df
 
@@ -106,7 +104,6 @@ class SelectedSourceDashboard(param.Parameterized):
             max_height=50,
         )
 
-        # TODO :: Fix the weird printouts of the autocomplete search
         self.search_id.param.watch(self._change_selected, "value")
 
         self.panel()
