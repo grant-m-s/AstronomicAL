@@ -2,10 +2,9 @@ from astronomicAL.extensions import extension_plots
 from functools import partial
 
 import panel as pn
-import param
 
 
-class MenuDashboard(param.Parameterized):
+class MenuDashboard:
     """A Dashboard used to dynamically choose which view to display.
 
     Parameters
@@ -22,8 +21,7 @@ class MenuDashboard(param.Parameterized):
 
     """
 
-    def __init__(self, main, **params):
-        super(MenuDashboard, self).__init__(**params)
+    def __init__(self, main):
 
         self.row = pn.Row(pn.pane.Str("loading"))
 

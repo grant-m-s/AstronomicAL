@@ -40,8 +40,8 @@ class Dashboard(param.Parameterized):
 
     contents = param.String()
 
-    def __init__(self, src, contents="Menu", **params):
-        super(Dashboard, self).__init__(**params)
+    def __init__(self, src, contents="Menu"):
+        super(Dashboard, self).__init__()
 
         self.src = src
         self.src.on_change("data", self._update_extension_plots_cb)
