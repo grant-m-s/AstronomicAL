@@ -4,6 +4,7 @@ sys.path.insert(1, os.path.join(sys.path[0], "../"))
 sys.path.insert(1, os.path.join(sys.path[0], "../../"))
 import pandas as pd
 from astronomicAL.settings.param_assignment import ParameterAssignment
+from astronomicAL.settings.active_learning import ActiveLearningSettings
 import astronomicAL.config as config
 
 
@@ -375,3 +376,69 @@ class TestSettings:
         assert config.settings["id_col"] == "A"
         assert config.settings["label_col"] == "B"
         assert config.settings["default_vars"] == ("C", "D")
+
+    def test_AL_classifier_correct_labels_on_init(self):
+
+        df = self._create_test_df()
+
+        alSettings = ActiveLearningSettings(None, None)
+
+        assert alSettings.label_selector.options == []
+        assert alSettings.label_selector.value == []
+
+    def test_AL_classifier_correct_features_on_init(self):
+
+        df = self._create_test_df()
+
+        alSettings = ActiveLearningSettings(None, None)
+
+        assert alSettings.feature_selector.options == []
+        assert alSettings.feature_selector.value == []
+
+    def test_AL_classifier_correct_labels_on_update_no_df(self):
+
+        df = self._create_test_df()
+
+        alSettings = ActiveLearningSettings(None, None)
+
+        alSettings.update_data(None)
+
+        assert alSettings.label_selector.options == []
+        assert alSettings.label_selector.value == []
+
+    def test_AL_classifier_correct_features_on_update_no_df(self):
+
+        df = self._create_test_df()
+
+        alSettings = ActiveLearningSettings(None, None)
+
+        alSettings.update_data(None)
+
+        assert alSettings.feature_selector.options == []
+        assert alSettings.feature_selector.value == []
+
+    def test_AL_classifier_correct_labels_on_update_df(self):
+
+        df = self._create_test_df()
+
+        labels = df[config.settings["label_col"]].astype(str).unique()
+
+        alSettings = ActiveLearningSettings(None, None)
+
+        alSettings.update_data(df)
+
+        assert alSettings.label_selector.options == list(labels)
+        assert alSettings.label_selector.value == []
+
+    def test_AL_classifier_correct_features_on_update_df(self):
+
+        df = self._create_test_df()
+
+        features = df.columns
+
+        alSettings = ActiveLearningSettings(None, None)
+
+        alSettings.update_data(df)
+
+        assert alSettings.feature_selector.options == list(features)
+        assert alSettings.feature_selector.value == []
