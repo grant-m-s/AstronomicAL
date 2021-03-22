@@ -4,12 +4,12 @@ import sys
 sys.path.insert(1, os.path.join(sys.path[0], "../"))
 from astronomicAL.utils import save_config, load_config
 from bokeh.models import ColumnDataSource, TextAreaInput
+from functools import partial
 
 import astronomicAL.config as config
 import holoviews as hv
 import pandas as pd
 import panel as pn
-from functools import partial
 
 hv.extension("bokeh")
 hv.renderer("bokeh").webgl = True
@@ -21,9 +21,9 @@ react = pn.template.ReactTemplate(title="astronomicAL")
 pn.config.sizing_mode = "stretch_both"
 
 if os.path.isfile(config.layout_file):
-    react = save_config.create_layout_from_file(react)
+    react = load_config.create_layout_from_file(react)
 else:
-    react = save_config.create_default_layout(react)
+    react = load_config.create_default_layout(react)
 
 save_layout_button = pn.widgets.Button(name="Save current layout")
 
@@ -32,7 +32,9 @@ text_area_input = TextAreaInput(value="")
 text_area_input.on_change(
     "value",
     partial(
-        save_config.save_config_file_cb, trigger_text=text_area_input, autosave=False
+        save_config.save_config_file_cb,
+        trigger_text=text_area_input,
+        autosave=False,
     ),
 )
 
