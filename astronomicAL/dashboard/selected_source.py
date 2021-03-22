@@ -1,9 +1,11 @@
 from functools import partial
+from requests.exceptions import ConnectionError
 
 import astronomicAL.config as config
 import numpy as np
 import pandas as pd
 import panel as pn
+import requests
 
 
 class SelectedSourceDashboard:
@@ -89,6 +91,8 @@ class SelectedSourceDashboard:
 
         self._url_optical_image = ""
 
+        self._search_status = ""
+
         self._image_zoom = 0.2
 
         self._initialise_optical_zoom_buttons()
@@ -111,9 +115,15 @@ class SelectedSourceDashboard:
     def _change_selected(self, event):
 
         if event.new == "":
+            self._search_status = ""
+            self.panel()
             return
 
+        self._search_status = "Searching..."
+
         if event.new not in list(self.df[config.settings["id_col"]].values):
+            self._search_status = "ID not found in dataset"
+            self.panel()
             return
 
         selected_source = self.df[self.df[config.settings["id_col"]] == event.new]
@@ -162,6 +172,7 @@ class SelectedSourceDashboard:
 
     def _deselect_source_cb(self, event):
         self.search_id.value = ""
+        self._search_status = ""
         self.empty_selected()
 
     def empty_selected(self):
@@ -248,13 +259,23 @@ class SelectedSourceDashboard:
             print(f"RA_DEC:{ra_dec}")
             dec = ra_dec[ra_dec.index(",") + 1 :]
 
-            self._url_optical_image = (
-                f"{url}{ra}&dec={dec}&opt=G&scale={self._image_zoom}"
-            )
-            self.optical_image.object = self._url_optical_image
+            try:
+                self._url_optical_image = (
+                    f"{url}{ra}&dec={dec}&opt=G&scale={self._image_zoom}"
+                )
+                r = requests.get(f"{self._url_optical_image}", timeout=2.0)
+                self.optical_image.object = self._url_optical_image
+            except ConnectionError as e:
+                print("optical image unavailable")
+                print(e)
 
-            self.url_radio_image = self._generate_radio_url(ra, dec)
-            self.radio_image.object = self.url_radio_image
+            try:
+                self._url_radio_image = self._generate_radio_url(ra, dec)
+                r = requests.get(f"{self._url_radio_image}", timeout=2.0)
+                self.radio_image.object = self._url_radio_image
+            except ConnectionError as e:
+                print("radio image unavailable")
+                print(e)
 
             self._initialise_optical_zoom_buttons()
 
@@ -374,6 +395,7 @@ class SelectedSourceDashboard:
             self.row[0] = pn.Card(
                 pn.Column(
                     self.search_id,
+                    self._search_status,
                     pn.Row(
                         pn.widgets.DataFrame(
                             pd.DataFrame(
