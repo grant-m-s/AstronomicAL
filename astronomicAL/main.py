@@ -2,7 +2,7 @@ import os
 import sys
 
 sys.path.insert(1, os.path.join(sys.path[0], "../"))
-from astronomicAL.utils import save_config
+from astronomicAL.utils import save_config, load_config
 from bokeh.models import ColumnDataSource, TextAreaInput
 
 import astronomicAL.config as config
