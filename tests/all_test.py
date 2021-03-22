@@ -1,10 +1,32 @@
 import os, sys, inspect
 
 sys.path.insert(1, os.path.join(sys.path[0], "../"))
-sys.path.insert(1, os.path.join(sys.path[0], "../../"))
 import pandas as pd
+from astronomicAL.active_learning.active_learning import ActiveLearningTab
+from astronomicAL.dashboard.active_learning import ActiveLearningDashboard
+from astronomicAL.dashboard.dashboard import Dashboard
+from astronomicAL.dashboard.menu import MenuDashboard
+from astronomicAL.dashboard.plot import PlotDashboard
+from astronomicAL.dashboard.selected_source import SelectedSourceDashboard
+from astronomicAL.dashboard.settings_dashboard import SettingsDashboard
+from astronomicAL.extensions.extension_plots import (
+    CustomPlot,
+    get_plot_dict,
+    create_plot,
+    bpt_plot,
+    agn_wedge,
+)
+from astronomicAL.extensions import feature_generation
+from astronomicAL.extensions import models
+from astronomicAL.extensions import query_strategies
 from astronomicAL.settings.param_assignment import ParameterAssignment
 from astronomicAL.settings.active_learning import ActiveLearningSettings
+from astronomicAL.settings.data_selection import DataSelection
+from astronomicAL.utils import load_config
+from astronomicAL.utils import save_config
+from astronomicAL.utils import optimise
+
+# from astronomicAL.dashboard.active_learning import ActiveLearningDashboard
 import astronomicAL.config as config
 
 
