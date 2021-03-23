@@ -11,8 +11,6 @@ class ActiveLearningSettings(param.Parameterized):
 
     Parameters
     ----------
-    src : ColumnDataSource
-        The shared data source which holds the current selected source.
     close_button : Panel Button
         Close button widget from the parent settings dashboard to allow the
         button to be updated when all settings have been completed.
@@ -40,7 +38,7 @@ class ActiveLearningSettings(param.Parameterized):
 
     """
 
-    def __init__(self, src, close_button):
+    def __init__(self, close_button):
 
         self.df = None
 
@@ -245,12 +243,12 @@ class ActiveLearningSettings(param.Parameterized):
         self.panel()
 
     def get_df(self):
-        """Return the dataframe the active learning settings has generated.
+        """Return the active learning settings dataframe.
 
         Returns
         -------
         df : DataFrame
-            Original DataFrame with any generated features added.
+            Data collected up to and including the Active Learning settings panel.
 
         """
         return self.df
