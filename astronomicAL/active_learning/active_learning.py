@@ -33,7 +33,6 @@ import numpy as np
 import os
 import pandas as pd
 import panel as pn
-import param
 import sys
 import time
 
@@ -788,6 +787,13 @@ class ActiveLearningTab:
         self.query_index = query_idx
 
         self.show_queried_point()
+
+        if self.retrain:
+            empty = {}
+            for key in list(self.src.data.keys()):
+                empty[key] = []
+
+            self.src.data = empty
 
         self.panel()
 
