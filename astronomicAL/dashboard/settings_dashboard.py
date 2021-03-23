@@ -76,7 +76,7 @@ class SettingsDashboard:
         ),
         self.pipeline.add_stage(
             "Active Learning Settings",
-            ActiveLearningSettings(src, self._close_settings_button),
+            ActiveLearningSettings(self._close_settings_button),
         )
 
     def _adjust_pipeline_layout(self):
