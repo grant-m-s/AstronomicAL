@@ -2,6 +2,7 @@ import os, sys, inspect
 
 sys.path.insert(1, os.path.join(sys.path[0], "../"))
 import pandas as pd
+import panel as pn
 from astronomicAL.active_learning.active_learning import ActiveLearningTab
 from astronomicAL.dashboard.active_learning import ActiveLearningDashboard
 from astronomicAL.dashboard.dashboard import Dashboard
@@ -399,68 +400,466 @@ class TestSettings:
         assert config.settings["label_col"] == "B"
         assert config.settings["default_vars"] == ("C", "D")
 
-    def test_AL_classifier_correct_labels_on_init(self):
+    def test_AL_settings_correct_labels_on_init(self):
 
         df = self._create_test_df()
 
-        alSettings = ActiveLearningSettings(None, None)
+        alSettings = ActiveLearningSettings(None)
 
         assert alSettings.label_selector.options == []
         assert alSettings.label_selector.value == []
 
-    def test_AL_classifier_correct_features_on_init(self):
+    def test_AL_settings_correct_features_on_init(self):
 
         df = self._create_test_df()
 
-        alSettings = ActiveLearningSettings(None, None)
+        alSettings = ActiveLearningSettings(None)
 
         assert alSettings.feature_selector.options == []
         assert alSettings.feature_selector.value == []
 
-    def test_AL_classifier_correct_labels_on_update_no_df(self):
+    def test_AL_settings_correct_labels_on_update_no_df(self):
 
         df = self._create_test_df()
 
-        alSettings = ActiveLearningSettings(None, None)
+        alSettings = ActiveLearningSettings(None)
 
         alSettings.update_data(None)
 
         assert alSettings.label_selector.options == []
         assert alSettings.label_selector.value == []
 
-    def test_AL_classifier_correct_features_on_update_no_df(self):
+    def test_AL_settings_correct_features_on_update_no_df(self):
 
         df = self._create_test_df()
 
-        alSettings = ActiveLearningSettings(None, None)
+        alSettings = ActiveLearningSettings(None)
 
         alSettings.update_data(None)
 
         assert alSettings.feature_selector.options == []
         assert alSettings.feature_selector.value == []
 
-    def test_AL_classifier_correct_labels_on_update_df(self):
+    def test_AL_settings_correct_labels_on_update_df(self):
 
         df = self._create_test_df()
 
         labels = df[config.settings["label_col"]].astype(str).unique()
 
-        alSettings = ActiveLearningSettings(None, None)
+        alSettings = ActiveLearningSettings(None)
 
         alSettings.update_data(df)
 
         assert alSettings.label_selector.options == list(labels)
         assert alSettings.label_selector.value == []
 
-    def test_AL_classifier_correct_features_on_update_df(self):
+    def test_AL_settings_correct_features_on_update_df(self):
 
         df = self._create_test_df()
 
         features = df.columns
 
-        alSettings = ActiveLearningSettings(None, None)
+        alSettings = ActiveLearningSettings(None)
 
         alSettings.update_data(df)
 
         assert alSettings.feature_selector.options == list(features)
         assert alSettings.feature_selector.value == []
+
+    def test_AL_settings_check_is_complete_on_init(self):
+
+        alSettings = ActiveLearningSettings(None)
+
+        assert not alSettings.is_complete()
+
+    def test_AL_settings_check_is_complete_on_update_no_df(self):
+
+        alSettings = ActiveLearningSettings(None)
+
+        alSettings.update_data(None)
+
+        assert not alSettings.is_complete()
+
+    def test_AL_settings_check_is_complete_on_update_df(self):
+
+        df = self._create_test_df()
+
+        alSettings = ActiveLearningSettings(None)
+
+        alSettings.update_data(df)
+
+        assert not alSettings.is_complete()
+
+    def test_AL_settings_get_df_on_init(self):
+
+        alSettings = ActiveLearningSettings(None)
+
+        assert alSettings.get_df() is None
+
+    def test_AL_settings_get_df_on_update_no_df(self):
+
+        alSettings = ActiveLearningSettings(None)
+
+        alSettings.update_data(None)
+
+        assert alSettings.get_df() is None
+
+    def test_AL_settings_get_df_on_update_df(self):
+
+        df = self._create_test_df()
+
+        alSettings = ActiveLearningSettings(None)
+
+        alSettings.update_data(df)
+
+        assert alSettings.get_df() is df
+
+    def test_AL_settings_correct_feature_generator_on_init(self):
+
+        alSettings = ActiveLearningSettings(None)
+
+        ans = feature_generation.get_oper_dict().keys()
+
+        assert alSettings.feature_generator.options == list(ans)
+
+    def test_AL_settings_correct_feature_generator_on_update_no_df(self):
+
+        alSettings = ActiveLearningSettings(None)
+
+        alSettings.update_data(None)
+
+        ans = feature_generation.get_oper_dict().keys()
+
+        assert alSettings.feature_generator.options == list(ans)
+
+    def test_AL_settings_correct_feature_generator_on_update_df(self):
+
+        df = self._create_test_df()
+
+        alSettings = ActiveLearningSettings(None)
+
+        alSettings.update_data(df)
+
+        ans = feature_generation.get_oper_dict().keys()
+        assert alSettings.feature_generator.options == list(ans)
+
+    def test_AL_settings_add_feature_cb_test(self):
+
+        df = self._create_test_df()
+
+        alSettings = ActiveLearningSettings(None)
+
+        alSettings.update_data(df)
+
+        alSettings.feature_generator.options = ["a", "b", "c", "d"]
+        alSettings.feature_generator.value = "b"
+        alSettings.feature_generator_number.value = 4
+
+        alSettings._add_feature_selector_cb(None)
+
+        assert alSettings.feature_generator_selected == [["b", 4]]
+        pd.testing.assert_frame_equal(
+            alSettings._feature_generator_dataframe.value,
+            pd.DataFrame([["b", 4]], columns=["oper", "n"]),
+        )
+
+    def test_AL_settings_add_multiple_feature_cb_test(self):
+
+        df = self._create_test_df()
+
+        alSettings = ActiveLearningSettings(None)
+
+        alSettings.update_data(df)
+
+        alSettings.feature_generator.options = ["a", "b", "c", "d"]
+        alSettings.feature_generator.value = "b"
+        alSettings.feature_generator_number.value = 4
+
+        alSettings._add_feature_selector_cb(None)
+
+        assert alSettings.feature_generator_selected == [["b", 4]]
+        pd.testing.assert_frame_equal(
+            alSettings._feature_generator_dataframe.value,
+            pd.DataFrame([["b", 4]], columns=["oper", "n"]),
+        )
+
+        alSettings.feature_generator.value = "a"
+        alSettings.feature_generator_number.value = 2
+
+        alSettings._add_feature_selector_cb(None)
+
+        assert alSettings.feature_generator_selected == [["b", 4], ["a", 2]]
+        pd.testing.assert_frame_equal(
+            alSettings._feature_generator_dataframe.value,
+            pd.DataFrame([["b", 4], ["a", 2]], columns=["oper", "n"]),
+        )
+
+    def test_AL_settings_add_duplicate_feature_cb_test(self):
+
+        df = self._create_test_df()
+
+        alSettings = ActiveLearningSettings(None)
+
+        alSettings.update_data(df)
+
+        alSettings.feature_generator.options = ["a", "b", "c", "d"]
+        alSettings.feature_generator.value = "b"
+        alSettings.feature_generator_number.value = 4
+
+        alSettings._add_feature_selector_cb(None)
+
+        assert alSettings.feature_generator_selected == [["b", 4]]
+        pd.testing.assert_frame_equal(
+            alSettings._feature_generator_dataframe.value,
+            pd.DataFrame([["b", 4]], columns=["oper", "n"]),
+        )
+
+        alSettings._add_feature_selector_cb(None)
+
+        assert alSettings.feature_generator_selected == [["b", 4]]
+        pd.testing.assert_frame_equal(
+            alSettings._feature_generator_dataframe.value,
+            pd.DataFrame([["b", 4]], columns=["oper", "n"]),
+        )
+
+    def test_AL_settings_add_multiple_and_duplicate_feature_cb_test(self):
+
+        df = self._create_test_df()
+
+        alSettings = ActiveLearningSettings(None)
+
+        alSettings.update_data(df)
+
+        alSettings.feature_generator.options = ["a", "b", "c", "d"]
+        alSettings.feature_generator.value = "b"
+        alSettings.feature_generator_number.value = 4
+
+        alSettings._add_feature_selector_cb(None)
+
+        assert alSettings.feature_generator_selected == [["b", 4]]
+        pd.testing.assert_frame_equal(
+            alSettings._feature_generator_dataframe.value,
+            pd.DataFrame([["b", 4]], columns=["oper", "n"]),
+        )
+
+        alSettings.feature_generator.value = "a"
+        alSettings.feature_generator_number.value = 2
+
+        alSettings._add_feature_selector_cb(None)
+
+        assert alSettings.feature_generator_selected == [["b", 4], ["a", 2]]
+        pd.testing.assert_frame_equal(
+            alSettings._feature_generator_dataframe.value,
+            pd.DataFrame([["b", 4], ["a", 2]], columns=["oper", "n"]),
+        )
+
+        alSettings.feature_generator.value = "b"
+        alSettings.feature_generator_number.value = 4
+
+        alSettings._add_feature_selector_cb(None)
+
+        assert alSettings.feature_generator_selected == [["b", 4], ["a", 2]]
+        pd.testing.assert_frame_equal(
+            alSettings._feature_generator_dataframe.value,
+            pd.DataFrame([["b", 4], ["a", 2]], columns=["oper", "n"]),
+        )
+
+    def test_AL_settings_remove_feature_cb_test(self):
+
+        df = self._create_test_df()
+
+        alSettings = ActiveLearningSettings(None)
+
+        alSettings.update_data(df)
+
+        alSettings.feature_generator_selected = [["b", 4]]
+        alSettings._feature_generator_dataframe.value = pd.DataFrame(
+            [["b", 4]], columns=["oper", "n"]
+        )
+
+        alSettings._remove_feature_selector_cb(None)
+
+        assert alSettings.feature_generator_selected == []
+
+        pd.testing.assert_frame_equal(
+            alSettings._feature_generator_dataframe.value,
+            pd.DataFrame([], columns=["oper", "n"]),
+        )
+
+    def test_AL_settings_remove_feature_empty_cb_test(self):
+
+        df = self._create_test_df()
+
+        alSettings = ActiveLearningSettings(None)
+
+        alSettings.update_data(df)
+
+        alSettings._remove_feature_selector_cb(None)
+
+        assert alSettings.feature_generator_selected == []
+
+        pd.testing.assert_frame_equal(
+            alSettings._feature_generator_dataframe.value,
+            pd.DataFrame([], columns=["oper", "n"]),
+        )
+
+    def test_AL_settings_add_remove_multiple_duplicate_feature_cb_test(self):
+
+        df = self._create_test_df()
+
+        alSettings = ActiveLearningSettings(None)
+
+        alSettings.update_data(df)
+
+        alSettings.feature_generator.options = ["a", "b", "c", "d"]
+        alSettings.feature_generator.value = "b"
+        alSettings.feature_generator_number.value = 4
+
+        alSettings._add_feature_selector_cb(None)
+
+        alSettings.feature_generator.value = "a"
+        alSettings.feature_generator_number.value = 2
+
+        alSettings._add_feature_selector_cb(None)
+
+        alSettings._remove_feature_selector_cb(None)
+
+        alSettings.feature_generator.value = "b"
+        alSettings.feature_generator_number.value = 4
+
+        alSettings._add_feature_selector_cb(None)
+
+        alSettings._remove_feature_selector_cb(None)
+
+        assert alSettings.feature_generator_selected == []
+        pd.testing.assert_frame_equal(
+            alSettings._feature_generator_dataframe.value,
+            pd.DataFrame([], columns=["oper", "n"]),
+        )
+
+    def test_AL_settings_confirm_settings_labels_to_train(self):
+
+        df = self._create_test_df()
+
+        button = pn.widgets.Button()
+        alSettings = ActiveLearningSettings(button)
+
+        alSettings.update_data(df)
+
+        alSettings.label_selector.options = ["a", "b", "c", "d"]
+        alSettings.label_selector.value = ["a", "b", "c"]
+
+        alSettings._confirm_settings_cb(None)
+
+        assert config.settings["labels_to_train"] == ["a", "b", "c"]
+
+    def test_AL_settings_confirm_settings_features_for_training(self):
+
+        df = self._create_test_df()
+
+        button = pn.widgets.Button()
+        alSettings = ActiveLearningSettings(button)
+
+        alSettings.update_data(df)
+
+        alSettings.feature_selector.options = ["a", "b", "c", "d"]
+        alSettings.feature_selector.value = ["a", "b", "c"]
+
+        alSettings._confirm_settings_cb(None)
+
+        assert config.settings["features_for_training"] == ["a", "b", "c"]
+
+    def test_AL_settings_confirm_settings_exclude_labels_true(self):
+
+        df = self._create_test_df()
+
+        button = pn.widgets.Button()
+        alSettings = ActiveLearningSettings(button)
+
+        alSettings.update_data(df)
+
+        alSettings.exclude_labels_checkbox.value = True
+
+        alSettings._confirm_settings_cb(None)
+
+        assert config.settings["exclude_labels"]
+
+    def test_AL_settings_confirm_settings_exclude_labels_false(self):
+
+        df = self._create_test_df()
+
+        button = pn.widgets.Button()
+        alSettings = ActiveLearningSettings(button)
+
+        alSettings.update_data(df)
+
+        alSettings.exclude_labels_checkbox.value = False
+
+        alSettings._confirm_settings_cb(None)
+
+        assert not config.settings["exclude_labels"]
+
+    def test_AL_settings_confirm_settings_unclassified_labels(self):
+
+        df = self._create_test_df()
+
+        button = pn.widgets.Button()
+        alSettings = ActiveLearningSettings(button)
+
+        alSettings.update_data(df)
+
+        alSettings.label_selector.options = ["a", "b", "c", "d"]
+        alSettings.label_selector.value = ["a", "b", "c"]
+
+        alSettings._confirm_settings_cb(None)
+
+        assert config.settings["unclassified_labels"] == ["d"]
+
+    def test_AL_settings_confirm_settings_scale_data_true(self):
+
+        df = self._create_test_df()
+
+        button = pn.widgets.Button()
+        alSettings = ActiveLearningSettings(button)
+
+        alSettings.update_data(df)
+
+        alSettings.scale_features_checkbox.value = True
+
+        alSettings._confirm_settings_cb(None)
+
+        assert config.settings["scale_data"]
+
+    def test_AL_settings_confirm_settings_scale_data_false(self):
+
+        df = self._create_test_df()
+
+        button = pn.widgets.Button()
+        alSettings = ActiveLearningSettings(button)
+
+        alSettings.update_data(df)
+
+        alSettings.scale_features_checkbox.value = False
+
+        alSettings._confirm_settings_cb(None)
+
+        assert not config.settings["scale_data"]
+
+    def test_AL_settings_confirm_settings_feature_generation(self):
+
+        df = self._create_test_df()
+
+        button = pn.widgets.Button()
+        alSettings = ActiveLearningSettings(button)
+
+        alSettings.update_data(df)
+
+        alSettings.feature_generator.options = ["a", "b", "c", "d"]
+        alSettings.feature_generator.value = "b"
+        alSettings.feature_generator_number.value = 4
+
+        alSettings._add_feature_selector_cb(None)
+
+        alSettings._confirm_settings_cb(None)
+
+        assert config.settings["feature_generation"] == [["b", 4]]
