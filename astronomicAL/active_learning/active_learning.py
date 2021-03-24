@@ -1,11 +1,14 @@
 from astronomicAL.extensions import models, query_strategies, feature_generation
 from astronomicAL.utils.optimise import optimise
+from astronomicAL.utils import save_config
 from bokeh.models import (
     ColumnDataSource,
     DataTable,
     TableColumn,
+    TextAreaInput,
 )
 from datetime import datetime
+from functools import partial
 from holoviews.operation.datashader import (
     datashade,
     dynspread,
@@ -30,12 +33,11 @@ import numpy as np
 import os
 import pandas as pd
 import panel as pn
-import param
 import sys
 import time
 
 
-class ActiveLearningTab(param.Parameterized):
+class ActiveLearningTab:
     """This class handles the Machine Learning aspect of the codebase.
 
       Based on the users settings, the required features will be extracted from
@@ -85,8 +87,8 @@ class ActiveLearningTab(param.Parameterized):
 
     """
 
-    def __init__(self, src, df, label, **params):
-        super(ActiveLearningTab, self).__init__(**params)
+    def __init__(self, src, df, label):
+
         print("init")
 
         self.df = df
@@ -129,6 +131,17 @@ class ActiveLearningTab(param.Parameterized):
         self._initialise_placeholders()
 
         self._resize_plot_scales()
+
+        self.retrain = False
+
+        if "config_load_level" in list(config.settings.keys()):
+            if (config.settings["config_load_level"] == 2) and (
+                f"{self._label}" in config.settings["classifiers"]
+            ):
+                keys = list(config.settings["classifiers"][f"{self._label}"].keys())
+                if ("y" in keys) and ("id" in keys):
+                    self.retrain = True
+                    self._start_training_cb(None)
 
     def _resize_plot_scales(self):
 
@@ -257,6 +270,30 @@ class ActiveLearningTab(param.Parameterized):
             columns=table_column,
         )
 
+        if "classifiers" in config.settings.keys():
+            if str(self._label) in config.settings["classifiers"].keys():
+                list_c1 = self.classifier_table_source.data["classifier"]
+                list_c2 = self.classifier_table_source.data["query"]
+
+                imported_classifiers = config.settings["classifiers"][f"{self._label}"][
+                    "classifier"
+                ]
+                imported_querys = config.settings["classifiers"][f"{self._label}"][
+                    "query"
+                ]
+
+                assert len(imported_classifiers) == len(imported_querys)
+
+                for i in range(len(imported_classifiers)):
+
+                    list_c1.append(imported_classifiers[i])
+                    list_c2.append(imported_querys[i])
+
+                self.classifier_table_source.data = {
+                    "classifier": list_c1,
+                    "query": list_c2,
+                }
+
         self.add_classifier_button = pn.widgets.Button(name=">>", max_height=40)
         self.remove_classifier_button = pn.widgets.Button(name="<<", max_height=40)
 
@@ -268,6 +305,21 @@ class ActiveLearningTab(param.Parameterized):
 
         self.next_iteration_button = pn.widgets.Button(name="Next Iteration")
         self.next_iteration_button.on_click(self._next_iteration_cb)
+
+        text_area_input = TextAreaInput(value="")
+        text_area_input.on_change(
+            "value",
+            partial(
+                save_config.save_config_file_cb,
+                trigger_text=text_area_input,
+                autosave=True,
+            ),
+        )
+
+        self.next_iteration_button.jscallback(
+            clicks=save_config.save_layout_js_cb,
+            args=dict(text_area_input=text_area_input),
+        )
 
         self.setup_row = pn.Row("Loading")
         self.panel_row = pn.Row("Loading")
@@ -510,7 +562,7 @@ class ActiveLearningTab(param.Parameterized):
         end = time.time()
         print(f"queried_id {end - start}")
 
-        print(f"\n\n\n id is {queried_id.values} \n\n\n")
+        # print(f"\n\n\n id is {queried_id.values} \n\n\n")
         start = time.time()
         sel_idx = np.where(data[f'{config.settings["id_col"]}'] == queried_id.values[0])
         end = time.time()
@@ -633,6 +685,13 @@ class ActiveLearningTab(param.Parameterized):
             self.y_al_train = new_label
             self.id_al_train = new_id
 
+            config.settings["classifiers"][f"{self._label}"]["id"] = self.id_al_train[
+                "id"
+            ].values.tolist()
+            config.settings["classifiers"][f"{self._label}"][
+                "y"
+            ] = self.y_al_train.tolist()
+
         else:
             self.assign_label_button.name = "Querying..."
             self.assign_label_button.disabled = True
@@ -684,6 +743,17 @@ class ActiveLearningTab(param.Parameterized):
     def _start_training_cb(self, event):
         print("start_training_cb")
 
+        table = self.classifier_table_source.data
+
+        if len(table["classifier"]) == 0:
+            print("No Classifiers Selected.")
+            self.start_training_button.disabled = True
+            self.start_training_button.name = "No Classifiers Selected"
+            time.sleep(1.5)
+            self.start_training_button.disabled = False
+            self.start_training_button.name = "Start Training"
+            return
+
         self._training = True
         self.start_training_button.name = "Beginning Training..."
         self.start_training_button.disabled = True
@@ -692,13 +762,38 @@ class ActiveLearningTab(param.Parameterized):
         self.num_points_list = []
         self.curr_num_points = self.starting_num_points.value
 
+        if self.retrain:
+
+            self.curr_num_points = len(
+                config.settings["classifiers"][f"{self._label}"]["y"]
+            )
+
+        if "classifiers" not in config.settings.keys():
+            config.settings["classifiers"] = {}
+
+        if f"{self._label}" not in config.settings["classifiers"]:
+            config.settings["classifiers"][f"{self._label}"] = {}
+
+        config.settings["classifiers"][f"{self._label}"]["classifier"] = table[
+            "classifier"
+        ]
+        config.settings["classifiers"][f"{self._label}"]["query"] = table["query"]
+
         self.setup_learners()
+
         query_idx, query_instance = self.learner.query(self.x_pool)
 
         self.query_instance = query_instance
         self.query_index = query_idx
 
         self.show_queried_point()
+
+        if self.retrain:
+            empty = {}
+            for key in list(self.src.data.keys()):
+                empty[key] = []
+
+            self.src.data = empty
 
         self.panel()
 
@@ -1167,7 +1262,7 @@ class ActiveLearningTab(param.Parameterized):
         self._model_output_data_val["pred"] = val_pred.flatten()
         self._model_output_data_val["y"] = self.y_val.to_numpy().flatten()
 
-    def create_pool(self):
+    def create_pool(self, preselected=None):
         """Create the pool used for query points during active learning.
         The training set will be split into the pool and the classifier's
         training set. The number in the classifier's training set has already
@@ -1184,48 +1279,101 @@ class ActiveLearningTab(param.Parameterized):
 
         np.random.seed(0)
 
-        initial_points = int(self.starting_num_points.value)
+        if preselected is None:
+            initial_points = int(self.starting_num_points.value)
 
-        if initial_points >= len(config.ml_data["x_train"].index):
-            self.starting_num_points.value = len(config.ml_data["x_train"].index)
+            if initial_points >= len(config.ml_data["x_train"].index):
+                self.starting_num_points.value = len(config.ml_data["x_train"].index)
 
-            initial_points = len(config.ml_data["x_train"].index)
+                initial_points = len(config.ml_data["x_train"].index)
 
-        y_tr = self.y_train.copy()
+            y_tr = self.y_train.copy()
 
-        # y_tr = y_tr.to_numpy()
+            # y_tr = y_tr.to_numpy()
 
-        X_pool = config.ml_data["x_train"].to_numpy()
-        y_pool = self.y_train.to_numpy().ravel()
-        id_pool = self.id_train.to_numpy()
+            X_pool = config.ml_data["x_train"].to_numpy()
+            y_pool = self.y_train.to_numpy().ravel()
+            id_pool = self.id_train.to_numpy()
 
-        print(X_pool.shape)
+            print(X_pool.shape)
 
-        train_idx = list(
-            np.random.choice(
-                range(X_pool.shape[0]), size=initial_points - 2, replace=False
+            train_idx = list(
+                np.random.choice(
+                    range(X_pool.shape[0]), size=initial_points - 2, replace=False
+                )
             )
-        )
 
-        c0 = np.random.choice(np.where(y_tr == 0)[0])
-        c1 = np.random.choice(np.where(y_tr == 1)[0])
+            c0 = np.random.choice(np.where(y_tr == 0)[0])
+            c1 = np.random.choice(np.where(y_tr == 1)[0])
 
-        train_idx = train_idx + [c0] + [c1]
+            train_idx = train_idx + [c0] + [c1]
 
-        X_train = X_pool[train_idx]
-        y_train = y_pool[train_idx]
-        id_train = self.id_train.iloc[train_idx]
+            X_train = X_pool[train_idx]
+            y_train = y_pool[train_idx]
+            id_train = self.id_train.iloc[train_idx]
 
-        X_pool = np.delete(X_pool, train_idx, axis=0)
-        y_pool = np.delete(y_pool, train_idx)
-        id_pool = self.id_train.drop(self.id_train.index[train_idx])
+            X_pool = np.delete(X_pool, train_idx, axis=0)
+            y_pool = np.delete(y_pool, train_idx)
+            id_pool = self.id_train.drop(self.id_train.index[train_idx])
 
-        self.x_pool = X_pool
-        self.y_pool = y_pool
-        self.id_pool = id_pool
-        self.x_al_train = X_train
-        self.y_al_train = y_train
-        self.id_al_train = id_train
+            self.x_pool = X_pool
+            self.y_pool = y_pool
+            self.id_pool = id_pool
+            self.x_al_train = X_train
+            self.y_al_train = y_train
+            self.id_al_train = id_train
+
+            config.settings["classifiers"][f"{self._label}"]["id"] = self.id_al_train[
+                "id"
+            ].values.tolist()
+            config.settings["classifiers"][f"{self._label}"][
+                "y"
+            ] = self.y_al_train.tolist()
+        else:
+
+            new_y = preselected[0]
+            new_id = preselected[1]
+
+            y_tr = self.y_train.copy()
+
+            # y_tr = y_tr.to_numpy()
+
+            X_pool = config.ml_data["x_train"].to_numpy()
+            y_pool = self.y_train.to_numpy().ravel()
+            id_pool = self.id_train.to_numpy()
+
+            print(X_pool.shape)
+
+            train_idx = []
+
+            for id in new_id:
+                train_idx.append(np.where(id_pool == id)[0][0])
+
+            print(train_idx)
+
+            X_train = X_pool[train_idx]
+            y_train = new_y
+            id_train = self.id_train.iloc[train_idx]
+
+            X_pool = np.delete(X_pool, train_idx, axis=0)
+            y_pool = np.delete(y_pool, train_idx)
+            id_pool = self.id_train.drop(self.id_train.index[train_idx])
+
+            self.x_pool = X_pool
+            self.y_pool = y_pool
+            self.id_pool = id_pool
+            self.x_al_train = X_train
+            self.y_al_train = y_train
+            self.id_al_train = id_train
+
+            config.settings["classifiers"][f"{self._label}"]["id"] = self.id_al_train[
+                "id"
+            ].values.tolist()
+            config.settings["classifiers"][f"{self._label}"]["y"] = self.y_al_train
+            # print("\n\n\n\n\n\n")
+            print(self.id_al_train)
+            print(self.y_al_train)
+            # print("\n\n\n\n\n\n")
 
     def setup_learners(self):
         """Initialise the classifiers used during active learning.
@@ -1244,13 +1392,30 @@ class ActiveLearningTab(param.Parameterized):
         if len(table["classifier"]) == 0:
             return
 
-        # TODO :: Move this
         qs_dict = query_strategies.get_strategy_dict()
 
         classifier_dict = self._get_blank_classifiers()
 
-        self.create_pool()
+        setup = False
 
+        if self.retrain:
+            print("inside inner loop")
+
+            new_y = config.settings["classifiers"][f"{self._label}"]["y"]
+            new_id = config.settings["classifiers"][f"{self._label}"]["id"]
+
+            preselected = [new_y, new_id]
+
+            print(preselected)
+
+            self.create_pool(preselected=preselected)
+            setup = True
+
+        if not setup:
+            print("Didnt Train")
+            self.create_pool()
+
+        print(f"{self._label_alias}: {self.y_al_train}, {self.id_al_train}")
         if len(table["classifier"]) == 1:
             self.committee = False
             learner = ActiveLearner(
@@ -1529,6 +1694,8 @@ class ActiveLearningTab(param.Parameterized):
             toolbar=None, default_tools=[]
         )  # * color_points
 
+        print(f"FULL_PLOT:{full_plot}")
+
         return full_plot
 
     def _val_tab(self):
@@ -1780,15 +1947,15 @@ class ActiveLearningTab(param.Parameterized):
                         ),
                         max_height=30,
                     )
-
+            print("\n\n Should print correctly \n\n")
             self.panel_row[0] = pn.Column(
                 pn.Row(self.setup_row),
                 pn.Row(
                     pn.Tabs(
-                        ("Train", self._train_tab),
-                        ("Metric", self._metric_tab),
-                        ("Val", self._val_tab),
-                        ("Scores", self._scores_tab),
+                        ("Train", self._train_tab()),
+                        ("Metric", self._metric_tab()),
+                        ("Val", self._val_tab()),
+                        ("Scores", self._scores_tab()),
                         # dynamic=True,
                     ),
                     self._add_conf_matrices(),
