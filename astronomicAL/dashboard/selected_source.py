@@ -1,13 +1,14 @@
 from functools import partial
+from requests.exceptions import ConnectionError
 
 import astronomicAL.config as config
 import numpy as np
 import pandas as pd
 import panel as pn
-import param
+import requests
 
 
-class SelectedSourceDashboard(param.Parameterized):
+class SelectedSourceDashboard:
     """A Dashboard used for showing detailed information about a source.
 
     Optical and Radio images of the source are provided free when the user has
@@ -59,6 +60,12 @@ class SelectedSourceDashboard(param.Parameterized):
         sizing_mode="scale_height",
     )
 
+    style_dict = {
+        "position": "absolute",
+        "clip": "rect(47px,auto,auto,0px)",
+        "margin": "-47px 0px 0px 0px",
+    }
+
     spectra_image = pn.pane.PNG(
         alt_text="Image Unavailable",
         min_width=350,
@@ -66,21 +73,25 @@ class SelectedSourceDashboard(param.Parameterized):
         max_width=550,
         max_height=550,
         sizing_mode="scale_height",
+        style=style_dict,
     )
 
-    def __init__(self, src, **params):
-        super(SelectedSourceDashboard, self).__init__(**params)
+    def __init__(self, src, close_button):
 
         self.df = config.main_df
 
         self.src = src
         self.src.on_change("data", self._panel_cb)
 
+        self.close_button = close_button
+
         self.row = pn.Row(pn.pane.Str("loading"))
 
         self.selected_history = []
 
         self._url_optical_image = ""
+
+        self._search_status = ""
 
         self._image_zoom = 0.2
 
@@ -97,7 +108,6 @@ class SelectedSourceDashboard(param.Parameterized):
             max_height=50,
         )
 
-        # TODO :: Fix the weird printouts of the autocomplete search
         self.search_id.param.watch(self._change_selected, "value")
 
         self.panel()
@@ -105,9 +115,15 @@ class SelectedSourceDashboard(param.Parameterized):
     def _change_selected(self, event):
 
         if event.new == "":
+            self._search_status = ""
+            self.panel()
             return
 
+        self._search_status = "Searching..."
+
         if event.new not in list(self.df[config.settings["id_col"]].values):
+            self._search_status = "ID not found in dataset"
+            self.panel()
             return
 
         selected_source = self.df[self.df[config.settings["id_col"]] == event.new]
@@ -156,6 +172,7 @@ class SelectedSourceDashboard(param.Parameterized):
 
     def _deselect_source_cb(self, event):
         self.search_id.value = ""
+        self._search_status = ""
         self.empty_selected()
 
     def empty_selected(self):
@@ -242,13 +259,23 @@ class SelectedSourceDashboard(param.Parameterized):
             print(f"RA_DEC:{ra_dec}")
             dec = ra_dec[ra_dec.index(",") + 1 :]
 
-            self._url_optical_image = (
-                f"{url}{ra}&dec={dec}&opt=G&scale={self._image_zoom}"
-            )
-            self.optical_image.object = self._url_optical_image
+            try:
+                self._url_optical_image = (
+                    f"{url}{ra}&dec={dec}&opt=G&scale={self._image_zoom}"
+                )
+                r = requests.get(f"{self._url_optical_image}", timeout=2.0)
+                self.optical_image.object = self._url_optical_image
+            except ConnectionError as e:
+                print("optical image unavailable")
+                print(e)
 
-            self.url_radio_image = self._generate_radio_url(ra, dec)
-            self.radio_image.object = self.url_radio_image
+            try:
+                self._url_radio_image = self._generate_radio_url(ra, dec)
+                r = requests.get(f"{self._url_radio_image}", timeout=2.0)
+                self.radio_image.object = self._url_radio_image
+            except ConnectionError as e:
+                print("radio image unavailable")
+                print(e)
 
             self._initialise_optical_zoom_buttons()
 
@@ -339,23 +366,25 @@ class SelectedSourceDashboard(param.Parameterized):
 
             print("setting row")
             extra_data_df = pd.DataFrame(extra_data_list, columns=["Column", "Value"])
-            extra_data_pn = pn.pane.DataFrame(extra_data_df, index=False, max_width=350)
+            extra_data_pn = pn.widgets.DataFrame(
+                extra_data_df, show_index=False, autosize_mode="fit_viewport"
+            )
             self.row[0] = pn.Card(
                 pn.Column(
                     pn.Row(
                         pn.Column(
+                            button_row,
                             pn.Row(
                                 self.optical_image,
                                 self.radio_image,
                             ),
-                            button_row,
                             spectra,
                         ),
-                        extra_data_pn,
+                        pn.Row(extra_data_pn, max_width=280),
                     ),
                 ),
                 collapsible=False,
-                header=deselect_buttton,
+                header=pn.Row(self.close_button, deselect_buttton, max_width=300),
             )
 
             print("row set")
@@ -366,11 +395,19 @@ class SelectedSourceDashboard(param.Parameterized):
             self.row[0] = pn.Card(
                 pn.Column(
                     self.search_id,
-                    pn.widgets.DataFrame(
-                        pd.DataFrame(self.selected_history, columns=["Selected IDs"]),
-                        show_index=False,
+                    self._search_status,
+                    pn.Row(
+                        pn.widgets.DataFrame(
+                            pd.DataFrame(
+                                self.selected_history, columns=["Selected IDs"]
+                            ),
+                            show_index=False,
+                        ),
+                        max_width=300,
                     ),
-                )
+                    # max_width=500,
+                ),
+                header=pn.Row(self.close_button, max_width=300),
             )
 
         print("selected source rendered...")

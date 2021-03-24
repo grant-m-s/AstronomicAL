@@ -5,10 +5,9 @@ from functools import partial
 
 import astronomicAL.config as config
 import panel as pn
-import param
 
 
-class SettingsDashboard(param.Parameterized):
+class SettingsDashboard:
     """A Dashboard used to display configuration settings for the user.
 
     Parameters
@@ -30,8 +29,7 @@ class SettingsDashboard(param.Parameterized):
         A pipeline of stages for the user to assign key parameters.
     """
 
-    def __init__(self, main, src, df, **params):
-        super(SettingsDashboard, self).__init__(**params)
+    def __init__(self, main, src, df):
         self.row = pn.Row(pn.pane.Str("loading"))
 
         self.src = src
@@ -78,7 +76,7 @@ class SettingsDashboard(param.Parameterized):
         ),
         self.pipeline.add_stage(
             "Active Learning Settings",
-            ActiveLearningSettings(src, self._close_settings_button),
+            ActiveLearningSettings(self._close_settings_button),
         )
 
     def _adjust_pipeline_layout(self):
@@ -182,8 +180,10 @@ class SettingsDashboard(param.Parameterized):
                 pn.Row(
                     pn.layout.HSpacer(),
                     pn.layout.HSpacer(),
+                    pn.layout.HSpacer(),
                     self.pipeline.buttons,
                     max_height=50,
+                    max_width=500,
                 ),
             ),
             header=pn.Row(
@@ -191,8 +191,6 @@ class SettingsDashboard(param.Parameterized):
                     name="Settings Panel",
                     value="Please choose the appropriate settings for your data",
                 ),
-                pn.layout.HSpacer(max_height=30),
-                pn.layout.HSpacer(max_height=30),
                 pn.layout.HSpacer(max_height=30),
                 pn.layout.HSpacer(max_height=30),
                 self._close_settings_button,

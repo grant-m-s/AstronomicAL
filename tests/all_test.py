@@ -2,9 +2,52 @@ import os, sys, inspect
 
 sys.path.insert(1, os.path.join(sys.path[0], "../"))
 import pandas as pd
+import panel as pn
+
+from astronomicAL.active_learning.active_learning import ActiveLearningTab
+from astronomicAL.dashboard.active_learning import ActiveLearningDashboard
 from astronomicAL.dashboard.dashboard import Dashboard
+from astronomicAL.dashboard.menu import MenuDashboard
+from astronomicAL.dashboard.plot import PlotDashboard
+from astronomicAL.dashboard.selected_source import SelectedSourceDashboard
+from astronomicAL.dashboard.settings_dashboard import SettingsDashboard
+from astronomicAL.extensions.extension_plots import (
+    CustomPlot,
+    get_plot_dict,
+    create_plot,
+    bpt_plot,
+    agn_wedge,
+)
+from astronomicAL.extensions import feature_generation
+from astronomicAL.extensions import models
+from astronomicAL.extensions import query_strategies
 from astronomicAL.settings.param_assignment import ParameterAssignment
+from astronomicAL.settings.active_learning import ActiveLearningSettings
+from astronomicAL.settings.data_selection import DataSelection
+from astronomicAL.utils import load_config
+from astronomicAL.utils import save_config
+from astronomicAL.utils import optimise
+from bokeh.models import ColumnDataSource
+from bokeh.document import Document
+from pyviz_comms import Comm
+
 import astronomicAL.config as config
+import pytest
+
+
+@pytest.fixture
+def document():
+    return Document()
+
+
+@pytest.fixture
+def comm():
+    return Comm()
+
+
+def check_folder_exists(folder):
+    if not os.path.isdir(folder):
+        os.mkdir(folder)
 
 
 class TestClass:
@@ -375,3 +418,713 @@ class TestSettings:
         assert config.settings["id_col"] == "A"
         assert config.settings["label_col"] == "B"
         assert config.settings["default_vars"] == ("C", "D")
+
+    def test_AL_settings_correct_labels_on_init(self):
+
+        df = self._create_test_df()
+
+        alSettings = ActiveLearningSettings(None)
+
+        assert alSettings.label_selector.options == []
+        assert alSettings.label_selector.value == []
+
+    def test_AL_settings_correct_features_on_init(self):
+
+        df = self._create_test_df()
+
+        alSettings = ActiveLearningSettings(None)
+
+        assert alSettings.feature_selector.options == []
+        assert alSettings.feature_selector.value == []
+
+    def test_AL_settings_correct_labels_on_update_no_df(self):
+
+        df = self._create_test_df()
+
+        alSettings = ActiveLearningSettings(None)
+
+        alSettings.update_data(None)
+
+        assert alSettings.label_selector.options == []
+        assert alSettings.label_selector.value == []
+
+    def test_AL_settings_correct_features_on_update_no_df(self):
+
+        df = self._create_test_df()
+
+        alSettings = ActiveLearningSettings(None)
+
+        alSettings.update_data(None)
+
+        assert alSettings.feature_selector.options == []
+        assert alSettings.feature_selector.value == []
+
+    def test_AL_settings_correct_labels_on_update_df(self):
+
+        df = self._create_test_df()
+
+        labels = df[config.settings["label_col"]].astype(str).unique()
+
+        alSettings = ActiveLearningSettings(None)
+
+        alSettings.update_data(df)
+
+        assert alSettings.label_selector.options == list(labels)
+        assert alSettings.label_selector.value == []
+
+    def test_AL_settings_correct_features_on_update_df(self):
+
+        df = self._create_test_df()
+
+        features = df.columns
+
+        alSettings = ActiveLearningSettings(None)
+
+        alSettings.update_data(df)
+
+        assert alSettings.feature_selector.options == list(features)
+        assert alSettings.feature_selector.value == []
+
+    def test_AL_settings_check_is_complete_on_init(self):
+
+        alSettings = ActiveLearningSettings(None)
+
+        assert not alSettings.is_complete()
+
+    def test_AL_settings_check_is_complete_on_update_no_df(self):
+
+        alSettings = ActiveLearningSettings(None)
+
+        alSettings.update_data(None)
+
+        assert not alSettings.is_complete()
+
+    def test_AL_settings_check_is_complete_on_update_df(self):
+
+        df = self._create_test_df()
+
+        alSettings = ActiveLearningSettings(None)
+
+        alSettings.update_data(df)
+
+        assert not alSettings.is_complete()
+
+    def test_AL_settings_get_df_on_init(self):
+
+        alSettings = ActiveLearningSettings(None)
+
+        assert alSettings.get_df() is None
+
+    def test_AL_settings_get_df_on_update_no_df(self):
+
+        alSettings = ActiveLearningSettings(None)
+
+        alSettings.update_data(None)
+
+        assert alSettings.get_df() is None
+
+    def test_AL_settings_get_df_on_update_df(self):
+
+        df = self._create_test_df()
+
+        alSettings = ActiveLearningSettings(None)
+
+        alSettings.update_data(df)
+
+        assert alSettings.get_df() is df
+
+    def test_AL_settings_correct_feature_generator_on_init(self):
+
+        alSettings = ActiveLearningSettings(None)
+
+        ans = feature_generation.get_oper_dict().keys()
+
+        assert alSettings.feature_generator.options == list(ans)
+
+    def test_AL_settings_correct_feature_generator_on_update_no_df(self):
+
+        alSettings = ActiveLearningSettings(None)
+
+        alSettings.update_data(None)
+
+        ans = feature_generation.get_oper_dict().keys()
+
+        assert alSettings.feature_generator.options == list(ans)
+
+    def test_AL_settings_correct_feature_generator_on_update_df(self):
+
+        df = self._create_test_df()
+
+        alSettings = ActiveLearningSettings(None)
+
+        alSettings.update_data(df)
+
+        ans = feature_generation.get_oper_dict().keys()
+        assert alSettings.feature_generator.options == list(ans)
+
+    def test_AL_settings_add_feature_cb_test(self):
+
+        df = self._create_test_df()
+
+        alSettings = ActiveLearningSettings(None)
+
+        alSettings.update_data(df)
+
+        alSettings.feature_generator.options = ["a", "b", "c", "d"]
+        alSettings.feature_generator.value = "b"
+        alSettings.feature_generator_number.value = 4
+
+        alSettings._add_feature_selector_cb(None)
+
+        assert alSettings.feature_generator_selected == [["b", 4]]
+        pd.testing.assert_frame_equal(
+            alSettings._feature_generator_dataframe.value,
+            pd.DataFrame([["b", 4]], columns=["oper", "n"]),
+        )
+
+    def test_AL_settings_add_multiple_feature_cb_test(self):
+
+        df = self._create_test_df()
+
+        alSettings = ActiveLearningSettings(None)
+
+        alSettings.update_data(df)
+
+        alSettings.feature_generator.options = ["a", "b", "c", "d"]
+        alSettings.feature_generator.value = "b"
+        alSettings.feature_generator_number.value = 4
+
+        alSettings._add_feature_selector_cb(None)
+
+        assert alSettings.feature_generator_selected == [["b", 4]]
+        pd.testing.assert_frame_equal(
+            alSettings._feature_generator_dataframe.value,
+            pd.DataFrame([["b", 4]], columns=["oper", "n"]),
+        )
+
+        alSettings.feature_generator.value = "a"
+        alSettings.feature_generator_number.value = 2
+
+        alSettings._add_feature_selector_cb(None)
+
+        assert alSettings.feature_generator_selected == [["b", 4], ["a", 2]]
+        pd.testing.assert_frame_equal(
+            alSettings._feature_generator_dataframe.value,
+            pd.DataFrame([["b", 4], ["a", 2]], columns=["oper", "n"]),
+        )
+
+    def test_AL_settings_add_duplicate_feature_cb_test(self):
+
+        df = self._create_test_df()
+
+        alSettings = ActiveLearningSettings(None)
+
+        alSettings.update_data(df)
+
+        alSettings.feature_generator.options = ["a", "b", "c", "d"]
+        alSettings.feature_generator.value = "b"
+        alSettings.feature_generator_number.value = 4
+
+        alSettings._add_feature_selector_cb(None)
+
+        assert alSettings.feature_generator_selected == [["b", 4]]
+        pd.testing.assert_frame_equal(
+            alSettings._feature_generator_dataframe.value,
+            pd.DataFrame([["b", 4]], columns=["oper", "n"]),
+        )
+
+        alSettings._add_feature_selector_cb(None)
+
+        assert alSettings.feature_generator_selected == [["b", 4]]
+        pd.testing.assert_frame_equal(
+            alSettings._feature_generator_dataframe.value,
+            pd.DataFrame([["b", 4]], columns=["oper", "n"]),
+        )
+
+    def test_AL_settings_add_multiple_and_duplicate_feature_cb_test(self):
+
+        df = self._create_test_df()
+
+        alSettings = ActiveLearningSettings(None)
+
+        alSettings.update_data(df)
+
+        alSettings.feature_generator.options = ["a", "b", "c", "d"]
+        alSettings.feature_generator.value = "b"
+        alSettings.feature_generator_number.value = 4
+
+        alSettings._add_feature_selector_cb(None)
+
+        assert alSettings.feature_generator_selected == [["b", 4]]
+        pd.testing.assert_frame_equal(
+            alSettings._feature_generator_dataframe.value,
+            pd.DataFrame([["b", 4]], columns=["oper", "n"]),
+        )
+
+        alSettings.feature_generator.value = "a"
+        alSettings.feature_generator_number.value = 2
+
+        alSettings._add_feature_selector_cb(None)
+
+        assert alSettings.feature_generator_selected == [["b", 4], ["a", 2]]
+        pd.testing.assert_frame_equal(
+            alSettings._feature_generator_dataframe.value,
+            pd.DataFrame([["b", 4], ["a", 2]], columns=["oper", "n"]),
+        )
+
+        alSettings.feature_generator.value = "b"
+        alSettings.feature_generator_number.value = 4
+
+        alSettings._add_feature_selector_cb(None)
+
+        assert alSettings.feature_generator_selected == [["b", 4], ["a", 2]]
+        pd.testing.assert_frame_equal(
+            alSettings._feature_generator_dataframe.value,
+            pd.DataFrame([["b", 4], ["a", 2]], columns=["oper", "n"]),
+        )
+
+    def test_AL_settings_remove_feature_cb_test(self):
+
+        df = self._create_test_df()
+
+        alSettings = ActiveLearningSettings(None)
+
+        alSettings.update_data(df)
+
+        alSettings.feature_generator_selected = [["b", 4]]
+        alSettings._feature_generator_dataframe.value = pd.DataFrame(
+            [["b", 4]], columns=["oper", "n"]
+        )
+
+        alSettings._remove_feature_selector_cb(None)
+
+        assert alSettings.feature_generator_selected == []
+
+        pd.testing.assert_frame_equal(
+            alSettings._feature_generator_dataframe.value,
+            pd.DataFrame([], columns=["oper", "n"]),
+        )
+
+    def test_AL_settings_remove_feature_empty_cb_test(self):
+
+        df = self._create_test_df()
+
+        alSettings = ActiveLearningSettings(None)
+
+        alSettings.update_data(df)
+
+        alSettings._remove_feature_selector_cb(None)
+
+        assert alSettings.feature_generator_selected == []
+
+        pd.testing.assert_frame_equal(
+            alSettings._feature_generator_dataframe.value,
+            pd.DataFrame([], columns=["oper", "n"]),
+        )
+
+    def test_AL_settings_add_remove_multiple_duplicate_feature_cb_test(self):
+
+        df = self._create_test_df()
+
+        alSettings = ActiveLearningSettings(None)
+
+        alSettings.update_data(df)
+
+        alSettings.feature_generator.options = ["a", "b", "c", "d"]
+        alSettings.feature_generator.value = "b"
+        alSettings.feature_generator_number.value = 4
+
+        alSettings._add_feature_selector_cb(None)
+
+        alSettings.feature_generator.value = "a"
+        alSettings.feature_generator_number.value = 2
+
+        alSettings._add_feature_selector_cb(None)
+
+        alSettings._remove_feature_selector_cb(None)
+
+        alSettings.feature_generator.value = "b"
+        alSettings.feature_generator_number.value = 4
+
+        alSettings._add_feature_selector_cb(None)
+
+        alSettings._remove_feature_selector_cb(None)
+
+        assert alSettings.feature_generator_selected == []
+        pd.testing.assert_frame_equal(
+            alSettings._feature_generator_dataframe.value,
+            pd.DataFrame([], columns=["oper", "n"]),
+        )
+
+    def test_AL_settings_confirm_settings_labels_to_train(self):
+
+        df = self._create_test_df()
+
+        button = pn.widgets.Button()
+        alSettings = ActiveLearningSettings(button)
+
+        alSettings.update_data(df)
+
+        alSettings.label_selector.options = ["a", "b", "c", "d"]
+        alSettings.label_selector.value = ["a", "b", "c"]
+
+        alSettings._confirm_settings_cb(None)
+
+        assert config.settings["labels_to_train"] == ["a", "b", "c"]
+
+    def test_AL_settings_confirm_settings_features_for_training(self):
+
+        df = self._create_test_df()
+
+        button = pn.widgets.Button()
+        alSettings = ActiveLearningSettings(button)
+
+        alSettings.update_data(df)
+
+        alSettings.feature_selector.options = ["a", "b", "c", "d"]
+        alSettings.feature_selector.value = ["a", "b", "c"]
+
+        alSettings._confirm_settings_cb(None)
+
+        assert config.settings["features_for_training"] == ["a", "b", "c"]
+
+    def test_AL_settings_confirm_settings_exclude_labels_true(self):
+
+        df = self._create_test_df()
+
+        button = pn.widgets.Button()
+        alSettings = ActiveLearningSettings(button)
+
+        alSettings.update_data(df)
+
+        alSettings.exclude_labels_checkbox.value = True
+
+        alSettings._confirm_settings_cb(None)
+
+        assert config.settings["exclude_labels"]
+
+    def test_AL_settings_confirm_settings_exclude_labels_false(self):
+
+        df = self._create_test_df()
+
+        button = pn.widgets.Button()
+        alSettings = ActiveLearningSettings(button)
+
+        alSettings.update_data(df)
+
+        alSettings.exclude_labels_checkbox.value = False
+
+        alSettings._confirm_settings_cb(None)
+
+        assert not config.settings["exclude_labels"]
+
+    def test_AL_settings_confirm_settings_unclassified_labels(self):
+
+        df = self._create_test_df()
+
+        button = pn.widgets.Button()
+        alSettings = ActiveLearningSettings(button)
+
+        alSettings.update_data(df)
+
+        alSettings.label_selector.options = ["a", "b", "c", "d"]
+        alSettings.label_selector.value = ["a", "b", "c"]
+
+        alSettings._confirm_settings_cb(None)
+
+        assert config.settings["unclassified_labels"] == ["d"]
+
+    def test_AL_settings_confirm_settings_scale_data_true(self):
+
+        df = self._create_test_df()
+
+        button = pn.widgets.Button()
+        alSettings = ActiveLearningSettings(button)
+
+        alSettings.update_data(df)
+
+        alSettings.scale_features_checkbox.value = True
+
+        alSettings._confirm_settings_cb(None)
+
+        assert config.settings["scale_data"]
+
+    def test_AL_settings_confirm_settings_scale_data_false(self):
+
+        df = self._create_test_df()
+
+        button = pn.widgets.Button()
+        alSettings = ActiveLearningSettings(button)
+
+        alSettings.update_data(df)
+
+        alSettings.scale_features_checkbox.value = False
+
+        alSettings._confirm_settings_cb(None)
+
+        assert not config.settings["scale_data"]
+
+    def test_AL_settings_confirm_settings_feature_generation(self):
+
+        df = self._create_test_df()
+
+        button = pn.widgets.Button()
+        alSettings = ActiveLearningSettings(button)
+
+        alSettings.update_data(df)
+
+        alSettings.feature_generator.options = ["a", "b", "c", "d"]
+        alSettings.feature_generator.value = "b"
+        alSettings.feature_generator_number.value = 4
+
+        alSettings._add_feature_selector_cb(None)
+
+        alSettings._confirm_settings_cb(None)
+
+        assert config.settings["feature_generation"] == [["b", 4]]
+
+    def test_data_selection_check_config_load_level_no_load_config(self):
+
+        from astropy.table import Table
+
+        t = Table([[1, 2], [4, 5], [7, 8]], names=("a", "b", "c"))
+
+        check_folder_exists("data")
+        check_folder_exists("configs")
+        t.write("data/table1.fits", format="fits")
+
+        src = ColumnDataSource()
+        ds = DataSelection(src)
+
+        ds.load_layout_check = False
+
+        ds.dataset = "data/table1.fits"
+
+        ds._load_data_cb(None)
+
+        os.remove("data/table1.fits")
+
+        assert "config_load_level" not in list(config.settings.keys())
+
+    def test_data_selection_check_config_load_level_layout_only(self, document, comm):
+
+        src = ColumnDataSource()
+        ds = DataSelection(src)
+
+        ds.load_layout_check = True
+
+        ds.load_config_select.value = (
+            "Only load layout. Let me choose all my own settings"
+        )
+
+        button = ds.load_data_button_js
+
+        widget = ds.load_data_button_js.get_root(document, comm=comm)
+
+        button._server_click(document, widget.ref["id"], None)
+
+        button._process_events({"clicks": 1})
+
+        assert config.settings["config_load_level"] == 0
+
+    def test_data_selection_check_config_load_level_layout_only(self):
+
+        src = ColumnDataSource()
+        ds = DataSelection(src)
+
+        check_folder_exists("configs")
+
+        ds.load_layout_check = True
+
+        ds.load_config_select.value = (
+            "Only load layout. Let me choose all my own settings"
+        )
+
+        ds._update_layout_file_cb(None)
+
+        assert config.settings["config_load_level"] == 0
+
+    def test_data_selection_check_config_load_level_settings_only(self):
+
+        src = ColumnDataSource()
+        ds = DataSelection(src)
+
+        check_folder_exists("configs")
+
+        ds.load_layout_check = True
+
+        ds.load_config_select.value = (
+            "Load all settings but let me train the model from scratch."
+        )
+
+        ds._update_layout_file_cb(None)
+
+        assert config.settings["config_load_level"] == 1
+
+    def test_data_selection_check_config_load_level_settings_only(self):
+
+        src = ColumnDataSource()
+        ds = DataSelection(src)
+
+        check_folder_exists("configs")
+
+        ds.load_layout_check = True
+
+        ds.load_config_select.value = (
+            "Load all settings and train model with provided labels."
+        )
+
+        ds._update_layout_file_cb(None)
+
+        assert config.settings["config_load_level"] == 2
+
+    def test_data_selection_get_dataframe_from_fits_non_optimised_parameter(self):
+
+        from astropy.table import Table
+
+        t = Table([[1, 2], [4, 5], [7, 8]], names=("a", "b", "c"))
+
+        check_folder_exists("data")
+        t.write("data/table1.fits", format="fits")
+
+        src = ColumnDataSource()
+        ds = DataSelection(src)
+
+        ds.memory_optimisation_check.value = False
+
+        df = ds.get_dataframe_from_fits_file("data/table1.fits", optimise_data=False)
+
+        os.remove("data/table1.fits")
+
+        pd.testing.assert_frame_equal(
+            df, pd.DataFrame([[1, 4, 7], [2, 5, 8]], columns=["a", "b", "c"])
+        )
+
+    def test_data_selection_get_dataframe_from_fits_optimised_parameter(self):
+
+        from astropy.table import Table
+
+        t = Table([[1, 2], [4, 5], [7, 8]], names=("a", "b", "c"))
+
+        check_folder_exists("data")
+        t.write("data/table1.fits", format="fits")
+
+        src = ColumnDataSource()
+        ds = DataSelection(src)
+
+        ds.memory_optimisation_check.value = False
+
+        df = ds.get_dataframe_from_fits_file("data/table1.fits", optimise_data=True)
+
+        os.remove("data/table1.fits")
+
+        new_df = pd.DataFrame([[1, 4, 7], [2, 5, 8]], columns=["a", "b", "c"])
+
+        new_df = new_df.astype("int8")
+
+        pd.testing.assert_frame_equal(df, new_df)
+
+    def test_data_selection_get_dataframe_from_fits_optimised_checkbox(self):
+
+        from astropy.table import Table
+
+        t = Table([[1, 2], [4, 5], [7, 8]], names=("a", "b", "c"))
+
+        check_folder_exists("data")
+        t.write("data/table1.fits", format="fits")
+
+        src = ColumnDataSource()
+        ds = DataSelection(src)
+
+        ds.memory_optimisation_check.value = True
+
+        df = ds.get_dataframe_from_fits_file("data/table1.fits")
+
+        os.remove("data/table1.fits")
+
+        new_df = pd.DataFrame([[1, 4, 7], [2, 5, 8]], columns=["a", "b", "c"])
+
+        new_df = new_df.astype("int8")
+
+        pd.testing.assert_frame_equal(df, new_df)
+        assert config.settings["optimise_data"]
+
+    def test_data_selection_get_dataframe_from_fits_non_optimised_checkbox(self):
+
+        from astropy.table import Table
+
+        t = Table([[1, 2], [4, 5], [7, 8]], names=("a", "b", "c"))
+
+        check_folder_exists("data")
+        t.write("data/table1.fits", format="fits")
+
+        src = ColumnDataSource()
+        ds = DataSelection(src)
+
+        ds.memory_optimisation_check.value = False
+
+        df = ds.get_dataframe_from_fits_file("data/table1.fits")
+
+        os.remove("data/table1.fits")
+
+        new_df = pd.DataFrame([[1, 4, 7], [2, 5, 8]], columns=["a", "b", "c"])
+
+        pd.testing.assert_frame_equal(df, new_df)
+        assert not config.settings["optimise_data"]
+
+    def test_data_selection_get_df_after_load_non_optimised(self):
+
+        from astropy.table import Table
+
+        t = Table([[1, 2], [4, 5], [7, 8]], names=("a", "b", "c"))
+
+        check_folder_exists("data")
+        t.write("data/table1.fits", format="fits")
+
+        src = ColumnDataSource()
+        ds = DataSelection(src)
+
+        ds.memory_optimisation_check.value = False
+
+        ds.dataset = "data/table1.fits"
+
+        ds._load_data_cb(None)
+
+        os.remove("data/table1.fits")
+
+        df = ds.get_df()
+
+        new_df = pd.DataFrame([[1, 4, 7], [2, 5, 8]], columns=["a", "b", "c"])
+
+        pd.testing.assert_frame_equal(df, new_df)
+        assert ds.ready
+        assert not config.settings["optimise_data"]
+
+    def test_data_selection_get_df_after_load_non_optimised(self):
+
+        from astropy.table import Table
+
+        t = Table([[1, 2], [4, 5], [7, 8]], names=("a", "b", "c"))
+
+        check_folder_exists("data")
+        t.write("data/table1.fits", format="fits")
+
+        src = ColumnDataSource()
+        ds = DataSelection(src)
+
+        ds.memory_optimisation_check.value = True
+
+        ds.dataset = "data/table1.fits"
+
+        ds._load_data_cb(None)
+
+        os.remove("data/table1.fits")
+
+        df = ds.get_df()
+
+        new_df = pd.DataFrame([[1, 4, 7], [2, 5, 8]], columns=["a", "b", "c"])
+        new_df = new_df.astype("int8")
+
+        pd.testing.assert_frame_equal(df, new_df)
+        assert ds.ready
+        assert config.settings["optimise_data"]

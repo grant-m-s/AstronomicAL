@@ -58,8 +58,8 @@ class ParameterAssignment(param.Parameterized):
 
     label_strings_param = {}
 
-    def __init__(self, **params):
-        super(ParameterAssignment, self).__init__(**params)
+    def __init__(self):
+        super(ParameterAssignment, self).__init__()
         self.column = pn.Column(pn.pane.Str("loading"))
         self.src = ColumnDataSource()
 
@@ -80,6 +80,7 @@ class ParameterAssignment(param.Parameterized):
             name="Extra Columns to display when inspecting a source:",
             value=[],
             options=[],
+            max_width=700,
         )
 
     def update_data(self, dataframe=None):
@@ -175,7 +176,9 @@ class ParameterAssignment(param.Parameterized):
 
         for i, data_label in enumerate(labels):
             self.colours_param[f"{data_label}"] = pn.widgets.ColorPicker(
-                name=f"{data_label}", value=colour_list[(i % 10)]
+                name=f"{data_label}",
+                value=colour_list[(i % 10)],
+                max_width=int(500 / len(labels)),
             )
 
         print(self.colours_param)
@@ -193,7 +196,9 @@ class ParameterAssignment(param.Parameterized):
         self.confirm_settings_button.name = "Assigning parameters..."
         self.confirm_settings_button.disabled = True
 
-        config.settings = self.get_settings()
+        updated_settings = self.get_settings()
+        for key in updated_settings.keys():
+            config.settings[key] = updated_settings[key]
         config.settings["confirmed"] = False
 
         config.settings["extra_info_cols"] = self.extra_info_selector.value
@@ -349,22 +354,29 @@ class ParameterAssignment(param.Parameterized):
         else:
             layout = pn.Column(
                 pn.Row(
-                    self.param.id_column,
-                    self.param.label_column,
-                    self.param.default_x_variable,
-                    self.param.default_y_variable,
+                    pn.Row(self.param.id_column, max_width=150),
+                    pn.Row(self.param.label_column, max_width=150),
+                    pn.Row(self.param.default_x_variable, max_width=150),
+                    pn.Row(self.param.default_y_variable, max_width=150),
+                    max_width=600,
                 )
             )
 
             if len(self.colours_param.keys()) > 0:
                 colour_row = pn.Row(
-                    pn.pane.Markdown("**Choose colours:**", max_height=50)
+                    pn.pane.Markdown(
+                        "**Choose colours:**", max_height=50, max_width=150
+                    ),
+                    max_width=750,
                 )
                 for widget in self.colours_param:
                     colour_row.append(self.colours_param[widget])
 
                 label_strings_row = pn.Row(
-                    pn.pane.Markdown("**Custom label names:**", max_height=50)
+                    pn.pane.Markdown(
+                        "**Custom label names:**", max_height=50, max_width=150
+                    ),
+                    max_width=750,
                 )
 
                 for widget in self.label_strings_param:
@@ -376,13 +388,15 @@ class ParameterAssignment(param.Parameterized):
 
                 layout.append(self.extra_info_selector)
 
+                layout.append(pn.Spacer(height=50))
+
                 layout.append(
                     pn.Row(
                         self.confirm_settings_button,
                     )
                 )
 
-                layout.append(pn.Spacer(height=50))
+                layout.append(pn.Spacer(height=80))
 
             self.column[0] = layout
 
