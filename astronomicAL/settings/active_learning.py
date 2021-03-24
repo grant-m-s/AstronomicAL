@@ -11,8 +11,6 @@ class ActiveLearningSettings(param.Parameterized):
 
     Parameters
     ----------
-    src : ColumnDataSource
-        The shared data source which holds the current selected source.
     close_button : Panel Button
         Close button widget from the parent settings dashboard to allow the
         button to be updated when all settings have been completed.
@@ -40,8 +38,7 @@ class ActiveLearningSettings(param.Parameterized):
 
     """
 
-    def __init__(self, src, close_button, **params):
-        super(ActiveLearningSettings, self).__init__(**params)
+    def __init__(self, close_button):
 
         self.df = None
 
@@ -59,10 +56,57 @@ class ActiveLearningSettings(param.Parameterized):
 
     def _adjust_widget_layouts(self):
 
+        self.label_selector.max_width = 750
+        self.label_selector.max_width = 750
+        self.feature_selector.max_width = 750
+        self.feature_selector.max_width = 750
+
         self.label_selector._search[True].max_height = 20
         self.label_selector._search[False].max_height = 20
         self.feature_selector._search[True].max_height = 20
         self.feature_selector._search[False].max_height = 20
+        self.label_selector._search[True].max_width = 300
+        self.label_selector._search[False].max_width = 300
+        self.feature_selector._search[True].max_width = 300
+        self.feature_selector._search[False].max_width = 300
+
+        self.label_selector._lists[True].max_width = 300
+        self.label_selector._lists[False].max_width = 300
+        self.feature_selector._lists[True].max_width = 300
+        self.feature_selector._lists[False].max_width = 300
+
+        self.label_selector._buttons[True].max_width = 50
+        self.label_selector._buttons[False].max_width = 50
+        self.feature_selector._buttons[True].max_width = 50
+        self.feature_selector._buttons[False].max_width = 50
+
+        self.label_selector._buttons[True].max_height = 30
+        self.label_selector._buttons[False].max_height = 30
+        self.feature_selector._buttons[True].max_height = 30
+        self.feature_selector._buttons[False].max_height = 30
+
+        self.label_selector._buttons[True].margin = (50, 20, 0, 20)
+        self.label_selector._buttons[False].margin = (10, 20, 0, 20)
+        self.feature_selector._buttons[True].margin = (50, 20, 0, 20)
+        self.feature_selector._buttons[False].margin = (10, 20, 0, 20)
+
+        self.label_selector._composite[:] = [
+            self.label_selector._unselected,
+            pn.Column(
+                self.label_selector._buttons[True],
+                self.label_selector._buttons[False],
+            ),
+            self.label_selector._selected,
+        ]
+
+        self.feature_selector._composite[:] = [
+            self.feature_selector._unselected,
+            pn.Column(
+                self.feature_selector._buttons[True],
+                self.feature_selector._buttons[False],
+            ),
+            self.feature_selector._selected,
+        ]
 
     def _initialise_widgets(self):
 
@@ -89,10 +133,12 @@ class ActiveLearningSettings(param.Parameterized):
             name="How many features to combine?", value=2, step=1, start=2, end=5
         )
 
-        self._add_feature_generator_button = pn.widgets.Button(name=">>")
+        self._add_feature_generator_button = pn.widgets.Button(name=">>", max_width=80)
         self._add_feature_generator_button.on_click(self._add_feature_selector_cb)
 
-        self._remove_feature_generator_button = pn.widgets.Button(name="Remove")
+        self._remove_feature_generator_button = pn.widgets.Button(
+            name="Remove", max_width=80
+        )
         self._remove_feature_generator_button.on_click(self._remove_feature_selector_cb)
 
         self._feature_generator_dataframe = pn.widgets.DataFrame(
@@ -197,12 +243,12 @@ class ActiveLearningSettings(param.Parameterized):
         self.panel()
 
     def get_df(self):
-        """Return the dataframe the active learning settings has generated.
+        """Return the active learning settings dataframe.
 
         Returns
         -------
         df : DataFrame
-            Original DataFrame with any generated features added.
+            Data collected up to and including the Active Learning settings panel.
 
         """
         return self.df
@@ -255,9 +301,8 @@ class ActiveLearningSettings(param.Parameterized):
                     self._feature_generator_dataframe,
                     sizing_mode="stretch_width",
                 ),
-                pn.layout.Divider(max_width=30),
                 pn.Row(self.confirm_settings_button, max_height=30),
-                pn.Row(pn.Spacer(height=50)),
+                pn.Row(pn.Spacer(height=10)),
             )
 
         return self.column
