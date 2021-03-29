@@ -700,13 +700,14 @@ class ActiveLearningTab:
             self.show_queried_point()
             self.assign_label_button.name = "Assign"
             self.assign_label_button.disabled = False
+            self.panel()
 
-        assert (
-            self.x_al_train.shape[0] == self.y_al_train.shape[0]
+        assert self.x_al_train.shape[0] == len(
+            self.y_al_train
         ), "AL_TRAIN & LABELS NOT EQUAL"
 
-        assert (
-            self.y_al_train.shape[0] == self.id_al_train.shape[0]
+        assert len(self.y_al_train) == len(
+            self.id_al_train
         ), "AL_LABELS & IDs NOT EQUAL"
 
         self.panel(button_update=True)
