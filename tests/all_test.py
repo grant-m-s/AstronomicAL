@@ -1100,7 +1100,7 @@ class TestSettings:
         assert ds.ready
         assert not config.settings["optimise_data"]
 
-    def test_data_selection_get_df_after_load_non_optimised(self):
+    def test_data_selection_get_df_after_load_optimised(self):
 
         from astropy.table import Table
 
@@ -1128,3 +1128,180 @@ class TestSettings:
         pd.testing.assert_frame_equal(df, new_df)
         assert ds.ready
         assert config.settings["optimise_data"]
+
+
+class TestDashboards:
+    def _create_test_df(self):
+
+        data = []
+
+        for i in range(100):
+            data.append([i, i % 3, i, i, i])
+
+        df = pd.DataFrame(data, columns=list("ABCDE"))
+
+        return df
+
+    def test_selected_source_init_no_selected(self):
+
+        data = self._create_test_df()
+        config.main_df = data
+        src = ColumnDataSource()
+        selected_source = SelectedSourceDashboard(src=src, close_button=None)
+
+        assert selected_source.selected_history == []
+        assert selected_source._url_optical_image == ""
+        assert selected_source._search_status == ""
+        assert selected_source._image_zoom == 0.2
+
+    def test_selected_source_init_selected(self):
+
+        data = self._create_test_df()
+        config.main_df = data
+        data = data.iloc[5]
+        src = ColumnDataSource({str(c): [v] for c, v in data.items()})
+        selected_source = SelectedSourceDashboard(src=src, close_button=None)
+
+        assert selected_source.selected_history == [5]
+        assert selected_source._url_optical_image == ""
+        assert selected_source._search_status == ""
+        assert selected_source._image_zoom == 0.2
+
+        data = self._create_test_df()
+        data = data.iloc[15]
+        src = ColumnDataSource({str(c): [v] for c, v in data.items()})
+        selected_source = SelectedSourceDashboard(src=src, close_button=None)
+
+        assert selected_source.selected_history == [15]
+        assert selected_source._url_optical_image == ""
+        assert selected_source._search_status == ""
+        assert selected_source._image_zoom == 0.2
+
+        data = self._create_test_df()
+        data = data.iloc[72]
+        src = ColumnDataSource({str(c): [v] for c, v in data.items()})
+        selected_source = SelectedSourceDashboard(src=src, close_button=None)
+
+        assert selected_source.selected_history == [72]
+        assert selected_source._url_optical_image == ""
+        assert selected_source._search_status == ""
+        assert selected_source._image_zoom == 0.2
+
+    def test_selected_source_check_history_from_none_to_selected(self):
+        data = self._create_test_df()
+        config.main_df = data
+        src = ColumnDataSource()
+        selected_source = SelectedSourceDashboard(src=src, close_button=None)
+
+        assert selected_source.selected_history == []
+
+        data_selected = data.iloc[72]
+        src.data = {str(c): [v] for c, v in data_selected.items()}
+
+        assert selected_source.selected_history == [72]
+
+    def test_selected_source_check_history_from_selected_to_selected_unique(self):
+        data = self._create_test_df()
+        data_selected = data.iloc[72]
+        src = ColumnDataSource({str(c): [v] for c, v in data_selected.items()})
+        selected_source = SelectedSourceDashboard(src=src, close_button=None)
+
+        assert selected_source.selected_history == [72]
+
+        data_selected = data.iloc[30]
+        src.data = {str(c): [v] for c, v in data_selected.items()}
+
+        assert selected_source.selected_history == [30, 72]
+
+    def test_selected_source_check_history_from_selected_to_selected_same_id_head(self):
+        data = self._create_test_df()
+        config.main_df = data
+        data_selected = data.iloc[72]
+        src = ColumnDataSource({str(c): [v] for c, v in data_selected.items()})
+        selected_source = SelectedSourceDashboard(src=src, close_button=None)
+
+        assert selected_source.selected_history == [72]
+
+        data_selected = data.iloc[72]
+        src.data = {str(c): [v] for c, v in data_selected.items()}
+
+        assert selected_source.selected_history == [72]
+
+    def test_selected_source_check_history_from_selected_to_selected_same_id_throughout(
+        self,
+    ):
+        data = self._create_test_df()
+        config.main_df = data
+        data_selected = data.iloc[72]
+        src = ColumnDataSource({str(c): [v] for c, v in data_selected.items()})
+        selected_source = SelectedSourceDashboard(src=src, close_button=None)
+
+        data_selected = data.iloc[30]
+        src.data = {str(c): [v] for c, v in data_selected.items()}
+
+        data_selected = data.iloc[30]
+        src.data = {str(c): [v] for c, v in data_selected.items()}
+
+        data_selected = data.iloc[72]
+        src.data = {str(c): [v] for c, v in data_selected.items()}
+
+        assert selected_source.selected_history == [72, 30, 72]
+
+    def test_selected_source_empty_selected_from_non_selected(self):
+        data = self._create_test_df()
+        config.main_df = data
+        src = ColumnDataSource()
+        selected_source = SelectedSourceDashboard(src=src, close_button=None)
+
+        selected_source.empty_selected()
+
+        empty = {}
+
+        assert selected_source.src.data == empty
+
+    def test_selected_source_empty_selected_from_selected(self):
+        data = self._create_test_df()
+        config.main_df = data
+        data_selected = data.iloc[72]
+        src = ColumnDataSource({str(c): [v] for c, v in data_selected.items()})
+        selected_source = SelectedSourceDashboard(src=src, close_button=None)
+
+        selected_source.empty_selected()
+
+        empty = {"A": [], "B": [], "C": [], "D": [], "E": []}
+
+        assert selected_source.src.data == empty
+
+    def test_selected_source_check_valid_select_from_non_selected(self):
+        data = self._create_test_df()
+        config.main_df = data
+        src = ColumnDataSource()
+        selected_source = SelectedSourceDashboard(src=src, close_button=None)
+
+        valid = selected_source._check_valid_selected()
+
+        assert not valid
+
+    def test_selected_source_check_valid_select_from_selected_is_valid(self):
+        data = self._create_test_df()
+        config.main_df = data
+        data_selected = data.iloc[72]
+        src = ColumnDataSource({str(c): [v] for c, v in data_selected.items()})
+        selected_source = SelectedSourceDashboard(src=src, close_button=None)
+
+        valid = selected_source._check_valid_selected()
+
+        assert valid
+
+    def test_selected_source_check_valid_select_from_selected_is_not_valid(self):
+        data = self._create_test_df()
+        config.main_df = data
+        data_selected = data.iloc[72].copy()
+        data_selected["A"] = 500
+
+        src = ColumnDataSource({str(c): [v] for c, v in data_selected.items()})
+        selected_source = SelectedSourceDashboard(src=src, close_button=None)
+
+        valid = selected_source._check_valid_selected()
+
+        assert not valid
