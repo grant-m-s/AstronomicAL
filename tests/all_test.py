@@ -1653,9 +1653,26 @@ class TestDashboards:
         settings_db.panel()
         assert not settings_db._close_settings_button.disabled
 
-    # def test_settings_dashboard_init(self):
-    #     data = self._create_test_df()
-    #     config.main_df = data
-    #     data_selected = data.iloc[72]
-    #     src = ColumnDataSource({str(c): [v] for c, v in data_selected.items()})
-    #     selected_source = SelectedSourceDashboard(src=src, close_button=None)
+    def test_settings_dashboard_get_settings(self):
+        data = self._create_test_df()
+        config.main_df = data
+        src = ColumnDataSource()
+
+        settings_db = SettingsDashboard(None, src)
+        settings_db.pipeline["Assign Parameters"].update_data(dataframe=data)
+        settings_db.pipeline["Assign Parameters"].id_column = "A"
+        settings_db.pipeline["Assign Parameters"].label_column = "B"
+        settings_db.pipeline["Assign Parameters"].default_x_variable = "C"
+        settings_db.pipeline["Assign Parameters"].default_y_variable = "D"
+        settings_db.pipeline["Assign Parameters"].update_colours()
+
+        updated_settings = settings_db.get_settings()
+
+        settings = {
+            "id_col": "A",
+            "label_col": "B",
+            "default_vars": ("C", "D"),
+            "label_colours": {0: "#1f77b4", 1: "#ff7f0e", 2: "#2ca02c"},
+        }
+
+        assert updated_settings == settings
