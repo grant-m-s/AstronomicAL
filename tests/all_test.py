@@ -1296,10 +1296,9 @@ class TestDashboards:
     def test_selected_source_check_valid_select_from_selected_is_not_valid(self):
         data = self._create_test_df()
         config.main_df = data
-        data_selected = data.iloc[72].copy()
-        data_selected["A"] = 500
-
-        src = ColumnDataSource({str(c): [v] for c, v in data_selected.items()})
+        data_selected = pd.DataFrame([[500, 23, 56, 56, 56]], columns=list("ABCDE"))
+        print(data_selected)
+        src = ColumnDataSource({str(c): v for c, v in data_selected.items()})
         selected_source = SelectedSourceDashboard(src=src, close_button=None)
 
         valid = selected_source._check_valid_selected()
