@@ -1676,3 +1676,83 @@ class TestDashboards:
         }
 
         assert updated_settings == settings
+
+    def test_AL_dashboard_init(self):
+        data = self._create_test_df()
+        config.main_df = data
+        src = ColumnDataSource()
+
+        al_db = ActiveLearningDashboard(src, data)
+
+        pd.testing.assert_frame_equal(al_db.df, data)
+        assert al_db.src.data == src.data
+        assert al_db.active_learning == []
+
+    def test_AL_dashboard_labels_to_train_empty(self):
+        data = self._create_test_df()
+        config.main_df = data
+        src = ColumnDataSource()
+
+        config.settings["labels_to_train"] = []
+
+        al_db = ActiveLearningDashboard(src, data)
+
+        assert al_db.active_learning == []
+
+    def test_AL_dashboard_labels_to_train_single(self):
+        data = self._create_test_df()
+        config.main_df = data
+        src = ColumnDataSource()
+
+        config.settings = {
+            "id_col": "A",
+            "label_col": "B",
+            "default_vars": ["C", "D"],
+            "labels": [0, 1, 2],
+            "label_colours": {0: "#ffad0e", 1: "#0057ff", 2: "#a2a2a2"},
+            "labels_to_strings": {0: "0", 1: "1", 2: "2"},
+            "strings_to_labels": {"0": 0, "1": 1, "2": 2},
+            "extra_info_cols": [
+                "C",
+            ],
+            "labels_to_train": ["1"],
+            "features_for_training": ["C", "D"],
+            "exclude_labels": True,
+            "unclassified_labels": ["0", "2"],
+            "scale_data": False,
+            "feature_generation": [["subtract (a-b)", 2]],
+        }
+
+        al_db = ActiveLearningDashboard(src, data)
+
+        assert len(al_db.active_learning) == 1
+        assert len(al_db.al_tabs) == 1
+
+    def test_AL_dashboard_labels_to_train_multiple(self):
+        data = self._create_test_df()
+        config.main_df = data
+        src = ColumnDataSource()
+
+        config.settings = {
+            "id_col": "A",
+            "label_col": "B",
+            "default_vars": ["C", "D"],
+            "labels": [0, 1, 2],
+            "label_colours": {0: "#ffad0e", 1: "#0057ff", 2: "#a2a2a2"},
+            "labels_to_strings": {0: "0", 1: "1", 2: "2"},
+            "strings_to_labels": {"0": 0, "1": 1, "2": 2},
+            "extra_info_cols": [
+                "C",
+            ],
+            "labels_to_train": ["0", "1", "2"],
+            "features_for_training": ["C", "D"],
+            "exclude_labels": True,
+            "unclassified_labels": [],
+            "scale_data": False,
+            "feature_generation": [["subtract (a-b)", 2]],
+        }
+
+        al_db = ActiveLearningDashboard(src, data)
+
+        assert len(al_db.active_learning) == 3
+        assert len(al_db.al_tabs) == 3
