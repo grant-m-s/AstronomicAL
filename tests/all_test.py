@@ -50,6 +50,12 @@ def check_folder_exists(folder):
         os.mkdir(folder)
 
 
+class Event:
+    def __init__(self, new, old):
+        self.new = new
+        self.old = old
+
+
 class TestClass:
     def func(self, x):
         return x + 1
@@ -1305,3 +1311,166 @@ class TestDashboards:
         valid = selected_source._check_valid_selected()
 
         assert not valid
+
+    def test_selected_source_check_ra_dec_conv(self):
+        data = self._create_test_df()
+        config.main_df = data
+        src = ColumnDataSource()
+        selected_source = SelectedSourceDashboard(src=src, close_button=None)
+
+        new_url = selected_source._generate_radio_url(121.5042, -34.1172)
+
+        url1 = "https://third.ucllnl.org/cgi-bin/firstimage?RA="
+        url2 = "&Equinox=J2000&ImageSize=2.5&MaxInt=200&GIF=1"
+        url = f"{url1}8.0 6.0 1.0 -34.0 7.0 2.0{url2}"
+        print(new_url)
+        print(url)
+
+        assert new_url == url
+
+        new_url = selected_source._generate_radio_url(183.0500, 45.7625)
+
+        url1 = "https://third.ucllnl.org/cgi-bin/firstimage?RA="
+        url2 = "&Equinox=J2000&ImageSize=2.5&MaxInt=200&GIF=1"
+        url = f"{url1}12.0 12.0 12.0 45.0 45.0 45.0{url2}"
+        print(new_url)
+        print(url)
+
+        assert new_url == url
+
+        new_url = selected_source._generate_radio_url(182.2667, 1.1358)
+
+        url1 = "https://third.ucllnl.org/cgi-bin/firstimage?RA="
+        url2 = "&Equinox=J2000&ImageSize=2.5&MaxInt=200&GIF=1"
+        url = f"{url1}12.0 9.0 4.0 1.0 8.0 9.0{url2}"
+        print(new_url)
+        print(url)
+
+        assert new_url == url
+
+        new_url = selected_source._generate_radio_url(15.2542, 1.0169)
+
+        url1 = "https://third.ucllnl.org/cgi-bin/firstimage?RA="
+        url2 = "&Equinox=J2000&ImageSize=2.5&MaxInt=200&GIF=1"
+        url = f"{url1}1.0 1.0 1.0 1.0 1.0 1.0{url2}"
+        print(new_url)
+        print(url)
+
+        assert new_url == url
+
+        new_url = selected_source._generate_radio_url(15.2542, -1.0169)
+
+        url1 = "https://third.ucllnl.org/cgi-bin/firstimage?RA="
+        url2 = "&Equinox=J2000&ImageSize=2.5&MaxInt=200&GIF=1"
+        url = f"{url1}1.0 1.0 1.0 -1.0 1.0 1.0{url2}"
+        print(new_url)
+        print(url)
+
+        assert new_url == url
+
+        new_url = selected_source._generate_radio_url(167.7958, 11.1864)
+
+        url1 = "https://third.ucllnl.org/cgi-bin/firstimage?RA="
+        url2 = "&Equinox=J2000&ImageSize=2.5&MaxInt=200&GIF=1"
+        url = f"{url1}11.0 11.0 11.0 11.0 11.0 11.0{url2}"
+        print(new_url)
+        print(url)
+
+        assert new_url == url
+
+        new_url = selected_source._generate_radio_url(167.7958, -11.1864)
+
+        url1 = "https://third.ucllnl.org/cgi-bin/firstimage?RA="
+        url2 = "&Equinox=J2000&ImageSize=2.5&MaxInt=200&GIF=1"
+        url = f"{url1}11.0 11.0 11.0 -11.0 11.0 11.0{url2}"
+        print(new_url)
+        print(url)
+
+        assert new_url == url
+
+    def test_selected_source_change_zoom_in(self):
+        data = self._create_test_df()
+        config.main_df = data
+        src = ColumnDataSource()
+        selected_source = SelectedSourceDashboard(src=src, close_button=None)
+
+        selected_source._change_zoom_cb(None, "in")
+        assert selected_source._image_zoom == 0.1
+
+    def test_selected_source_change_zoom_in_check_stop(self):
+        data = self._create_test_df()
+        config.main_df = data
+        src = ColumnDataSource()
+        selected_source = SelectedSourceDashboard(src=src, close_button=None)
+
+        selected_source._change_zoom_cb(None, "in")
+        selected_source._change_zoom_cb(None, "in")
+        selected_source._change_zoom_cb(None, "in")
+        selected_source._change_zoom_cb(None, "in")
+        assert selected_source._image_zoom == 0.1
+
+    def test_selected_source_change_zoom_out(self):
+        data = self._create_test_df()
+        config.main_df = data
+        src = ColumnDataSource()
+        selected_source = SelectedSourceDashboard(src=src, close_button=None)
+
+        selected_source._change_zoom_cb(None, "out")
+        assert selected_source._image_zoom == 0.3
+
+    def test_selected_source_search_empty(self):
+        data = self._create_test_df()
+        config.main_df = data
+        src = ColumnDataSource()
+        selected_source = SelectedSourceDashboard(src=src, close_button=None)
+
+        event = Event("", "")
+        selected_source._change_selected(event)
+
+        assert selected_source._search_status == ""
+
+    def test_selected_source_search_invalid_id(self):
+        data = self._create_test_df()
+        config.main_df = data
+        src = ColumnDataSource()
+        selected_source = SelectedSourceDashboard(src=src, close_button=None)
+
+        event = Event("DOESNT_EXIST", "")
+        selected_source._change_selected(event)
+
+        assert selected_source._search_status == "ID not found in dataset"
+
+    def test_selected_source_search_valid_id(self):
+        data = self._create_test_df()
+        config.main_df = data
+        src = ColumnDataSource()
+        selected_source = SelectedSourceDashboard(src=src, close_button=None)
+
+        event = Event(5, "")
+        selected_source._change_selected(event)
+
+        print(selected_source.src.data)
+
+        assert selected_source._search_status == "Searching..."
+        assert selected_source.src.data == src.data
+        assert selected_source.src.data["A"] == [5]
+
+    def test_selected_source_check_required_column_has_column(self):
+        data = self._create_test_df()
+        config.main_df = data
+        src = ColumnDataSource()
+        selected_source = SelectedSourceDashboard(src=src, close_button=None)
+
+        has_column = selected_source.check_required_column("A")
+
+        assert has_column
+
+    def test_selected_source_check_required_column_missing_column(self):
+        data = self._create_test_df()
+        config.main_df = data
+        src = ColumnDataSource()
+        selected_source = SelectedSourceDashboard(src=src, close_button=None)
+
+        has_column = selected_source.check_required_column("F")
+
+        assert not has_column
