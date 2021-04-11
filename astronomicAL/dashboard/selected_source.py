@@ -149,7 +149,11 @@ class SelectedSourceDashboard:
 
         if config.settings["id_col"] in list(self.src.data.keys()):
             if len(self.src.data[config.settings["id_col"]]) > 0:
-                selected = True
+                if self.src.data[config.settings["id_col"]][0] in list(
+                    self.df[config.settings["id_col"]].values
+                ):
+                    print(self.src.data[config.settings["id_col"]][0])
+                    selected = True
 
         return selected
 
