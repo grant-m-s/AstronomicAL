@@ -152,7 +152,6 @@ class SelectedSourceDashboard:
                 if self.src.data[config.settings["id_col"]][0] in list(
                     self.df[config.settings["id_col"]].values
                 ):
-                    print(self.src.data[config.settings["id_col"]][0])
                     selected = True
 
         return selected
@@ -204,6 +203,7 @@ class SelectedSourceDashboard:
         m = np.floor(d / 0.25)
         d = d - m * 0.25
         s = d / (0.25 / 60.0)
+        s = np.round(s)
         ra_conv = f"{h} {m} {s}"
 
         sign = 1
@@ -216,6 +216,8 @@ class SelectedSourceDashboard:
         m = np.floor(g * 60.0)
         g = g - m / 60.0
         s = g * 3600.0
+
+        s = np.round(s)
 
         dec_conv = f"{d} {m} {s}"
 
@@ -230,12 +232,12 @@ class SelectedSourceDashboard:
         return url
 
     def _change_zoom_cb(self, event, oper):
-        if oper == "-":
+        if oper == "out":
             self._image_zoom += 0.1
             self._image_zoom = round(self._image_zoom, 1)
-        if oper == "+":
-            if self._image_zoom == 0.1:
-                pass
+        if oper == "in":
+            if self._image_zoom <= 0.1:
+                self._image_zoom = 0.1
             else:
                 self._image_zoom -= 0.1
                 self._image_zoom = round(self._image_zoom, 1)
@@ -288,11 +290,11 @@ class SelectedSourceDashboard:
         self.zoom_increase = pn.widgets.Button(
             name="Zoom In", max_height=30, max_width=50
         )
-        self.zoom_increase.on_click(partial(self._change_zoom_cb, oper="+"))
+        self.zoom_increase.on_click(partial(self._change_zoom_cb, oper="in"))
         self.zoom_decrease = pn.widgets.Button(
             name="Zoom Out", max_height=30, max_width=50
         )
-        self.zoom_decrease.on_click(partial(self._change_zoom_cb, oper="-"))
+        self.zoom_decrease.on_click(partial(self._change_zoom_cb, oper="out"))
 
     def check_required_column(self, column):
         """Check `df` has the required column.
