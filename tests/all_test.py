@@ -1153,9 +1153,22 @@ class TestDashboards:
         data = []
 
         for i in range(100):
-            data.append([i, i % 3, i, i, i, "178.52904,2.1655949"])
+            if i % 2 == 0:
+                data.append([i, i % 3, i, i, i, "178.52904,2.1655949", ""])
+            else:
+                data.append(
+                    [
+                        i,
+                        i % 3,
+                        i,
+                        i,
+                        i,
+                        "178.52904,2.1655949",
+                        "https://dr15.sdss.org/sas/dr15/sdss/spectro/redux/images/v5_10_0/8125-56955/spec-image-8125-56955-0534.png",
+                    ]
+                )
 
-        df = pd.DataFrame(data, columns=list("ABCDE") + ["ra_dec"])
+        df = pd.DataFrame(data, columns=list("ABCDE") + ["ra_dec", "png_path_DR16"])
 
         return df
 
@@ -1544,3 +1557,32 @@ class TestDashboards:
         )
 
         assert selected_source._url_optical_image == _url_optical_image
+
+    def test_selected_source_spectra_image_check_none_selected(self):
+        data = self._create_test_df_with_image_data()
+        config.main_df = data
+        src = ColumnDataSource()
+        selected_source = SelectedSourceDashboard(src=src, close_button=None)
+
+        assert selected_source.spectra_image.object == ""
+
+    def test_selected_source_spectra_image_check_selected_has_image(self):
+        data = self._create_test_df_with_image_data()
+        config.main_df = data
+        data_selected = data.iloc[71]
+        src = ColumnDataSource({str(c): [v] for c, v in data_selected.items()})
+        selected_source = SelectedSourceDashboard(src=src, close_button=None)
+
+        assert (
+            selected_source.spectra_image.object
+            == "https://dr15.sdss.org/sas/dr15/sdss/spectro/redux/images/v5_10_0/8125-56955/spec-image-8125-56955-0534.png"
+        )
+
+    def test_selected_source_spectra_image_check_selected_no_image(self):
+        data = self._create_test_df_with_image_data()
+        config.main_df = data
+        data_selected = data.iloc[72]
+        src = ColumnDataSource({str(c): [v] for c, v in data_selected.items()})
+        selected_source = SelectedSourceDashboard(src=src, close_button=None)
+
+        assert selected_source.spectra_image.object == ""
