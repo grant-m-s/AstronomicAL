@@ -1586,3 +1586,76 @@ class TestDashboards:
         selected_source = SelectedSourceDashboard(src=src, close_button=None)
 
         assert selected_source.spectra_image.object == ""
+
+    def test_settings_dashboard_init(self):
+        data = self._create_test_df()
+        config.main_df = data
+        src = ColumnDataSource()
+        selected_source = SelectedSourceDashboard(src=src, close_button=None)
+
+        settings_db = SettingsDashboard(None, src)
+
+        assert settings_db._pipeline_stage == 0
+
+    def test_settings_dashboard_close_settings(self):
+        data = self._create_test_df()
+        config.main_df = data
+        src = ColumnDataSource()
+
+        main = Dashboard(src)
+
+        settings_db = SettingsDashboard(None, src)
+        settings_db.pipeline["Active Learning Settings"].df = data
+        settings_db._close_settings_cb(None, main)
+
+        pd.testing.assert_frame_equal(config.main_df, settings_db.df)
+        assert settings_db.src.data == {"A": [], "B": [], "C": [], "D": [], "E": []}
+        assert main.contents == "Active Learning"
+
+    def test_settings_dashboard_pipeline_previous(self):
+        data = self._create_test_df()
+        config.main_df = data
+        src = ColumnDataSource()
+
+        settings_db = SettingsDashboard(None, src)
+
+        settings_db._pipeline_stage = 5
+
+        settings_db._stage_previous_cb(None)
+
+        assert settings_db._pipeline_stage == 4
+
+    def test_settings_dashboard_pipeline_next(self):
+        data = self._create_test_df()
+        config.main_df = data
+        src = ColumnDataSource()
+
+        settings_db = SettingsDashboard(None, src)
+
+        settings_db.pipeline["Select Your Data"].df = data
+
+        settings_db._stage_next_cb(None)
+
+        assert settings_db._pipeline_stage == 1
+
+    def test_settings_dashboard_close_button_check_disabled(self):
+        data = self._create_test_df()
+        config.main_df = data
+        src = ColumnDataSource()
+
+        settings_db = SettingsDashboard(None, src)
+
+        settings_db.pipeline["Active Learning Settings"].completed = False
+        settings_db.panel()
+        assert settings_db._close_settings_button.disabled
+
+        settings_db.pipeline["Active Learning Settings"].completed = True
+        settings_db.panel()
+        assert not settings_db._close_settings_button.disabled
+
+    # def test_settings_dashboard_init(self):
+    #     data = self._create_test_df()
+    #     config.main_df = data
+    #     data_selected = data.iloc[72]
+    #     src = ColumnDataSource({str(c): [v] for c, v in data_selected.items()})
+    #     selected_source = SelectedSourceDashboard(src=src, close_button=None)
