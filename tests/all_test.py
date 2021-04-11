@@ -1148,6 +1148,17 @@ class TestDashboards:
 
         return df
 
+    def _create_test_df_with_image_data(self):
+
+        data = []
+
+        for i in range(100):
+            data.append([i, i % 3, i, i, i, "178.52904,2.1655949"])
+
+        df = pd.DataFrame(data, columns=list("ABCDE") + ["ra_dec"])
+
+        return df
+
     def test_selected_source_init_no_selected(self):
 
         data = self._create_test_df()
@@ -1229,6 +1240,21 @@ class TestDashboards:
         assert selected_source.selected_history == [72]
 
         data_selected = data.iloc[72]
+        src.data = {str(c): [v] for c, v in data_selected.items()}
+
+        assert selected_source.selected_history == [72]
+
+    def test_selected_source_check_history_from_selected_to_selected_no_id(self):
+        data = self._create_test_df()
+        config.main_df = data
+        data_selected = data.iloc[72]
+        src = ColumnDataSource({str(c): [v] for c, v in data_selected.items()})
+        selected_source = SelectedSourceDashboard(src=src, close_button=None)
+
+        assert selected_source.selected_history == [72]
+
+        data_selected = data.iloc[53].copy()
+        data_selected["A"] = ""
         src.data = {str(c): [v] for c, v in data_selected.items()}
 
         assert selected_source.selected_history == [72]
@@ -1418,6 +1444,17 @@ class TestDashboards:
         selected_source._change_zoom_cb(None, "out")
         assert selected_source._image_zoom == 0.3
 
+    def test_selected_source_change_zoom_exception(self):
+        data = self._create_test_df()
+        config.main_df = data
+        src = ColumnDataSource()
+        selected_source = SelectedSourceDashboard(src=src, close_button=None)
+        selected_source._url_optical_image = "INVALID_URL&"
+
+        selected_source._change_zoom_cb(None, "out")
+
+        assert selected_source._image_zoom == 0.3
+
     def test_selected_source_search_empty(self):
         data = self._create_test_df()
         config.main_df = data
@@ -1474,3 +1511,36 @@ class TestDashboards:
         has_column = selected_source.check_required_column("F")
 
         assert not has_column
+
+    def test_selected_source_search_deselect(self):
+        data = self._create_test_df()
+        config.main_df = data
+        src = ColumnDataSource()
+        selected_source = SelectedSourceDashboard(src=src, close_button=None)
+
+        event = Event(5, "")
+        selected_source._change_selected(event)
+
+        selected_source._deselect_source_cb(None)
+
+        assert selected_source.search_id.value == ""
+        assert selected_source._search_status == ""
+        assert selected_source.src.data == {"A": [], "B": [], "C": [], "D": [], "E": []}
+
+    def test_selected_source_update_default_images(self):
+        data = self._create_test_df_with_image_data()
+        config.main_df = data
+        data_selected = data.iloc[72]
+        src = ColumnDataSource({str(c): [v] for c, v in data_selected.items()})
+        selected_source = SelectedSourceDashboard(src=src, close_button=None)
+
+        ra_dec = selected_source.src.data["ra_dec"][0]
+        ra = ra_dec[: ra_dec.index(",")]
+        dec = ra_dec[ra_dec.index(",") + 1 :]
+
+        url = "http://skyserver.sdss.org/dr16/SkyServerWS/ImgCutout/getjpeg?TaskName=Skyserver.Explore.Image&ra="
+        _url_optical_image = (
+            f"{url}{ra}&dec={dec}&opt=G&scale={selected_source._image_zoom}"
+        )
+
+        assert selected_source._url_optical_image == _url_optical_image
