@@ -85,7 +85,7 @@ class Dashboard(param.Parameterized):
 
         if self.contents == "Settings":
 
-            self.panel_contents = SettingsDashboard(self, self.src, self.df)
+            self.panel_contents = SettingsDashboard(self, self.src)
 
         elif self.contents == "Menu":
 

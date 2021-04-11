@@ -17,8 +17,6 @@ class SettingsDashboard:
         rendered.
     src : ColumnDataSource
         The shared data source which holds the current selected source.
-    df : DataFrame
-        The shared dataframe which holds all the data.
 
     Attributes
     ----------
@@ -29,7 +27,7 @@ class SettingsDashboard:
         A pipeline of stages for the user to assign key parameters.
     """
 
-    def __init__(self, main, src, df):
+    def __init__(self, main, src):
         self.row = pn.Row(pn.pane.Str("loading"))
 
         self.src = src
@@ -40,7 +38,7 @@ class SettingsDashboard:
 
         self._initialise_widgets(main)
 
-        self.create_pipeline(src, df)
+        self.create_pipeline(src)
 
         self._adjust_pipeline_layout()
 
@@ -52,15 +50,13 @@ class SettingsDashboard:
             partial(self._close_settings_cb, main=main)
         )
 
-    def create_pipeline(self, src, df):
+    def create_pipeline(self, src):
         """Create the pipeline of setting stages.
 
         Parameters
         ----------
         src : ColumnDataSource
             The shared data source which holds the current selected source.
-        df : DataFrame
-            The shared dataframe which holds all the data.
 
         Returns
         -------
