@@ -1300,7 +1300,8 @@ class TestDashboards:
         print(data_selected)
         src = ColumnDataSource({str(c): v for c, v in data_selected.items()})
         selected_source = SelectedSourceDashboard(src=src, close_button=None)
-
+        print(selected_source.src.data[config.settings["id_col"]][0])
+        print(list(selected_source.df[config.settings["id_col"]].values))
         valid = selected_source._check_valid_selected()
 
         assert not valid
