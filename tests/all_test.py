@@ -1756,3 +1756,274 @@ class TestDashboards:
 
         assert len(al_db.active_learning) == 3
         assert len(al_db.al_tabs) == 3
+
+    def test_plot_dashboard_init(self):
+        data = self._create_test_df()
+        config.main_df = data
+        # data_selected = data.iloc[72]
+        src = ColumnDataSource()
+
+        plot_db = PlotDashboard(src, None)
+
+        pd.testing.assert_frame_equal(plot_db.df, data)
+
+    def test_plot_dashboard_update_df(self):
+        data = self._create_test_df()
+        config.main_df = data
+        # data_selected = data.iloc[72]
+        src = ColumnDataSource()
+
+        config.settings = {
+            "id_col": "A",
+            "label_col": "B",
+            "default_vars": ["C", "D"],
+            "labels": [0, 1, 2],
+            "label_colours": {0: "#ffad0e", 1: "#0057ff", 2: "#a2a2a2"},
+            "labels_to_strings": {0: "0", 1: "1", 2: "2"},
+            "strings_to_labels": {"0": 0, "1": 1, "2": 2},
+            "extra_info_cols": [
+                "C",
+            ],
+            "labels_to_train": ["0", "1", "2"],
+            "features_for_training": ["C", "D"],
+            "exclude_labels": True,
+            "unclassified_labels": [],
+            "scale_data": False,
+            "feature_generation": [["subtract (a-b)", 2]],
+        }
+
+        plot_db = PlotDashboard(src, None)
+
+        data = self._create_test_df_with_image_data()
+        config.main_df = data
+
+        plot_db.update_df()
+
+        pd.testing.assert_frame_equal(plot_db.df, data)
+
+    def test_plot_dashboard_update_variable_lists_id_col_removed(self):
+        data = self._create_test_df()
+        config.main_df = data
+        # data_selected = data.iloc[72]
+        src = ColumnDataSource()
+
+        config.settings = {
+            "id_col": "A",
+            "label_col": "B",
+            "default_vars": ["C", "D"],
+            "labels": [0, 1, 2],
+            "label_colours": {0: "#ffad0e", 1: "#0057ff", 2: "#a2a2a2"},
+            "labels_to_strings": {0: "0", 1: "1", 2: "2"},
+            "strings_to_labels": {"0": 0, "1": 1, "2": 2},
+            "extra_info_cols": [
+                "C",
+            ],
+            "labels_to_train": ["0", "1", "2"],
+            "features_for_training": ["C", "D"],
+            "exclude_labels": True,
+            "unclassified_labels": [],
+            "scale_data": False,
+            "feature_generation": [["subtract (a-b)", 2]],
+        }
+
+        plot_db = PlotDashboard(src, None)
+
+        assert "A" not in list(plot_db.param.X_variable.objects)
+        assert "A" not in list(plot_db.param.Y_variable.objects)
+
+    def test_plot_dashboard_update_variable_lists_non_id_col_not_removed(self):
+        data = self._create_test_df()
+        config.main_df = data
+        # data_selected = data.iloc[72]
+        src = ColumnDataSource()
+
+        config.settings = {
+            "id_col": "B",
+            "label_col": "E",
+            "default_vars": ["C", "D"],
+            "labels": [0, 1, 2],
+            "label_colours": {0: "#ffad0e", 1: "#0057ff", 2: "#a2a2a2"},
+            "labels_to_strings": {0: "0", 1: "1", 2: "2"},
+            "strings_to_labels": {"0": 0, "1": 1, "2": 2},
+            "extra_info_cols": [
+                "C",
+            ],
+            "labels_to_train": ["0", "1", "2"],
+            "features_for_training": ["C", "D"],
+            "exclude_labels": True,
+            "unclassified_labels": [],
+            "scale_data": False,
+            "feature_generation": [["subtract (a-b)", 2]],
+        }
+
+        plot_db = PlotDashboard(src, None)
+
+        assert "A" in list(plot_db.param.Y_variable.objects)
+        assert "A" in list(plot_db.param.X_variable.objects)
+
+    def test_plot_dashboard_update_variable_lists_label_col_removed(self):
+        data = self._create_test_df()
+        config.main_df = data
+        # data_selected = data.iloc[72]
+        src = ColumnDataSource()
+
+        config.settings = {
+            "id_col": "A",
+            "label_col": "B",
+            "default_vars": ["C", "D"],
+            "labels": [0, 1, 2],
+            "label_colours": {0: "#ffad0e", 1: "#0057ff", 2: "#a2a2a2"},
+            "labels_to_strings": {0: "0", 1: "1", 2: "2"},
+            "strings_to_labels": {"0": 0, "1": 1, "2": 2},
+            "extra_info_cols": [
+                "C",
+            ],
+            "labels_to_train": ["0", "1", "2"],
+            "features_for_training": ["C", "D"],
+            "exclude_labels": True,
+            "unclassified_labels": [],
+            "scale_data": False,
+            "feature_generation": [["subtract (a-b)", 2]],
+        }
+
+        plot_db = PlotDashboard(src, None)
+
+        assert "B" not in list(plot_db.param.X_variable.objects)
+        assert "B" not in list(plot_db.param.Y_variable.objects)
+
+    def test_plot_dashboard_update_variable_lists_non_label_col_not_removed(self):
+        data = self._create_test_df()
+        config.main_df = data
+        # data_selected = data.iloc[72]
+        src = ColumnDataSource()
+
+        config.settings = {
+            "id_col": "A",
+            "label_col": "E",
+            "default_vars": ["C", "D"],
+            "labels": [0, 1, 2],
+            "label_colours": {0: "#ffad0e", 1: "#0057ff", 2: "#a2a2a2"},
+            "labels_to_strings": {0: "0", 1: "1", 2: "2"},
+            "strings_to_labels": {"0": 0, "1": 1, "2": 2},
+            "extra_info_cols": [
+                "C",
+            ],
+            "labels_to_train": ["0", "1", "2"],
+            "features_for_training": ["C", "D"],
+            "exclude_labels": True,
+            "unclassified_labels": [],
+            "scale_data": False,
+            "feature_generation": [["subtract (a-b)", 2]],
+        }
+
+        plot_db = PlotDashboard(src, None)
+
+        assert "B" in list(plot_db.param.Y_variable.objects)
+        assert "B" in list(plot_db.param.X_variable.objects)
+
+    def test_plot_dashboard_update_variable_lists_correct_columns(self):
+        data = self._create_test_df()
+        config.main_df = data
+        # data_selected = data.iloc[72]
+        src = ColumnDataSource()
+
+        config.settings = {
+            "id_col": "A",
+            "label_col": "B",
+            "default_vars": ["C", "D"],
+            "labels": [0, 1, 2],
+            "label_colours": {0: "#ffad0e", 1: "#0057ff", 2: "#a2a2a2"},
+            "labels_to_strings": {0: "0", 1: "1", 2: "2"},
+            "strings_to_labels": {"0": 0, "1": 1, "2": 2},
+            "extra_info_cols": [
+                "C",
+            ],
+            "labels_to_train": ["0", "1", "2"],
+            "features_for_training": ["C", "D"],
+            "exclude_labels": True,
+            "unclassified_labels": [],
+            "scale_data": False,
+            "feature_generation": [["subtract (a-b)", 2]],
+        }
+
+        plot_db = PlotDashboard(src, None)
+
+        assert list(plot_db.param.X_variable.objects) == ["C", "D", "E"]
+        assert list(plot_db.param.Y_variable.objects) == ["C", "D", "E"]
+
+    def test_plot_dashboard_update_variable_lists_correct_cols_after_update(self):
+        data = self._create_test_df()
+        config.main_df = data
+        src = ColumnDataSource()
+
+        config.settings = {
+            "id_col": "A",
+            "label_col": "B",
+            "default_vars": ["C", "D"],
+            "labels": [0, 1, 2],
+            "label_colours": {0: "#ffad0e", 1: "#0057ff", 2: "#a2a2a2"},
+            "labels_to_strings": {0: "0", 1: "1", 2: "2"},
+            "strings_to_labels": {"0": 0, "1": 1, "2": 2},
+            "extra_info_cols": [
+                "C",
+            ],
+            "labels_to_train": ["0", "1", "2"],
+            "features_for_training": ["C", "D"],
+            "exclude_labels": True,
+            "unclassified_labels": [],
+            "scale_data": False,
+            "feature_generation": [["subtract (a-b)", 2]],
+        }
+
+        plot_db = PlotDashboard(src, None)
+
+        data = self._create_test_df_with_image_data()
+        config.main_df = data
+
+        plot_db.update_variable_lists()
+
+        assert list(plot_db.param.X_variable.objects) == [
+            "C",
+            "D",
+            "E",
+            "ra_dec",
+            "png_path_DR16",
+        ]
+        assert list(plot_db.param.Y_variable.objects) == [
+            "C",
+            "D",
+            "E",
+            "ra_dec",
+            "png_path_DR16",
+        ]
+
+    def test_plot_dashboard_check_correct_defaults_selected(self):
+        data = self._create_test_df()
+        config.main_df = data
+        src = ColumnDataSource()
+
+        config.settings = {
+            "id_col": "A",
+            "label_col": "B",
+            "default_vars": ["C", "D"],
+            "labels": [0, 1, 2],
+            "label_colours": {0: "#ffad0e", 1: "#0057ff", 2: "#a2a2a2"},
+            "labels_to_strings": {0: "0", 1: "1", 2: "2"},
+            "strings_to_labels": {"0": 0, "1": 1, "2": 2},
+            "extra_info_cols": [
+                "C",
+            ],
+            "labels_to_train": ["0", "1", "2"],
+            "features_for_training": ["C", "D"],
+            "exclude_labels": True,
+            "unclassified_labels": [],
+            "scale_data": False,
+            "feature_generation": [["subtract (a-b)", 2]],
+        }
+
+        plot_db = PlotDashboard(src, None)
+
+        assert plot_db.param.X_variable.default == "C"
+        assert plot_db.param.Y_variable.default == "D"
+        assert plot_db.X_variable == "C"
+        assert plot_db.Y_variable == "D"

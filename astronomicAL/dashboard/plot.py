@@ -56,6 +56,9 @@ class PlotDashboard(param.Parameterized):
     def _update_variable_lists_cb(self, attr, old, new):
         self.update_variable_lists()
 
+    def update_df(self):
+        self.df = config.main_df
+
     def update_variable_lists(self):
         """Update the list of options used inside `X_variable` and `Y_variable`.
 
@@ -69,6 +72,8 @@ class PlotDashboard(param.Parameterized):
         """
         print(f"x_var currently is: {self.X_variable}")
 
+        self.update_df()
+
         cols = list(self.df.columns)
 
         if config.settings["id_col"] in cols:
@@ -78,10 +83,10 @@ class PlotDashboard(param.Parameterized):
 
         self.param.X_variable.objects = cols
         self.param.Y_variable.objects = cols
-        self.param.X_variable.default = config.settings["default_vars"][1]
-        self.param.Y_variable.default = config.settings["default_vars"][0]
-        self.Y_variable = config.settings["default_vars"][1]
+        self.param.X_variable.default = config.settings["default_vars"][0]
+        self.param.Y_variable.default = config.settings["default_vars"][1]
         self.X_variable = config.settings["default_vars"][0]
+        self.Y_variable = config.settings["default_vars"][1]
 
         print(f"x_var has now changed to: {self.X_variable}")
 
