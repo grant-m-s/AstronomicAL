@@ -269,7 +269,7 @@ class SelectedSourceDashboard:
                 self._url_optical_image = (
                     f"{url}{ra}&dec={dec}&opt=G&scale={self._image_zoom}"
                 )
-                r = requests.get(f"{self._url_optical_image}", timeout=2.0)
+                r = requests.get(f"{self._url_optical_image}", timeout=3.0)
                 self.optical_image.object = self._url_optical_image
             except ConnectionError as e:
                 print("optical image unavailable")
@@ -277,7 +277,7 @@ class SelectedSourceDashboard:
 
             try:
                 self._url_radio_image = self._generate_radio_url(ra, dec)
-                r = requests.get(f"{self._url_radio_image}", timeout=2.0)
+                r = requests.get(f"{self._url_radio_image}", timeout=3.0)
                 self.radio_image.object = self._url_radio_image
             except ConnectionError as e:
                 print("radio image unavailable")
