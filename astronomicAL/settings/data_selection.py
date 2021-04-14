@@ -38,11 +38,13 @@ class DataSelection(param.Parameterized):
 
     ready = param.Boolean(default=False)
 
-    def __init__(self, src):
+    def __init__(self, src, mode):
         super(DataSelection, self).__init__()
 
-        self._initialise_widgets()
+        self.mode = mode
         self.src = src
+
+        self._initialise_widgets()
 
         self.panel_col = pn.Column("Loading...")
 
@@ -57,15 +59,26 @@ class DataSelection(param.Parameterized):
             max_width=5,
         )
 
-        self.load_config_select = pn.widgets.Select(
-            name="How Much Would You Like To Load?",
-            options=[
-                "Only load layout. Let me choose all my own settings",
-                "Load all settings but let me train the model from scratch.",
-                "Load all settings and train model with provided labels.",
-            ],
-            max_width=400,
-        )
+        if self.mode == "AL":
+            self.load_config_select = pn.widgets.Select(
+                name="How Much Would You Like To Load?",
+                options=[
+                    "Only load layout. Let me choose all my own settings",
+                    "Load all settings but let me train the model from scratch.",
+                    "Load all settings and train model with provided labels.",
+                ],
+                max_width=400,
+            )
+
+        elif self.mode == "Labelling":
+            self.load_config_select = pn.widgets.Select(
+                name="How Much Would You Like To Load?",
+                options=[
+                    "Only load layout. Let me choose all my own settings",
+                    "Load all settings and begin labelling data.",
+                ],
+                max_width=400,
+            )
 
         self.load_data_button = pn.widgets.Button(
             name="Load Data File", max_height=30, margin=(45, 0, 0, 0)

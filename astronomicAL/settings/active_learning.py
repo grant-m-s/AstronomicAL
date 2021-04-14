@@ -38,7 +38,7 @@ class ActiveLearningSettings(param.Parameterized):
 
     """
 
-    def __init__(self, close_button):
+    def __init__(self, close_button, mode):
 
         self.df = None
 
