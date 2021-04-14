@@ -94,7 +94,7 @@ class PlotDashboard(param.Parameterized):
         self.panel()
 
     @param.depends("X_variable", "Y_variable")
-    def plot(self):
+    def plot(self, x_var=None, y_var=None):
         """Create a basic scatter plot of the data with the selected axis.
 
         The data is represented as a Holoviews Datashader object allowing for
@@ -108,9 +108,17 @@ class PlotDashboard(param.Parameterized):
 
         """
 
+        print(f"x_var is {x_var}")
+
+        if x_var is None:
+            x_var = self.X_variable
+
+        if y_var is None:
+            y_var = self.Y_variable
+
         p = hv.Points(
             self.df,
-            [self.X_variable, self.Y_variable],
+            [x_var, y_var],
         ).opts(active_tools=["pan", "wheel_zoom"])
 
         cols = list(self.df.columns)
@@ -120,7 +128,7 @@ class PlotDashboard(param.Parameterized):
         else:
             selected = pd.DataFrame(columns=cols)
 
-        selected_plot = hv.Scatter(selected, self.X_variable, self.Y_variable,).opts(
+        selected_plot = hv.Scatter(selected, x_var, y_var,).opts(
             fill_color="black",
             marker="circle",
             size=10,
@@ -139,16 +147,16 @@ class PlotDashboard(param.Parameterized):
             }
         )
 
-        max_x = np.max(self.df[self.X_variable])
-        min_x = np.min(self.df[self.X_variable])
+        max_x = np.max(self.df[x_var])
+        min_x = np.min(self.df[x_var])
 
-        max_y = np.max(self.df[self.Y_variable])
-        min_y = np.min(self.df[self.Y_variable])
+        max_y = np.max(self.df[y_var])
+        min_y = np.min(self.df[y_var])
 
-        x_sd = np.std(self.df[self.X_variable])
-        x_mu = np.mean(self.df[self.X_variable])
-        y_sd = np.std(self.df[self.Y_variable])
-        y_mu = np.mean(self.df[self.Y_variable])
+        x_sd = np.std(self.df[x_var])
+        x_mu = np.mean(self.df[x_var])
+        y_sd = np.std(self.df[y_var])
+        y_mu = np.mean(self.df[y_var])
 
         max_x = np.min([x_mu + 4 * x_sd, max_x])
         min_x = np.max([x_mu - 4 * x_sd, min_x])
@@ -158,11 +166,11 @@ class PlotDashboard(param.Parameterized):
 
         if selected.shape[0] > 0:
 
-            max_x = np.max([max_x, np.max(selected[self.X_variable])])
-            min_x = np.min([min_x, np.min(selected[self.X_variable])])
+            max_x = np.max([max_x, np.max(selected[x_var])])
+            min_x = np.min([min_x, np.min(selected[x_var])])
 
-            max_y = np.max([max_y, np.max(selected[self.Y_variable])])
-            min_y = np.min([min_y, np.min(selected[self.Y_variable])])
+            max_y = np.max([max_y, np.max(selected[y_var])])
+            min_y = np.min([min_y, np.min(selected[y_var])])
 
         plot = (
             dynspread(
