@@ -1,4 +1,5 @@
 from astronomicAL.dashboard.active_learning import ActiveLearningDashboard
+from astronomicAL.dashboard.labelling import LabellingDashboard
 from astronomicAL.dashboard.menu import MenuDashboard
 from astronomicAL.dashboard.plot import PlotDashboard
 from astronomicAL.dashboard.selected_source import SelectedSourceDashboard
@@ -85,6 +86,7 @@ class Dashboard(param.Parameterized):
 
         if self.contents == "Settings":
 
+            self.mode = ""
             self.panel_contents = SettingsDashboard(self, self.src)
 
         elif self.contents == "Menu":
@@ -102,6 +104,11 @@ class Dashboard(param.Parameterized):
                 print("Please Complete Settings before accessing this view.")
                 return
             self.panel_contents = PlotDashboard(self.src, self._close_button)
+
+        elif self.contents == "Labelling":
+
+            self.df = config.main_df
+            self.panel_contents = LabellingDashboard(self.src, self.df)
 
         elif self.contents == "Selected Source Info":
             if not config.settings["confirmed"]:

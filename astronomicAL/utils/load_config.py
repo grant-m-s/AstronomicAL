@@ -38,7 +38,7 @@ def create_layout_from_file(react):
             if config.settings["config_load_level"] > 0:
 
                 update_config_settings(curr_config_file)
-                load_data = DataSelection(config.source)
+                load_data = DataSelection(config.source, mode="AL")
                 config.main_df = load_data.get_dataframe_from_fits_file(
                     curr_config_file["dataset_filepath"],
                     optimise_data=curr_config_file["optimise_data"],
