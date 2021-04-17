@@ -131,6 +131,7 @@ class SettingsDashboard:
         self.panel()
 
     def _adjust_pipeline_widgets(self):
+
         self.pipeline.layout[0][0][0].sizing_mode = "fixed"
 
         self.pipeline.layout[0][0][0].max_height = 75
@@ -196,6 +197,7 @@ class SettingsDashboard:
     def _stage_previous_cb(self, event):
 
         self._pipeline_stage -= 1
+        self.panel()
 
     def _stage_next_cb(self, event):
 
@@ -204,13 +206,12 @@ class SettingsDashboard:
             self.df = config.main_df
 
         pipeline_list = list(self.pipeline._stages)
-        print("STAGE:")
-        current_stage = pipeline_list[self._pipeline_stage]
 
         next_stage = pipeline_list[self._pipeline_stage + 1]
         self.pipeline[next_stage].update_data(dataframe=self.df)
 
         self._pipeline_stage += 1
+        self.panel()
 
     def panel(self):
         """Render the current view.
@@ -234,13 +235,8 @@ class SettingsDashboard:
 
             self.row[0] = pn.Card(
                 pn.Column(
-                    pn.Row(
-                        self.pipeline.title,
-                    ),
                     pn.Row(self.pipeline.stage),
                     pn.Row(
-                        pn.layout.HSpacer(),
-                        pn.layout.HSpacer(),
                         pn.layout.HSpacer(),
                         self.pipeline.buttons,
                         max_height=50,
@@ -252,8 +248,9 @@ class SettingsDashboard:
                         name="Settings Panel",
                         value="Please choose the appropriate settings for your data",
                     ),
-                    pn.layout.HSpacer(max_height=30),
-                    pn.layout.HSpacer(max_height=30),
+                    pn.pane.Markdown(
+                        "### " + list(self.pipeline._stages)[self._pipeline_stage],
+                    ),
                     self._close_settings_button,
                 ),
                 collapsible=False,
