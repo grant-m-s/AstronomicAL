@@ -988,7 +988,15 @@ class ActiveLearningTab:
         np.random.seed(0)
         rng = np.random.RandomState(seed=0)
 
-        if not config.settings["test_set_file"]:
+        include_test_file = True
+
+        if "test_set_file" not in list(config.settings.keys()):
+            include_test_file = False
+
+        elif not config.settings["test_set_file"]:
+            include_test_file = False
+
+        if not include_test_file:
 
             test_ratio = 1 - train_ratio - val_ratio
             x_train, x_temp, y_train, y_temp = train_test_split(
