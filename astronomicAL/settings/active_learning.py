@@ -56,10 +56,8 @@ class ActiveLearningSettings(param.Parameterized):
 
     def _adjust_widget_layouts(self):
 
-        self.label_selector.max_width = 750
-        self.label_selector.max_width = 750
-        self.feature_selector.max_width = 750
-        self.feature_selector.max_width = 750
+        self.label_selector.size = 5
+        self.feature_selector.size = 5
 
         self.label_selector._search[True].max_height = 20
         self.label_selector._search[False].max_height = 20
@@ -114,14 +112,12 @@ class ActiveLearningSettings(param.Parameterized):
             name="**Which Labels would you like to create a classifier for?**",
             value=[],
             options=[],
-            max_height=100,
         )
 
         self.feature_selector = pn.widgets.CrossSelector(
             name="**Which Features should be used for training?**",
             value=[],
             options=[],
-            max_height=100,
         )
 
         self.feature_generator = pn.widgets.Select(
@@ -286,7 +282,6 @@ class ActiveLearningSettings(param.Parameterized):
                 pn.Row(
                     self.label_selector,
                     self.feature_selector,
-                    height=200,
                     sizing_mode="stretch_width",
                 ),
                 pn.Row(self.exclude_labels_checkbox, self._exclude_labels_tooltip),
