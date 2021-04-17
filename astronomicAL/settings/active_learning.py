@@ -3,6 +3,8 @@ from astronomicAL.extensions import models, query_strategies, feature_generation
 import astronomicAL.config as config
 import pandas as pd
 import panel as pn
+import json
+import os
 import param
 
 
@@ -167,6 +169,34 @@ class ActiveLearningSettings(param.Parameterized):
             max_width=5,
         )
 
+        labelled_data = {}
+
+        if os.path.exists("data/test_set.json"):
+            with open("data/test_set.json", "r") as json_file:
+                labelled_data = json.load(json_file)
+
+        total_labelled = len(list(labelled_data.keys()))
+
+        if total_labelled == 0:
+            self.test_set_checkbox = pn.widgets.Checkbox(
+                name=f"Should data/test_set.json be used as the test set? [DISABLED: 0 LABELLED DATA]",
+                disabled=True,
+            )
+
+        if total_labelled < 7:
+            self.test_set_checkbox = pn.widgets.Checkbox(
+                name=f"Should data/test_set.json be used as the test set? [DISABLED: currently labelled: {total_labelled} - REQUIRED >7]",
+                disabled=True,
+            )
+        elif total_labelled < 500:
+            self.test_set_checkbox = pn.widgets.Checkbox(
+                name=f"Should data/test_set.json be the used test set? [currently labelled: {total_labelled} - RECOMMENDED >500]"
+            )
+        else:
+            self.test_set_checkbox = pn.widgets.Checkbox(
+                name=f"Should data/test_set.json be the used test set? [currently labelled: {total_labelled}]"
+            )
+
     def update_data(self, dataframe=None):
         """Update the classes local copy of the dataset.
 
@@ -229,6 +259,7 @@ class ActiveLearningSettings(param.Parameterized):
         config.settings["unclassified_labels"] = unclassified_labels
         config.settings["scale_data"] = self.scale_features_checkbox.value
         config.settings["feature_generation"] = self.feature_generator_selected
+        config.settings["test_set_file"] = self.test_set_checkbox.value
         config.settings["confirmed"] = True
 
         self.completed = True
@@ -286,6 +317,7 @@ class ActiveLearningSettings(param.Parameterized):
                 ),
                 pn.Row(self.exclude_labels_checkbox, self._exclude_labels_tooltip),
                 pn.Row(self.scale_features_checkbox, self._scale_features_tooltip),
+                pn.Row(self.test_set_checkbox),
                 pn.Row(
                     self.feature_generator,
                     self.feature_generator_number,

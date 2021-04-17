@@ -33,6 +33,7 @@ import numpy as np
 import os
 import pandas as pd
 import panel as pn
+import json
 import sys
 import time
 
@@ -341,9 +342,16 @@ class ActiveLearningTab:
 
         x, y = self.split_x_y_ids(self.data)
 
+        excluded_x = {}
+        excluded_y = {}
         if config.settings["exclude_labels"]:
             for label in config.settings["unclassified_labels"]:
-                x, y, _, _ = self.exclude_unclassified_labels(x, y, label)
+                (
+                    x,
+                    y,
+                    excluded_x[f"{label}"],
+                    excluded_y[f"{label}"],
+                ) = self.exclude_unclassified_labels(x, y, label)
 
         (
             self.x_train,
@@ -352,7 +360,7 @@ class ActiveLearningTab:
             self.y_val,
             self.x_test,
             self.y_test,
-        ) = self.train_val_test_split(x, y, 0.6, 0.2)
+        ) = self.train_val_test_split(x, y, excluded_x, excluded_y, 0.6, 0.2)
 
         self.x_cols = self.x_train.columns
         self.y_cols = self.y_train.columns
@@ -901,7 +909,46 @@ class ActiveLearningTab:
 
         return data_x, data_y, excluded_x, excluded_y
 
-    def train_val_test_split(self, df_data_x, df_data_y, train_ratio, val_ratio):
+    def separate_test_ids(self, df_data_x, df_data_y, excluded_x, excluded_y):
+
+        if os.path.exists("data/test_set.json"):
+            with open("data/test_set.json", "r") as json_file:
+                labels = json.load(json_file)
+
+        ids_test = list(labels.keys())
+
+        print(ids_test)
+        x_test = df_data_x[df_data_y[config.settings["id_col"]].isin(ids_test)]
+        y_test = df_data_y[df_data_y[config.settings["id_col"]].isin(ids_test)]
+
+        for label in list(excluded_x.keys()):
+            curr_x = excluded_x[label]
+            curr_y = excluded_y[label]
+
+            inc_x = curr_x[curr_y[config.settings["id_col"]].isin(ids_test)]
+            inc_y = curr_y[curr_y[config.settings["id_col"]].isin(ids_test)]
+
+            x_test = x_test.append(inc_x)
+            y_test = y_test.append(inc_y)
+
+        y_test_temp = []
+        for id in list(y_test[config.settings["id_col"]].values):
+            y_test_temp.append(labels[id])
+
+        y_test[config.settings["label_col"]] = y_test_temp
+
+        assert len(x_test) == len(y_test)
+
+        assert len(y_test_temp) == len(ids_test)
+
+        remaining_x = df_data_x[~df_data_y[config.settings["id_col"]].isin(ids_test)]
+        remaining_y = df_data_y[~df_data_y[config.settings["id_col"]].isin(ids_test)]
+
+        return remaining_x, remaining_y, x_test, y_test
+
+    def train_val_test_split(
+        self, df_data_x, df_data_y, excluded_x, excluded_y, train_ratio, val_ratio
+    ):
         """Split data into train, validation and test sets.
         The method uses stratified sampling to ensure each set has the correct
         distribution of points.
@@ -941,22 +988,40 @@ class ActiveLearningTab:
         np.random.seed(0)
         rng = np.random.RandomState(seed=0)
 
-        test_ratio = 1 - train_ratio - val_ratio
-        x_train, x_temp, y_train, y_temp = train_test_split(
-            df_data_x,
-            df_data_y,
-            test_size=1 - train_ratio,
-            stratify=df_data_y[config.settings["label_col"]],
-            random_state=rng,
-        )
+        if not config.settings["test_set_file"]:
 
-        x_val, x_test, y_val, y_test = train_test_split(
-            x_temp,
-            y_temp,
-            test_size=test_ratio / (test_ratio + val_ratio),
-            stratify=y_temp[config.settings["label_col"]],
-            random_state=rng,
-        )
+            test_ratio = 1 - train_ratio - val_ratio
+            x_train, x_temp, y_train, y_temp = train_test_split(
+                df_data_x,
+                df_data_y,
+                test_size=1 - train_ratio,
+                stratify=df_data_y[config.settings["label_col"]],
+                random_state=rng,
+            )
+
+            x_val, x_test, y_val, y_test = train_test_split(
+                x_temp,
+                y_temp,
+                test_size=test_ratio / (test_ratio + val_ratio),
+                stratify=y_temp[config.settings["label_col"]],
+                random_state=rng,
+            )
+
+        else:
+            df_data_x, df_data_y, x_test, y_test = self.separate_test_ids(
+                df_data_x,
+                df_data_y,
+                excluded_x,
+                excluded_y,
+            )
+
+            x_train, x_val, y_train, y_val = train_test_split(
+                df_data_x,
+                df_data_y,
+                test_size=1 - train_ratio,
+                stratify=df_data_y[config.settings["label_col"]],
+                random_state=rng,
+            )
 
         print(f"train: {y_train[config.settings['label_col']].value_counts()}")
         print(f"val: {y_val[config.settings['label_col']].value_counts()}")
