@@ -38,7 +38,7 @@ def create_layout_from_file(react):
             if config.settings["config_load_level"] > 0:
 
                 update_config_settings(curr_config_file)
-                load_data = DataSelection(config.source, mode="AL")
+                load_data = DataSelection(config.source, mode=config.mode)
                 config.main_df = load_data.get_dataframe_from_fits_file(
                     curr_config_file["dataset_filepath"],
                     optimise_data=curr_config_file["optimise_data"],
@@ -66,6 +66,8 @@ def create_layout_from_file(react):
             if int(p) == 0:
                 if (contents == "Menu") or (config.settings["config_load_level"] == 0):
                     contents = "Settings"
+                elif config.mode == "Labelling":
+                    contents = "Labelling"
                 main_plot = Dashboard(src=config.source, contents=contents)
                 config.dashboards[p] = main_plot
                 react.main[start_row:end_row, start_col:end_col] = main_plot.panel()

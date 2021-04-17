@@ -10,10 +10,14 @@ import random
 import os
 import json
 
+from functools import partial
+
+
 from holoviews.operation.datashader import (
     datashade,
     dynspread,
 )
+
 
 class LabellingDashboard(param.Parameterized):
     """A dashboard for .
@@ -41,9 +45,11 @@ class LabellingDashboard(param.Parameterized):
         self.row = pn.Row(pn.pane.Str("loading"))
         self.df = df
         self.src = src
+        self.src.on_change("data", self._panel_cb)
 
+        self.labels = self.get_previous_labels()
         self._construct_panel()
-        self.update_variable_lists()
+        self._update_variable_lists()
         self.select_random_point()
 
     def _construct_panel(self):
@@ -62,7 +68,24 @@ class LabellingDashboard(param.Parameterized):
         )
         self.assign_label_button.on_click(self._assign_label_cb)
 
-    def update_variable_lists(self):
+        self.first_labelled_button = pn.widgets.Button(name="First")
+        self.first_labelled_button.on_click(
+            partial(self.update_selected_point_from_buttons, button="First")
+        )
+        self.prev_labelled_button = pn.widgets.Button(name="<")
+        self.prev_labelled_button.on_click(
+            partial(self.update_selected_point_from_buttons, button="<")
+        )
+        self.next_labelled_button = pn.widgets.Button(name=">")
+        self.next_labelled_button.on_click(
+            partial(self.update_selected_point_from_buttons, button=">")
+        )
+        self.new_labelled_button = pn.widgets.Button(name="New")
+        self.new_labelled_button.on_click(
+            partial(self.update_selected_point_from_buttons, button="New")
+        )
+
+    def _update_variable_lists(self):
         """Update the list of options used inside `X_variable` and `Y_variable`.
 
         This method retrieves an up-to-date list of columns inside `df` and
@@ -109,17 +132,19 @@ class LabellingDashboard(param.Parameterized):
         return plot_db.plot(x_var=self.X_variable, y_var=self.Y_variable)
 
     def _assign_label_cb(self, event):
+
         selected_label = self.assign_label_group.value
-        id = self.src.data[config.settings['id_col']][0]
+        id = self.src.data[config.settings["id_col"]][0]
+
+        self.assign_label_button.disabled = True
 
         if selected_label is not "Unsure":
             raw_label = config.settings["strings_to_labels"][selected_label]
             self.save_label(id, raw_label)
 
         self.select_random_point()
-        self.panel()
 
-    def save_label(self, id, label):
+    def get_previous_labels(self):
 
         labels = {}
 
@@ -127,23 +152,84 @@ class LabellingDashboard(param.Parameterized):
             with open("data/test_set.json", "r") as json_file:
                 labels = json.load(json_file)
 
+        return labels
+
+    def save_label(self, id, label):
+
+        labels = self.get_previous_labels()
+
         labels[id] = int(label)
-        with open('data/test_set.json', 'w+') as outfile:
-            json.dump(labels, outfile)
 
+        self.labels = labels
 
+        with open("data/test_set.json", "w+") as outfile:
+            json.dump(self.labels, outfile)
 
     def select_random_point(self):
 
-        selected = random.choice(list(self.df[config.settings['id_col']].values))
-        selected_source = self.df[
-            self.df[config.settings["id_col"]] == selected
-        ]
+        selected = random.choice(list(self.df[config.settings["id_col"]].values))
+        selected_source = self.df[self.df[config.settings["id_col"]] == selected]
         selected_dict = selected_source.set_index(config.settings["id_col"]).to_dict(
             "list"
         )
 
         self.src.data = selected_source
+
+    def update_selected_point_from_buttons(self, event, button):
+
+        index = self.get_current_index_in_labelled_data()
+
+        updated = None
+
+        if button == "<":
+
+            updated = list(self.labels.keys())[index - 1]
+
+        elif button == ">":
+
+            updated = list(self.labels.keys())[index + 1]
+
+        elif button == "First":
+
+            updated = list(self.labels.keys())[0]
+
+        elif button == "New":
+            self.select_random_point()
+            return
+
+        if updated is not None:
+
+            selected_source = self.df[self.df[config.settings["id_col"]] == updated]
+            selected_dict = selected_source.set_index(
+                config.settings["id_col"]
+            ).to_dict("list")
+
+            self.src.data = selected_source
+
+    def get_current_index_in_labelled_data(self):
+
+        total = len(self.labels.keys())
+
+        if len(self.src.data[config.settings["id_col"]]) > 0:
+            if self.src.data[config.settings["id_col"]][0] in list(self.labels.keys()):
+                index = list(self.labels.keys()).index(
+                    self.src.data[config.settings["id_col"]][0]
+                )
+            else:
+                index = total
+        else:
+            index = "-"
+
+        return index
+
+    def _reset_index_buttons(self):
+        self.first_labelled_button.disabled = False
+        self.prev_labelled_button.disabled = False
+        self.next_labelled_button.disabled = False
+        self.new_labelled_button.disabled = False
+
+    def _panel_cb(self, attr, old, new):
+        self.panel()
 
     def panel(self):
         """Render the current view.
@@ -167,16 +253,74 @@ class LabellingDashboard(param.Parameterized):
             max_height=30,
         )
 
+        plot = pn.Row(self.plot, height=400, width=500, sizing_mode="fixed")
+        total = len(self.labels.keys())
+
+        index = self.get_current_index_in_labelled_data()
+
+        self._reset_index_buttons()
+
+        if (index == 0) or (total == 0):
+            self.first_labelled_button.disabled = True
+            self.prev_labelled_button.disabled = True
+
+        if index >= (total - 1):
+            self.next_labelled_button.disabled = True
+
+        if index >= total:
+            self.new_labelled_button.disabled = True
+            self.next_labelled_button.disabled = True
+
+        if self.src.data[config.settings["id_col"]][0] in list(self.labels.keys()):
+
+            raw_label = self.labels[self.src.data[config.settings["id_col"]][0]]
+
+            label = config.settings["labels_to_strings"][f"{raw_label}"]
+
+            previous_label = pn.widgets.StaticText(
+                name="You previously labelled this",
+                value=f"{label}",
+            )
+        else:
+            previous_label = "You have not yet labelled this source."
+
+        dataset_raw_label = self.src.data[config.settings["label_col"]][0]
+        dataset_label = config.settings["labels_to_strings"][f"{dataset_raw_label}"]
+
+        labelling_info_col = pn.Column(
+            pn.Row(
+                self.first_labelled_button,
+                self.prev_labelled_button,
+                self.next_labelled_button,
+                self.new_labelled_button,
+            ),
+            pn.widgets.StaticText(name="Index", value=f"{index+1}/{total}"),
+            pn.widgets.StaticText(
+                name="Source ID", value=f"{self.src.data[config.settings['id_col']][0]}"
+            ),
+            pn.widgets.StaticText(
+                name="Original Dataset Label",
+                value=f"{dataset_label}",
+            ),
+            previous_label,
+        )
+
+        self.assign_label_button.disabled = False
+
         self.row[0] = pn.Card(
-            pn.Row(self.plot, height=400, width=500, sizing_mode="fixed"),
+            pn.Row(
+                plot,
+                labelling_info_col,
+            ),
             buttons_row,
             header=pn.Row(
-                        pn.Spacer(width=25, sizing_mode="fixed"),
-                        pn.Row(self.param.X_variable, max_width=200),
-                        pn.Row(self.param.Y_variable, max_width=200),
-                        max_width=400,
-                        sizing_mode="fixed",
-                    ),
+                pn.Spacer(width=25, sizing_mode="fixed"),
+                pn.Row(self.param.X_variable, max_width=200),
+                pn.Row(self.param.Y_variable, max_width=200),
+                max_width=400,
+                sizing_mode="fixed",
+            ),
             collapsible=False,
-            sizing_mode="stretch_both")
+            sizing_mode="stretch_both",
+        )
         return self.row
