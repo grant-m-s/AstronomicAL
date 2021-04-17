@@ -56,6 +56,8 @@ class ActiveLearningSettings(param.Parameterized):
 
         self._adjust_widget_layouts()
 
+        self._verify_valid_selection_cb(None)
+
     def _adjust_widget_layouts(self):
 
         self.label_selector.size = 5
@@ -116,11 +118,17 @@ class ActiveLearningSettings(param.Parameterized):
             options=[],
         )
 
+        self.label_selector._buttons[True].on_click(self._verify_valid_selection_cb)
+        self.label_selector._buttons[False].on_click(self._verify_valid_selection_cb)
+
         self.feature_selector = pn.widgets.CrossSelector(
             name="**Which Features should be used for training?**",
             value=[],
             options=[],
         )
+
+        self.feature_selector._buttons[True].on_click(self._verify_valid_selection_cb)
+        self.feature_selector._buttons[False].on_click(self._verify_valid_selection_cb)
 
         self.feature_generator = pn.widgets.Select(
             name="Create Feature Combinations?",
@@ -197,6 +205,43 @@ class ActiveLearningSettings(param.Parameterized):
                 name=f"Should data/test_set.json be the used test set? [currently labelled: {total_labelled}]"
             )
 
+    def _verify_valid_selection_cb(self, event):
+
+        selected_labels = self.label_selector.value
+        selected_features = self.feature_selector.value
+
+        print(selected_features)
+        print(selected_labels)
+
+        exclude_labels = False
+        confirm_settings = False
+
+        if len(selected_labels) < 2:
+            self.exclude_labels_checkbox.name = (
+                "Should remaining labels be removed from Active Learning datasets? "
+                + " [DISABLED: Atleast 2 labels must be selected]"
+            )
+            self.confirm_settings_button.name = "Atleast 2 labels must be selected"
+            exclude_labels = True
+            confirm_settings = True
+
+        if len(selected_features) < 2:
+            confirm_settings = True
+            self.confirm_settings_button.name = "Atleast 2 features must be selected"
+
+        if not exclude_labels:
+            self.exclude_labels_checkbox.name = (
+                "Should remaining labels be removed from Active Learning datasets?"
+            )
+
+        if not confirm_settings:
+            self.confirm_settings_button.name = "Confirm Settings"
+
+        self.confirm_settings_button.disabled = confirm_settings
+        self.exclude_labels_checkbox.disabled = exclude_labels
+
+        self.panel()
+
     def update_data(self, dataframe=None):
         """Update the classes local copy of the dataset.
 
@@ -249,7 +294,11 @@ class ActiveLearningSettings(param.Parameterized):
 
         config.settings["labels_to_train"] = self.label_selector.value
         config.settings["features_for_training"] = self.feature_selector.value
-        config.settings["exclude_labels"] = self.exclude_labels_checkbox.value
+
+        if not self.exclude_labels_checkbox.disabled:
+            config.settings["exclude_labels"] = self.exclude_labels_checkbox.value
+        else:
+            config.settings["exclude_labels"] = False
 
         unclassified_labels = []
         for label in self.label_selector.options:
