@@ -74,8 +74,8 @@ class ActiveLearningSettings(param.Parameterized):
 
         self.label_selector._lists[True].max_width = 300
         self.label_selector._lists[False].max_width = 300
-        self.feature_selector._lists[True].max_width = 300
-        self.feature_selector._lists[False].max_width = 300
+        self.feature_selector._lists[True].width = 500
+        self.feature_selector._lists[False].width = 500
 
         self.label_selector._buttons[True].max_width = 50
         self.label_selector._buttons[False].max_width = 50
@@ -125,6 +125,9 @@ class ActiveLearningSettings(param.Parameterized):
             name="**Which Features should be used for training?**",
             value=[],
             options=[],
+            width=500,
+            max_width=500,
+            sizing_mode="fixed",
         )
 
         self.feature_selector._buttons[True].on_click(self._verify_valid_selection_cb)

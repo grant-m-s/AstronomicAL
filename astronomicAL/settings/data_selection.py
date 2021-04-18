@@ -9,6 +9,8 @@ import pandas as pd
 import panel as pn
 import param
 import time
+import mimetypes
+import magic
 
 
 class DataSelection(param.Parameterized):
@@ -31,7 +33,7 @@ class DataSelection(param.Parameterized):
 
     """
 
-    dataset = param.FileSelector(path="data/*.fits")
+    dataset = param.FileSelector(path="data/*")
     config_file = param.FileSelector(path="configs/*.json")
 
     load_layout_check = param.Boolean(False, label="Load Custom Configuration?")
@@ -97,7 +99,7 @@ class DataSelection(param.Parameterized):
                 button.disabled = true
 
                 var i;
-                for (i = 0; i < 25; i++) {
+                for (i = 0; i < 40; i++) {
                   if (i % 3 === 0) {
                       setTimeout(() => {  button.label = 'Loading New Layout - Please Wait, This may take a minute.'; }, 500*i);
                    } else if (i % 3 === 1) {
@@ -137,7 +139,17 @@ class DataSelection(param.Parameterized):
 
         """
         start = time.time()
-        fits_table = Table.read(filename, format="fits")
+        ext = None
+        try:
+            ext = filename[filename.rindex(".") + 1 :]
+            fits_table = Table.read(filename, format=f"{ext}")
+        except:
+            filetype = magic.from_file(filename, mime=True)
+            if filetype[: filetype.index("/")] == "text":
+                fits_table = Table.read(filename, format="ascii")
+            else:
+                assert False, "Unknown Filetype"
+
         end = time.time()
         print(f"Loading FITS Table {end - start}")
         start = time.time()
@@ -164,7 +176,11 @@ class DataSelection(param.Parameterized):
         start = time.time()
         for col, dtype in df.dtypes.items():
             if dtype == np.object:  # Only process byte object columns.
-                df[col] = df[col].apply(lambda x: x.decode("utf-8"))
+                if dtype == object:
+                    continue
+                else:
+                    print(dtype)
+                    df[col] = df[col].apply(lambda x: x.decode("utf-8"))
         end = time.time()
         print(f"Pandas object loop {end - start}")
 
