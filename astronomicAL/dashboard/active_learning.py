@@ -1,4 +1,4 @@
-from astronomicAL.active_learning.active_learning import ActiveLearningTab
+from astronomicAL.active_learning.active_learning import ActiveLearningModel
 
 import astronomicAL.config as config
 import panel as pn
@@ -13,7 +13,7 @@ class ActiveLearningDashboard:
         The shared data source which holds the current selected source.
     df : DataFrame
         The shared dataframe which holds all the data.
-    active_learning : list of ActiveLearningTab
+    active_learning : list of ActiveLearningModel
         List of all classifier tab views.
 
     Attributes
@@ -33,7 +33,7 @@ class ActiveLearningDashboard:
         self.add_active_learning()
 
     def add_active_learning(self):
-        """Initialise all required ActiveLearningTab classifiers and views.
+        """Initialise all required ActiveLearningModel classifiers and views.
 
         Returns
         -------
@@ -46,7 +46,7 @@ class ActiveLearningDashboard:
             raw_label = config.settings["strings_to_labels"][label]
             print(f"Raw Label is {raw_label} with type: {type(raw_label)}")
             self.active_learning.append(
-                ActiveLearningTab(df=self.df, src=self.src, label=label)
+                ActiveLearningModel(df=self.df, src=self.src, label=label)
             )
         self.al_tabs = pn.Tabs(dynamic=True)
         for i, al_tab in enumerate(self.active_learning):
