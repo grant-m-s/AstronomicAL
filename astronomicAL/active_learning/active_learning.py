@@ -909,43 +909,6 @@ class ActiveLearningTab:
 
         return data_x, data_y, excluded_x, excluded_y
 
-    def separate_test_ids(self, df_data_x, df_data_y, excluded_x, excluded_y):
-
-        if os.path.exists("data/test_set.json"):
-            with open("data/test_set.json", "r") as json_file:
-                labels = json.load(json_file)
-
-        ids_test = list(labels.keys())
-
-        print(ids_test)
-        x_test = df_data_x[df_data_y[config.settings["id_col"]].isin(ids_test)]
-        y_test = df_data_y[df_data_y[config.settings["id_col"]].isin(ids_test)]
-
-        for label in list(excluded_x.keys()):
-            curr_x = excluded_x[label]
-            curr_y = excluded_y[label]
-
-            inc_x = curr_x[curr_y[config.settings["id_col"]].isin(ids_test)]
-            inc_y = curr_y[curr_y[config.settings["id_col"]].isin(ids_test)]
-
-            x_test = x_test.append(inc_x)
-            y_test = y_test.append(inc_y)
-
-        y_test_temp = []
-        for id in list(y_test[config.settings["id_col"]].values):
-            y_test_temp.append(labels[id])
-
-        y_test[config.settings["label_col"]] = y_test_temp
-
-        assert len(x_test) == len(y_test)
-
-        assert len(y_test_temp) == len(ids_test)
-
-        remaining_x = df_data_x[~df_data_y[config.settings["id_col"]].isin(ids_test)]
-        remaining_y = df_data_y[~df_data_y[config.settings["id_col"]].isin(ids_test)]
-
-        return remaining_x, remaining_y, x_test, y_test
-
     def train_val_test_split(
         self, df_data_x, df_data_y, excluded_x, excluded_y, train_ratio, val_ratio
     ):
@@ -996,39 +959,33 @@ class ActiveLearningTab:
         elif not config.settings["test_set_file"]:
             include_test_file = False
 
-        if not include_test_file:
+        test_ratio = 1 - train_ratio - val_ratio
+        x_train, x_temp, y_train, y_temp = train_test_split(
+            df_data_x,
+            df_data_y,
+            test_size=1 - train_ratio,
+            stratify=df_data_y[config.settings["label_col"]],
+            random_state=rng,
+        )
 
-            test_ratio = 1 - train_ratio - val_ratio
-            x_train, x_temp, y_train, y_temp = train_test_split(
-                df_data_x,
-                df_data_y,
-                test_size=1 - train_ratio,
-                stratify=df_data_y[config.settings["label_col"]],
-                random_state=rng,
-            )
+        x_val, x_test, y_val, y_test = train_test_split(
+            x_temp,
+            y_temp,
+            test_size=test_ratio / (test_ratio + val_ratio),
+            stratify=y_temp[config.settings["label_col"]],
+            random_state=rng,
+        )
 
-            x_val, x_test, y_val, y_test = train_test_split(
-                x_temp,
-                y_temp,
-                test_size=test_ratio / (test_ratio + val_ratio),
-                stratify=y_temp[config.settings["label_col"]],
-                random_state=rng,
-            )
-
-        else:
-            df_data_x, df_data_y, x_test, y_test = self.separate_test_ids(
-                df_data_x,
-                df_data_y,
-                excluded_x,
-                excluded_y,
-            )
-
-            x_train, x_val, y_train, y_val = train_test_split(
-                df_data_x,
-                df_data_y,
-                test_size=1 - train_ratio,
-                stratify=df_data_y[config.settings["label_col"]],
-                random_state=rng,
+        if include_test_file:
+            (
+                x_train,
+                y_train,
+                x_val,
+                y_val,
+                x_test,
+                y_test,
+            ) = self.reconstruct_tailored_sets(
+                x_train, y_train, x_val, y_val, x_test, y_test, excluded_x, excluded_y
             )
 
         print(f"train: {y_train[config.settings['label_col']].value_counts()}")
@@ -1036,6 +993,86 @@ class ActiveLearningTab:
         print(f"test: {y_test[config.settings['label_col']].value_counts()}")
 
         return x_train, y_train, x_val, y_val, x_test, y_test
+
+    def reconstruct_tailored_sets(
+        self, x_train, y_train, x_val, y_val, x_test, y_test, excluded_x, excluded_y
+    ):
+
+        if os.path.exists("data/test_set.json"):
+            with open("data/test_set.json", "r") as json_file:
+                labels = json.load(json_file)
+
+        ids_test = list(labels.keys())
+
+        ids_trained_on = []
+
+        for i in config.settings["classifiers"]:
+            if "id" in list(config.settings["classifiers"][i].keys()):
+                ids_trained_on += config.settings["classifiers"][i]["id"]
+
+        ids_trained_on = list(dict.fromkeys(ids_trained_on))
+
+        isin_test = y_train[config.settings["id_col"]].isin(ids_test)
+        isin_trained_on = y_train[config.settings["id_col"]].isin(ids_trained_on)
+
+        new_x_test = x_train[(isin_test) & (~isin_trained_on)]
+        new_y_test = y_train[(isin_test) & (~isin_trained_on)]
+
+        new_x_train = x_train[~((isin_test) & (~isin_trained_on))]
+        new_y_train = y_train[~((isin_test) & (~isin_trained_on))]
+
+        isin_test = y_val[config.settings["id_col"]].isin(ids_test)
+        isin_trained_on = y_val[config.settings["id_col"]].isin(ids_trained_on)
+
+        new_x_test_temp = x_val[(isin_test) & (~isin_trained_on)]
+        new_y_test_temp = y_val[(isin_test) & (~isin_trained_on)]
+
+        new_x_test = new_x_test.append(new_x_test_temp)
+        new_y_test = new_y_test.append(new_y_test_temp)
+
+        new_x_val = x_val[~((isin_test) & (~isin_trained_on))]
+        new_y_val = y_val[~((isin_test) & (~isin_trained_on))]
+
+        isin_test = y_test[config.settings["id_col"]].isin(ids_test)
+        isin_trained_on = y_test[config.settings["id_col"]].isin(ids_trained_on)
+
+        new_x_test_temp = x_test[(isin_test) & (~isin_trained_on)]
+        new_y_test_temp = y_test[(isin_test) & (~isin_trained_on)]
+
+        new_x_test = new_x_test.append(new_x_test_temp)
+        new_y_test = new_y_test.append(new_y_test_temp)
+
+        new_x_val_temp = x_test[~((isin_test) & (~isin_trained_on))]
+        new_y_val_temp = y_test[~((isin_test) & (~isin_trained_on))]
+
+        new_x_val = new_x_val.append(new_x_val_temp)
+        new_y_val = new_y_val.append(new_y_val_temp)
+
+        for label in list(excluded_x.keys()):
+            curr_x = excluded_x[label]
+            curr_y = excluded_y[label]
+
+            inc_x = curr_x[curr_y[config.settings["id_col"]].isin(ids_test)]
+            inc_y = curr_y[curr_y[config.settings["id_col"]].isin(ids_test)]
+
+            new_x_test = new_x_test.append(inc_x)
+            new_y_test = new_y_test.append(inc_y)
+
+        y_test_temp = []
+
+        for id in list(new_y_test[config.settings["id_col"]].values):
+            y_test_temp.append(labels[id])
+
+        new_y_test[config.settings["label_col"]] = y_test_temp
+
+        assert len(new_x_test) == len(new_y_test)
+
+        assert len(y_test_temp) == len(ids_test)
+
+        assert len(new_x_val) == len(new_y_val)
+        assert len(new_x_train) == len(new_y_train)
+
+        return new_x_train, new_y_train, new_x_val, new_y_val, new_x_test, new_y_test
 
     def scale_data(self, x_train, x_val, x_test, x_cols):
         """Scale the features of the data according to the training set.
@@ -1405,8 +1442,13 @@ class ActiveLearningTab:
             ] = self.y_al_train.tolist()
         else:
 
+            print(preselected)
+
             new_y = preselected[0]
             new_id = preselected[1]
+
+            print(f"new_y: {new_y}")
+            print(f"new_id: {new_id}")
 
             y_tr = self.y_train.copy()
 
@@ -1416,11 +1458,17 @@ class ActiveLearningTab:
             y_pool = self.y_train.to_numpy().ravel()
             id_pool = self.id_train.to_numpy()
 
+            print(f"X_pool: {X_pool}")
+            print(f"y_pool: {y_pool}")
+            print(f"id_pool: {id_pool}")
+
             print(X_pool.shape)
 
             train_idx = []
 
             for id in new_id:
+                print(id)
+                print(np.where(id_pool == id))
                 train_idx.append(np.where(id_pool == id)[0][0])
 
             print(train_idx)
