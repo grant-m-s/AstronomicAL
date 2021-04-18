@@ -38,16 +38,16 @@ import sys
 import time
 
 
-class ActiveLearningTab:
+class ActiveLearningModel:
     """This class handles the Machine Learning aspect of the codebase.
 
-      Based on the users settings, the required features will be extracted from
-      the data and split into train, validation and test sets. The user can
-      then specify which classifiers and query functions they would like to
-      use in the Active Learning Process. The results at each stage will be
-      displayed in various widgets and plots, allowing the user to select the
-      correct label for the newly queried source. Each instance will train a
-      separate one-vs-rest classifier.
+    Based on the users settings, the required features will be extracted from
+    the data and split into train, validation and test sets. The user can
+    then specify which classifiers and query functions they would like to
+    use in the Active Learning Process. The results at each stage will be
+    displayed in various widgets and plots, allowing the user to select the
+    correct label for the newly queried source. Each instance will train a
+    separate one-vs-rest classifier.
 
     Parameters
     ----------
@@ -135,6 +135,11 @@ class ActiveLearningTab:
 
         self.retrain = False
 
+        self.show_test_results = False
+        self._seen_test_results = False
+        self._show_caution = True
+        self._seen_caution = False
+
         if "config_load_level" in list(config.settings.keys()):
             if (config.settings["config_load_level"] == 2) and (
                 f"{self._label}" in config.settings["classifiers"]
@@ -209,6 +214,7 @@ class ActiveLearningTab:
 
         self._train_scores = {"acc": 0.00, "prec": 0.00, "rec": 0.00, "f1": 0.00}
         self._val_scores = {"acc": 0.00, "prec": 0.00, "rec": 0.00, "f1": 0.00}
+        self._test_scores = {"acc": 0.00, "prec": 0.00, "rec": 0.00, "f1": 0.00}
 
         self.corr_train = ColumnDataSource(self._empty_data())
         self.incorr_train = ColumnDataSource(self._empty_data())
@@ -235,10 +241,16 @@ class ActiveLearningTab:
         self.assign_label_group = pn.widgets.RadioButtonGroup(
             name="Label button group",
             options=options,
+            width=350,
+            sizing_mode="fixed",
         )
 
         self.assign_label_button = pn.widgets.Button(
-            name="Assign Label", button_type="primary"
+            name="Assign Label",
+            button_type="primary",
+            max_width=50,
+            width=50,
+            sizing_mode="fixed",
         )
         self.assign_label_button.on_click(self._assign_label_cb)
 
@@ -321,6 +333,22 @@ class ActiveLearningTab:
             clicks=save_config.save_layout_js_cb,
             args=dict(text_area_input=text_area_input),
         )
+        self.request_test_results_button = pn.widgets.Button(
+            name="View Test Results", button_type="warning"
+        )
+        self.request_test_results_button.on_click(self._request_test_results_cb)
+
+        self._return_to_train_view_button = pn.widgets.Button(name="<< Go Back")
+        self._return_to_train_view_button.on_click(self._return_to_train_cb)
+
+        self._stop_caution_show_checkbox = pn.widgets.Checkbox(
+            name="Don't show this message again for this classifier."
+        )
+
+        self._view_test_results_button = pn.widgets.Button(
+            name="Continue to Test Data", button_type="danger"
+        )
+        self._view_test_results_button.on_click(self._show_test_results_cb)
 
         self.setup_row = pn.Row("Loading")
         self.panel_row = pn.Row("Loading")
@@ -333,6 +361,10 @@ class ActiveLearningTab:
         self.conf_mat_val_fn = "FN"
         self.conf_mat_val_fp = "FP"
         self.conf_mat_val_tp = "TP"
+        self.conf_mat_test_tn = "TN"
+        self.conf_mat_test_fn = "FN"
+        self.conf_mat_test_fp = "FP"
+        self.conf_mat_test_tp = "TP"
 
     def _preprocess_data(self):
 
@@ -1272,6 +1304,7 @@ class ActiveLearningTab:
         t_conf = confusion_matrix(self.y_train, tr_pred)
         end = time.time()
         print(f"conf matrix {end - start}")
+
         start = time.time()
         val_pred = self.learner.predict(config.ml_data["x_val"]).reshape((-1, 1))
         end = time.time()
@@ -1322,6 +1355,25 @@ class ActiveLearningTab:
 
         v_conf = confusion_matrix(self.y_val, val_pred)
 
+        test_pred = self.learner.predict(config.ml_data["x_test"]).reshape((-1, 1))
+        end = time.time()
+        print(f"pred test {end - start}")
+        temp = self.y_test.to_numpy().reshape((-1, 1))
+
+        curr_test_acc = accuracy_score(self.y_test, test_pred)
+        curr_test_f1 = f1_score(self.y_test, test_pred)
+        curr_test_prec = precision_score(self.y_test, test_pred)
+        curr_test_rec = recall_score(self.y_test, test_pred)
+
+        self._test_scores = {
+            "acc": "%.3f" % round(curr_test_acc, 3),
+            "prec": "%.3f" % round(curr_test_prec, 3),
+            "rec": "%.3f" % round(curr_test_rec, 3),
+            "f1": "%.3f" % round(curr_test_f1, 3),
+        }
+
+        test_conf = confusion_matrix(self.y_test, test_pred)
+
         self.num_points_list.append(self.curr_num_points)
 
         self._accuracy_list["train"]["num_points"] = self.num_points_list
@@ -1342,6 +1394,11 @@ class ActiveLearningTab:
         self.conf_mat_val_fp = str(v_conf[0][1])
         self.conf_mat_val_fn = str(v_conf[1][0])
         self.conf_mat_val_tp = str(v_conf[1][1])
+
+        self.conf_mat_test_tn = str(test_conf[0][0])
+        self.conf_mat_test_fp = str(test_conf[0][1])
+        self.conf_mat_test_fn = str(test_conf[1][0])
+        self.conf_mat_test_tp = str(test_conf[1][1])
 
         start = time.time()
         proba = 1 - np.max(proba, axis=1)
@@ -1948,52 +2005,139 @@ class ActiveLearningTab:
 
     def _add_conf_matrices(self):
         print("_add_conf_matrices")
+        if not self.show_test_results:
+            return pn.Column(
+                pn.pane.Markdown("Training Set:", sizing_mode="fixed"),
+                pn.pane.Markdown(
+                    f"Acc: {self._train_scores['acc']}, Prec: {self._train_scores['prec']}, Rec: {self._train_scores['rec']}, F1: {self._train_scores['f1']}",
+                    sizing_mode="fixed",
+                ),
+                pn.Row(
+                    pn.Column(
+                        pn.Row("", max_height=30),
+                        pn.Row("Actual 0", min_height=50),
+                        pn.Row("Actual 1", min_height=50),
+                    ),
+                    pn.Column(
+                        pn.Row("Predicted 0", max_height=30),
+                        pn.Row(pn.pane.Str(self.conf_mat_tr_tn), min_height=50),
+                        pn.Row(pn.pane.Str(self.conf_mat_tr_fn), min_height=50),
+                    ),
+                    pn.Column(
+                        pn.Row("Predicted 1", max_height=30),
+                        pn.Row(pn.pane.Str(self.conf_mat_tr_fp), min_height=50),
+                        pn.Row(pn.pane.Str(self.conf_mat_tr_tp), min_height=50),
+                    ),
+                ),
+                pn.pane.Markdown("Validation Set:", sizing_mode="fixed"),
+                pn.pane.Markdown(
+                    f"Acc: {self._val_scores['acc']}, Prec: {self._val_scores['prec']}, Rec: {self._val_scores['rec']}, F1: {self._val_scores['f1']}",
+                    sizing_mode="fixed",
+                ),
+                pn.Row(
+                    pn.Column(
+                        pn.Row("", max_height=30),
+                        pn.Row("Actual 0", min_height=50),
+                        pn.Row("Actual 1", min_height=50),
+                    ),
+                    pn.Column(
+                        pn.Row("Predicted 0", max_height=30),
+                        pn.Row(pn.pane.Str(self.conf_mat_val_tn), min_height=50),
+                        pn.Row(pn.pane.Str(self.conf_mat_val_fn), min_height=50),
+                    ),
+                    pn.Column(
+                        pn.Row("Predicted 1", max_height=30),
+                        pn.Row(pn.pane.Str(self.conf_mat_val_fp), min_height=50),
+                        pn.Row(pn.pane.Str(self.conf_mat_val_tp), min_height=50),
+                    ),
+                ),
+            )
+        else:
+            if (not self._show_caution) or (self._seen_caution):
+                return pn.Column(
+                    pn.pane.Markdown("Test Set:", sizing_mode="fixed"),
+                    pn.pane.Markdown(
+                        f"Acc: {self._test_scores['acc']}, Prec: {self._test_scores['prec']}, Rec: {self._test_scores['rec']}, F1: {self._test_scores['f1']}",
+                        sizing_mode="fixed",
+                    ),
+                    pn.Row(
+                        pn.Column(
+                            pn.Row("", max_height=30),
+                            pn.Row("Actual 0", min_height=50),
+                            pn.Row("Actual 1", min_height=50),
+                        ),
+                        pn.Column(
+                            pn.Row("Predicted 0", max_height=30),
+                            pn.Row(pn.pane.Str(self.conf_mat_test_tn), min_height=50),
+                            pn.Row(pn.pane.Str(self.conf_mat_test_fn), min_height=50),
+                        ),
+                        pn.Column(
+                            pn.Row("Predicted 1", max_height=30),
+                            pn.Row(pn.pane.Str(self.conf_mat_test_fp), min_height=50),
+                            pn.Row(pn.pane.Str(self.conf_mat_test_tp), min_height=50),
+                        ),
+                    ),
+                    pn.Row(self._return_to_train_view_button, max_height=20),
+                    min_height=400,
+                )
+            else:
+                return self._show_caution_message()
+
+    def _show_caution_message(self):
+
         return pn.Column(
-            pn.pane.Markdown("Training Set:", sizing_mode="fixed"),
+            pn.Row(
+                pn.layout.HSpacer(width=75),
+                pn.pane.PNG(
+                    "https://static.thenounproject.com/png/1531082-200.png",
+                    max_height=75,
+                    max_width=75,
+                ),
+                pn.layout.HSpacer(width=75),
+            ),
             pn.pane.Markdown(
-                f"Acc: {self._train_scores['acc']}, Prec: {self._train_scores['prec']}, Rec: {self._train_scores['rec']}, F1: {self._train_scores['f1']}",
-                sizing_mode="fixed",
+                """
+            ### Caution
+
+            You are about to view the final publishable results for this classifier on the test set.
+
+            It is extremely poor Machine Learning practice to continue training your model after viewing these results.
+
+            If you do continue to train after viewing these results you risk invalidating the generalisability of your classifier by removing the unbias nature of your test set.
+            """,
+                min_height=200,
             ),
             pn.Row(
-                pn.Column(
-                    pn.Row("", max_height=30),
-                    pn.Row("Actual 0", min_height=50),
-                    pn.Row("Actual 1", min_height=50),
-                ),
-                pn.Column(
-                    pn.Row("Predicted 0", max_height=30),
-                    pn.Row(pn.pane.Str(self.conf_mat_tr_tn), min_height=50),
-                    pn.Row(pn.pane.Str(self.conf_mat_tr_fn), min_height=50),
-                ),
-                pn.Column(
-                    pn.Row("Predicted 1", max_height=30),
-                    pn.Row(pn.pane.Str(self.conf_mat_tr_fp), min_height=50),
-                    pn.Row(pn.pane.Str(self.conf_mat_tr_tp), min_height=50),
-                ),
+                self._return_to_train_view_button,
+                self._view_test_results_button,
+                max_height=30,
             ),
-            pn.pane.Markdown("Validation Set:", sizing_mode="fixed"),
-            pn.pane.Markdown(
-                f"Acc: {self._val_scores['acc']}, Prec: {self._val_scores['prec']}, Rec: {self._val_scores['rec']}, F1: {self._val_scores['f1']}",
-                sizing_mode="fixed",
-            ),
-            pn.Row(
-                pn.Column(
-                    pn.Row("", max_height=30),
-                    pn.Row("Actual 0", min_height=50),
-                    pn.Row("Actual 1", min_height=50),
-                ),
-                pn.Column(
-                    pn.Row("Predicted 0", max_height=30),
-                    pn.Row(pn.pane.Str(self.conf_mat_val_tn), min_height=50),
-                    pn.Row(pn.pane.Str(self.conf_mat_val_fn), min_height=50),
-                ),
-                pn.Column(
-                    pn.Row("Predicted 1", max_height=30),
-                    pn.Row(pn.pane.Str(self.conf_mat_val_fp), min_height=50),
-                    pn.Row(pn.pane.Str(self.conf_mat_val_tp), min_height=50),
-                ),
-            ),
+            self._stop_caution_show_checkbox,
+            min_height=400,
         )
+
+    def _request_test_results_cb(self, event):
+        self.show_test_results = True
+        self.panel()
+        self._seen_caution = True
+
+    def _return_to_train_cb(self, event):
+        self.show_test_results = False
+        self._seen_caution = False
+
+        if self._stop_caution_show_checkbox.value:
+            self._show_caution = False
+
+        self.panel()
+
+    def _show_test_results_cb(self, event):
+        self._seen_test_results = True
+        self.show_test_results = True
+        self.panel()
+        self._seen_caution = False
+
+        if self._stop_caution_show_checkbox.value:
+            self._show_caution = False
 
     def setup_panel(self):
         """Create the panel which will house all the classifier setup options.
@@ -2059,17 +2203,24 @@ class ActiveLearningTab:
                 if self._assigned:
                     buttons_row.append(self.next_iteration_button)
                 else:
-                    buttons_row = pn.Row(
-                        self.assign_label_group,
+                    buttons_row = pn.Column(
                         pn.Row(
+                            self.assign_label_group,
                             self.assign_label_button,
+                            max_height=30,
+                            width_policy="max",
+                        ),
+                        pn.layout.VSpacer(max_height=5),
+                        pn.Row(
+                            pn.layout.HSpacer(max_width=200),
                             self.show_queried_button,
                             self.checkpoint_button,
+                            self.request_test_results_button,
                             max_height=30,
                         ),
-                        max_height=30,
+                        max_height=70,
                     )
-            print("\n\n Should print correctly \n\n")
+
             self.panel_row[0] = pn.Column(
                 pn.Row(self.setup_row),
                 pn.Row(
@@ -2095,15 +2246,22 @@ class ActiveLearningTab:
                 if self._assigned:
                     buttons_row.append(self.next_iteration_button)
                 else:
-                    buttons_row = pn.Row(
-                        self.assign_label_group,
+                    buttons_row = pn.Column(
                         pn.Row(
+                            self.assign_label_group,
                             self.assign_label_button,
+                            max_height=30,
+                            width_policy="max",
+                        ),
+                        pn.layout.VSpacer(max_height=5),
+                        pn.Row(
+                            pn.layout.HSpacer(max_width=200),
                             self.show_queried_button,
                             self.checkpoint_button,
+                            self.request_test_results_button,
                             max_height=30,
                         ),
-                        max_height=30,
+                        max_height=70,
                     )
             self.panel_row[0][3] = buttons_row
 
