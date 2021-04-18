@@ -1,4 +1,5 @@
 from astronomicAL.extensions import extension_plots
+from bokeh.models.widgets import Dropdown
 from functools import partial
 
 import panel as pn
@@ -30,36 +31,19 @@ class MenuDashboard:
             "Selected Source Info",
         ] + list(extension_plots.get_plot_dict().keys())
 
-        self._plot_selection = pn.widgets.Select(
-            name="Choose plot type:", options=plot_options
-        )
+        self._plot_selection = Dropdown(label="Choose plot type:", menu=plot_options)
 
-        self._add_plot_button = pn.widgets.Button(name="Add Plot")
-        self._add_plot_button.on_click(
+        self._plot_selection.on_click(
             partial(
                 self._update_main_contents,
                 main=main,
-                button=self._add_plot_button,
-            )
+            ),
         )
 
-        # self._add_selected_info_button = pn.widgets.Button(
-        #     name="Add Selected Source Info"
-        # )
-        # self._add_selected_info_button.on_click(
-        #     partial(
-        #         self._update_main_contents,
-        #         main=main,
-        #         updated="Selected Source",
-        #         button=self._add_selected_info_button,
-        #     )
-        # )
+    def _update_main_contents(self, event, main):
+        self._plot_selection.label = "Loading..."
 
-    def _update_main_contents(self, event, main, button):
-        # print(updated)
-        button.name = "Loading..."
-
-        main.set_contents(self._plot_selection.value)
+        main.set_contents(event.item)
 
     def panel(self):
         """Render the current view.
@@ -74,7 +58,6 @@ class MenuDashboard:
         self.row[0] = pn.Column(
             pn.layout.VSpacer(),
             self._plot_selection,
-            self._add_plot_button,
             max_height=100,
         )
         return self.row
