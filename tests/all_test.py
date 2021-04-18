@@ -4,7 +4,7 @@ sys.path.insert(1, os.path.join(sys.path[0], "../"))
 import pandas as pd
 import panel as pn
 
-from astronomicAL.active_learning.active_learning import ActiveLearningTab
+from astronomicAL.active_learning.active_learning import ActiveLearningModel
 from astronomicAL.dashboard.active_learning import ActiveLearningDashboard
 from astronomicAL.dashboard.dashboard import Dashboard
 from astronomicAL.dashboard.menu import MenuDashboard
