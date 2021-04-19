@@ -77,7 +77,14 @@ class ParameterAssignment(param.Parameterized):
         self.confirm_settings_button.on_click(self._confirm_settings_cb)
 
         self.extra_info_selector = pn.widgets.MultiChoice(
-            name="Extra Columns to display when inspecting a source:",
+            name="Extra Columns that will be shown in a table when inspecting a source:",
+            value=[],
+            options=[],
+            max_width=700,
+        )
+
+        self.extra_images_selector = pn.widgets.MultiChoice(
+            name="Extra Columns containing image URLs that will be displayed when inspecting a source:",
             value=[],
             options=[],
             max_width=700,
@@ -124,6 +131,7 @@ class ParameterAssignment(param.Parameterized):
             self.default_y_variable = cols[1]
 
             self.extra_info_selector.options = cols
+            self.extra_images_selector.options = cols
 
     @param.depends("label_column", watch=True)
     def _update_labels_cb(self):
@@ -202,6 +210,7 @@ class ParameterAssignment(param.Parameterized):
         config.settings["confirmed"] = False
 
         config.settings["extra_info_cols"] = self.extra_info_selector.value
+        config.settings["extra_image_cols"] = self.extra_images_selector.value
         self.confirm_settings_button.name = "Confirmed"
         self.ready = True
 
@@ -385,10 +394,28 @@ class ParameterAssignment(param.Parameterized):
                 layout.append(colour_row)
 
                 layout.append(label_strings_row)
+                layout.append(
+                    pn.pane.Markdown(
+                        "**Choose which extra information you want to view when inspecting each source:**",
+                        margin=0,
+                        max_height=20,
+                    )
+                )
+                layout.append(
+                    pn.layout.Tabs(
+                        (
+                            "Extra Table Data",
+                            self.extra_info_selector,
+                        ),
+                        (
+                            "Extra Image Data",
+                            self.extra_images_selector,
+                        ),
+                        tabs_location="left",
+                    )
+                )
 
-                layout.append(self.extra_info_selector)
-
-                layout.append(pn.Spacer(height=50))
+                layout.append(pn.Spacer(height=100))
 
                 layout.append(
                     pn.Row(
