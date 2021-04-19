@@ -94,8 +94,6 @@ class ActiveLearningModel:
 
         self.df = df
 
-        print(self.df.columns)
-
         self.src = src
         self._label = config.settings["strings_to_labels"][label]
         self._label_alias = label
@@ -104,6 +102,15 @@ class ActiveLearningModel:
 
         self._training = False
         self._assigned = False
+        self.retrain = False
+
+        if "config_load_level" in list(config.settings.keys()):
+            if (config.settings["config_load_level"] == 2) and (
+                f"{self._label}" in config.settings["classifiers"]
+            ):
+                keys = list(config.settings["classifiers"][f"{self._label}"].keys())
+                if ("y" in keys) and ("id" in keys):
+                    self.retrain = True
 
         if len(config.ml_data.keys()) == 0:
 
@@ -133,21 +140,13 @@ class ActiveLearningModel:
 
         self._resize_plot_scales()
 
-        self.retrain = False
-
         self.show_test_results = False
         self._seen_test_results = False
         self._show_caution = True
         self._seen_caution = False
 
-        if "config_load_level" in list(config.settings.keys()):
-            if (config.settings["config_load_level"] == 2) and (
-                f"{self._label}" in config.settings["classifiers"]
-            ):
-                keys = list(config.settings["classifiers"][f"{self._label}"].keys())
-                if ("y" in keys) and ("id" in keys):
-                    self.retrain = True
-                    self._start_training_cb(None)
+        if self.retrain:
+            self._start_training_cb(None)
 
     def _resize_plot_scales(self):
 
@@ -241,15 +240,15 @@ class ActiveLearningModel:
         self.assign_label_group = pn.widgets.RadioButtonGroup(
             name="Label button group",
             options=options,
-            width=350,
-            sizing_mode="fixed",
+            # width=350,
+            # max_width=600,
+            sizing_mode="stretch_width",
         )
 
         self.assign_label_button = pn.widgets.Button(
             name="Assign Label",
             button_type="primary",
-            max_width=50,
-            width=50,
+            width=125,
             sizing_mode="fixed",
         )
         self.assign_label_button.on_click(self._assign_label_cb)
@@ -394,8 +393,20 @@ class ActiveLearningModel:
             self.y_test,
         ) = self.train_val_test_split(x, y, excluded_x, excluded_y, 0.6, 0.2)
 
-        self.x_cols = self.x_train.columns
-        self.y_cols = self.y_train.columns
+        x_cols = list(self.x_train.columns)
+        y_cols = list(self.y_train.columns)
+
+        if "index" in x_cols:
+            x_cols.remove("index")
+
+        if "index" in y_cols:
+            y_cols.remove("index")
+
+        assert not "index" in x_cols
+        assert not "index" in y_cols
+
+        self.x_cols = x_cols
+        self.y_cols = y_cols
 
         if config.settings["scale_data"]:
 
@@ -442,6 +453,10 @@ class ActiveLearningModel:
         None
 
         """
+
+        self.x_train = self.x_train[self.x_cols]
+        self.x_val = self.x_val[self.x_cols]
+        self.x_test = self.x_test[self.x_cols]
 
         config.ml_data["x_train"] = self.x_train
         config.ml_data["x_val"] = self.x_val
@@ -626,10 +641,6 @@ class ActiveLearningModel:
                 config.settings["default_vars"][1]
             ),
         ]
-
-        print(plot_idx[0])
-        print(plot_idx[1])
-        print(query_instance)
 
         q = {
             f'{config.settings["default_vars"][0]}': query_instance[:, plot_idx[0]],
@@ -1038,9 +1049,10 @@ class ActiveLearningModel:
 
         ids_trained_on = []
 
-        for i in config.settings["classifiers"]:
-            if "id" in list(config.settings["classifiers"][i].keys()):
-                ids_trained_on += config.settings["classifiers"][i]["id"]
+        if self.retrain:
+            for i in config.settings["classifiers"]:
+                if "id" in list(config.settings["classifiers"][i].keys()):
+                    ids_trained_on += config.settings["classifiers"][i]["id"]
 
         ids_trained_on = list(dict.fromkeys(ids_trained_on))
 
@@ -1081,6 +1093,7 @@ class ActiveLearningModel:
         new_y_val = new_y_val.append(new_y_val_temp)
 
         for label in list(excluded_x.keys()):
+
             curr_x = excluded_x[label]
             curr_y = excluded_y[label]
 
@@ -1093,16 +1106,25 @@ class ActiveLearningModel:
         y_test_temp = []
 
         for id in list(new_y_test[config.settings["id_col"]].values):
+
             y_test_temp.append(labels[id])
 
         new_y_test[config.settings["label_col"]] = y_test_temp
 
-        assert len(new_x_test) == len(new_y_test)
+        assert len(new_x_test) == len(
+            new_y_test
+        ), f"new_x_test len:{len(new_x_test)}, new_y_test len:{len(new_y_test)}"
 
-        assert len(y_test_temp) == len(ids_test)
+        assert len(y_test_temp) == len(
+            ids_test
+        ), f"y_test_temp len:{len(y_test_temp)}, ids_test len:{len(ids_test)}"
 
-        assert len(new_x_val) == len(new_y_val)
-        assert len(new_x_train) == len(new_y_train)
+        assert len(new_x_val) == len(
+            new_y_val
+        ), f"new_x_val len:{len(new_x_val)}, new_y_val len:{len(new_y_val)}"
+        assert len(new_x_train) == len(
+            new_y_train
+        ), f"new_x_train len:{len(new_x_train)}, new_y_train len:{len(new_y_train)}"
 
         return new_x_train, new_y_train, new_x_val, new_y_val, new_x_test, new_y_test
 
@@ -1246,8 +1268,6 @@ class ActiveLearningModel:
         print("get_predicitions")
         start = time.time()
         tr_pred = np.argmax(proba, axis=1).reshape((-1, 1))
-        print(tr_pred.reshape)
-        print(tr_pred)
         end = time.time()
         print(f"predict {end - start}")
         temp = self.y_train.to_numpy().reshape((-1, 1))
@@ -1458,7 +1478,10 @@ class ActiveLearningModel:
             y_tr = self.y_train.copy()
 
             # y_tr = y_tr.to_numpy()
-
+            print(
+                f"\n\n=======  {config.ml_data['x_train'].shape} vs. {config.ml_data['x_train'].to_numpy().shape}  ==========\n\n"
+            )
+            print(f"{list(config.ml_data['x_train'].columns)}")
             X_pool = config.ml_data["x_train"].to_numpy()
             y_pool = self.y_train.to_numpy().ravel()
             id_pool = self.id_train.to_numpy()
@@ -1511,6 +1534,10 @@ class ActiveLearningModel:
 
             # y_tr = y_tr.to_numpy()
 
+            print(
+                f"\n\n=======  {config.ml_data['x_train'].shape} vs. {config.ml_data['x_train'].to_numpy().shape}  ==========\n\n"
+            )
+
             X_pool = config.ml_data["x_train"].to_numpy()
             y_pool = self.y_train.to_numpy().ravel()
             id_pool = self.id_train.to_numpy()
@@ -1524,11 +1551,7 @@ class ActiveLearningModel:
             train_idx = []
 
             for id in new_id:
-                print(id)
-                print(np.where(id_pool == id))
                 train_idx.append(np.where(id_pool == id)[0][0])
-
-            print(train_idx)
 
             X_train = X_pool[train_idx]
             y_train = new_y
@@ -2251,7 +2274,7 @@ class ActiveLearningModel:
                             self.assign_label_group,
                             self.assign_label_button,
                             max_height=30,
-                            width_policy="max",
+                            # width_policy="max",
                         ),
                         pn.layout.VSpacer(max_height=5),
                         pn.Row(
