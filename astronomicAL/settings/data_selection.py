@@ -140,6 +140,7 @@ class DataSelection(param.Parameterized):
         """
         start = time.time()
         ext = None
+        filetype = None
         try:
             ext = filename[filename.rindex(".") + 1 :]
             fits_table = Table.read(filename, format=f"{ext}")
@@ -174,12 +175,9 @@ class DataSelection(param.Parameterized):
         print(f"Convert to Pandas {end - start}")
 
         start = time.time()
-        for col, dtype in df.dtypes.items():
-            if dtype == np.object:  # Only process byte object columns.
-                if dtype == object:
-                    continue
-                else:
-                    print(dtype)
+        if ext == "fits":
+            for col, dtype in df.dtypes.items():
+                if dtype == np.object:  # Only process byte object columns.
                     df[col] = df[col].apply(lambda x: x.decode("utf-8"))
         end = time.time()
         print(f"Pandas object loop {end - start}")
