@@ -429,7 +429,7 @@ class TestSettings:
 
         df = self._create_test_df()
 
-        alSettings = ActiveLearningSettings(None)
+        alSettings = ActiveLearningSettings(None, mode="AL")
 
         assert alSettings.label_selector.options == []
         assert alSettings.label_selector.value == []
@@ -438,7 +438,7 @@ class TestSettings:
 
         df = self._create_test_df()
 
-        alSettings = ActiveLearningSettings(None)
+        alSettings = ActiveLearningSettings(None, mode="AL")
 
         assert alSettings.feature_selector.options == []
         assert alSettings.feature_selector.value == []
@@ -447,7 +447,7 @@ class TestSettings:
 
         df = self._create_test_df()
 
-        alSettings = ActiveLearningSettings(None)
+        alSettings = ActiveLearningSettings(None, mode="AL")
 
         alSettings.update_data(None)
 
@@ -458,7 +458,7 @@ class TestSettings:
 
         df = self._create_test_df()
 
-        alSettings = ActiveLearningSettings(None)
+        alSettings = ActiveLearningSettings(None, mode="AL")
 
         alSettings.update_data(None)
 
@@ -471,7 +471,7 @@ class TestSettings:
 
         labels = df[config.settings["label_col"]].astype(str).unique()
 
-        alSettings = ActiveLearningSettings(None)
+        alSettings = ActiveLearningSettings(None, mode="AL")
 
         alSettings.update_data(df)
 
@@ -484,7 +484,7 @@ class TestSettings:
 
         features = df.columns
 
-        alSettings = ActiveLearningSettings(None)
+        alSettings = ActiveLearningSettings(None, mode="AL")
 
         alSettings.update_data(df)
 
@@ -493,13 +493,13 @@ class TestSettings:
 
     def test_AL_settings_check_is_complete_on_init(self):
 
-        alSettings = ActiveLearningSettings(None)
+        alSettings = ActiveLearningSettings(None, mode="AL")
 
         assert not alSettings.is_complete()
 
     def test_AL_settings_check_is_complete_on_update_no_df(self):
 
-        alSettings = ActiveLearningSettings(None)
+        alSettings = ActiveLearningSettings(None, mode="AL")
 
         alSettings.update_data(None)
 
@@ -509,7 +509,7 @@ class TestSettings:
 
         df = self._create_test_df()
 
-        alSettings = ActiveLearningSettings(None)
+        alSettings = ActiveLearningSettings(None, mode="AL")
 
         alSettings.update_data(df)
 
@@ -517,13 +517,13 @@ class TestSettings:
 
     def test_AL_settings_get_df_on_init(self):
 
-        alSettings = ActiveLearningSettings(None)
+        alSettings = ActiveLearningSettings(None, mode="AL")
 
         assert alSettings.get_df() is None
 
     def test_AL_settings_get_df_on_update_no_df(self):
 
-        alSettings = ActiveLearningSettings(None)
+        alSettings = ActiveLearningSettings(None, mode="AL")
 
         alSettings.update_data(None)
 
@@ -533,7 +533,7 @@ class TestSettings:
 
         df = self._create_test_df()
 
-        alSettings = ActiveLearningSettings(None)
+        alSettings = ActiveLearningSettings(None, mode="AL")
 
         alSettings.update_data(df)
 
@@ -541,7 +541,7 @@ class TestSettings:
 
     def test_AL_settings_correct_feature_generator_on_init(self):
 
-        alSettings = ActiveLearningSettings(None)
+        alSettings = ActiveLearningSettings(None, mode="AL")
 
         ans = feature_generation.get_oper_dict().keys()
 
@@ -549,7 +549,7 @@ class TestSettings:
 
     def test_AL_settings_correct_feature_generator_on_update_no_df(self):
 
-        alSettings = ActiveLearningSettings(None)
+        alSettings = ActiveLearningSettings(None, mode="AL")
 
         alSettings.update_data(None)
 
@@ -561,7 +561,7 @@ class TestSettings:
 
         df = self._create_test_df()
 
-        alSettings = ActiveLearningSettings(None)
+        alSettings = ActiveLearningSettings(None, mode="AL")
 
         alSettings.update_data(df)
 
@@ -572,7 +572,7 @@ class TestSettings:
 
         df = self._create_test_df()
 
-        alSettings = ActiveLearningSettings(None)
+        alSettings = ActiveLearningSettings(None, mode="AL")
 
         alSettings.update_data(df)
 
@@ -592,7 +592,7 @@ class TestSettings:
 
         df = self._create_test_df()
 
-        alSettings = ActiveLearningSettings(None)
+        alSettings = ActiveLearningSettings(None, mode="AL")
 
         alSettings.update_data(df)
 
@@ -623,7 +623,7 @@ class TestSettings:
 
         df = self._create_test_df()
 
-        alSettings = ActiveLearningSettings(None)
+        alSettings = ActiveLearningSettings(None, mode="AL")
 
         alSettings.update_data(df)
 
@@ -651,7 +651,7 @@ class TestSettings:
 
         df = self._create_test_df()
 
-        alSettings = ActiveLearningSettings(None)
+        alSettings = ActiveLearningSettings(None, mode="AL")
 
         alSettings.update_data(df)
 
@@ -693,7 +693,7 @@ class TestSettings:
 
         df = self._create_test_df()
 
-        alSettings = ActiveLearningSettings(None)
+        alSettings = ActiveLearningSettings(None, mode="AL")
 
         alSettings.update_data(df)
 
@@ -715,7 +715,7 @@ class TestSettings:
 
         df = self._create_test_df()
 
-        alSettings = ActiveLearningSettings(None)
+        alSettings = ActiveLearningSettings(None, mode="AL")
 
         alSettings.update_data(df)
 
@@ -732,7 +732,7 @@ class TestSettings:
 
         df = self._create_test_df()
 
-        alSettings = ActiveLearningSettings(None)
+        alSettings = ActiveLearningSettings(None, mode="AL")
 
         alSettings.update_data(df)
 
@@ -767,7 +767,7 @@ class TestSettings:
         df = self._create_test_df()
 
         button = pn.widgets.Button()
-        alSettings = ActiveLearningSettings(button)
+        alSettings = ActiveLearningSettings(button, mode="AL")
 
         alSettings.update_data(df)
 
@@ -783,7 +783,7 @@ class TestSettings:
         df = self._create_test_df()
 
         button = pn.widgets.Button()
-        alSettings = ActiveLearningSettings(button)
+        alSettings = ActiveLearningSettings(button, mode="AL")
 
         alSettings.update_data(df)
 
@@ -799,11 +799,17 @@ class TestSettings:
         df = self._create_test_df()
 
         button = pn.widgets.Button()
-        alSettings = ActiveLearningSettings(button)
+        alSettings = ActiveLearningSettings(button, mode="AL")
 
         alSettings.update_data(df)
 
         alSettings.exclude_labels_checkbox.value = True
+
+        alSettings.label_selector.value = ["0", "1"]
+
+        alSettings._verify_valid_selection_cb(None)
+
+        print(alSettings.exclude_labels_checkbox.disabled)
 
         alSettings._confirm_settings_cb(None)
 
@@ -814,9 +820,13 @@ class TestSettings:
         df = self._create_test_df()
 
         button = pn.widgets.Button()
-        alSettings = ActiveLearningSettings(button)
+        alSettings = ActiveLearningSettings(button, mode="AL")
 
         alSettings.update_data(df)
+
+        alSettings.label_selector.value = ["0", "1"]
+
+        alSettings._verify_valid_selection_cb(None)
 
         alSettings.exclude_labels_checkbox.value = False
 
@@ -829,7 +839,7 @@ class TestSettings:
         df = self._create_test_df()
 
         button = pn.widgets.Button()
-        alSettings = ActiveLearningSettings(button)
+        alSettings = ActiveLearningSettings(button, mode="AL")
 
         alSettings.update_data(df)
 
@@ -845,7 +855,7 @@ class TestSettings:
         df = self._create_test_df()
 
         button = pn.widgets.Button()
-        alSettings = ActiveLearningSettings(button)
+        alSettings = ActiveLearningSettings(button, mode="AL")
 
         alSettings.update_data(df)
 
@@ -860,7 +870,7 @@ class TestSettings:
         df = self._create_test_df()
 
         button = pn.widgets.Button()
-        alSettings = ActiveLearningSettings(button)
+        alSettings = ActiveLearningSettings(button, mode="AL")
 
         alSettings.update_data(df)
 
@@ -875,7 +885,7 @@ class TestSettings:
         df = self._create_test_df()
 
         button = pn.widgets.Button()
-        alSettings = ActiveLearningSettings(button)
+        alSettings = ActiveLearningSettings(button, mode="AL")
 
         alSettings.update_data(df)
 
@@ -900,7 +910,7 @@ class TestSettings:
         t.write("data/table1.fits", format="fits")
 
         src = ColumnDataSource()
-        ds = DataSelection(src)
+        ds = DataSelection(src, "AL")
 
         ds.load_layout_check = False
 
@@ -915,7 +925,7 @@ class TestSettings:
     def test_data_selection_check_config_load_level_layout_only(self, document, comm):
 
         src = ColumnDataSource()
-        ds = DataSelection(src)
+        ds = DataSelection(src, "AL")
 
         ds.load_layout_check = True
 
@@ -936,7 +946,7 @@ class TestSettings:
     def test_data_selection_check_config_load_level_layout_only(self):
 
         src = ColumnDataSource()
-        ds = DataSelection(src)
+        ds = DataSelection(src, "AL")
 
         check_folder_exists("configs")
 
@@ -953,7 +963,7 @@ class TestSettings:
     def test_data_selection_check_config_load_level_settings_only(self):
 
         src = ColumnDataSource()
-        ds = DataSelection(src)
+        ds = DataSelection(src, "AL")
 
         check_folder_exists("configs")
 
@@ -970,7 +980,7 @@ class TestSettings:
     def test_data_selection_check_config_load_level_settings_only(self):
 
         src = ColumnDataSource()
-        ds = DataSelection(src)
+        ds = DataSelection(src, "AL")
 
         check_folder_exists("configs")
 
@@ -994,7 +1004,7 @@ class TestSettings:
         t.write("data/table1.fits", format="fits")
 
         src = ColumnDataSource()
-        ds = DataSelection(src)
+        ds = DataSelection(src, "AL")
 
         ds.memory_optimisation_check.value = False
 
@@ -1016,7 +1026,7 @@ class TestSettings:
         t.write("data/table1.fits", format="fits")
 
         src = ColumnDataSource()
-        ds = DataSelection(src)
+        ds = DataSelection(src, "AL")
 
         ds.memory_optimisation_check.value = False
 
@@ -1040,7 +1050,7 @@ class TestSettings:
         t.write("data/table1.fits", format="fits")
 
         src = ColumnDataSource()
-        ds = DataSelection(src)
+        ds = DataSelection(src, "AL")
 
         ds.memory_optimisation_check.value = True
 
@@ -1065,7 +1075,7 @@ class TestSettings:
         t.write("data/table1.fits", format="fits")
 
         src = ColumnDataSource()
-        ds = DataSelection(src)
+        ds = DataSelection(src, "AL")
 
         ds.memory_optimisation_check.value = False
 
@@ -1088,7 +1098,7 @@ class TestSettings:
         t.write("data/table1.fits", format="fits")
 
         src = ColumnDataSource()
-        ds = DataSelection(src)
+        ds = DataSelection(src, "AL")
 
         ds.memory_optimisation_check.value = False
 
@@ -1116,7 +1126,7 @@ class TestSettings:
         t.write("data/table1.fits", format="fits")
 
         src = ColumnDataSource()
-        ds = DataSelection(src)
+        ds = DataSelection(src, "AL")
 
         ds.memory_optimisation_check.value = True
 
@@ -1558,35 +1568,6 @@ class TestDashboards:
 
         assert selected_source._url_optical_image == _url_optical_image
 
-    def test_selected_source_spectra_image_check_none_selected(self):
-        data = self._create_test_df_with_image_data()
-        config.main_df = data
-        src = ColumnDataSource()
-        selected_source = SelectedSourceDashboard(src=src, close_button=None)
-
-        assert selected_source.spectra_image.object == ""
-
-    def test_selected_source_spectra_image_check_selected_has_image(self):
-        data = self._create_test_df_with_image_data()
-        config.main_df = data
-        data_selected = data.iloc[71]
-        src = ColumnDataSource({str(c): [v] for c, v in data_selected.items()})
-        selected_source = SelectedSourceDashboard(src=src, close_button=None)
-
-        assert (
-            selected_source.spectra_image.object
-            == "https://dr15.sdss.org/sas/dr15/sdss/spectro/redux/images/v5_10_0/8125-56955/spec-image-8125-56955-0534.png"
-        )
-
-    def test_selected_source_spectra_image_check_selected_no_image(self):
-        data = self._create_test_df_with_image_data()
-        config.main_df = data
-        data_selected = data.iloc[72]
-        src = ColumnDataSource({str(c): [v] for c, v in data_selected.items()})
-        selected_source = SelectedSourceDashboard(src=src, close_button=None)
-
-        assert selected_source.spectra_image.object == ""
-
     def test_settings_dashboard_init(self):
         data = self._create_test_df()
         config.main_df = data
@@ -1605,6 +1586,9 @@ class TestDashboards:
         main = Dashboard(src)
 
         settings_db = SettingsDashboard(None, src)
+
+        settings_db._create_pipeline_cb(None, "AL", main)
+
         settings_db.pipeline["Active Learning Settings"].df = data
         settings_db._close_settings_cb(None, main)
 
@@ -1618,19 +1602,22 @@ class TestDashboards:
         src = ColumnDataSource()
 
         settings_db = SettingsDashboard(None, src)
+        settings_db.create_pipeline(mode="AL")
 
-        settings_db._pipeline_stage = 5
+        settings_db._pipeline_stage = 3
 
         settings_db._stage_previous_cb(None)
 
-        assert settings_db._pipeline_stage == 4
+        assert settings_db._pipeline_stage == 2
 
     def test_settings_dashboard_pipeline_next(self):
         data = self._create_test_df()
         config.main_df = data
         src = ColumnDataSource()
 
+        main = Dashboard(src)
         settings_db = SettingsDashboard(None, src)
+        settings_db.create_pipeline(mode="AL")
 
         settings_db.pipeline["Select Your Data"].df = data
 
@@ -1642,8 +1629,10 @@ class TestDashboards:
         data = self._create_test_df()
         config.main_df = data
         src = ColumnDataSource()
+        main = Dashboard(src)
 
         settings_db = SettingsDashboard(None, src)
+        settings_db.create_pipeline(mode="AL")
 
         settings_db.pipeline["Active Learning Settings"].completed = False
         settings_db.panel()
@@ -1659,6 +1648,8 @@ class TestDashboards:
         src = ColumnDataSource()
 
         settings_db = SettingsDashboard(None, src)
+        settings_db.create_pipeline(mode="AL")
+
         settings_db.pipeline["Assign Parameters"].update_data(dataframe=data)
         settings_db.pipeline["Assign Parameters"].id_column = "A"
         settings_db.pipeline["Assign Parameters"].label_column = "B"
