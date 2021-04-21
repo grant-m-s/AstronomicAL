@@ -38,10 +38,6 @@ class SettingsDashboard:
 
         self._initialise_widgets(main)
 
-        # self.create_pipeline(src)
-
-        # self._adjust_pipeline_layout()
-
         self.create_mode_selection_menu()
 
         self.pipeline_initialised = False
