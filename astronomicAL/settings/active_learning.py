@@ -224,9 +224,7 @@ class ActiveLearningSettings(param.Parameterized):
                 "Should remaining labels be removed from Active Learning datasets? "
                 + " [DISABLED: Atleast 2 labels must be selected]"
             )
-            self.confirm_settings_button.name = "Atleast 2 labels must be selected"
             exclude_labels = True
-            confirm_settings = True
 
         if len(selected_features) < 2:
             confirm_settings = True
