@@ -9,8 +9,6 @@ import pandas as pd
 import panel as pn
 import param
 import time
-import mimetypes
-import magic
 
 
 class DataSelection(param.Parameterized):
@@ -139,17 +137,11 @@ class DataSelection(param.Parameterized):
 
         """
         start = time.time()
-        ext = None
-        filetype = None
         try:
             ext = filename[filename.rindex(".") + 1 :]
             fits_table = Table.read(filename, format=f"{ext}")
         except:
-            filetype = magic.from_file(filename, mime=True)
-            if filetype[: filetype.index("/")] == "text":
-                fits_table = Table.read(filename, format="ascii")
-            else:
-                assert False, "Unknown Filetype"
+            assert False, "Unknown Filetype"
 
         end = time.time()
         print(f"Loading FITS Table {end - start}")
