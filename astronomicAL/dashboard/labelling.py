@@ -1,5 +1,6 @@
 import astronomicAL.config as config
 from astronomicAL.dashboard.plot import PlotDashboard
+from astronomicAL.active_learning.active_learning import ActiveLearningModel
 import panel as pn
 import numpy as np
 import datashader as ds
@@ -44,11 +45,17 @@ class LabellingDashboard(param.Parameterized):
 
         self.row = pn.Row(pn.pane.Str("loading"))
         self.df = df
+        self.sample_region = df
+        self.region_criteria_df = pd.DataFrame([], columns=["column", "oper", "value"])
+        self.region_message = ""
         self.src = src
         self.src.on_change("data", self._panel_cb)
 
         self.labels = self.get_previous_labels()
         self._construct_panel()
+
+        ActiveLearningModel(self.src, df, config.settings["labels_to_train"][0])
+
         self._update_variable_lists()
         self.select_random_point()
 
@@ -84,6 +91,23 @@ class LabellingDashboard(param.Parameterized):
         self.new_labelled_button.on_click(
             partial(self.update_selected_point_from_buttons, button="New")
         )
+        self.column_dropdown = pn.widgets.Select(
+            name="Column", options=list(self.df.columns)
+        )
+        self.operation_dropdown = pn.widgets.Select(
+            name="Operation", options=[">", ">=", "==", "!=", "<=", "<"]
+        )
+        self.input_value = pn.widgets.TextInput(name="Value")
+
+        self.add_sample_criteria_button = pn.widgets.Button(name="Add Criteria")
+        self.add_sample_criteria_button.on_click(
+            partial(self.update_sample_region, button="ADD")
+        )
+
+        self.remove_sample_criteria_button = pn.widgets.Button(name="Remove Criteria")
+        self.remove_sample_criteria_button.on_click(
+            partial(self.update_sample_region, button="REMOVE")
+        )
 
     def _update_variable_lists(self):
         """Update the list of options used inside `X_variable` and `Y_variable`.
@@ -114,6 +138,84 @@ class LabellingDashboard(param.Parameterized):
 
         print(f"x_var has now changed to: {self.X_variable}")
 
+    def update_sample_region(self, event=None, button="ADD"):
+        if button == "ADD":
+            updated_df = pd.DataFrame(
+                [
+                    [
+                        self.column_dropdown.value,
+                        self.operation_dropdown.value,
+                        self.input_value.value,
+                    ]
+                ],
+                columns=["column", "oper", "value"],
+            )
+
+            if len(self.region_criteria_df) == 0:
+                self.region_criteria_df = updated_df
+
+            else:
+                exists = self.region_criteria_df[
+                    (self.region_criteria_df["column"] == updated_df["column"][0])
+                    & (self.region_criteria_df["oper"] == updated_df["oper"][0])
+                    & (self.region_criteria_df["value"] == updated_df["value"][0])
+                ]
+                if len(exists) == 0:
+                    self.region_criteria_df = self.region_criteria_df.append(
+                        updated_df, ignore_index=True
+                    )
+                else:
+                    return
+
+        elif button == "REMOVE":
+            if len(self.region_criteria_df) == 0:
+                return
+            else:
+                self.region_criteria_df.drop(
+                    self.region_criteria_df.tail(1).index, inplace=True
+                )
+
+        all_bools = ""
+
+        for i in range(len(self.region_criteria_df)):
+            row = self.region_criteria_df.iloc[i]
+            oper = row["oper"]
+            col = row["column"]
+            value = float(row["value"])
+            if oper == ">":
+                bool = f"{col} > {value}"
+            elif oper == ">=":
+                bool = f"{col} >= {value}"
+            elif oper == "==":
+                bool = f"{col} == {value}"
+            elif oper == "!=":
+                bool = f"{col} != {value}"
+            elif oper == "<=":
+                bool = f"{col} <= {value}"
+            elif oper == "<":
+                bool = f"{col} < {value}"
+
+            if i == 0:
+                all_bools = bool
+            else:
+                all_bools = f"{all_bools} & {bool}"
+
+            print(all_bools)
+
+        if all_bools == "":
+            self.sample_region = self.df
+        else:
+            self.sample_region = self.df.query(all_bools)
+
+        if len(self.sample_region) == 0:
+            self.region_message = "No Matching Sources!"
+        elif len(self.sample_region) == len(self.df):
+            self.region_message = f"All Sources Matching ({len(self.sample_region)})"
+        else:
+            self.region_message = f"{len(self.sample_region)} Matching Sources"
+
+        self.panel()
+
     @param.depends("X_variable", "Y_variable")
     def plot(self, x_var=None, y_var=None):
         """Create a basic scatter plot of the data with the selected axis.
@@ -128,8 +230,118 @@ class LabellingDashboard(param.Parameterized):
             A Holoviews plot
 
         """
-        plot_db = PlotDashboard(self.src, None)
-        return plot_db.plot(x_var=self.X_variable, y_var=self.Y_variable)
+
+        print(f"x_var is {x_var}")
+
+        if x_var is None:
+            x_var = self.X_variable
+
+        if y_var is None:
+            y_var = self.Y_variable
+
+        p = hv.Points(
+            self.df,
+            [x_var, y_var],
+        ).opts(active_tools=["pan", "wheel_zoom"])
+
+        sample_region = hv.Points(
+            self.sample_region,
+            [x_var, y_var],
+        ).opts(active_tools=["pan", "wheel_zoom"])
+
+        cols = list(self.df.columns)
+
+        if len(self.src.data[cols[0]]) == 1:
+            selected = pd.DataFrame(self.src.data, columns=cols, index=[0])
+        else:
+            selected = pd.DataFrame(columns=cols)
+
+        selected_plot = hv.Scatter(selected, x_var, y_var,).opts(
+            fill_color="black",
+            marker="circle",
+            size=10,
+            tools=["box_select"],
+            active_tools=["pan", "wheel_zoom"],
+        )
+
+        color_key = config.settings["label_colours"]
+
+        color_points = hv.NdOverlay(
+            {
+                config.settings["labels_to_strings"][f"{n}"]: hv.Points(
+                    [0, 0], label=config.settings["labels_to_strings"][f"{n}"]
+                ).opts(style=dict(color=color_key[n], size=0))
+                for n in color_key
+            }
+        )
+
+        max_x = np.max(self.df[x_var])
+        min_x = np.min(self.df[x_var])
+
+        max_y = np.max(self.df[y_var])
+        min_y = np.min(self.df[y_var])
+
+        x_sd = np.std(self.df[x_var])
+        x_mu = np.mean(self.df[x_var])
+        y_sd = np.std(self.df[y_var])
+        y_mu = np.mean(self.df[y_var])
+
+        max_x = np.min([x_mu + 4 * x_sd, max_x])
+        min_x = np.max([x_mu - 4 * x_sd, min_x])
+
+        max_y = np.min([y_mu + 4 * y_sd, max_y])
+        min_y = np.max([y_mu - 4 * y_sd, min_y])
+
+        if selected.shape[0] > 0:
+
+            max_x = np.max([max_x, np.max(selected[x_var])])
+            min_x = np.min([min_x, np.min(selected[x_var])])
+
+            max_y = np.max([max_y, np.max(selected[y_var])])
+            min_y = np.min([min_y, np.min(selected[y_var])])
+
+        new_key = {}
+
+        for k in list(color_key.keys()):
+            new_key[k] = "#333333"
+
+        all_points = dynspread(
+            datashade(
+                p,
+                color_key=new_key,
+                aggregator=ds.by(config.settings["label_col"], ds.count()),
+            ).opts(
+                xlim=(min_x, max_x),
+                ylim=(min_y, max_y),
+                responsive=True,
+                alpha=0.5,
+                shared_axes=False,
+            ),
+            threshold=0.3,
+            how="over",
+        )
+
+        sample_region_plot = dynspread(
+            datashade(
+                sample_region,
+                color_key=color_key,
+                aggregator=ds.by(config.settings["label_col"], ds.count()),
+                min_alpha=70,
+                alpha=100,
+            ).opts(
+                xlim=(min_x, max_x),
+                ylim=(min_y, max_y),
+                responsive=True,
+                shared_axes=False,
+            ),
+            threshold=0.7,
+            how="saturate",
+        )
+        plot = (all_points * sample_region_plot * selected_plot * color_points).opts(
+            shared_axes=False,
+        )
+
+        return plot
 
     def _assign_label_cb(self, event):
 
@@ -167,7 +379,16 @@ class LabellingDashboard(param.Parameterized):
 
     def select_random_point(self):
 
-        selected = random.choice(list(self.df[config.settings["id_col"]].values))
+        inside_region = list(self.sample_region[config.settings["id_col"]].values)
+
+        if len(inside_region) == 0:
+            self.region_message = "No Matching Sources!"
+        else:
+            self.region_message = ""
+
+        selected = random.choice(
+            list(self.sample_region[config.settings["id_col"]].values)
+        )
         selected_source = self.df[self.df[config.settings["id_col"]] == selected]
         selected_dict = selected_source.set_index(config.settings["id_col"]).to_dict(
             "list"
@@ -231,6 +452,13 @@ class LabellingDashboard(param.Parameterized):
     def _panel_cb(self, attr, old, new):
         self.panel()
 
+    def _apply_format(self, plot, element):
+        plot.handles["table"].autosize_mode = "none"
+        plot.handles["table"].index_position = None  # hide index
+        plot.handles["table"].columns[0].width = 80
+        plot.handles["table"].columns[1].width = 50
+        plot.handles["table"].columns[2].width = 50
+
     def panel(self):
         """Render the current view.
 
@@ -243,6 +471,8 @@ class LabellingDashboard(param.Parameterized):
         """
 
         print("Labelling panel rendering...")
+
+        df_pane = hv.Table(self.region_criteria_df).opts(hooks=[self._apply_format])
 
         buttons_row = pn.Row(
             self.assign_label_group,
@@ -268,7 +498,6 @@ class LabellingDashboard(param.Parameterized):
             self.next_labelled_button.disabled = True
 
         if index >= total:
-            self.new_labelled_button.disabled = True
             self.next_labelled_button.disabled = True
 
         if self.src.data[config.settings["id_col"]][0] in list(self.labels.keys()):
@@ -287,6 +516,11 @@ class LabellingDashboard(param.Parameterized):
         dataset_raw_label = self.src.data[config.settings["label_col"]][0]
         dataset_label = config.settings["labels_to_strings"][f"{dataset_raw_label}"]
 
+        if (index + 1) > total:
+            index_tally = f"NEW ({total} Labelled)"
+        else:
+            index_tally = f"{index+1}/{total}"
+
         labelling_info_col = pn.Column(
             pn.Row(
                 self.first_labelled_button,
@@ -294,7 +528,7 @@ class LabellingDashboard(param.Parameterized):
                 self.next_labelled_button,
                 self.new_labelled_button,
             ),
-            pn.widgets.StaticText(name="Index", value=f"{index+1}/{total}"),
+            pn.widgets.StaticText(name="Labelled Point", value=index_tally),
             pn.widgets.StaticText(
                 name="Source ID", value=f"{self.src.data[config.settings['id_col']][0]}"
             ),
@@ -303,6 +537,15 @@ class LabellingDashboard(param.Parameterized):
                 value=f"{dataset_label}",
             ),
             previous_label,
+            pn.Row(df_pane, max_height=130, sizing_mode="stretch_width", scroll=True),
+            pn.Row(
+                self.column_dropdown,
+                self.operation_dropdown,
+                self.input_value,
+            ),
+            self.add_sample_criteria_button,
+            self.remove_sample_criteria_button,
+            self.region_message,
         )
 
         self.assign_label_button.disabled = False
