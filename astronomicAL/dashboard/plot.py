@@ -178,7 +178,12 @@ class PlotDashboard(param.Parameterized):
                     p,
                     color_key=color_key,
                     aggregator=ds.by(config.settings["label_col"], ds.count()),
-                ).opts(xlim=(min_x, max_x), ylim=(min_y, max_y), responsive=True),
+                ).opts(
+                    xlim=(min_x, max_x),
+                    ylim=(min_y, max_y),
+                    responsive=True,
+                    shared_axes=False,
+                ),
                 threshold=0.75,
                 how="saturate",
             )
