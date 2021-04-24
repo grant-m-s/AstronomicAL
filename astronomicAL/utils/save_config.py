@@ -99,6 +99,7 @@ def save_config_file(layout_from_js, trigger_text, autosave=False):
     export_config["labels_to_strings"] = config.settings["labels_to_strings"]
     export_config["strings_to_labels"] = config.settings["strings_to_labels"]
     export_config["extra_info_cols"] = config.settings["extra_info_cols"]
+    export_config["extra_image_cols"] = config.settings["extra_image_cols"]
     export_config["labels_to_train"] = config.settings["labels_to_train"]
     export_config["features_for_training"] = config.settings["features_for_training"]
     export_config["exclude_labels"] = config.settings["exclude_labels"]
