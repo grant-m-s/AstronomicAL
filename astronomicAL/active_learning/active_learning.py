@@ -231,6 +231,8 @@ class ActiveLearningModel:
 
         self.id_al_train = []
 
+        self.full_labelled_data = {"id": [], "y": []}
+
     def _construct_panel(self):
 
         options = []
@@ -473,7 +475,7 @@ class ActiveLearningModel:
         if config.settings["scale_data"]:
             config.ml_data["scaler"] = self.scaler
 
-    def remove_from_pool(self):
+    def remove_from_pool(self, id=None):
         """Remove the current queried source from the active learning pool.
 
         Returns
@@ -483,19 +485,26 @@ class ActiveLearningModel:
         """
         print("remove_from_pool")
 
+        if id is None:
+            index = self.query_index
+        else:
+            ind_list = list(self.id_pool.index.values)
+            df_index = self.id_pool.index[self.id_pool["id"] == id].to_list()[0]
+            index = ind_list.index(df_index)
+
         self.x_pool = np.delete(
             self.x_pool,
-            self.query_index,
+            index,
             0,
         )
 
         self.y_pool = np.delete(
             self.y_pool,
-            self.query_index,
+            index,
             0,
         )
 
-        self.id_pool = self.id_pool.drop(self.id_pool.index[self.query_index])
+        self.id_pool = self.id_pool.drop(self.id_pool.index[index])
 
     def save_model(self, checkpoint=False):
         """Save the current classifier(s) as a joblib file to the models/
@@ -703,6 +712,9 @@ class ActiveLearningModel:
         selected_label = self.assign_label_group.value
         self._last_label = selected_label
 
+        query = self.query_instance
+        query_idx = self.query_index
+
         if not selected_label == "Unsure":
 
             self._assigned = True
@@ -719,10 +731,12 @@ class ActiveLearningModel:
             else:
                 selected_label = 0
 
-            selected_label = np.array([selected_label])
+            self.full_labelled_data["id"].append(
+                list(self.id_pool.iloc[query_idx].values)[0][0]
+            )
+            self.full_labelled_data["y"].append(selected_label)
 
-            query = self.query_instance
-            query_idx = self.query_index
+            selected_label = np.array([selected_label])
 
             new_train = np.vstack((self.x_al_train, query))
 
@@ -736,22 +750,28 @@ class ActiveLearningModel:
             self.y_al_train = new_label
             self.id_al_train = new_id
 
-            config.settings["classifiers"][f"{self._label}"]["id"] = self.id_al_train[
-                "id"
-            ].values.tolist()
-            config.settings["classifiers"][f"{self._label}"][
-                "y"
-            ] = self.y_al_train.tolist()
-
         else:
             self.assign_label_button.name = "Querying..."
             self.assign_label_button.disabled = True
+
+            self.full_labelled_data["id"].append(
+                list(self.id_pool.iloc[query_idx].values)[0][0]
+            )
+            self.full_labelled_data["y"].append(-1)
+
             self.remove_from_pool()
             self.query_new_point()
             self.show_queried_point()
             self.assign_label_button.name = "Assign"
             self.assign_label_button.disabled = False
             self.panel()
+
+        config.settings["classifiers"][f"{self._label}"][
+            "id"
+        ] = self.full_labelled_data["id"]
+        config.settings["classifiers"][f"{self._label}"]["y"] = self.full_labelled_data[
+            "y"
+        ]
 
         assert self.x_al_train.shape[0] == len(
             self.y_al_train
@@ -814,14 +834,13 @@ class ActiveLearningModel:
         self.num_points_list = []
         self.curr_num_points = self.starting_num_points.value
 
-        if self.retrain:
+        if "classifiers" not in config.settings.keys():
+            config.settings["classifiers"] = {}
 
+        if self.retrain:
             self.curr_num_points = len(
                 config.settings["classifiers"][f"{self._label}"]["y"]
             )
-
-        if "classifiers" not in config.settings.keys():
-            config.settings["classifiers"] = {}
 
         if f"{self._label}" not in config.settings["classifiers"]:
             config.settings["classifiers"][f"{self._label}"] = {}
@@ -1517,6 +1536,7 @@ class ActiveLearningModel:
             config.settings["classifiers"][f"{self._label}"]["id"] = self.id_al_train[
                 "id"
             ].values.tolist()
+
             config.settings["classifiers"][f"{self._label}"][
                 "y"
             ] = self.y_al_train.tolist()
@@ -1603,14 +1623,36 @@ class ActiveLearningModel:
         if self.retrain:
             print("inside inner loop")
 
-            new_y = config.settings["classifiers"][f"{self._label}"]["y"]
-            new_id = config.settings["classifiers"][f"{self._label}"]["id"]
+            new_y_with_unknowns = config.settings["classifiers"][f"{self._label}"]["y"]
+            new_id_with_unknowns = config.settings["classifiers"][f"{self._label}"][
+                "id"
+            ]
+
+            self.full_labelled_data["y"] = new_y_with_unknowns
+            self.full_labelled_data["id"] = new_id_with_unknowns
+
+            new_y = [x for x in new_y_with_unknowns if x != -1]
+            new_id = [
+                x
+                for i, x in enumerate(new_id_with_unknowns)
+                if new_y_with_unknowns[i] != -1
+            ]
+
+            unknowns_id = [
+                x
+                for i, x in enumerate(new_id_with_unknowns)
+                if new_y_with_unknowns[i] == -1
+            ]
 
             preselected = [new_y, new_id]
 
             print(preselected)
 
             self.create_pool(preselected=preselected)
+
+            for id in unknowns_id:
+                self.remove_from_pool(id=id)
+
             setup = True
 
         if not setup:
