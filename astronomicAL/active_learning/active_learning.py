@@ -153,12 +153,8 @@ class ActiveLearningModel:
         x_axis = config.settings["default_vars"][0]
         y_axis = config.settings["default_vars"][1]
 
-        assert (
-            x_axis in config.ml_data["x_train"].keys()
-        ), f"Your Default x axis variable doesn't seem to be in your set of features. (MISSING: {x_axis})"
-        assert (
-            y_axis in config.ml_data["x_train"].keys()
-        ), f"Your Default y axis variable doesn't seem to be in your set of features. (MISSING: {y_axis})"
+        if x_axis not in config.ml_data["x_train"].keys():
+            x_axis
 
         x_sd = np.std(config.ml_data["x_train"][x_axis])
         x_mu = np.mean(config.ml_data["x_train"][x_axis])
@@ -178,6 +174,23 @@ class ActiveLearningModel:
         self._min_y = np.max([(y_min), np.min(config.ml_data["x_train"][y_axis])])
 
     def _initialise_placeholders(self):
+
+        if not config.settings["default_vars"][0] in config.ml_data["x_train"].keys():
+            print(
+                f"{config.settings['default_vars'][0]} not in training features, reassigning to {config.settings['features_for_training'][0]}"
+            )
+            config.settings["default_vars"] = (
+                config.settings["features_for_training"][0],
+                config.settings["default_vars"][1],
+            )
+        if not config.settings["default_vars"][1] in config.ml_data["x_train"].keys():
+            print(
+                f"{config.settings['default_vars'][1]} not in training features, reassigning to {config.settings['features_for_training'][1]}"
+            )
+            config.settings["default_vars"] = (
+                config.settings["default_vars"][0],
+                config.settings["features_for_training"][1],
+            )
 
         self._model_output_data_tr = {
             f'{config.settings["default_vars"][0]}': [],
