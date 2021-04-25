@@ -103,6 +103,7 @@ def save_config_file(layout_from_js, trigger_text, autosave=False):
     export_config["labels_to_train"] = config.settings["labels_to_train"]
     export_config["features_for_training"] = config.settings["features_for_training"]
     export_config["exclude_labels"] = config.settings["exclude_labels"]
+    export_config["exclude_unknown_labels"] = config.settings["exclude_unknown_labels"]
     export_config["unclassified_labels"] = config.settings["unclassified_labels"]
     export_config["scale_data"] = config.settings["scale_data"]
     export_config["feature_generation"] = config.settings["feature_generation"]
