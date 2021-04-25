@@ -114,6 +114,10 @@ class DataSelection(param.Parameterized):
 
         self.load_data_button_js.on_click(self._update_layout_file_cb)
 
+        self.loading_progress = pn.indicators.Progress(
+            name="Progress", value=0, width=200
+        )
+
     def _update_layout_file_cb(self, event):
         config.layout_file = self.config_file
         config.settings["config_load_level"] = list(
@@ -156,10 +160,22 @@ class DataSelection(param.Parameterized):
         if optimise_data is None:
             config.settings["optimise_data"] = self.memory_optimisation_check.value
             if self.memory_optimisation_check.value:
+                approx_time = np.ceil(
+                    (np.array(fits_table).shape[0] * len(names)) / 100000000
+                )
+                self.load_data_button.name = (
+                    f"Optimising... Approx time: {int(approx_time)} minute(s)"
+                )
                 df = optimise(fits_table[names].to_pandas())
             else:
                 df = fits_table[names].to_pandas()
         elif optimise_data:
+            approx_time = np.ceil(
+                (np.array(fits_table).shape[0] * len(names)) / 100000000
+            )
+            self.load_data_button.name = (
+                f"Optimising... Approx time: {int(approx_time)} minute(s)"
+            )
             df = optimise(fits_table[names].to_pandas())
         else:
             df = fits_table[names].to_pandas()
@@ -250,6 +266,7 @@ class DataSelection(param.Parameterized):
                     max_width=300,
                 ),
                 pn.Row(self.load_data_button, max_width=300),
+                self.loading_progress,
                 pn.layout.VSpacer(max_width=300),
                 pn.layout.VSpacer(max_width=300),
                 pn.layout.VSpacer(max_width=300),
