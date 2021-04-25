@@ -167,7 +167,7 @@ class ActiveLearningSettings(param.Parameterized):
         )
 
         self._exclude_labels_tooltip = pn.pane.HTML(
-            "<span data-toggle='tooltip' title='If enabled, this will remove all instances of labels without a classifier from the Active Learning train, validation and test sets (visualisations outside the AL panel are unaffected). This is useful for labels representing an unknown classification which would not be compatible with scoring functions.' style='border-radius: 15px;padding: 5px; background: #5e5e5e; ' >❔</span> ",
+            "<span data-toggle='tooltip' title='If enabled, this will remove the unused labels from train, val and test sets. All other plots remain unaffected.' style='border-radius: 15px;padding: 5px; background: #5e5e5e; ' >❔</span> ",
             max_width=5,
         )
 
@@ -190,15 +190,10 @@ class ActiveLearningSettings(param.Parameterized):
 
         if total_labelled == 0:
             self.test_set_checkbox = pn.widgets.Checkbox(
-                name=f"Should data/test_set.json be used as the test set? [DISABLED: 0 LABELLED DATA]",
+                name="Should data/test_set.json be used as the test set? [DISABLED: 0 LABELLED DATA]",
                 disabled=True,
             )
 
-        if total_labelled < 7:
-            self.test_set_checkbox = pn.widgets.Checkbox(
-                name=f"Should data/test_set.json be used as the test set? [DISABLED: currently labelled: {total_labelled} - REQUIRED >7]",
-                disabled=True,
-            )
         elif total_labelled < 500:
             self.test_set_checkbox = pn.widgets.Checkbox(
                 name=f"Should data/test_set.json be the used test set? [currently labelled: {total_labelled} - RECOMMENDED >500]"
@@ -207,6 +202,15 @@ class ActiveLearningSettings(param.Parameterized):
             self.test_set_checkbox = pn.widgets.Checkbox(
                 name=f"Should data/test_set.json be the used test set? [currently labelled: {total_labelled}]"
             )
+
+        self.exclude_unknown_labels_checkbox = pn.widgets.Checkbox(
+            name="Should unknown labels [-1] be removed from training set?",
+            value=True,
+        )
+        self._exclude_unknown_labels_tooltip = pn.pane.HTML(
+            "<span data-toggle='tooltip' title='If enabled, this will remove the unknown labels from train, val and test sets. By not removing unknown labels you will have more data, however your accuracy metrics will be affected.' style='border-radius: 15px;padding: 5px; background: #5e5e5e; ' >❔</span> ",
+            max_width=5,
+        )
 
     def _verify_valid_selection_cb(self, event):
 
@@ -262,6 +266,8 @@ class ActiveLearningSettings(param.Parameterized):
         if self.df is not None:
 
             labels = config.settings["labels"]
+            if -1 in labels:
+                labels.remove(-1)
             options = []
             for label in labels:
                 options.append(config.settings["labels_to_strings"][f"{label}"])
@@ -300,6 +306,10 @@ class ActiveLearningSettings(param.Parameterized):
             config.settings["exclude_labels"] = self.exclude_labels_checkbox.value
         else:
             config.settings["exclude_labels"] = False
+
+        config.settings[
+            "exclude_unknown_labels"
+        ] = self.exclude_unknown_labels_checkbox.value
 
         unclassified_labels = []
         for label in self.label_selector.options:
@@ -364,6 +374,10 @@ class ActiveLearningSettings(param.Parameterized):
                     self.label_selector,
                     self.feature_selector,
                     sizing_mode="stretch_width",
+                ),
+                pn.Row(
+                    self.exclude_unknown_labels_checkbox,
+                    self._exclude_unknown_labels_tooltip,
                 ),
                 pn.Row(self.exclude_labels_checkbox, self._exclude_labels_tooltip),
                 pn.Row(self.scale_features_checkbox, self._scale_features_tooltip),
