@@ -163,7 +163,6 @@ class ActiveLearningSettings(param.Parameterized):
 
         self.exclude_labels_checkbox = pn.widgets.Checkbox(
             name="Should remaining labels be removed from Active Learning datasets?",
-            value=True,
         )
 
         self._exclude_labels_tooltip = pn.pane.HTML(
