@@ -1772,7 +1772,7 @@ class TestDashboards:
             "default_vars": ["C", "D"],
             "labels": [0, 1, 2],
             "label_colours": {0: "#ffad0e", 1: "#0057ff", 2: "#a2a2a2"},
-            "labels_to_strings": {0: "0", 1: "1", 2: "2"},
+            "labels_to_strings": {"0": "0", "1": "1", "2": "2"},
             "strings_to_labels": {"0": 0, "1": 1, "2": 2},
             "extra_info_cols": [
                 "C",
@@ -1806,7 +1806,7 @@ class TestDashboards:
             "default_vars": ["C", "D"],
             "labels": [0, 1, 2],
             "label_colours": {0: "#ffad0e", 1: "#0057ff", 2: "#a2a2a2"},
-            "labels_to_strings": {0: "0", 1: "1", 2: "2"},
+            "labels_to_strings": {"0": "0", "1": "1", "2": "2"},
             "strings_to_labels": {"0": 0, "1": 1, "2": 2},
             "extra_info_cols": [
                 "C",
@@ -1836,7 +1836,7 @@ class TestDashboards:
             "default_vars": ["C", "D"],
             "labels": [0, 1, 2],
             "label_colours": {0: "#ffad0e", 1: "#0057ff", 2: "#a2a2a2"},
-            "labels_to_strings": {0: "0", 1: "1", 2: "2"},
+            "labels_to_strings": {"0": "0", "1": "1", "2": "2"},
             "strings_to_labels": {"0": 0, "1": 1, "2": 2},
             "extra_info_cols": [
                 "C",
@@ -1866,7 +1866,7 @@ class TestDashboards:
             "default_vars": ["C", "D"],
             "labels": [0, 1, 2],
             "label_colours": {0: "#ffad0e", 1: "#0057ff", 2: "#a2a2a2"},
-            "labels_to_strings": {0: "0", 1: "1", 2: "2"},
+            "labels_to_strings": {"0": "0", "1": "1", "2": "2"},
             "strings_to_labels": {"0": 0, "1": 1, "2": 2},
             "extra_info_cols": [
                 "C",
@@ -1896,7 +1896,7 @@ class TestDashboards:
             "default_vars": ["C", "D"],
             "labels": [0, 1, 2],
             "label_colours": {0: "#ffad0e", 1: "#0057ff", 2: "#a2a2a2"},
-            "labels_to_strings": {0: "0", 1: "1", 2: "2"},
+            "labels_to_strings": {"0": "0", "1": "1", "2": "2"},
             "strings_to_labels": {"0": 0, "1": 1, "2": 2},
             "extra_info_cols": [
                 "C",
@@ -1926,7 +1926,7 @@ class TestDashboards:
             "default_vars": ["C", "D"],
             "labels": [0, 1, 2],
             "label_colours": {0: "#ffad0e", 1: "#0057ff", 2: "#a2a2a2"},
-            "labels_to_strings": {0: "0", 1: "1", 2: "2"},
+            "labels_to_strings": {"0": "0", "1": "1", "2": "2"},
             "strings_to_labels": {"0": 0, "1": 1, "2": 2},
             "extra_info_cols": [
                 "C",
@@ -1955,7 +1955,7 @@ class TestDashboards:
             "default_vars": ["C", "D"],
             "labels": [0, 1, 2],
             "label_colours": {0: "#ffad0e", 1: "#0057ff", 2: "#a2a2a2"},
-            "labels_to_strings": {0: "0", 1: "1", 2: "2"},
+            "labels_to_strings": {"0": "0", "1": "1", "2": "2"},
             "strings_to_labels": {"0": 0, "1": 1, "2": 2},
             "extra_info_cols": [
                 "C",
@@ -2001,7 +2001,7 @@ class TestDashboards:
             "default_vars": ["C", "D"],
             "labels": [0, 1, 2],
             "label_colours": {0: "#ffad0e", 1: "#0057ff", 2: "#a2a2a2"},
-            "labels_to_strings": {0: "0", 1: "1", 2: "2"},
+            "labels_to_strings": {"0": "0", "1": "1", "2": "2"},
             "strings_to_labels": {"0": 0, "1": 1, "2": 2},
             "extra_info_cols": [
                 "C",
