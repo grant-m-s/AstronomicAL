@@ -411,13 +411,14 @@ class ActiveLearningModel:
                 ) = self.exclude_unclassified_labels(x, y, label)
 
         if config.settings["exclude_unknown_labels"]:
-            label = config.settings["labels_to_strings"]["-1"]
-            (
-                x,
-                y,
-                excluded_x[f"{label}"],
-                excluded_y[f"{label}"],
-            ) = self.exclude_unclassified_labels(x, y, label)
+            if -1 in config.settings["labels"]:
+                label = config.settings["labels_to_strings"]["-1"]
+                (
+                    x,
+                    y,
+                    excluded_x[f"{label}"],
+                    excluded_y[f"{label}"],
+                ) = self.exclude_unclassified_labels(x, y, label)
 
         (
             self.x_train,
