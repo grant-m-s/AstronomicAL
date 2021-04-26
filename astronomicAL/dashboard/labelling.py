@@ -1,6 +1,7 @@
 import astronomicAL.config as config
 from astronomicAL.dashboard.plot import PlotDashboard
 from astronomicAL.active_learning.active_learning import ActiveLearningModel
+from holoviews import opts
 import panel as pn
 import numpy as np
 import datashader as ds
@@ -75,19 +76,19 @@ class LabellingDashboard(param.Parameterized):
         )
         self.assign_label_button.on_click(self._assign_label_cb)
 
-        self.first_labelled_button = pn.widgets.Button(name="First")
+        self.first_labelled_button = pn.widgets.Button(name="First", max_height=35)
         self.first_labelled_button.on_click(
             partial(self.update_selected_point_from_buttons, button="First")
         )
-        self.prev_labelled_button = pn.widgets.Button(name="<")
+        self.prev_labelled_button = pn.widgets.Button(name="<", max_height=35)
         self.prev_labelled_button.on_click(
             partial(self.update_selected_point_from_buttons, button="<")
         )
-        self.next_labelled_button = pn.widgets.Button(name=">")
+        self.next_labelled_button = pn.widgets.Button(name=">", max_height=35)
         self.next_labelled_button.on_click(
             partial(self.update_selected_point_from_buttons, button=">")
         )
-        self.new_labelled_button = pn.widgets.Button(name="New")
+        self.new_labelled_button = pn.widgets.Button(name="New", max_height=35)
         self.new_labelled_button.on_click(
             partial(self.update_selected_point_from_buttons, button="New")
         )
@@ -99,14 +100,23 @@ class LabellingDashboard(param.Parameterized):
         )
         self.input_value = pn.widgets.TextInput(name="Value")
 
-        self.add_sample_criteria_button = pn.widgets.Button(name="Add Criteria")
+        self.add_sample_criteria_button = pn.widgets.Button(
+            name="Add Criteria", max_height=30
+        )
         self.add_sample_criteria_button.on_click(
             partial(self.update_sample_region, button="ADD")
         )
 
-        self.remove_sample_criteria_button = pn.widgets.Button(name="Remove Criteria")
+        self.remove_sample_criteria_button = pn.widgets.Button(
+            name="Remove Criteria", max_height=30
+        )
         self.remove_sample_criteria_button.on_click(
             partial(self.update_sample_region, button="REMOVE")
+        )
+
+        self.criteria_dict = {}
+        self.remove_sample_selection_dropdown = pn.widgets.Select(
+            name="Criteria to Remove", options=[""]
         )
 
     def _update_variable_lists(self):
@@ -140,6 +150,9 @@ class LabellingDashboard(param.Parameterized):
 
     def update_sample_region(self, event=None, button="ADD"):
         if button == "ADD":
+            if self.input_value.value == "":
+                return
+
             updated_df = pd.DataFrame(
                 [
                     [
@@ -150,6 +163,14 @@ class LabellingDashboard(param.Parameterized):
                 ],
                 columns=["column", "oper", "value"],
             )
+
+            self.criteria_dict[
+                f"{self.column_dropdown.value} {self.operation_dropdown.value} {self.input_value.value}"
+            ] = [
+                self.column_dropdown.value,
+                self.operation_dropdown.value,
+                self.input_value.value,
+            ]
 
             if len(self.region_criteria_df) == 0:
                 self.region_criteria_df = updated_df
@@ -171,9 +192,21 @@ class LabellingDashboard(param.Parameterized):
             if len(self.region_criteria_df) == 0:
                 return
             else:
-                self.region_criteria_df.drop(
-                    self.region_criteria_df.tail(1).index, inplace=True
+                col = self.criteria_dict[self.remove_sample_selection_dropdown.value][0]
+                oper = self.criteria_dict[self.remove_sample_selection_dropdown.value][
+                    1
+                ]
+                val = self.criteria_dict[self.remove_sample_selection_dropdown.value][2]
+                print(col, oper, val)
+                exists = self.region_criteria_df[
+                    (self.region_criteria_df["column"] == col)
+                    & (self.region_criteria_df["oper"] == oper)
+                    & (self.region_criteria_df["value"] == val)
+                ]
+                self.criteria_dict.pop(
+                    self.remove_sample_selection_dropdown.value, None
                 )
+                self.region_criteria_df.drop([exists.index[0]], inplace=True)
 
         all_bools = ""
 
@@ -213,6 +246,8 @@ class LabellingDashboard(param.Parameterized):
             self.region_message = f"All Sources Matching ({len(self.sample_region)})"
         else:
             self.region_message = f"{len(self.sample_region)} Matching Sources"
+
+        self.remove_sample_selection_dropdown.options = list(self.criteria_dict.keys())
 
         self.panel()
 
@@ -383,8 +418,10 @@ class LabellingDashboard(param.Parameterized):
 
         if len(inside_region) == 0:
             self.region_message = "No Matching Sources!"
+        elif len(inside_region) == len(self.df):
+            self.region_message = f"All Sources Matching ({len(self.sample_region)})"
         else:
-            self.region_message = ""
+            self.region_message = f"{len(inside_region)} Matching Sources"
 
         selected = random.choice(
             list(self.sample_region[config.settings["id_col"]].values)
@@ -507,11 +544,14 @@ class LabellingDashboard(param.Parameterized):
             label = config.settings["labels_to_strings"][f"{raw_label}"]
 
             previous_label = pn.widgets.StaticText(
-                name="You previously labelled this",
+                name="Current Label",
                 value=f"{label}",
             )
         else:
-            previous_label = "You have not yet labelled this source."
+            previous_label = pn.widgets.StaticText(
+                name="Current Label",
+                value=f"Unlabelled",
+            )
 
         dataset_raw_label = self.src.data[config.settings["label_col"]][0]
         dataset_label = config.settings["labels_to_strings"][f"{dataset_raw_label}"]
@@ -522,12 +562,22 @@ class LabellingDashboard(param.Parameterized):
             index_tally = f"{index+1}/{total}"
 
         labelling_info_col = pn.Column(
-            pn.Row(
-                self.first_labelled_button,
-                self.prev_labelled_button,
-                self.next_labelled_button,
-                self.new_labelled_button,
+            pn.Column(
+                pn.Row(self.region_message, max_height=50),
+                pn.Row(
+                    df_pane, max_height=130, sizing_mode="stretch_width", scroll=True
+                ),
+                max_height=100,
+                margin=(0, 0, 50, 0),
             ),
+            pn.Row(
+                self.column_dropdown,
+                self.operation_dropdown,
+                self.input_value,
+            ),
+            self.add_sample_criteria_button,
+            self.remove_sample_selection_dropdown,
+            self.remove_sample_criteria_button,
             pn.widgets.StaticText(name="Labelled Point", value=index_tally),
             pn.widgets.StaticText(
                 name="Source ID", value=f"{self.src.data[config.settings['id_col']][0]}"
@@ -536,16 +586,13 @@ class LabellingDashboard(param.Parameterized):
                 name="Original Dataset Label",
                 value=f"{dataset_label}",
             ),
-            previous_label,
-            pn.Row(df_pane, max_height=130, sizing_mode="stretch_width", scroll=True),
+            pn.Row(previous_label, max_height=25),
             pn.Row(
-                self.column_dropdown,
-                self.operation_dropdown,
-                self.input_value,
+                self.first_labelled_button,
+                self.prev_labelled_button,
+                self.next_labelled_button,
+                self.new_labelled_button,
             ),
-            self.add_sample_criteria_button,
-            self.remove_sample_criteria_button,
-            self.region_message,
         )
 
         self.assign_label_button.disabled = False
@@ -554,6 +601,7 @@ class LabellingDashboard(param.Parameterized):
             pn.Row(
                 plot,
                 labelling_info_col,
+                margin=(0, 20),
             ),
             buttons_row,
             header=pn.Row(
