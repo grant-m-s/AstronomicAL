@@ -2193,7 +2193,7 @@ class ActiveLearningModel:
             pn.Row(
                 pn.layout.HSpacer(width=75),
                 pn.pane.PNG(
-                    "https://static.thenounproject.com/png/1531082-200.png",
+                    "images/caution_sign.png",
                     max_height=75,
                     max_width=75,
                 ),
