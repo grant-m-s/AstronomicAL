@@ -1,6 +1,7 @@
 import os, sys, inspect
 
 sys.path.insert(1, os.path.join(sys.path[0], "../"))
+import numpy as np
 import pandas as pd
 import panel as pn
 
@@ -2505,6 +2506,93 @@ class TestDashboards:
         assert labels == should_be
 
         os.system(f"rm -rf data/test_set.json")
+
+
+class TestExtensions:
+    def _create_test_df(self):
+
+        data = []
+
+        for i in range(100):
+            data.append([str(i), i % 3, i, i, i])
+
+        df = pd.DataFrame(data, columns=list("ABCDE"))
+
+        return df
+
+    def test_feature_extension_subtract(self):
+
+        config.settings = {"features_for_training": ["C", "D", "E"]}
+
+        data = self._create_test_df()
+
+        data_df = data.loc[:, ["C", "D", "E"]]
+
+        new_data, gen_features = feature_generation.subtract(data_df, 2)
+
+        expect_features = ["C", "D", "E", "C-D", "C-E", "D-E"]
+        assert len(expect_features) == len(new_data.columns)
+        for feature in expect_features:
+            assert feature in list(new_data.columns)
+
+        for col in ["C-D", "C-E", "D-E"]:
+            assert list(new_data[col].unique()) == [0]
+
+    def test_feature_extension_add(self):
+
+        config.settings = {"features_for_training": ["C", "D", "E"]}
+
+        data = self._create_test_df()
+
+        data_df = data.loc[:, ["C", "D", "E"]]
+
+        new_data, gen_features = feature_generation.add(data_df, 2)
+
+        expect_features = ["C", "D", "E", "C+D", "C+E", "D+E"]
+        assert len(expect_features) == len(new_data.columns)
+        for feature in expect_features:
+            assert feature in list(new_data.columns)
+
+        for col in ["C+D", "C+E", "D+E"]:
+            assert list(new_data[col].unique()) == [2 * x for x in range(len(data))]
+
+    def test_feature_extension_multiply(self):
+
+        config.settings = {"features_for_training": ["C", "D", "E"]}
+
+        data = self._create_test_df()
+
+        data_df = data.loc[:, ["C", "D", "E"]]
+
+        new_data, gen_features = feature_generation.multiply(data_df, 2)
+
+        expect_features = ["C", "D", "E", "C*D", "C*E", "D*E"]
+        assert len(expect_features) == len(new_data.columns)
+        for feature in expect_features:
+            assert feature in list(new_data.columns)
+
+        for col in ["C*D", "C*E", "D*E"]:
+            assert list(new_data[col].unique()) == [x ** 2 for x in range(len(data))]
+
+    def test_feature_extension_divide(self):
+
+        config.settings = {"features_for_training": ["C", "D", "E"]}
+
+        data = self._create_test_df()
+
+        data_df = data.loc[:, ["C", "D", "E"]]
+
+        new_data, gen_features = feature_generation.divide(data_df, 2)
+
+        expect_features = ["C", "D", "E", "C/D", "C/E", "D/E"]
+        assert len(expect_features) == len(new_data.columns)
+        for feature in expect_features:
+            assert feature in list(new_data.columns)
+
+        for col in ["C/D", "C/E", "D/E"]:
+            assert np.isnan(list(new_data[col].unique())[0])
+            assert list(new_data[col].unique())[1] == 1.0
+            assert len(list(new_data[col].unique())) == 2
 
 
 class TestUtils:
