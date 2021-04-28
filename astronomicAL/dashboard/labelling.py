@@ -63,8 +63,21 @@ class LabellingDashboard(param.Parameterized):
     def _construct_panel(self):
 
         options = []
-        for label in config.settings["labels_to_train"]:
-            options.append(label)
+
+        all_labels = list(config.main_df[config.settings["label_col"]].unique())
+
+        all_labels.sort()
+
+        if -1 in all_labels:
+            all_labels.remove(-1)
+
+        if config.settings["exclude_labels"]:
+            for i in config.settings["unclassified_labels"]:
+                all_labels.remove(config.settings["strings_to_labels"][f"{i}"])
+
+        for i in all_labels:
+            options.append(config.settings["labels_to_strings"][f"{i}"])
+
         options.append("Unsure")
         self.assign_label_group = pn.widgets.RadioButtonGroup(
             name="Label button group",
