@@ -69,21 +69,24 @@ class SettingsDashboard:
 
     def create_mode_selection_menu(self):
         layout = pn.Card(
-            pn.Column(
-                pn.Row(
+            pn.Row(
+                pn.Column(
                     pn.pane.PNG(
                         "images/classification.png",
                         width=250,
                         height=250,
                         margin=(0, 0, 0, 50),
                     ),
-                    pn.layout.HSpacer(max_width=150),
-                    pn.pane.PNG("images/cluster.png", width=250, height=250),
+                    pn.Row(self.select_labelling_mode_button, max_height=30),
                 ),
-                pn.Row(
-                    self.select_labelling_mode_button,
-                    self.select_AL_mode_button,
-                    max_height=30,
+                pn.Column(
+                    pn.pane.PNG(
+                        "images/cluster.png",
+                        width=250,
+                        height=250,
+                        margin=(0, 0, 0, 50),
+                    ),
+                    pn.Row(self.select_AL_mode_button, max_height=30),
                 ),
             )
         )
