@@ -29,6 +29,7 @@ from astronomicAL.utils import load_config
 from astronomicAL.utils import save_config
 from astronomicAL.utils import optimise
 from bokeh.models import ColumnDataSource
+from bokeh.models import TextAreaInput
 from bokeh.document import Document
 from pyviz_comms import Comm
 
@@ -2504,3 +2505,108 @@ class TestDashboards:
         assert labels == should_be
 
         os.system(f"rm -rf data/test_set.json")
+
+
+class TestUtils:
+    def _create_test_df(self):
+
+        data = []
+
+        for i in range(100):
+            data.append([str(i), i % 3, i, i, i])
+
+        df = pd.DataFrame(data, columns=list("ABCDE"))
+
+        return df
+
+    def test_load_config_update_config_settings(self):
+
+        config.settings = {}
+
+        imported_config = {
+            "id_col": "A",
+            "label_col": "B",
+            "default_vars": ["C", "D"],
+            "labels": [0, 1, 2],
+            "label_colours": {0: "#ffad0e", 1: "#0057ff", 2: "#a2a2a2"},
+            "labels_to_strings": {"0": "0", "1": "1", "2": "2"},
+            "strings_to_labels": {"0": 0, "1": 1, "2": 2},
+            "extra_info_cols": [
+                "C",
+            ],
+            "labels_to_train": ["0", "1", "2"],
+            "features_for_training": ["C", "D"],
+            "exclude_labels": True,
+            "unclassified_labels": [],
+            "scale_data": False,
+            "feature_generation": [["subtract (a-b)", 2]],
+            "extra_image_cols": ["png_path_DR16"],
+        }
+
+        load_config.update_config_settings(imported_config)
+
+        del config.settings["confirmed"]
+
+        assert config.settings == imported_config, print(
+            f"{config.settings},\n\n {imported_config}"
+        )
+
+    def test_save_config_save_config_file(self):
+
+        config.settings = {
+            "Author": "",
+            "doi": "",
+            "layout": {
+                "0": {"x": 0, "y": 0, "w": 6, "h": 6, "contents": "Menu"},
+                "1": {
+                    "x": 0,
+                    "y": 6,
+                    "w": 6,
+                    "h": 6,
+                    "contents": "Menu",
+                },
+                "2": {"x": 6, "y": 0, "w": 6, "h": 6, "contents": "Settings"},
+            },
+            "id_col": "A",
+            "label_col": "B",
+            "default_vars": ["C", "D"],
+            "labels": [0, 1, 2],
+            "label_colours": {"0": "#ffad0e", "1": "#0057ff", "2": "#a2a2a2"},
+            "labels_to_strings": {"0": "0", "1": "1", "2": "2"},
+            "strings_to_labels": {"0": 0, "1": 1, "2": 2},
+            "extra_info_cols": [
+                "C",
+            ],
+            "labels_to_train": ["0", "1", "2"],
+            "features_for_training": ["C", "D"],
+            "exclude_labels": True,
+            "unclassified_labels": [],
+            "scale_data": False,
+            "feature_generation": [["subtract (a-b)", 2]],
+            "extra_image_cols": ["png_path_DR16"],
+            "confirmed": False,
+            "dataset_filepath": "",
+            "optimise_data": True,
+            "exclude_unknown_labels": True,
+            "classifiers": [],
+        }
+
+        example_layout = """{"0":{"x":0,"y":0,"w":6,"h":6},"1":{"x":0,"y":6,"w":6,"h":6},"2":{"x":6,"y":0,"w":6,"h":6}}"""
+
+        data = self._create_test_df()
+        config.main_df = data
+        src = ColumnDataSource()
+
+        config.dashboards = {
+            "0": Dashboard(src, contents="Menu"),
+            "1": Dashboard(src, contents="Menu"),
+            "2": Dashboard(src, contents="Settings"),
+        }
+
+        save_config.save_config_file(example_layout, TextAreaInput(value=""))
+
+        with open("configs/export_config.json") as layout_file:
+            created_file = json.load(layout_file)
+
+        for k in list(created_file.keys()):
+            assert created_file[k] == config.settings[k]
