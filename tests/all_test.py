@@ -2271,6 +2271,76 @@ class TestDashboards:
         assert labelling.next_labelled_button.disabled == True
         assert labelling.prev_labelled_button.disabled == False
 
+        labelling.update_selected_point_from_buttons(None, button="First")
+
+        first_key = list(labelling.src.data.keys())[0]
+        assert len(labelling.src.data[first_key]) == 1
+
+        assert labelling.src.data["A"][0] == "2"
+        assert labelling.labels[labelling.src.data[config.settings["id_col"]][0]] == 0
+        assert labelling.next_labelled_button.disabled == False
+        assert labelling.prev_labelled_button.disabled == True
+
+        assert len(labelling.src.data[config.settings["id_col"]]) == 1
+
+    def test_labelling_dashboard_check_new_button_with_single_match(self):
+
+        data = self._create_test_df()
+        config.main_df = data
+        src = ColumnDataSource()
+
+        self._create_test_test_set()
+
+        labelling = LabellingDashboard(src=src, df=data)
+
+        os.system(f"rm -rf data/test_set.json")
+
+        labelling.column_dropdown.value = "C"
+        labelling.operation_dropdown.value = "=="
+        labelling.input_value.value = "1"
+
+        labelling.update_sample_region(None, button="ADD")
+
+        labelling.update_selected_point_from_buttons(None, button="New")
+
+        assert len(labelling.sample_region) == 1
+        assert list(labelling.criteria_dict.keys()) == ["C == 1"]
+        assert labelling.criteria_dict["C == 1"] == ["C", "==", "1"]
+        assert labelling.region_message == "1 Matching Sources"
+        assert labelling.next_labelled_button.disabled == True
+        assert labelling.prev_labelled_button.disabled == False
+
+    def test_labelling_dashboard_check_zero_matching(self):
+
+        data = self._create_test_df()
+        config.main_df = data
+        src = ColumnDataSource()
+
+        self._create_test_test_set()
+
+        labelling = LabellingDashboard(src=src, df=data)
+
+        os.system(f"rm -rf data/test_set.json")
+
+        labelling.column_dropdown.value = "C"
+        labelling.operation_dropdown.value = "=="
+        labelling.input_value.value = "1"
+
+        labelling.update_sample_region(None, button="ADD")
+
+        labelling.column_dropdown.value = "C"
+        labelling.operation_dropdown.value = "=="
+        labelling.input_value.value = "2"
+
+        labelling.update_sample_region(None, button="ADD")
+
+        assert len(labelling.sample_region) == 0
+        assert labelling.region_message == "No Matching Sources!"
+
+        labelling.update_selected_point_from_buttons(None, button="New")
+
+        assert labelling.new_labelled_button.disabled == True
+
     def test_labelling_save_assigned_label(self):
 
         data = self._create_test_df()
@@ -2313,3 +2383,5 @@ class TestDashboards:
         should_be[selected] = 0
 
         assert labels == should_be
+
+        os.system(f"rm -rf data/test_set.json")
