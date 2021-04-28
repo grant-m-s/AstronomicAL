@@ -149,6 +149,7 @@ class LabellingDashboard(param.Parameterized):
         print(f"x_var has now changed to: {self.X_variable}")
 
     def update_sample_region(self, event=None, button="ADD"):
+
         if button == "ADD":
             if self.input_value.value == "":
                 return
@@ -197,7 +198,7 @@ class LabellingDashboard(param.Parameterized):
                     1
                 ]
                 val = self.criteria_dict[self.remove_sample_selection_dropdown.value][2]
-                print(col, oper, val)
+
                 exists = self.region_criteria_df[
                     (self.region_criteria_df["column"] == col)
                     & (self.region_criteria_df["oper"] == oper)
@@ -458,11 +459,9 @@ class LabellingDashboard(param.Parameterized):
         if updated is not None:
 
             selected_source = self.df[self.df[config.settings["id_col"]] == updated]
-            selected_dict = selected_source.set_index(
-                config.settings["id_col"]
-            ).to_dict("list")
+            selected_dict = selected_source.to_dict("list")
 
-            self.src.data = selected_source
+            self.src.data = selected_dict
 
     def get_current_index_in_labelled_data(self):
 
@@ -532,9 +531,6 @@ class LabellingDashboard(param.Parameterized):
             self.prev_labelled_button.disabled = True
 
         if index >= (total - 1):
-            self.next_labelled_button.disabled = True
-
-        if index >= total:
             self.next_labelled_button.disabled = True
 
         if self.src.data[config.settings["id_col"]][0] in list(self.labels.keys()):
@@ -614,4 +610,5 @@ class LabellingDashboard(param.Parameterized):
             collapsible=False,
             sizing_mode="stretch_both",
         )
+
         return self.row
