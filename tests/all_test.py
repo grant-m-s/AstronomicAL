@@ -7,6 +7,7 @@ import panel as pn
 from astronomicAL.active_learning.active_learning import ActiveLearningModel
 from astronomicAL.dashboard.active_learning import ActiveLearningDashboard
 from astronomicAL.dashboard.dashboard import Dashboard
+from astronomicAL.dashboard.labelling import LabellingDashboard
 from astronomicAL.dashboard.menu import MenuDashboard
 from astronomicAL.dashboard.plot import PlotDashboard
 from astronomicAL.dashboard.selected_source import SelectedSourceDashboard
@@ -2020,3 +2021,168 @@ class TestDashboards:
         assert plot_db.param.Y_variable.default == "D"
         assert plot_db.X_variable == "C"
         assert plot_db.Y_variable == "D"
+
+    def _create_test_test_set(self):
+
+        if os.path.exists("data/test_set.json"):
+            os.system("mv data/test_set.json data/test_set_cp.json")
+
+        test_data = """{ "2":0,"5":1,"7":0 }"""
+
+        os.system(f"echo '{test_data}' > data/test_set.json")
+
+    def test_labelling_dashboard_init(self):
+
+        data = self._create_test_df()
+        config.main_df = data
+        src = ColumnDataSource()
+
+        self._create_test_test_set()
+
+        labelling = LabellingDashboard(src=src, df=data)
+
+        os.system(f"rm -rf data/test_set.json")
+
+        pd.testing.assert_frame_equal(config.main_df, labelling.sample_region)
+        assert list(labelling.region_criteria_df.columns) == ["column", "oper", "value"]
+        assert (
+            labelling.region_message
+            == f"All Sources Matching ({len(labelling.sample_region)})"
+        )
+        first_key = list(labelling.src.data.keys())[0]
+        assert len(labelling.src.data[first_key]) == 1
+
+        assert labelling.criteria_dict == {}
+
+        assert labelling.next_labelled_button.disabled == True
+        assert labelling.prev_labelled_button.disabled == False
+
+    def test_labelling_dashboard_check_single_matching_value_in_region(self):
+
+        data = self._create_test_df()
+        config.main_df = data
+        src = ColumnDataSource()
+
+        self._create_test_test_set()
+
+        labelling = LabellingDashboard(src=src, df=data)
+
+        os.system(f"rm -rf data/test_set.json")
+
+        labelling.column_dropdown.value = "A"
+        labelling.operation_dropdown.value = "=="
+        labelling.input_value.value = "1"
+
+        labelling.update_sample_region(None, button="ADD")
+
+        assert len(labelling.sample_region) == 1
+        assert list(labelling.criteria_dict.keys()) == ["A == 1"]
+        assert labelling.criteria_dict["A == 1"] == ["A", "==", "1"]
+        assert labelling.region_message == "1 Matching Sources"
+        assert labelling.next_labelled_button.disabled == True
+        assert labelling.prev_labelled_button.disabled == False
+
+    def test_labelling_dashboard_check_multiple_matching_values_in_region(self):
+
+        data = self._create_test_df()
+        config.main_df = data
+        src = ColumnDataSource()
+
+        self._create_test_test_set()
+
+        labelling = LabellingDashboard(src=src, df=data)
+
+        os.system(f"rm -rf data/test_set.json")
+
+        labelling.column_dropdown.value = "A"
+        labelling.operation_dropdown.value = "<"
+        labelling.input_value.value = "5"
+
+        labelling.update_sample_region(None, button="ADD")
+
+        assert len(labelling.sample_region) == 5
+        assert list(labelling.criteria_dict.keys()) == ["A < 5"]
+        assert labelling.criteria_dict["A < 5"] == ["A", "<", "5"]
+        assert labelling.region_message == "5 Matching Sources"
+        assert labelling.next_labelled_button.disabled == True
+        assert labelling.prev_labelled_button.disabled == False
+
+    def test_labelling_dashboard_check_combined_matching_values_in_region(self):
+
+        data = self._create_test_df()
+        config.main_df = data
+        src = ColumnDataSource()
+
+        self._create_test_test_set()
+
+        labelling = LabellingDashboard(src=src, df=data)
+
+        os.system(f"rm -rf data/test_set.json")
+
+        labelling.column_dropdown.value = "A"
+        labelling.operation_dropdown.value = "<"
+        labelling.input_value.value = "5"
+
+        labelling.update_sample_region(None, button="ADD")
+
+        labelling.column_dropdown.value = "A"
+        labelling.operation_dropdown.value = "=="
+        labelling.input_value.value = "1"
+
+        labelling.update_sample_region(None, button="ADD")
+
+        assert len(labelling.sample_region) == 1
+        assert list(labelling.criteria_dict.keys()) == ["A < 5", "A == 1"]
+        assert labelling.criteria_dict["A == 1"] == ["A", "==", "1"]
+        assert labelling.region_message == "1 Matching Sources"
+        assert labelling.next_labelled_button.disabled == True
+        assert labelling.prev_labelled_button.disabled == False
+
+        assert labelling.remove_sample_selection_dropdown.options == ["A < 5", "A == 1"]
+
+    def test_labelling_dashboard_removing_sample_criteria(self):
+
+        data = self._create_test_df()
+        config.main_df = data
+        src = ColumnDataSource()
+
+        self._create_test_test_set()
+
+        labelling = LabellingDashboard(src=src, df=data)
+
+        os.system(f"rm -rf data/test_set.json")
+
+        labelling.column_dropdown.value = "A"
+        labelling.operation_dropdown.value = "<"
+        labelling.input_value.value = "5"
+
+        labelling.update_sample_region(None, button="ADD")
+
+        labelling.column_dropdown.value = "A"
+        labelling.operation_dropdown.value = "=="
+        labelling.input_value.value = "1"
+
+        labelling.update_sample_region(None, button="ADD")
+
+        labelling.remove_sample_selection_dropdown.value = "A == 1"
+
+        labelling.update_sample_region(None, button="REMOVE")
+
+        assert len(labelling.sample_region) == 5
+        assert list(labelling.criteria_dict.keys()) == ["A < 5"]
+        assert labelling.criteria_dict["A < 5"] == ["A", "<", "5"]
+        assert labelling.region_message == "5 Matching Sources"
+        assert labelling.next_labelled_button.disabled == True
+        assert labelling.prev_labelled_button.disabled == False
+
+        labelling.remove_sample_selection_dropdown.value = "A < 5"
+
+        labelling.update_sample_region(None, button="REMOVE")
+
+        assert len(labelling.sample_region) == len(config.main_df)
+        assert list(labelling.criteria_dict.keys()) == []
+        assert (
+            labelling.region_message == f"All Sources Matching ({len(config.main_df)})"
+        )
+        assert labelling.next_labelled_button.disabled == True
+        assert labelling.prev_labelled_button.disabled == False
