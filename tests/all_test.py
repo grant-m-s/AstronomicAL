@@ -34,6 +34,7 @@ from pyviz_comms import Comm
 
 import astronomicAL.config as config
 import pytest
+import json
 
 
 @pytest.fixture
@@ -71,7 +72,7 @@ class TestSettings:
         data = []
 
         for i in range(100):
-            data.append([i, i % 3, i, i, i])
+            data.append([str(i), i % 3, i, i, i])
 
         df = pd.DataFrame(data, columns=list("ABCDE"))
 
@@ -1153,7 +1154,7 @@ class TestDashboards:
         data = []
 
         for i in range(100):
-            data.append([i, i % 3, i, i, i])
+            data.append([str(i), i % 3, i, i, i])
 
         df = pd.DataFrame(data, columns=list("ABCDE"))
 
@@ -1165,7 +1166,7 @@ class TestDashboards:
 
         for i in range(100):
             if i % 2 == 0:
-                data.append([i, i % 3, i, i, i, "178.52904,2.1655949", ""])
+                data.append([str(i), i % 3, i, i, i, "178.52904,2.1655949", ""])
             else:
                 data.append(
                     [
@@ -1203,7 +1204,7 @@ class TestDashboards:
         src = ColumnDataSource({str(c): [v] for c, v in data.items()})
         selected_source = SelectedSourceDashboard(src=src, close_button=None)
 
-        assert selected_source.selected_history == [5]
+        assert selected_source.selected_history == ["5"]
         assert selected_source._url_optical_image == ""
         assert selected_source._search_status == ""
         assert selected_source._image_zoom == 0.2
@@ -1213,7 +1214,7 @@ class TestDashboards:
         src = ColumnDataSource({str(c): [v] for c, v in data.items()})
         selected_source = SelectedSourceDashboard(src=src, close_button=None)
 
-        assert selected_source.selected_history == [15]
+        assert selected_source.selected_history == ["15"]
         assert selected_source._url_optical_image == ""
         assert selected_source._search_status == ""
         assert selected_source._image_zoom == 0.2
@@ -1223,7 +1224,7 @@ class TestDashboards:
         src = ColumnDataSource({str(c): [v] for c, v in data.items()})
         selected_source = SelectedSourceDashboard(src=src, close_button=None)
 
-        assert selected_source.selected_history == [72]
+        assert selected_source.selected_history == ["72"]
         assert selected_source._url_optical_image == ""
         assert selected_source._search_status == ""
         assert selected_source._image_zoom == 0.2
@@ -1239,7 +1240,7 @@ class TestDashboards:
         data_selected = data.iloc[72]
         src.data = {str(c): [v] for c, v in data_selected.items()}
 
-        assert selected_source.selected_history == [72]
+        assert selected_source.selected_history == ["72"]
 
     def test_selected_source_check_history_from_selected_to_selected_unique(self):
         data = self._create_test_df()
@@ -1247,12 +1248,12 @@ class TestDashboards:
         src = ColumnDataSource({str(c): [v] for c, v in data_selected.items()})
         selected_source = SelectedSourceDashboard(src=src, close_button=None)
 
-        assert selected_source.selected_history == [72]
+        assert selected_source.selected_history == ["72"]
 
         data_selected = data.iloc[30]
         src.data = {str(c): [v] for c, v in data_selected.items()}
 
-        assert selected_source.selected_history == [30, 72]
+        assert selected_source.selected_history == ["30", "72"]
 
     def test_selected_source_check_history_from_selected_to_selected_same_id_head(self):
         data = self._create_test_df()
@@ -1261,12 +1262,12 @@ class TestDashboards:
         src = ColumnDataSource({str(c): [v] for c, v in data_selected.items()})
         selected_source = SelectedSourceDashboard(src=src, close_button=None)
 
-        assert selected_source.selected_history == [72]
+        assert selected_source.selected_history == ["72"]
 
         data_selected = data.iloc[72]
         src.data = {str(c): [v] for c, v in data_selected.items()}
 
-        assert selected_source.selected_history == [72]
+        assert selected_source.selected_history == ["72"]
 
     def test_selected_source_check_history_from_selected_to_selected_no_id(self):
         data = self._create_test_df()
@@ -1275,13 +1276,13 @@ class TestDashboards:
         src = ColumnDataSource({str(c): [v] for c, v in data_selected.items()})
         selected_source = SelectedSourceDashboard(src=src, close_button=None)
 
-        assert selected_source.selected_history == [72]
+        assert selected_source.selected_history == ["72"]
 
         data_selected = data.iloc[53].copy()
         data_selected["A"] = ""
         src.data = {str(c): [v] for c, v in data_selected.items()}
 
-        assert selected_source.selected_history == [72]
+        assert selected_source.selected_history == ["72"]
 
     def test_selected_source_check_history_from_selected_to_selected_same_id_throughout(
         self,
@@ -1301,7 +1302,7 @@ class TestDashboards:
         data_selected = data.iloc[72]
         src.data = {str(c): [v] for c, v in data_selected.items()}
 
-        assert selected_source.selected_history == [72, 30, 72]
+        assert selected_source.selected_history == ["72", "30", "72"]
 
     def test_selected_source_empty_selected_from_non_selected(self):
         data = self._create_test_df()
@@ -1507,14 +1508,14 @@ class TestDashboards:
         src = ColumnDataSource()
         selected_source = SelectedSourceDashboard(src=src, close_button=None)
 
-        event = Event(5, "")
+        event = Event("5", "")
         selected_source._change_selected(event)
 
         print(selected_source.src.data)
 
         assert selected_source._search_status == "Searching..."
         assert selected_source.src.data == src.data
-        assert selected_source.src.data["A"] == [5]
+        assert selected_source.src.data["A"] == ["5"]
 
     def test_selected_source_check_required_column_has_column(self):
         data = self._create_test_df()
@@ -1542,7 +1543,7 @@ class TestDashboards:
         src = ColumnDataSource()
         selected_source = SelectedSourceDashboard(src=src, close_button=None)
 
-        event = Event(5, "")
+        event = Event("5", "")
         selected_source._change_selected(event)
 
         selected_source._deselect_source_cb(None)
@@ -2069,15 +2070,15 @@ class TestDashboards:
 
         os.system(f"rm -rf data/test_set.json")
 
-        labelling.column_dropdown.value = "A"
+        labelling.column_dropdown.value = "C"
         labelling.operation_dropdown.value = "=="
         labelling.input_value.value = "1"
 
         labelling.update_sample_region(None, button="ADD")
 
         assert len(labelling.sample_region) == 1
-        assert list(labelling.criteria_dict.keys()) == ["A == 1"]
-        assert labelling.criteria_dict["A == 1"] == ["A", "==", "1"]
+        assert list(labelling.criteria_dict.keys()) == ["C == 1"]
+        assert labelling.criteria_dict["C == 1"] == ["C", "==", "1"]
         assert labelling.region_message == "1 Matching Sources"
         assert labelling.next_labelled_button.disabled == True
         assert labelling.prev_labelled_button.disabled == False
@@ -2094,15 +2095,15 @@ class TestDashboards:
 
         os.system(f"rm -rf data/test_set.json")
 
-        labelling.column_dropdown.value = "A"
+        labelling.column_dropdown.value = "C"
         labelling.operation_dropdown.value = "<"
         labelling.input_value.value = "5"
 
         labelling.update_sample_region(None, button="ADD")
 
         assert len(labelling.sample_region) == 5
-        assert list(labelling.criteria_dict.keys()) == ["A < 5"]
-        assert labelling.criteria_dict["A < 5"] == ["A", "<", "5"]
+        assert list(labelling.criteria_dict.keys()) == ["C < 5"]
+        assert labelling.criteria_dict["C < 5"] == ["C", "<", "5"]
         assert labelling.region_message == "5 Matching Sources"
         assert labelling.next_labelled_button.disabled == True
         assert labelling.prev_labelled_button.disabled == False
@@ -2119,26 +2120,26 @@ class TestDashboards:
 
         os.system(f"rm -rf data/test_set.json")
 
-        labelling.column_dropdown.value = "A"
+        labelling.column_dropdown.value = "C"
         labelling.operation_dropdown.value = "<"
         labelling.input_value.value = "5"
 
         labelling.update_sample_region(None, button="ADD")
 
-        labelling.column_dropdown.value = "A"
+        labelling.column_dropdown.value = "C"
         labelling.operation_dropdown.value = "=="
         labelling.input_value.value = "1"
 
         labelling.update_sample_region(None, button="ADD")
 
         assert len(labelling.sample_region) == 1
-        assert list(labelling.criteria_dict.keys()) == ["A < 5", "A == 1"]
-        assert labelling.criteria_dict["A == 1"] == ["A", "==", "1"]
+        assert list(labelling.criteria_dict.keys()) == ["C < 5", "C == 1"]
+        assert labelling.criteria_dict["C == 1"] == ["C", "==", "1"]
         assert labelling.region_message == "1 Matching Sources"
         assert labelling.next_labelled_button.disabled == True
         assert labelling.prev_labelled_button.disabled == False
 
-        assert labelling.remove_sample_selection_dropdown.options == ["A < 5", "A == 1"]
+        assert labelling.remove_sample_selection_dropdown.options == ["C < 5", "C == 1"]
 
     def test_labelling_dashboard_removing_sample_criteria(self):
 
@@ -2152,30 +2153,30 @@ class TestDashboards:
 
         os.system(f"rm -rf data/test_set.json")
 
-        labelling.column_dropdown.value = "A"
+        labelling.column_dropdown.value = "C"
         labelling.operation_dropdown.value = "<"
         labelling.input_value.value = "5"
 
         labelling.update_sample_region(None, button="ADD")
 
-        labelling.column_dropdown.value = "A"
+        labelling.column_dropdown.value = "C"
         labelling.operation_dropdown.value = "=="
         labelling.input_value.value = "1"
 
         labelling.update_sample_region(None, button="ADD")
 
-        labelling.remove_sample_selection_dropdown.value = "A == 1"
+        labelling.remove_sample_selection_dropdown.value = "C == 1"
 
         labelling.update_sample_region(None, button="REMOVE")
 
         assert len(labelling.sample_region) == 5
-        assert list(labelling.criteria_dict.keys()) == ["A < 5"]
-        assert labelling.criteria_dict["A < 5"] == ["A", "<", "5"]
+        assert list(labelling.criteria_dict.keys()) == ["C < 5"]
+        assert labelling.criteria_dict["C < 5"] == ["C", "<", "5"]
         assert labelling.region_message == "5 Matching Sources"
         assert labelling.next_labelled_button.disabled == True
         assert labelling.prev_labelled_button.disabled == False
 
-        labelling.remove_sample_selection_dropdown.value = "A < 5"
+        labelling.remove_sample_selection_dropdown.value = "C < 5"
 
         labelling.update_sample_region(None, button="REMOVE")
 
@@ -2186,3 +2187,129 @@ class TestDashboards:
         )
         assert labelling.next_labelled_button.disabled == True
         assert labelling.prev_labelled_button.disabled == False
+
+    def test_labelling_dashboard_check_looping_through_labelled(self):
+
+        data = self._create_test_df()
+        config.main_df = data
+        src = ColumnDataSource()
+
+        config.settings = {
+            "id_col": "A",
+            "label_col": "B",
+            "default_vars": ["C", "D"],
+            "labels": [0, 1, 2],
+            "label_colours": {0: "#ffad0e", 1: "#0057ff", 2: "#a2a2a2"},
+            "labels_to_strings": {"0": "0", "1": "1", "2": "2"},
+            "strings_to_labels": {"0": 0, "1": 1, "2": 2},
+            "extra_info_cols": [
+                "C",
+            ],
+            "labels_to_train": ["0", "1", "2"],
+            "features_for_training": ["C", "D"],
+            "exclude_labels": True,
+            "unclassified_labels": [],
+            "scale_data": False,
+            "feature_generation": [["subtract (a-b)", 2]],
+        }
+
+        self._create_test_test_set()
+
+        labelling = LabellingDashboard(src=src, df=data)
+
+        os.system(f"rm -rf data/test_set.json")
+
+        assert len(labelling.src.data[config.settings["id_col"]]) == 1
+
+        labelling.update_selected_point_from_buttons(None, button="<")
+
+        first_key = list(labelling.src.data.keys())[0]
+        assert len(labelling.src.data[first_key]) == 1
+        assert labelling.next_labelled_button.disabled == True
+        assert labelling.prev_labelled_button.disabled == False
+
+        assert labelling.src.data["A"][0] == "7"
+        assert labelling.labels[labelling.src.data[config.settings["id_col"]][0]] == 0
+
+        labelling.update_selected_point_from_buttons(None, button="<")
+
+        first_key = list(labelling.src.data.keys())[0]
+        assert len(labelling.src.data[first_key]) == 1
+
+        assert labelling.src.data["A"][0] == "5"
+        assert labelling.labels[labelling.src.data[config.settings["id_col"]][0]] == 1
+        assert labelling.next_labelled_button.disabled == False
+        assert labelling.prev_labelled_button.disabled == False
+
+        labelling.update_selected_point_from_buttons(None, button="<")
+
+        first_key = list(labelling.src.data.keys())[0]
+        assert len(labelling.src.data[first_key]) == 1
+
+        assert labelling.src.data["A"][0] == "2"
+        assert labelling.labels[labelling.src.data[config.settings["id_col"]][0]] == 0
+        assert labelling.next_labelled_button.disabled == False
+        assert labelling.prev_labelled_button.disabled == True
+
+        assert len(labelling.src.data[config.settings["id_col"]]) == 1
+
+        labelling.update_selected_point_from_buttons(None, button=">")
+
+        first_key = list(labelling.src.data.keys())[0]
+        assert len(labelling.src.data[first_key]) == 1
+
+        assert labelling.src.data["A"][0] == "5"
+        assert labelling.next_labelled_button.disabled == False
+        assert labelling.prev_labelled_button.disabled == False
+
+        labelling.update_selected_point_from_buttons(None, button=">")
+
+        first_key = list(labelling.src.data.keys())[0]
+        assert len(labelling.src.data[first_key]) == 1
+
+        assert labelling.src.data["A"][0] == "7"
+        assert labelling.next_labelled_button.disabled == True
+        assert labelling.prev_labelled_button.disabled == False
+
+    def test_labelling_save_assigned_label(self):
+
+        data = self._create_test_df()
+        config.main_df = data
+        src = ColumnDataSource()
+
+        config.settings = {
+            "id_col": "A",
+            "label_col": "B",
+            "default_vars": ["C", "D"],
+            "labels": [0, 1, 2],
+            "label_colours": {0: "#ffad0e", 1: "#0057ff", 2: "#a2a2a2"},
+            "labels_to_strings": {"0": "0", "1": "1", "2": "2"},
+            "strings_to_labels": {"0": 0, "1": 1, "2": 2},
+            "extra_info_cols": [
+                "C",
+            ],
+            "labels_to_train": ["0", "1", "2"],
+            "features_for_training": ["C", "D"],
+            "exclude_labels": True,
+            "unclassified_labels": [],
+            "scale_data": False,
+            "feature_generation": [["subtract (a-b)", 2]],
+        }
+
+        self._create_test_test_set()
+
+        labelling = LabellingDashboard(src=src, df=data)
+
+        selected = labelling.src.data["A"][0]
+
+        labelling.assign_label_group.value = "0"
+
+        labelling._assign_label_cb(None)
+
+        with open("data/test_set.json", "r") as json_file:
+            labels = json.load(json_file)
+
+        should_be = {"2": 0, "5": 1, "7": 0}
+        should_be[selected] = 0
+
+        assert labels == should_be
