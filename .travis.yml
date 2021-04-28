@@ -8,4 +8,4 @@ script:
   - pytest --cov=. --cov-config=.coveragerc
 after_success:
   - coverage xml
-  - bash <(curl -s https://codecov.io/bash) -t 235bf500-d739-4eb3-b349-7bea010a937d -f coverage.xml
+  - bash <(curl -s https://codecov.io/bash) -t dffaa1d0-d30d-4a6e-8540-9f61c5ecfca9 -f coverage.xml
