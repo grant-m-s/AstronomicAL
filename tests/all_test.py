@@ -1184,6 +1184,58 @@ class TestDashboards:
 
         return df
 
+    def test_dashboard_init(self):
+        data = self._create_test_df()
+        config.main_df = data
+        src = ColumnDataSource()
+        dashboard = Dashboard(src=src)
+
+        assert dashboard.src.data == src.data
+        assert dashboard.contents == "Menu"
+
+    @pytest.mark.parametrize(
+        "contents_name",
+        [
+            "Menu",
+            "Settings",
+            "Menu",
+            "Basic Plot",
+            "Selected Source Info",
+        ],
+        ids=str,
+    )
+    def test_dashboard_closing_button_check_contents(self, contents_name):
+        data = self._create_test_df()
+        config.main_df = data
+
+        config.settings = {
+            "id_col": "A",
+            "label_col": "B",
+            "default_vars": ["C", "D"],
+            "labels": [0, 1, 2],
+            "label_colours": {0: "#ffad0e", 1: "#0057ff", 2: "#a2a2a2"},
+            "labels_to_strings": {"0": "0", "1": "1", "2": "2"},
+            "strings_to_labels": {"0": 0, "1": 1, "2": 2},
+            "extra_info_cols": [
+                "C",
+            ],
+            "labels_to_train": ["1"],
+            "features_for_training": ["C", "D"],
+            "exclude_unknown_labels": False,
+            "exclude_labels": True,
+            "unclassified_labels": ["0", "2"],
+            "scale_data": False,
+            "feature_generation": [["subtract (a-b)", 2]],
+            "extra_image_cols": [],
+            "confirmed": False,
+        }
+
+        src = ColumnDataSource()
+        dashboard = Dashboard(src=src, contents=contents_name)
+        dashboard._close_button_cb(None)
+
+        assert dashboard.contents == "Menu"
+
     def test_selected_source_init_no_selected(self):
 
         data = self._create_test_df()
