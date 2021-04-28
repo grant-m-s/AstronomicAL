@@ -419,6 +419,7 @@ class LabellingDashboard(param.Parameterized):
 
         if len(inside_region) == 0:
             self.region_message = "No Matching Sources!"
+            return
         elif len(inside_region) == len(self.df):
             self.region_message = f"All Sources Matching ({len(self.sample_region)})"
         else:
@@ -532,6 +533,9 @@ class LabellingDashboard(param.Parameterized):
 
         if index >= (total - 1):
             self.next_labelled_button.disabled = True
+
+        if len(self.sample_region) == 0:
+            self.new_labelled_button.disabled = True
 
         if self.src.data[config.settings["id_col"]][0] in list(self.labels.keys()):
 
