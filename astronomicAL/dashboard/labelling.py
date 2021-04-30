@@ -114,14 +114,14 @@ class LabellingDashboard(param.Parameterized):
         self.input_value = pn.widgets.TextInput(name="Value")
 
         self.add_sample_criteria_button = pn.widgets.Button(
-            name="Add Criteria", max_height=30
+            name="Add Criterion", max_height=30
         )
         self.add_sample_criteria_button.on_click(
             partial(self.update_sample_region, button="ADD")
         )
 
         self.remove_sample_criteria_button = pn.widgets.Button(
-            name="Remove Criteria", max_height=30
+            name="Remove Criterion", max_height=30
         )
         self.remove_sample_criteria_button.on_click(
             partial(self.update_sample_region, button="REMOVE")
@@ -129,7 +129,7 @@ class LabellingDashboard(param.Parameterized):
 
         self.criteria_dict = {}
         self.remove_sample_selection_dropdown = pn.widgets.Select(
-            name="Criteria to Remove", options=[""]
+            name="Criterion to Remove", options=[""]
         )
 
     def _update_variable_lists(self):
