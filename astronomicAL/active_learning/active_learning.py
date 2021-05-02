@@ -95,6 +95,8 @@ class ActiveLearningModel:
         self.df = df
 
         self.src = src
+        self.src.on_change("data", self._panel_cb)
+
         self._label = config.settings["strings_to_labels"][label]
         self._label_alias = label
 
@@ -279,10 +281,9 @@ class ActiveLearningModel:
         )
         self.assign_label_button.on_click(self._assign_label_cb)
 
-        self.checkpoint_button = pn.widgets.Button(name="Checkpoint")
-        self.checkpoint_button.on_click(self._checkpoint_cb)
-
-        self.show_queried_button = pn.widgets.Button(name="Show Queried")
+        self.show_queried_button = pn.widgets.Button(
+            name="Show Queried", sizing_mode="stretch_width"
+        )
         self.show_queried_button.on_click(self._show_queried_point_cb)
 
         self.classifier_dropdown = pn.widgets.Select(
@@ -344,22 +345,42 @@ class ActiveLearningModel:
         self.next_iteration_button = pn.widgets.Button(name="Next Iteration")
         self.next_iteration_button.on_click(self._next_iteration_cb)
 
-        text_area_input = TextAreaInput(value="")
-        text_area_input.on_change(
+        trigger_for_autosave = TextAreaInput(value="")
+        trigger_for_autosave.on_change(
             "value",
             partial(
                 save_config.save_config_file_cb,
-                trigger_text=text_area_input,
+                trigger_text=trigger_for_autosave,
                 autosave=True,
+            ),
+        )
+
+        trigger_for_checkout = TextAreaInput(value="")
+        trigger_for_checkout.on_change(
+            "value",
+            partial(
+                save_config.save_config_file_cb,
+                trigger_text=trigger_for_checkout,
+                autosave=False,
             ),
         )
 
         self.next_iteration_button.jscallback(
             clicks=save_config.save_layout_js_cb,
-            args=dict(text_area_input=text_area_input),
+            args=dict(text_area_input=trigger_for_autosave),
         )
+
+        self.checkpoint_button = pn.widgets.Button(
+            name="Checkpoint", sizing_mode="stretch_width"
+        )
+        self.checkpoint_button.on_click(self._checkpoint_cb)
+        self.checkpoint_button.jscallback(
+            clicks=save_config.save_layout_js_cb,
+            args=dict(text_area_input=trigger_for_checkout),
+        )
+
         self.request_test_results_button = pn.widgets.Button(
-            name="View Test Results", button_type="warning"
+            name="View Test Results", button_type="warning", max_width=125
         )
         self.request_test_results_button.on_click(self._request_test_results_cb)
 
@@ -374,6 +395,8 @@ class ActiveLearningModel:
             name="Continue to Test Data", button_type="danger"
         )
         self._view_test_results_button.on_click(self._show_test_results_cb)
+
+        self._queried_is_selected = False
 
         self.setup_row = pn.Row("Loading")
         self.panel_row = pn.Row("Loading")
@@ -517,7 +540,6 @@ class ActiveLearningModel:
         None
 
         """
-        print("remove_from_pool")
 
         if id is None:
             index = self.query_index
@@ -656,7 +678,7 @@ class ActiveLearningModel:
         data = self.df
 
         start = time.time()
-        queried_id = self.id_pool.iloc[query_idx][config.settings["id_col"]]
+        queried_id = self.id_pool.iloc[query_idx][config.settings["id_col"]].copy()
         end = time.time()
         print(f"queried_id {end - start}")
 
@@ -704,7 +726,6 @@ class ActiveLearningModel:
 
         # self.assign_label = False
 
-        print("remove_from_pool")
         self.remove_from_pool()
 
         self.curr_num_points = self.x_al_train.shape[0]
@@ -737,7 +758,6 @@ class ActiveLearningModel:
         None
 
         """
-
         self.query_index, self.query_instance = self.learner.query(self.x_pool)
         print("queried")
 
@@ -778,7 +798,8 @@ class ActiveLearningModel:
 
             new_id = self.id_al_train.append(self.id_pool.iloc[query_idx])
 
-            print(new_id)
+            print(f"new_label: {new_label}")
+            print(f"new_id: {new_id}")
 
             self.x_al_train = new_train
             self.y_al_train = new_label
@@ -809,11 +830,11 @@ class ActiveLearningModel:
 
         assert self.x_al_train.shape[0] == len(
             self.y_al_train
-        ), "AL_TRAIN & LABELS NOT EQUAL"
+        ), f"AL_TRAIN & LABELS NOT EQUAL - {self.x_al_train.shape[0]}|{len(self.y_al_train)}"
 
         assert len(self.y_al_train) == len(
             self.id_al_train
-        ), "AL_LABELS & IDs NOT EQUAL"
+        ), f"AL_LABELS & IDs NOT EQUAL - {len(self.y_al_train)}|{len(self.id_al_train)}"
 
         self.panel(button_update=True)
 
@@ -886,10 +907,7 @@ class ActiveLearningModel:
 
         self.setup_learners()
 
-        query_idx, query_instance = self.learner.query(self.x_pool)
-
-        self.query_instance = query_instance
-        self.query_index = query_idx
+        self.query_index, self.query_instance = self.learner.query(self.x_pool)
 
         self.show_queried_point()
 
@@ -1554,31 +1572,27 @@ class ActiveLearningModel:
 
             train_idx = train_idx + [c0] + [c1]
 
-            X_train = X_pool[train_idx]
-            y_train = y_pool[train_idx]
-            id_train = self.id_train.iloc[train_idx]
+            self.x_al_train = X_pool[train_idx]
+            self.y_al_train = y_pool[train_idx]
+            self.id_al_train = self.id_train.iloc[train_idx]
 
-            X_pool = np.delete(X_pool, train_idx, axis=0)
-            y_pool = np.delete(y_pool, train_idx)
-            id_pool = self.id_train.drop(self.id_train.index[train_idx])
-
-            self.x_pool = X_pool
-            self.y_pool = y_pool
-            self.id_pool = id_pool
-            self.x_al_train = X_train
-            self.y_al_train = y_train
-            self.id_al_train = id_train
+            self.x_pool = np.delete(X_pool, train_idx, axis=0)
+            self.y_pool = np.delete(y_pool, train_idx)
+            self.id_pool = self.id_train.drop(self.id_train.index[train_idx])
 
             print(self.id_al_train)
             print(config.settings["classifiers"][f"{self._label}"])
 
             config.settings["classifiers"][f"{self._label}"]["id"] = self.id_al_train[
-                config.settings["id_col"]
+                "id"
             ].values.tolist()
+            self.full_labelled_data["id"] = self.id_al_train["id"].values.tolist()
 
             config.settings["classifiers"][f"{self._label}"][
                 "y"
             ] = self.y_al_train.tolist()
+            self.full_labelled_data["y"] = self.y_al_train.tolist()
+
         else:
 
             print(preselected)
@@ -1612,29 +1626,25 @@ class ActiveLearningModel:
             for id in new_id:
                 train_idx.append(np.where(id_pool == id)[0][0])
 
-            X_train = X_pool[train_idx]
-            y_train = new_y
-            id_train = self.id_train.iloc[train_idx]
+            self.x_al_train = X_pool[train_idx]
+            self.y_al_train = new_y
+            self.id_al_train = self.id_train.iloc[train_idx]
 
-            X_pool = np.delete(X_pool, train_idx, axis=0)
-            y_pool = np.delete(y_pool, train_idx)
-            id_pool = self.id_train.drop(self.id_train.index[train_idx])
+            self.x_pool = np.delete(X_pool, train_idx, axis=0)
+            self.y_pool = np.delete(y_pool, train_idx)
+            self.id_pool = self.id_train.drop(self.id_train.index[train_idx])
 
-            self.x_pool = X_pool
-            self.y_pool = y_pool
-            self.id_pool = id_pool
-            self.x_al_train = X_train
-            self.y_al_train = y_train
-            self.id_al_train = id_train
-
-            config.settings["classifiers"][f"{self._label}"]["id"] = self.id_al_train[
-                "id"
-            ].values.tolist()
-            config.settings["classifiers"][f"{self._label}"]["y"] = self.y_al_train
             # print("\n\n\n\n\n\n")
             print(self.id_al_train)
             print(self.y_al_train)
             # print("\n\n\n\n\n\n")
+
+            config.settings["classifiers"][f"{self._label}"][
+                "y"
+            ] = self.full_labelled_data["y"]
+            config.settings["classifiers"][f"{self._label}"][
+                "id"
+            ] = self.full_labelled_data["id"]
 
     def setup_learners(self):
         """Initialise the classifiers used during active learning.
@@ -2194,10 +2204,10 @@ class ActiveLearningModel:
                 pn.layout.HSpacer(width=75),
                 pn.pane.PNG(
                     "images/caution_sign.png",
-                    max_height=75,
-                    max_width=75,
+                    max_height=90,
+                    max_width=90,
                 ),
-                pn.layout.HSpacer(width=75),
+                pn.layout.HSpacer(height=5),
             ),
             pn.pane.Markdown(
                 """
@@ -2282,6 +2292,18 @@ class ActiveLearningModel:
                 ),
             )
 
+    def _panel_cb(self, attr, old, new):
+        if self._training:
+
+            query_idx = self.query_index
+            queried_id = self.id_pool.iloc[query_idx][config.settings["id_col"]].copy()
+
+            if self.src.data[config.settings["id_col"]] == list(queried_id):
+                self._queried_is_selected = True
+            else:
+                self._queried_is_selected = False
+        self.panel()
+
     def panel(self, button_update=False):
         """Create the active learning tab panel.
 
@@ -2293,6 +2315,20 @@ class ActiveLearningModel:
 
         """
         print("panel")
+
+        if self._queried_is_selected:
+            selected_message = pn.pane.Markdown(
+                "The queried source is currently selected",
+                style={"color": "#558855"},
+                max_width=250,
+            )
+        else:
+            selected_message = pn.pane.Markdown(
+                "The queried source is not currently selected",
+                style={"color": "#ff5555"},
+                max_width=250,
+            )
+
         if not button_update:
             self.assign_label_group.value = self._last_label
 
@@ -2316,11 +2352,13 @@ class ActiveLearningModel:
                         ),
                         pn.layout.VSpacer(max_height=5),
                         pn.Row(
-                            pn.layout.HSpacer(max_width=200),
+                            selected_message,
                             self.show_queried_button,
                             self.checkpoint_button,
                             self.request_test_results_button,
+                            width_policy="max",
                             max_height=30,
+                            max_width=2000,
                         ),
                         max_height=70,
                     )
@@ -2355,15 +2393,17 @@ class ActiveLearningModel:
                             self.assign_label_group,
                             self.assign_label_button,
                             max_height=30,
-                            # width_policy="max",
+                            width_policy="max",
                         ),
                         pn.layout.VSpacer(max_height=5),
                         pn.Row(
-                            pn.layout.HSpacer(max_width=200),
+                            selected_message,
                             self.show_queried_button,
                             self.checkpoint_button,
                             self.request_test_results_button,
+                            width_policy="max",
                             max_height=30,
+                            max_width=2000,
                         ),
                         max_height=70,
                     )
