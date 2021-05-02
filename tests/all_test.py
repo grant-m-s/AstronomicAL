@@ -2655,6 +2655,7 @@ class TestUtils:
         config.settings = {
             "Author": "",
             "doi": "",
+            "dataset_filepath": "",
             "layout": {
                 "0": {"x": 0, "y": 0, "w": 6, "h": 6, "contents": "Menu"},
                 "1": {
@@ -2684,7 +2685,6 @@ class TestUtils:
             "feature_generation": [["subtract (a-b)", 2]],
             "extra_image_cols": ["png_path_DR16"],
             "confirmed": False,
-            "dataset_filepath": "",
             "optimise_data": True,
             "exclude_unknown_labels": True,
             "classifiers": [],
@@ -2704,7 +2704,7 @@ class TestUtils:
 
         save_config.save_config_file(example_layout, TextAreaInput(value=""), test=True)
 
-        with open("configs/export_config.json") as layout_file:
+        with open("configs/config_export.json") as layout_file:
             created_file = json.load(layout_file)
 
         for k in list(created_file.keys()):
