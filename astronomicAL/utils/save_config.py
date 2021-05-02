@@ -64,7 +64,7 @@ def save_config_file_cb(attr, old, new, trigger_text, autosave):
     save_config_file(new, trigger_text=trigger_text, autosave=autosave)
 
 
-def save_config_file(layout_from_js, trigger_text, autosave=False):
+def save_config_file(layout_from_js, trigger_text, autosave=False, test=False):
     print("json updated")
     print(f"LAYOUT VALUE:{layout_from_js}")
 
@@ -89,7 +89,6 @@ def save_config_file(layout_from_js, trigger_text, autosave=False):
 
     export_config["Author"] = ""
     export_config["doi"] = ""
-    export_config["dataset_filepath"] = ""
     export_config["dataset_filepath"] = config.settings["dataset_filepath"]
     export_config["optimise_data"] = config.settings["optimise_data"]
     export_config["layout"] = layout
@@ -116,6 +115,9 @@ def save_config_file(layout_from_js, trigger_text, autosave=False):
     if autosave:
         print("AUTOSAVING")
         with open("configs/autosave.json", "w") as fp:
+            json.dump(export_config, fp, cls=NumpyEncoder)
+    elif test:
+        with open(f"configs/config_export.json", "w") as fp:
             json.dump(export_config, fp, cls=NumpyEncoder)
     else:
         now = datetime.now()

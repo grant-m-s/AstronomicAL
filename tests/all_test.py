@@ -928,13 +928,17 @@ class TestSettings:
 
     def test_data_selection_check_config_load_level_layout_only(self, document, comm):
 
+        os.makedirs("configs/", exist_ok=True)
+        if not os.path.exists("configs/test.json"):
+            os.system("""echo '{"testing":true}' > configs/test.json""")
+
         src = ColumnDataSource()
         ds = DataSelection(src, "AL")
 
         ds.load_layout_check = True
 
         ds.load_config_select = "Only load layout. Let me choose all my own settings"
-        ds.config_file = "configs/autosave.json"
+        ds.config_file = "configs/test.json"
 
         button = ds.load_data_button_js
 
@@ -948,15 +952,17 @@ class TestSettings:
 
     def test_data_selection_check_config_load_level_0_settings_only(self):
 
+        check_folder_exists("configs")
+        if not os.path.exists("configs/test.json"):
+            os.system("""echo '{"testing":true}' > configs/test.json""")
+
         src = ColumnDataSource()
         ds = DataSelection(src, "AL")
-
-        check_folder_exists("configs")
 
         ds.load_layout_check = True
 
         ds.load_config_select = "Only load layout. Let me choose all my own settings"
-        ds.config_file = "configs/autosave.json"
+        ds.config_file = "configs/test.json"
 
         ds._update_layout_file_cb()
 
@@ -964,10 +970,12 @@ class TestSettings:
 
     def test_data_selection_check_config_load_level_1_settings_only(self):
 
+        check_folder_exists("configs")
+        if not os.path.exists("configs/test.json"):
+            os.system("""echo '{"testing":true}' > configs/test.json""")
+
         src = ColumnDataSource()
         ds = DataSelection(src, "AL")
-
-        check_folder_exists("configs")
 
         ds.load_layout_check = True
 
@@ -975,7 +983,7 @@ class TestSettings:
             "Load all settings but let me train the model from scratch."
         )
 
-        ds.config_file = "configs/autosave.json"
+        ds.config_file = "configs/test.json"
 
         ds._update_layout_file_cb()
 
@@ -983,17 +991,19 @@ class TestSettings:
 
     def test_data_selection_check_config_load_level_2_settings_only(self):
 
+        check_folder_exists("configs")
+        if not os.path.exists("configs/test.json"):
+            os.system("""echo '{"testing":true}' > configs/test.json""")
+
         src = ColumnDataSource()
         ds = DataSelection(src, "AL")
-
-        check_folder_exists("configs")
 
         ds.load_layout_check = True
 
         ds.load_config_select = (
             "Load all settings and train model with provided labels."
         )
-        ds.config_file = "configs/autosave.json"
+        ds.config_file = "configs/test.json"
 
         ds._update_layout_file_cb()
 
@@ -2692,10 +2702,12 @@ class TestUtils:
             "2": Dashboard(src, contents="Settings"),
         }
 
-        save_config.save_config_file(example_layout, TextAreaInput(value=""))
+        save_config.save_config_file(example_layout, TextAreaInput(value=""), test=True)
 
         with open("configs/export_config.json") as layout_file:
             created_file = json.load(layout_file)
 
         for k in list(created_file.keys()):
-            assert created_file[k] == config.settings[k]
+            assert (
+                created_file[k] == config.settings[k]
+            ), f"{k}: {created_file[k]} != {config.settings[k]}"
