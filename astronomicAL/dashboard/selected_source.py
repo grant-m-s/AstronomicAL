@@ -94,7 +94,9 @@ class SelectedSourceDashboard:
             )
             for col in config.settings["extra_image_cols"]:
                 url = f"{self.src.data[col][0]}"
-                if len(url) == 0:
+                print(f"image_url:{url}")
+                print(f"len: {len(url)}")
+                if len(url) <= 4:
                     pane = "No Image available for this source."
                 elif "." in url:
                     ext = url[url.rindex(".") + 1 :]
@@ -103,8 +105,8 @@ class SelectedSourceDashboard:
                         pane = pn.pane.JPG(
                             url,
                             alt_text="Image Unavailable",
-                            min_width=350,
-                            min_height=350,
+                            min_width=325,
+                            min_height=325,
                             max_width=1000,
                             max_height=1000,
                             sizing_mode="scale_height",
@@ -113,8 +115,8 @@ class SelectedSourceDashboard:
                         pane = pn.pane.PNG(
                             url,
                             alt_text="Image Unavailable",
-                            min_width=350,
-                            min_height=350,
+                            min_width=325,
+                            min_height=325,
                             max_width=1000,
                             max_height=1000,
                             sizing_mode="scale_height",
@@ -123,8 +125,8 @@ class SelectedSourceDashboard:
                         pane = pn.pane.SVG(
                             url,
                             alt_text="Image Unavailable",
-                            min_width=350,
-                            min_height=350,
+                            min_width=325,
+                            min_height=325,
                             max_width=1000,
                             max_height=1000,
                             sizing_mode="scale_height",
