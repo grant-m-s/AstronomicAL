@@ -933,9 +933,8 @@ class TestSettings:
 
         ds.load_layout_check = True
 
-        ds.load_config_select.value = (
-            "Only load layout. Let me choose all my own settings"
-        )
+        ds.load_config_select = "Only load layout. Let me choose all my own settings"
+        ds.config_file = "configs/autosave.json"
 
         button = ds.load_data_button_js
 
@@ -947,7 +946,7 @@ class TestSettings:
 
         assert config.settings["config_load_level"] == 0
 
-    def test_data_selection_check_config_load_level_layout_only(self):
+    def test_data_selection_check_config_load_level_0_settings_only(self):
 
         src = ColumnDataSource()
         ds = DataSelection(src, "AL")
@@ -956,15 +955,14 @@ class TestSettings:
 
         ds.load_layout_check = True
 
-        ds.load_config_select.value = (
-            "Only load layout. Let me choose all my own settings"
-        )
+        ds.load_config_select = "Only load layout. Let me choose all my own settings"
+        ds.config_file = "configs/autosave.json"
 
-        ds._update_layout_file_cb(None)
+        ds._update_layout_file_cb()
 
         assert config.settings["config_load_level"] == 0
 
-    def test_data_selection_check_config_load_level_settings_only(self):
+    def test_data_selection_check_config_load_level_1_settings_only(self):
 
         src = ColumnDataSource()
         ds = DataSelection(src, "AL")
@@ -973,15 +971,17 @@ class TestSettings:
 
         ds.load_layout_check = True
 
-        ds.load_config_select.value = (
+        ds.load_config_select = (
             "Load all settings but let me train the model from scratch."
         )
 
-        ds._update_layout_file_cb(None)
+        ds.config_file = "configs/autosave.json"
+
+        ds._update_layout_file_cb()
 
         assert config.settings["config_load_level"] == 1
 
-    def test_data_selection_check_config_load_level_settings_only(self):
+    def test_data_selection_check_config_load_level_2_settings_only(self):
 
         src = ColumnDataSource()
         ds = DataSelection(src, "AL")
@@ -990,11 +990,12 @@ class TestSettings:
 
         ds.load_layout_check = True
 
-        ds.load_config_select.value = (
+        ds.load_config_select = (
             "Load all settings and train model with provided labels."
         )
+        ds.config_file = "configs/autosave.json"
 
-        ds._update_layout_file_cb(None)
+        ds._update_layout_file_cb()
 
         assert config.settings["config_load_level"] == 2
 
