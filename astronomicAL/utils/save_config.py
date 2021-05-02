@@ -1,3 +1,5 @@
+from datetime import datetime
+
 import astronomicAL.config as config
 import json
 import numpy as np
@@ -116,5 +118,7 @@ def save_config_file(layout_from_js, trigger_text, autosave=False):
         with open("configs/autosave.json", "w") as fp:
             json.dump(export_config, fp, cls=NumpyEncoder)
     else:
-        with open("configs/export_config.json", "w") as fp:
+        now = datetime.now()
+        dt_string = now.strftime("%Y%m%d_%H:%M:%S")
+        with open(f"configs/config_{dt_string}.json", "w") as fp:
             json.dump(export_config, fp, cls=NumpyEncoder)
