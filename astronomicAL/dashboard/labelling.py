@@ -309,7 +309,6 @@ class LabellingDashboard(param.Parameterized):
             fill_color="black",
             marker="circle",
             size=10,
-            tools=["box_select"],
             active_tools=["pan", "wheel_zoom"],
         )
 
