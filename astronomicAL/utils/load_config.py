@@ -49,7 +49,7 @@ def verify_import_config(curr_config_file):
 
         if len(missing_settings) > 0:
             has_error = True
-            error_message += f"Unable to import file due to the following errors:\n\n\n\nThe config file is missing these columns:{missing_settings} **[Rerun astronomicAL and assign the settings yourself or manually edit {config.layout_file}, to include the missing settings]**\n\n\n"
+            error_message += f"Unable to import file due to the following errors:\n\n\n\nThe config file is missing these settings: \n\n{missing_settings} \n\n **[Rerun astronomicAL and assign the settings yourself or manually edit {config.layout_file}, to include the missing settings]**\n\n\n"
             return has_error, error_message
 
         if "classifiers" not in list(curr_config_file.keys()):
@@ -106,7 +106,7 @@ def verify_import_config(curr_config_file):
 
         if len(missing_cols) > 0:
             has_error = True
-            error_message += f"The dataset is missing these columns:\n{missing_cols} **[Rerun astronomicAL and assign the settings yourself or manually edit {filename}, replacing the missing columns]**\n\n\n"
+            error_message += f"The dataset is missing these columns:\n\n{missing_cols}\n\n **[Rerun astronomicAL and assign the settings yourself or manually edit {filename}, replacing the missing columns]**\n\n\n"
 
     if has_error:
         error_message = (
