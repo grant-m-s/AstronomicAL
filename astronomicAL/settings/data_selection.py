@@ -85,10 +85,11 @@ class DataSelection(param.Parameterized):
         self.load_data_button.on_click(self._load_data_cb)
 
         self.load_data_button_js = pn.widgets.Button(
-            name="Load Configuration File",
+            name="Select values from dropdown to continue",
             max_height=30,
             margin=(45, 0, 0, 0),
             button_type="success",
+            disabled=True,
         )
 
         self.load_data_button_js.jscallback(
@@ -144,6 +145,8 @@ class DataSelection(param.Parameterized):
             self.load_data_button_js.label = "Select values from dropdown to continue"
             self.load_data_button_js.disabled = True
             return
+
+        self.load_data_button_js.label = "Verifying Config..."
 
         config.layout_file = self.config_file
         config.settings["config_load_level"] = (
@@ -309,7 +312,10 @@ class DataSelection(param.Parameterized):
                     pn.layout.VSpacer(),
                     pn.layout.VSpacer(),
                 ),
-                pn.Row(message),
+                pn.Row(message, scroll=True, max_height=300),
+                pn.layout.VSpacer(),
+                pn.layout.VSpacer(),
+                pn.layout.VSpacer(),
             )
 
         else:
