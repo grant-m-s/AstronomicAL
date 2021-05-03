@@ -61,16 +61,27 @@ class ActiveLearningModel:
 
     Attributes
     ----------
+    df : Dataframe
+        The shared dataframe which holds all the data.
+    src : ColumnDataSource
+        The shared data source which holds the current selected source
     _label : int
         The label that will be the positive case in the one-vs-rest classifier.
+    _label_alias : str
+        The string alias of `_label`
     _last_label : str
-        The string alias of the last assigned label in the Active Learing
+        The string alias of the last assigned label in the Active Learning
         process. Used for visual improvements.
     _training : bool
         Flag for whether the training process has begun.
     _assigned : bool
         Flag for whether the user has assigned a label to the current queried
         source.
+    retrain : bool
+        Flag for whether the class is retraining a previous model from within `config.settings["classifiers"]`
+    scaler : sklearn.preprocessing.RobustScaler
+        The scaler used to standardise features across the train, val and test sets according to the training set.
+        NOTE: Only initialised if `config.settings["scale_data"]` is `True`.
     y_train : DataFrame
         The labels for the training set.
     y_val : DataFrame
@@ -83,8 +94,24 @@ class ActiveLearningModel:
         The ids of the sources in the validation set.
     id_test : DataFrame
         The ids of the sources in the test set.
-    _model_output_data_tr : type
-        Description of attribute `_model_output_data_tr`.
+    _show_test_results : bool
+        Flag for whether to render the test set results column in `panel` method.
+    _seen_test_results : bool
+        Flag for indicating whether the user has viewed the test results of the classifier.
+    _show_caution : bool
+        Flag for whether to show the test set caution column to the user when trying to view the test set results.
+    _seen_caution : bool
+        Flag for indicating whether the user has viewed the test results caution page.
+    _max_x : float
+        The maximum value of the x axis of the train, val and metric plots. This is set as the `min(μ(x)+4*σ(x), max(x))`.
+    _max_y : float
+        The maximum value of the y axis of the train, val and metric plots. This is set as the `min(μ(y)+4*σ(y), max(y))`.
+    _min_x : float
+        The minimum value of the x axis of the train, val and metric plots. This is set as the `max(μ(x)-4*σ(x), min(x))`.
+    _min_y : float
+        The minimum value of the y axis of the train, val and metric plots. This is set as the `max(μ(y)-4*σ(y), min(y))`.
+    _model_output_data_tr : dict
+        Dictionary containing the plotting data required for the train, val and metric plots.
 
     """
 
@@ -142,7 +169,7 @@ class ActiveLearningModel:
 
         self._resize_plot_scales()
 
-        self.show_test_results = False
+        self._show_test_results = False
         self._seen_test_results = False
         self._show_caution = True
         self._seen_caution = False
@@ -154,9 +181,6 @@ class ActiveLearningModel:
 
         x_axis = config.settings["default_vars"][0]
         y_axis = config.settings["default_vars"][1]
-
-        if x_axis not in config.ml_data["x_train"].keys():
-            x_axis
 
         x_sd = np.std(config.ml_data["x_train"][x_axis])
         x_mu = np.mean(config.ml_data["x_train"][x_axis])
@@ -1203,7 +1227,9 @@ class ActiveLearningModel:
 
     def scale_data(self, x_train, x_val, x_test, x_cols):
         """Scale the features of the data according to the training set.
+
         A RobustScaler is used to limit the impact of outliers on the data.
+
         Parameters
         ----------
         x_train : DataFrame
@@ -1227,7 +1253,6 @@ class ActiveLearningModel:
             A dataframe containing the normalised testing set.
 
         """
-
         print("scale_data")
 
         self.scaler = RobustScaler()
@@ -1648,6 +1673,7 @@ class ActiveLearningModel:
 
     def setup_learners(self):
         """Initialise the classifiers used during active learning.
+
         The classifiers used have already been chosen by the user.
 
         Returns
@@ -1655,7 +1681,6 @@ class ActiveLearningModel:
         None
 
         """
-
         print("setup_learners")
 
         table = self.classifier_table_source.data
@@ -2037,12 +2062,6 @@ class ActiveLearningModel:
         print(f"plot-val {end - start}")
         return plot.opts(toolbar=None, default_tools=[])
 
-    def scale_range(self, input, min, max):
-        input += -(np.min(input))
-        input /= np.max(input) / (max - min)
-        input += min
-        return input
-
     def _metric_tab(self):
 
         print("_metric_tab")
@@ -2119,7 +2138,7 @@ class ActiveLearningModel:
 
     def _add_conf_matrices(self):
         print("_add_conf_matrices")
-        if not self.show_test_results:
+        if not self._show_test_results:
             return pn.Column(
                 pn.pane.Markdown("Training Set:", sizing_mode="fixed"),
                 pn.pane.Markdown(
@@ -2231,12 +2250,12 @@ class ActiveLearningModel:
         )
 
     def _request_test_results_cb(self, event):
-        self.show_test_results = True
+        self._show_test_results = True
         self.panel()
         self._seen_caution = True
 
     def _return_to_train_cb(self, event):
-        self.show_test_results = False
+        self._show_test_results = False
         self._seen_caution = False
 
         if self._stop_caution_show_checkbox.value:
@@ -2246,7 +2265,7 @@ class ActiveLearningModel:
 
     def _show_test_results_cb(self, event):
         self._seen_test_results = True
-        self.show_test_results = True
+        self._show_test_results = True
         self.panel()
         self._seen_caution = False
 
