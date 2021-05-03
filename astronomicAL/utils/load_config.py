@@ -1,5 +1,9 @@
 import astronomicAL.config as config
 from astronomicAL.dashboard.dashboard import Dashboard
+from astronomicAL.extensions.extension_plots import get_plot_dict
+from astronomicAL.extensions.feature_generation import get_oper_dict
+from astronomicAL.extensions.models import get_classifiers
+from astronomicAL.extensions.query_strategies import get_strategy_dict
 from astronomicAL.settings.data_selection import DataSelection
 from astropy.table import Table
 import json
@@ -15,7 +19,7 @@ def verify_import_config(curr_config_file):
         config.settings["config_load_level"] < 0
     ):
         has_error = True
-        error_message += f"Unable to import file due to the following errors:\n\n\n\nconfig_load_level = {config.settings['config_load_level']} **[config_load_level should be 0,1 or 2]**\n"
+        error_message += f"**Unable to import file due to the following errors:**\n\n\n\nconfig_load_level = {config.settings['config_load_level']} **[config_load_level should be 0,1 or 2]**\n"
 
         return has_error, error_message
 
@@ -49,7 +53,7 @@ def verify_import_config(curr_config_file):
 
         if len(missing_settings) > 0:
             has_error = True
-            error_message += f"Unable to import file due to the following errors:\n\n\n\nThe config file is missing these settings: \n\n{missing_settings} \n\n **[Rerun astronomicAL and assign the settings yourself or manually edit {config.layout_file}, to include the missing settings]**\n\n\n"
+            error_message += f"**Unable to import file due to the following errors:**\n\n\n\nThe config file is missing these settings: \n\n{missing_settings} \n\n **[Rerun astronomicAL and assign the settings yourself or manually edit `{config.layout_file}`, to include the missing settings]**\n\n\n"
             return has_error, error_message
 
         if "classifiers" not in list(curr_config_file.keys()):
@@ -64,7 +68,7 @@ def verify_import_config(curr_config_file):
 
         if not os.path.exists(filename):
             has_error = True
-            error_message += f"Unable to import file due to the following errors:\n\n\n\nFile: {filename} does not exist. **[Check you have downloaded the correct dataset, with the correct name and placed it in your 'data/' directory (symlinks are accepted)]**\n"
+            error_message += f"**Unable to import file due to the following errors:**\n\n\n\nFile: {filename} does not exist. **[Check you have downloaded the correct dataset, with the correct name and placed it in your `data/` directory (symlinks are accepted)]**\n"
 
             return has_error, error_message
 
@@ -72,14 +76,14 @@ def verify_import_config(curr_config_file):
             ext = filename[filename.rindex(".") + 1 :]
         except:
             has_error = True
-            error_message += f"Unable to import file due to the following errors:\n\n\n\nFile: {filename} has no extension. **[Extensions are required to load the data properly]**\n"
+            error_message += f"**Unable to import file due to the following errors:**\n\n\n\nFile: `{filename}` has no extension. **[Extensions are required to load the data properly]**\n"
 
             return has_error, error_message
         try:
             table = Table.read(filename, format=f"{ext}")
         except:
             has_error = True
-            error_message += f"Unable to import file due to the following errors:\n\n\n\nExtension: {ext} is not a filetype that can be imported. **[See astropy documentation to see acceptable filetypes]**\n"
+            error_message += f"**Unable to import file due to the following errors:**\n\n\n\nExtension: {ext} is not a filetype that can be imported. **[See astropy documentation to see acceptable filetypes]**\n"
 
             return has_error, error_message
 
@@ -106,11 +110,76 @@ def verify_import_config(curr_config_file):
 
         if len(missing_cols) > 0:
             has_error = True
-            error_message += f"The dataset is missing these columns:\n\n{missing_cols}\n\n **[Rerun astronomicAL and assign the settings yourself or manually edit {filename}, replacing the missing columns]**\n\n\n"
+            error_message += f"The dataset is missing these columns:\n\n{missing_cols}\n\n **[Rerun astronomicAL and assign the settings yourself or manually edit `{filename}`, replacing the missing columns]**\n\n\n"
+
+        if "feature_generation" not in missing_settings:
+            opers = list(get_oper_dict().keys())
+            missing_opers = []
+            for oper in config.settings["feature_generation"]:
+                if oper[0] not in opers:
+                    missing_opers.append(oper[0])
+            if len(missing_opers) > 0:
+                has_error = True
+                error_message += f"AstronomicAL is missing the following operations in `extensions/feature_generation.py`:\n\n{missing_opers}\n\n **[If they have not been uploaded to the astronomicAL repo you may need to contact the researcher who uploaded the config for the correct code]**\n\n\n"
+
+        if "layout" in list(curr_config_file.keys()):
+            plots = list(get_plot_dict().keys())
+            contents = [
+                "Settings",
+                "Menu",
+                "Active Learning",
+                "Basic Plot",
+                "Labelling",
+                "Selected Source Info",
+            ] + plots
+
+            missing_contents = []
+
+            for i in curr_config_file["layout"]:
+                if "contents" in curr_config_file["layout"][i]:
+                    if curr_config_file["layout"][i]["contents"] not in contents:
+                        missing_contents.append(
+                            curr_config_file["layout"][i]["contents"]
+                        )
+
+            if len(missing_contents) > 0:
+                has_error = True
+                error_message += f"AstronomicAL is missing the following plots in `extensions/extension_plots.py`:\n\n{missing_contents}\n\n **[If they have not been uploaded to the astronomicAL repo you may need to contact the researcher who uploaded the config for the correct code]**\n\n\n"
+
+        if "classifiers" in list(curr_config_file.keys()):
+            clfs = list(get_classifiers().keys())
+
+            missing_clfs = []
+
+            for i in curr_config_file["classifiers"]:
+                if "classifier" in curr_config_file["classifiers"][i]:
+                    for clf in curr_config_file["classifiers"][i]["classifier"]:
+                        if clf not in clfs:
+                            missing_clfs.append(clf)
+
+            if len(missing_clfs) > 0:
+                has_error = True
+                error_message += f"AstronomicAL is missing the following classifiers in `extensions/models.py`:\n\n{missing_clfs}\n\n **[If they have not been uploaded to the astronomicAL repo you may need to contact the researcher who uploaded the config for the correct code]**\n\n\n"
+
+        if "classifiers" in list(curr_config_file.keys()):
+            qrys = list(get_strategy_dict().keys())
+
+            missing_qrys = []
+
+            for i in curr_config_file["classifiers"]:
+                if "query" in curr_config_file["classifiers"][i]:
+                    for qry in curr_config_file["classifiers"][i]["query"]:
+                        if qry not in qrys:
+                            missing_qrys.append(qry)
+
+            if len(missing_qrys) > 0:
+                has_error = True
+                error_message += f"AstronomicAL is missing the following classifiers in `extensions/query_strategies.py`:\n\n{missing_qrys}\n\n **[If they have not been uploaded to the astronomicAL repo you may need to contact the researcher who uploaded the config for the correct code]**\n\n\n"
 
     if has_error:
         error_message = (
-            "Unable to import file due to the following errors:\n\n\n\n" + error_message
+            "**Unable to import file due to the following errors:**\n\n\n\n"
+            + error_message
         )
 
     return has_error, error_message
