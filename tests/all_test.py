@@ -2174,7 +2174,7 @@ class TestDashboards:
 
         labelling = LabellingDashboard(src=src, df=data)
 
-        os.system(f"rm -rf data/test_set.json")
+        os.remove("data/test_set.json")
 
         pd.testing.assert_frame_equal(config.main_df, labelling.sample_region)
         assert list(labelling.region_criteria_df.columns) == ["column", "oper", "value"]
@@ -2200,7 +2200,7 @@ class TestDashboards:
 
         labelling = LabellingDashboard(src=src, df=data)
 
-        os.system(f"rm -rf data/test_set.json")
+        os.remove("data/test_set.json")
 
         labelling.column_dropdown.value = "C"
         labelling.operation_dropdown.value = "=="
@@ -2225,7 +2225,7 @@ class TestDashboards:
 
         labelling = LabellingDashboard(src=src, df=data)
 
-        os.system(f"rm -rf data/test_set.json")
+        os.remove("data/test_set.json")
 
         labelling.column_dropdown.value = "C"
         labelling.operation_dropdown.value = "<"
@@ -2250,7 +2250,7 @@ class TestDashboards:
 
         labelling = LabellingDashboard(src=src, df=data)
 
-        os.system(f"rm -rf data/test_set.json")
+        os.remove("data/test_set.json")
 
         labelling.column_dropdown.value = "C"
         labelling.operation_dropdown.value = "<"
@@ -2283,7 +2283,7 @@ class TestDashboards:
 
         labelling = LabellingDashboard(src=src, df=data)
 
-        os.system(f"rm -rf data/test_set.json")
+        os.remove("data/test_set.json")
 
         labelling.column_dropdown.value = "C"
         labelling.operation_dropdown.value = "<"
@@ -2349,7 +2349,7 @@ class TestDashboards:
 
         labelling = LabellingDashboard(src=src, df=data)
 
-        os.system(f"rm -rf data/test_set.json")
+        os.remove("data/test_set.json")
 
         assert len(labelling.src.data[config.settings["id_col"]]) == 1
 
@@ -2425,7 +2425,7 @@ class TestDashboards:
 
         labelling = LabellingDashboard(src=src, df=data)
 
-        os.system(f"rm -rf data/test_set.json")
+        os.remove("data/test_set.json")
 
         labelling.column_dropdown.value = "C"
         labelling.operation_dropdown.value = "=="
@@ -2452,7 +2452,7 @@ class TestDashboards:
 
         labelling = LabellingDashboard(src=src, df=data)
 
-        os.system(f"rm -rf data/test_set.json")
+        os.remove("data/test_set.json")
 
         labelling.column_dropdown.value = "C"
         labelling.operation_dropdown.value = "=="
@@ -2516,7 +2516,7 @@ class TestDashboards:
 
         assert labels == should_be
 
-        os.system(f"rm -rf data/test_set.json")
+        os.remove("data/test_set.json")
 
 
 class TestExtensions:
@@ -2711,3 +2711,5 @@ class TestUtils:
             assert (
                 created_file[k] == config.settings[k]
             ), f"{k}: {created_file[k]} != {config.settings[k]}"
+
+        os.remove("configs/config_export.json")
