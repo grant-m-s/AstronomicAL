@@ -142,11 +142,11 @@ class DataSelection(param.Parameterized):
 
         if (self.load_config_select == "") or (self.config_file == ""):
             self.error_message = ""
-            self.load_data_button_js.label = "Select values from dropdown to continue"
+            self.load_data_button_js.name = "Select values from dropdown to continue"
             self.load_data_button_js.disabled = True
             return
 
-        self.load_data_button_js.label = "Verifying Config..."
+        self.load_data_button_js.name = "Verifying Config..."
 
         config.layout_file = self.config_file
         config.settings["config_load_level"] = (
