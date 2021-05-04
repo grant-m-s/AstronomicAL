@@ -64,7 +64,7 @@ class ActiveLearningModel:
     df : Dataframe
         The shared dataframe which holds all the data.
     src : ColumnDataSource
-        The shared data source which holds the current selected source
+        The shared data source which holds the current selected source.
     _label : int
         The label that will be the positive case in the one-vs-rest classifier.
     _label_alias : str
@@ -111,8 +111,135 @@ class ActiveLearningModel:
     _min_y : float
         The minimum value of the y axis of the train, val and metric plots. This is set as the `max(μ(y)-4*σ(y), min(y))`.
     _model_output_data_tr : dict
-        Dictionary containing the plotting data required for the train, val and metric plots.
-
+        Dictionary containing the plotting data [`config.settings["default_vars"][0]`,`config.settings["default_vars"][1]`,`metric`,`y`,`pred`] required for the train and metric plots.
+    _model_output_data_val : dict
+        Dictionary containing the plotting data [`config.settings["default_vars"][0]`,`config.settings["default_vars"][1]`,`y`,`pred`] required for the val plot.
+    _accuracy_list : dict
+        Dictionary containing the train and validation vs number of points accuracy scores.
+    _f1_list : dict
+        Dictionary containing the train and validation vs number of points f1 scores.
+    _precision_list : dict
+        Dictionary containing the train and validation vs number of points precision scores.
+    _recall_list : dict
+        Dictionary containing the train and validation vs number of points recall scores.
+    _train_scores : dict
+        Dictionary containing the current scores for the training set.
+    _val_scores : dict
+        Dictionary containing the current scores for the validation set.
+    _test_scores : dict
+        Dictionary containing the current scores for the testing set.
+    corr_train : ColumnDataSource
+        The `config.settings["default_vars"][0]` and `config.settings["default_vars"][1]` values of all the training sources that are currently predicted correctly.
+    incorr_train : ColumnDataSource
+        The `config.settings["default_vars"][0]` and `config.settings["default_vars"][1]` values of all the training sources that are currently predicted incorrectly.
+    corr_val : ColumnDataSource
+        The `config.settings["default_vars"][0]` and `config.settings["default_vars"][1]` values of all the validation sources that are currently predicted correctly.
+    incorr_val : ColumnDataSource
+        The `config.settings["default_vars"][0]` and `config.settings["default_vars"][1]` values of all the validation sources that are currently predicted incorrectly.
+    queried_points : ColumnDataSource
+        The `config.settings["default_vars"][0]` and `config.settings["default_vars"][1]` values of the current queried points.
+    full_labelled_data : dict
+        Dictionary containing the `id` and `y` values of all labelled points during training.
+    assign_label_group : Panel RadioButtonGroup Widget
+        The group of buttons containing the possible labels for labelling during training.
+    assign_label_button : Panel Button Widget
+        The button for assigning the selected label from `assign_label_group` to the currently queried source.
+    show_queried_button : Panel Button Widget
+        The button for making the current queried point the current selected point.
+    classifier_dropdown : Panel Select Widget
+        A dropdown menu showing all the classifiers initialised in `astronomicAL.extensions.models`.
+    query_strategy_dropdown : Panel Select Widget
+        A dropdown menu showing all the query strategies initialised in `astronomicAL.extensions.query_strategies`.
+    starting_num_points : Panel IntInput Widget
+        Set the number of initial randomly selected points to train on.
+    classifier_table_source : ColumnDataSource
+        The collection of all the currently selected classifier and query strategy pairs.
+    classifier_table : DataTable
+        The table for visualising `classifier_table_source`
+    add_classifier_button : Panel Button Widget
+        The button for appending the currently selected values from `classifier_dropdown` and `query_strategy_dropdown` to `classifier_table_source`.
+    remove_classifier_button : Panel Button Widget
+        The button for removing the last entry from `classifier_table_source`.
+    start_training_button : Panel Button Widget
+        The button for beginning the training of a classifier using the selected parameters from `classifier_table_source` and `starting_num_points`.
+    next_interation_button : Panel Button Widget
+        The button to begin the next iteration of the Active Learning process. Only visible after assigning a label to the currently queried point.
+    checkpoint_button : Panel Button Widget
+        The button to save the current model and parameters required to recreate current set up.
+    request_test_results_button : Panel Button Widget
+        The button to request the current classifiers results for the test set.
+    _return_to_train_view_button : Panel Button Widget
+        The button displayed in the test set caution window, allowing the user to return to the train and validation results without seeing the test set results.
+    _stop_caution_show_checkbox : Panel Checkbox Widget
+        A checkbox for whether the user wants to disable the test set caution window from appearing when they want to view the test set.
+    _view_test_results_button : Panel Button Widget
+        The button to show the test set results to the user. If `_show_caution` is `True`, this button will show the test set caution window instead.
+    _queried_is_selected : bool
+        Flag for whether the current queried point is also the current selected point.
+    setup_row : Panel Row
+        A row containing all the classifier setup settings required before the training process has begun.
+    panel_row : Panel Row
+        A row containing all the visualisation aspects of the ActiveLearningModel view.
+    conf_mat_tr_tn : str
+        The current number of true negatives in the classifiers current prediction of the training set.
+    conf_mat_tr_fn : str
+        The current number of false negatives in the classifiers current prediction of the training set.
+    conf_mat_tr_fp : str
+        The current number of false positives in the classifiers current prediction of the training set.
+    conf_mat_tr_tp : str
+        The current number of true positives in the classifiers current prediction of the training set.
+    conf_mat_val_tn : str
+        The current number of true negatives in the classifiers current prediction of the validation set.
+    conf_mat_val_fn : str
+        The current number of false negatives in the classifiers current prediction of the validation set.
+    conf_mat_val_fp : str
+        The current number of false positives in the classifiers current prediction of the validation set.
+    conf_mat_val_tp : str
+        The current number of true positives in the classifiers current prediction of the validation set.
+    conf_mat_test_tn : str
+        The current number of true negatives in the classifiers current prediction of the test set.
+    conf_mat_test_fn : str
+        The current number of false negatives in the classifiers current prediction of the test set.
+    conf_mat_test_fp : str
+        The current number of false positives in the classifiers current prediction of the test set.
+    conf_mat_test_tp : str
+        The current number of true positives in the classifiers current prediction of the test set.
+    all_al_data : DataFrame
+        A dataframe containing a subset of `df` with only the required features for training.
+    x_train : DataFrame
+        A dataframe containing all the training input data.
+    y_train : DataFrame
+        A dataframe containing all the training labels.
+    id_train : DataFrame
+        A dataframe containing all the training ids.
+    x_val : DataFrame
+        A dataframe containing all the validation input data.
+    y_val : DataFrame
+        A dataframe containing all the validation labels.
+    id_val : DataFrame
+        A dataframe containing all the validation ids.
+    x_test : DataFrame
+        A dataframe containing all the test input data.
+    y_test : DataFrame
+        A dataframe containing all the test labels.
+    id_test : DataFrame
+        A dataframe containing all the test ids.
+    x_al_train : Numpy Array
+        The data that the classifier is training on.
+    y_al_train : Numpy Array
+        The labels for the data the classifier is training on.
+    id_al_train : DataFrame
+        The ids of the data the classifier is training on.
+    x_pool : Numpy Array
+        The data of the sources in the pool that are available to query from.
+    y_pool : Numpy Array
+        The labels of the sources in the pool that are available to query from.
+    id_pool : DataFrame
+        The ids of the sources in the pool that are available to query from.
+    query_index : int
+        The current index of `x_pool` that contains the current queried point.
+    learner : ModAL ActiveLearner
+        The current classifier that is being trained. If multiple classifiers exist in `classifier_table_source`, then `learner` will be a ModAL Committee.
     """
 
     def __init__(self, src, df, label):
@@ -258,13 +385,6 @@ class ActiveLearningModel:
         self.incorr_train = ColumnDataSource(self._empty_data())
         self.corr_val = ColumnDataSource(self._empty_data())
         self.incorr_val = ColumnDataSource(self._empty_data())
-        self.metric_values = ColumnDataSource(
-            {
-                f'{config.settings["default_vars"][0]}': [],
-                f'{config.settings["default_vars"][1]}': [],
-                "metric": [],
-            }
-        )
 
         self.queried_points = ColumnDataSource(self._empty_data())
 
@@ -440,11 +560,11 @@ class ActiveLearningModel:
 
     def _preprocess_data(self):
 
-        self.df, self.data = self.generate_features(self.df)
+        self.df, self.all_al_data = self.generate_features(self.df)
         print(f"df:{sys.getsizeof(self.df)}")
-        print(f"data df:{sys.getsizeof(self.data)}")
+        print(f"data df:{sys.getsizeof(self.all_al_data)}")
 
-        x, y = self.split_x_y_ids(self.data)
+        x, y = self.split_x_y_ids(self.all_al_data)
 
         excluded_x = {}
         excluded_y = {}
@@ -469,15 +589,15 @@ class ActiveLearningModel:
 
         (
             self.x_train,
-            self.y_train,
+            y_train,
             self.x_val,
-            self.y_val,
+            y_val,
             self.x_test,
-            self.y_test,
+            y_test,
         ) = self.train_val_test_split(x, y, excluded_x, excluded_y, 0.6, 0.2)
 
         x_cols = list(self.x_train.columns)
-        y_cols = list(self.y_train.columns)
+        y_cols = list(y_train.columns)
 
         if "index" in x_cols:
             x_cols.remove("index")
@@ -507,7 +627,7 @@ class ActiveLearningModel:
             self.id_val,
             self.y_test,
             self.id_test,
-        ) = self.split_y_ids(self.y_train, self.y_val, self.y_test)
+        ) = self.split_y_ids(y_train, y_val, y_test)
 
         self.assign_global_data()
 
