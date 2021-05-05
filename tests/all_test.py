@@ -2187,9 +2187,6 @@ class TestDashboards:
 
         assert labelling.criteria_dict == {}
 
-        assert labelling.next_labelled_button.disabled == True
-        assert labelling.prev_labelled_button.disabled == False
-
     def test_labelling_dashboard_check_single_matching_value_in_region(self):
 
         data = self._create_test_df()
@@ -2212,8 +2209,6 @@ class TestDashboards:
         assert list(labelling.criteria_dict.keys()) == ["C == 1"]
         assert labelling.criteria_dict["C == 1"] == ["C", "==", "1"]
         assert labelling.region_message == "1 Matching Sources"
-        assert labelling.next_labelled_button.disabled == True
-        assert labelling.prev_labelled_button.disabled == False
 
     def test_labelling_dashboard_check_multiple_matching_values_in_region(self):
 
@@ -2237,8 +2232,6 @@ class TestDashboards:
         assert list(labelling.criteria_dict.keys()) == ["C < 5"]
         assert labelling.criteria_dict["C < 5"] == ["C", "<", "5"]
         assert labelling.region_message == "5 Matching Sources"
-        assert labelling.next_labelled_button.disabled == True
-        assert labelling.prev_labelled_button.disabled == False
 
     def test_labelling_dashboard_check_combined_matching_values_in_region(self):
 
@@ -2268,8 +2261,6 @@ class TestDashboards:
         assert list(labelling.criteria_dict.keys()) == ["C < 5", "C == 1"]
         assert labelling.criteria_dict["C == 1"] == ["C", "==", "1"]
         assert labelling.region_message == "1 Matching Sources"
-        assert labelling.next_labelled_button.disabled == True
-        assert labelling.prev_labelled_button.disabled == False
 
         assert labelling.remove_sample_selection_dropdown.options == ["C < 5", "C == 1"]
 
@@ -2305,8 +2296,6 @@ class TestDashboards:
         assert list(labelling.criteria_dict.keys()) == ["C < 5"]
         assert labelling.criteria_dict["C < 5"] == ["C", "<", "5"]
         assert labelling.region_message == "5 Matching Sources"
-        assert labelling.next_labelled_button.disabled == True
-        assert labelling.prev_labelled_button.disabled == False
 
         labelling.remove_sample_selection_dropdown.value = "C < 5"
 
@@ -2317,8 +2306,6 @@ class TestDashboards:
         assert (
             labelling.region_message == f"All Sources Matching ({len(config.main_df)})"
         )
-        assert labelling.next_labelled_button.disabled == True
-        assert labelling.prev_labelled_button.disabled == False
 
     def test_labelling_dashboard_check_looping_through_labelled(self):
 
@@ -2357,8 +2344,6 @@ class TestDashboards:
 
         first_key = list(labelling.src.data.keys())[0]
         assert len(labelling.src.data[first_key]) == 1
-        assert labelling.next_labelled_button.disabled == True
-        assert labelling.prev_labelled_button.disabled == False
 
         assert labelling.src.data["A"][0] == "7"
         assert labelling.labels[labelling.src.data[config.settings["id_col"]][0]] == 0
@@ -2400,8 +2385,6 @@ class TestDashboards:
         assert len(labelling.src.data[first_key]) == 1
 
         assert labelling.src.data["A"][0] == "7"
-        assert labelling.next_labelled_button.disabled == True
-        assert labelling.prev_labelled_button.disabled == False
 
         labelling.update_selected_point_from_buttons(None, button="First")
 
@@ -2439,8 +2422,6 @@ class TestDashboards:
         assert list(labelling.criteria_dict.keys()) == ["C == 1"]
         assert labelling.criteria_dict["C == 1"] == ["C", "==", "1"]
         assert labelling.region_message == "1 Matching Sources"
-        assert labelling.next_labelled_button.disabled == True
-        assert labelling.prev_labelled_button.disabled == False
 
     def test_labelling_dashboard_check_zero_matching(self):
 
