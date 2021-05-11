@@ -242,6 +242,8 @@ class DataSelection(param.Parameterized):
         end = time.time()
         print(f"Pandas object loop {end - start}")
 
+        df = self.add_ra_dec_col(df)
+
         return df
 
     def _load_data_cb(self, event):
@@ -262,6 +264,27 @@ class DataSelection(param.Parameterized):
         self._initialise_src()
         self.ready = True
         self.load_data_button.name = "File Loaded."
+
+    def add_ra_dec_col(self, df):
+
+        new_df = df
+        has_loc = True
+        ra = None
+        dec = None
+        for col in list(new_df.columns):
+            if col.upper() == "RA":
+                ra = col
+            if col.upper() == "DEC":
+                dec = col
+
+        if (ra is None) or (dec is None):
+            has_loc = False
+
+        if has_loc:
+
+            new_df["ra_dec"] = df[ra].astype(str) + "," + df[dec].astype(str)
+
+        return new_df
 
     def get_df(self):
         """Return the dataframe that has been loaded in from a file.
