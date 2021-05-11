@@ -441,11 +441,9 @@ class LabellingDashboard(param.Parameterized):
             list(self.sample_region[config.settings["id_col"]].values)
         )
         selected_source = self.df[self.df[config.settings["id_col"]] == selected]
-        selected_dict = selected_source.set_index(config.settings["id_col"]).to_dict(
-            "list"
-        )
+        selected_dict = selected_source.to_dict("list")
 
-        self.src.data = selected_source
+        self.src.data = selected_dict
 
     def update_selected_point_from_buttons(self, event, button):
 
