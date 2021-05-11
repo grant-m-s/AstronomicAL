@@ -605,8 +605,16 @@ class ActiveLearningModel:
         if "index" in y_cols:
             y_cols.remove("index")
 
+        if "level_0" in x_cols:
+            x_cols.remove("level_0")
+
+        if "level_0" in y_cols:
+            y_cols.remove("level_0")
+
         assert not "index" in x_cols
         assert not "index" in y_cols
+        assert not "level_0" in x_cols
+        assert not "level_0" in y_cols
 
         self.x_cols = x_cols
         self.y_cols = y_cols
@@ -1729,9 +1737,11 @@ class ActiveLearningModel:
             print(config.settings["classifiers"][f"{self._label}"])
 
             config.settings["classifiers"][f"{self._label}"]["id"] = self.id_al_train[
-                "id"
+                config.settings["id_col"]
             ].values.tolist()
-            self.full_labelled_data["id"] = self.id_al_train["id"].values.tolist()
+            self.full_labelled_data["id"] = self.id_al_train[
+                config.settings["id_col"]
+            ].values.tolist()
 
             config.settings["classifiers"][f"{self._label}"][
                 "y"
