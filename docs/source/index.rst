@@ -34,13 +34,15 @@ Quickstart Instructions
 To begin using the software, run :code:`bokeh serve astronomicAL --show` and your browser should automatically open to `localhost:5006/astronomicAL
 <localhost:5006/astronomicAL>`_.
 
-You can make use of the provided test fits files to enable you to explore the framework, or if you'd like to dive in with your own fits file simply place your file (or a symlink to the file) in the :code:`data/` directory.
+AstronomicAL provides both an example dataset and an example configuration file to allow you to jump right into the software and give it a test run.
 
-To make the integration of your data with the system as seamless as possible, we put very few requirements on what columns your data must contain. Whenever there is a default column required, the user is able to select a corresponding column from their dataset that matches that requirement. This prevents the tedius task of needing to rename column names. We only require the user to have the following columns:
-  - :code:`ID` column - containing unique identifiers for each source
-  - :code:`Labels` column - A set of predefined labels which are solely used in scoring metrics in the training process.
-  - :code:`RA` and :code:`DEC` columns - The location of your source will enable you to gain access to optical and radio images of your sources.
-  - :code:`default_x` and :code:`default_y` columns - These are simply the default axes used for the active learning based plots.
+.. figure:: images/Load_config_AL.gif
+
+    AstronomicAL makes it easy to start training your classifier or reload a previous checkpoint.
+
+To begin training you simply have to select **Load Custom Configuration** checkbox and select your config file. Here we have chosen to use the :code:`example_config.json` file.
+
+The **Load Config Select** option allows use to choose the extent to which to reload the configuration.
 
 For a thorough tutorial on the training process, see :ref:`Training a Classifier: From Start to Finish <Training a Classifier: From Start to Finish>`.
 
