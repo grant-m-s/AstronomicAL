@@ -269,7 +269,11 @@ class ActiveLearningModel:
                     self.retrain = True
 
         if len(config.ml_data.keys()) == 0:
+            print("preprocessing...")
+            self._preprocess_data()
 
+        elif len(config.ml_data["x_train"].columns) == 0:
+            print("preprocessing...")
             self._preprocess_data()
 
         else:
