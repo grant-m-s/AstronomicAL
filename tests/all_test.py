@@ -154,81 +154,81 @@ class TestSettings:
             "E",
         ]
 
-    def test_param_assignment_default_x_variable_contains_correct_columns_on_init(self):
-
-        df = self._create_test_df()
-
-        paramAssignment = ParameterAssignment()
-
-        assert paramAssignment.param.default_x_variable.objects == ["default"]
-
-    def test_param_assignment_default_x_variable_contains_correct_columns_on_update_no_df(
-        self,
-    ):
-
-        df = self._create_test_df()
-
-        paramAssignment = ParameterAssignment()
-
-        paramAssignment.update_data()
-
-        assert paramAssignment.param.default_x_variable.objects == ["default"]
-
-    def test_param_assignment_default_x_variable_contains_correct_columns_on_update_with_df(
-        self,
-    ):
-
-        df = self._create_test_df()
-
-        paramAssignment = ParameterAssignment()
-
-        paramAssignment.update_data(df)
-
-        assert paramAssignment.param.default_x_variable.objects == [
-            "A",
-            "B",
-            "C",
-            "D",
-            "E",
-        ]
-
-    def test_param_assignment_default_y_variable_contains_correct_columns_on_init(self):
-
-        df = self._create_test_df()
-
-        paramAssignment = ParameterAssignment()
-
-        assert paramAssignment.param.default_y_variable.objects == ["default"]
-
-    def test_param_assignment_default_y_variable_contains_correct_columns_on_update_no_df(
-        self,
-    ):
-
-        df = self._create_test_df()
-
-        paramAssignment = ParameterAssignment()
-
-        paramAssignment.update_data()
-
-        assert paramAssignment.param.default_y_variable.objects == ["default"]
-
-    def test_param_assignment_default_y_variable_contains_correct_columns_on_update_with_df(
-        self,
-    ):
-
-        df = self._create_test_df()
-
-        paramAssignment = ParameterAssignment()
-
-        paramAssignment.update_data(df)
-
-        assert paramAssignment.param.default_y_variable.objects == [
-            "A",
-            "B",
-            "C",
-            "D",
-            "E",
-        ]
+    # def test_param_assignment_default_x_variable_contains_correct_columns_on_init(self):
+    #
+    #     df = self._create_test_df()
+    #
+    #     paramAssignment = ParameterAssignment()
+    #
+    #     assert paramAssignment.param.default_x_variable.objects == ["default"]
+    #
+    # def test_param_assignment_default_x_variable_contains_correct_columns_on_update_no_df(
+    #     self,
+    # ):
+    #
+    #     df = self._create_test_df()
+    #
+    #     paramAssignment = ParameterAssignment()
+    #
+    #     paramAssignment.update_data()
+    #
+    #     assert paramAssignment.param.default_x_variable.objects == ["default"]
+    #
+    # def test_param_assignment_default_x_variable_contains_correct_columns_on_update_with_df(
+    #     self,
+    # ):
+    #
+    #     df = self._create_test_df()
+    #
+    #     paramAssignment = ParameterAssignment()
+    #
+    #     paramAssignment.update_data(df)
+    #
+    #     assert paramAssignment.param.default_x_variable.objects == [
+    #         "A",
+    #         "B",
+    #         "C",
+    #         "D",
+    #         "E",
+    #     ]
+    #
+    # def test_param_assignment_default_y_variable_contains_correct_columns_on_init(self):
+    #
+    #     df = self._create_test_df()
+    #
+    #     paramAssignment = ParameterAssignment()
+    #
+    #     assert paramAssignment.param.default_y_variable.objects == ["default"]
+    #
+    # def test_param_assignment_default_y_variable_contains_correct_columns_on_update_no_df(
+    #     self,
+    # ):
+    #
+    #     df = self._create_test_df()
+    #
+    #     paramAssignment = ParameterAssignment()
+    #
+    #     paramAssignment.update_data()
+    #
+    #     assert paramAssignment.param.default_y_variable.objects == ["default"]
+    #
+    # def test_param_assignment_default_y_variable_contains_correct_columns_on_update_with_df(
+    #     self,
+    # ):
+    #
+    #     df = self._create_test_df()
+    #
+    #     paramAssignment = ParameterAssignment()
+    #
+    #     paramAssignment.update_data(df)
+    #
+    #     assert paramAssignment.param.default_y_variable.objects == [
+    #         "A",
+    #         "B",
+    #         "C",
+    #         "D",
+    #         "E",
+    #     ]
 
     def test_param_assignment_greater_than_20_labels_dont_proceed(self):
 
@@ -240,8 +240,6 @@ class TestSettings:
 
         paramAssignment.id_column = "A"
         paramAssignment.label_column = "E"
-        paramAssignment.default_x_variable = "C"
-        paramAssignment.default_y_variable = "D"
 
         paramAssignment._update_labels_cb()
 
@@ -257,8 +255,6 @@ class TestSettings:
 
         paramAssignment.id_column = "A"
         paramAssignment.label_column = "B"
-        paramAssignment.default_x_variable = "C"
-        paramAssignment.default_y_variable = "D"
 
         paramAssignment._update_labels_cb()
 
@@ -274,8 +270,6 @@ class TestSettings:
 
         paramAssignment.id_column = "A"
         paramAssignment.label_column = "B"
-        paramAssignment.default_x_variable = "C"
-        paramAssignment.default_y_variable = "D"
 
         paramAssignment._update_labels_cb()
 
@@ -293,8 +287,6 @@ class TestSettings:
 
         paramAssignment.id_column = "A"
         paramAssignment.label_column = "B"
-        paramAssignment.default_x_variable = "C"
-        paramAssignment.default_y_variable = "D"
 
         paramAssignment._update_labels_cb()
 
@@ -319,8 +311,6 @@ class TestSettings:
 
         paramAssignment.id_column = "A"
         paramAssignment.label_column = "B"
-        paramAssignment.default_x_variable = "C"
-        paramAssignment.default_y_variable = "D"
 
         paramAssignment._update_labels_cb()
 
@@ -346,8 +336,6 @@ class TestSettings:
 
         paramAssignment.id_column = "A"
         paramAssignment.label_column = "B"
-        paramAssignment.default_x_variable = "C"
-        paramAssignment.default_y_variable = "D"
 
         paramAssignment._update_labels_cb()
 
@@ -365,8 +353,6 @@ class TestSettings:
 
         paramAssignment.id_column = "A"
         paramAssignment.label_column = "B"
-        paramAssignment.default_x_variable = "C"
-        paramAssignment.default_y_variable = "D"
 
         paramAssignment._update_labels_cb()
 
@@ -391,8 +377,6 @@ class TestSettings:
 
         paramAssignment.id_column = "A"
         paramAssignment.label_column = "B"
-        paramAssignment.default_x_variable = "C"
-        paramAssignment.default_y_variable = "D"
 
         paramAssignment._update_labels_cb()
 
@@ -418,8 +402,6 @@ class TestSettings:
 
         paramAssignment.id_column = "A"
         paramAssignment.label_column = "B"
-        paramAssignment.default_x_variable = "C"
-        paramAssignment.default_y_variable = "D"
 
         paramAssignment._update_labels_cb()
 
@@ -427,7 +409,7 @@ class TestSettings:
 
         assert config.settings["id_col"] == "A"
         assert config.settings["label_col"] == "B"
-        assert config.settings["default_vars"] == ("C", "D")
+        # assert config.settings["default_vars"] == ("C", "D")
 
     def test_AL_settings_correct_labels_on_init(self):
 
@@ -486,11 +468,27 @@ class TestSettings:
 
         df = self._create_test_df()
 
-        features = df.columns
+        config.settings = {
+            "id_col": "A",
+            "label_col": "B",
+            "labels": [0, 1, 2],
+            "label_colours": {0: "#ffad0e", 1: "#0057ff", 2: "#a2a2a2"},
+            "labels_to_strings": {"0": "0", "1": "1", "2": "2"},
+            "strings_to_labels": {"0": 0, "1": 1, "2": 2},
+            "extra_info_cols": [
+                "C",
+            ],
+            "extra_image_cols": [],
+        }
+
+        features = list(df.columns)
 
         alSettings = ActiveLearningSettings(None, mode="AL")
 
         alSettings.update_data(df)
+
+        features.remove("A")
+        features.remove("B")
 
         assert alSettings.feature_selector.options == list(features)
         assert alSettings.feature_selector.value == []
@@ -1702,6 +1700,27 @@ class TestDashboards:
 
         settings_db._create_pipeline_cb(None, "AL", main)
 
+        config.settings = {
+            "id_col": "A",
+            "label_col": "B",
+            "default_vars": ["C", "D"],
+            "labels": [0, 1, 2],
+            "label_colours": {0: "#ffad0e", 1: "#0057ff", 2: "#a2a2a2"},
+            "labels_to_strings": {"0": "0", "1": "1", "2": "2"},
+            "strings_to_labels": {"0": 0, "1": 1, "2": 2},
+            "extra_info_cols": [
+                "C",
+            ],
+            "labels_to_train": ["1"],
+            "features_for_training": ["C", "D"],
+            "exclude_unknown_labels": False,
+            "exclude_labels": True,
+            "unclassified_labels": ["0", "2"],
+            "scale_data": False,
+            "feature_generation": [["subtract (a-b)", 2]],
+            "extra_image_cols": ["png_path_DR16"],
+        }
+
         settings_db.pipeline["Active Learning Settings"].df = data
         settings_db._close_settings_cb(None, main)
 
@@ -1766,17 +1785,25 @@ class TestDashboards:
         settings_db.pipeline["Assign Parameters"].update_data(dataframe=data)
         settings_db.pipeline["Assign Parameters"].id_column = "A"
         settings_db.pipeline["Assign Parameters"].label_column = "B"
-        settings_db.pipeline["Assign Parameters"].default_x_variable = "C"
-        settings_db.pipeline["Assign Parameters"].default_y_variable = "D"
         settings_db.pipeline["Assign Parameters"].update_colours()
+        settings_db.pipeline["Active Learning Settings"].default_x_variable.options = [
+            "C",
+            "D",
+        ]
+        settings_db.pipeline["Active Learning Settings"].default_y_variable.options = [
+            "C",
+            "D",
+        ]
+        settings_db.pipeline["Active Learning Settings"].default_x_variable.value = "C"
+        settings_db.pipeline["Active Learning Settings"].default_y_variable.value = "D"
 
         updated_settings = settings_db.get_settings()
 
         settings = {
             "id_col": "A",
             "label_col": "B",
-            "default_vars": ("C", "D"),
             "label_colours": {0: "#1f77b4", 1: "#ff7f0e", 2: "#2ca02c"},
+            "default_vars": ("C", "D"),
         }
 
         assert updated_settings == settings
