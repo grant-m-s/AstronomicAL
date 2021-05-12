@@ -152,6 +152,8 @@ class LabellingDashboard(param.Parameterized):
         if config.settings["label_col"] in cols:
             cols.remove(config.settings["label_col"])
 
+        self.column_dropdown.options = cols
+
         self.param.X_variable.objects = cols
         self.param.Y_variable.objects = cols
         self.param.X_variable.default = config.settings["default_vars"][0]
