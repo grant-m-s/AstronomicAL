@@ -701,7 +701,9 @@ class ActiveLearningModel:
             index = self.query_index
         else:
             ind_list = list(self.id_pool.index.values)
-            df_index = self.id_pool.index[self.id_pool["id"] == id].to_list()[0]
+            df_index = self.id_pool.index[
+                self.id_pool[config.settings["id_col"]] == id
+            ].to_list()[0]
             index = ind_list.index(df_index)
 
         self.x_pool = np.delete(
