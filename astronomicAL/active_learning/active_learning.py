@@ -82,18 +82,6 @@ class ActiveLearningModel:
     scaler : sklearn.preprocessing.RobustScaler
         The scaler used to standardise features across the train, val and test sets according to the training set.
         NOTE: Only initialised if `config.settings["scale_data"]` is `True`.
-    y_train : DataFrame
-        The labels for the training set.
-    y_val : DataFrame
-        The labels for the validation set.
-    y_test : DataFrame
-        The labels for the test set.
-    id_train : DataFrame
-        The ids of the sources in the training set.
-    id_val : DataFrame
-        The ids of the sources in the validation set.
-    id_test : DataFrame
-        The ids of the sources in the test set.
     _show_test_results : bool
         Flag for whether to render the test set results column in `panel` method.
     _seen_test_results : bool
