@@ -136,10 +136,16 @@ class ActiveLearningSettings(param.Parameterized):
         self.feature_generator = pn.widgets.Select(
             name="Create Feature Combinations?",
             options=list(feature_generation.get_oper_dict().keys()),
+            max_height=30,
         )
 
         self.feature_generator_number = pn.widgets.IntInput(
-            name="How many features to combine?", value=2, step=1, start=2, end=5
+            name="How many features to combine?",
+            value=2,
+            step=1,
+            start=2,
+            end=5,
+            max_height=50,
         )
 
         self._add_feature_generator_button = pn.widgets.Button(name=">>", max_width=80)
@@ -154,6 +160,13 @@ class ActiveLearningSettings(param.Parameterized):
             pd.DataFrame(self.feature_generator_selected, columns=["oper", "n"]),
             name="",
             show_index=False,
+        )
+
+        self.default_x_variable = pn.widgets.Select(
+            name="Default x variable", options=[]
+        )
+        self.default_y_variable = pn.widgets.Select(
+            name="Default y variable", options=[]
         )
 
         self.confirm_settings_button = pn.widgets.Button(
@@ -244,6 +257,8 @@ class ActiveLearningSettings(param.Parameterized):
         self.confirm_settings_button.disabled = confirm_settings
         self.exclude_labels_checkbox.disabled = exclude_labels
 
+        self._update_default_var_lists()
+
         self.panel()
 
     def update_data(self, dataframe=None):
@@ -272,7 +287,12 @@ class ActiveLearningSettings(param.Parameterized):
                 options.append(config.settings["labels_to_strings"][f"{label}"])
             self.label_selector.options = options
 
-            self.feature_selector.options = list(self.df.columns)
+            features = list(self.df.columns)
+
+            features.remove(config.settings["id_col"])
+            features.remove(config.settings["label_col"])
+
+            self.feature_selector.options = features
 
     def _add_feature_selector_cb(self, event):
 
@@ -289,15 +309,48 @@ class ActiveLearningSettings(param.Parameterized):
                 self.feature_generator_selected, columns=["oper", "n"]
             )
 
+        self._update_default_var_lists()
+
+    def _update_default_var_lists(self):
+
+        selected_features = self.feature_selector.value
+
+        config.settings["features_for_training"] = selected_features
+
+        if selected_features == []:
+            return
+        else:
+
+            oper_dict = feature_generation.get_oper_dict()
+
+            for generator in self.feature_generator_selected:
+
+                oper = generator[0]
+                n = generator[1]
+
+                _, generated_features = oper_dict[oper](
+                    pd.DataFrame(columns=selected_features), n
+                )
+                selected_features = selected_features + generated_features
+
+        self.default_x_variable.options = selected_features
+        self.default_y_variable.options = selected_features
+
     def _remove_feature_selector_cb(self, event):
         self.feature_generator_selected = self.feature_generator_selected[:-1]
         self._feature_generator_dataframe.value = pd.DataFrame(
             self.feature_generator_selected, columns=["oper", "n"]
         )
 
+        self._update_default_var_lists()
+
     def _confirm_settings_cb(self, event):
         print("Saving settings...")
 
+        config.settings["default_vars"] = (
+            self.default_x_variable.value,
+            self.default_y_variable.value,
+        )
         config.settings["labels_to_train"] = self.label_selector.value
         config.settings["features_for_training"] = self.feature_selector.value
 
@@ -373,14 +426,27 @@ class ActiveLearningSettings(param.Parameterized):
                     self.label_selector,
                     self.feature_selector,
                     sizing_mode="stretch_width",
+                    max_height=150,
                 ),
                 pn.Row(
                     self.exclude_unknown_labels_checkbox,
                     self._exclude_unknown_labels_tooltip,
+                    max_height=35,
                 ),
-                pn.Row(self.exclude_labels_checkbox, self._exclude_labels_tooltip),
-                pn.Row(self.scale_features_checkbox, self._scale_features_tooltip),
-                pn.Row(self.test_set_checkbox),
+                pn.Row(
+                    self.exclude_labels_checkbox,
+                    self._exclude_labels_tooltip,
+                    max_height=35,
+                ),
+                pn.Row(
+                    self.scale_features_checkbox,
+                    self._scale_features_tooltip,
+                    max_height=35,
+                ),
+                pn.Row(
+                    self.test_set_checkbox,
+                    max_height=35,
+                ),
                 pn.Row(
                     self.feature_generator,
                     self.feature_generator_number,
@@ -391,8 +457,9 @@ class ActiveLearningSettings(param.Parameterized):
                     self._feature_generator_dataframe,
                     sizing_mode="stretch_width",
                 ),
+                pn.Row(self.default_x_variable, self.default_y_variable),
                 pn.Row(self.confirm_settings_button, max_height=30),
-                pn.Row(pn.Spacer(height=10)),
+                pn.Row(pn.Spacer(height=30)),
             )
 
         return self.column
