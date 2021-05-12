@@ -178,7 +178,7 @@ class SettingsDashboard:
             "Assign Parameters"
         ].get_label_column()
         updated_settings["default_vars"] = self.pipeline[
-            "Assign Parameters"
+            "Active Learning Settings"
         ].get_default_variables()
         updated_settings["label_colours"] = self.pipeline[
             "Assign Parameters"

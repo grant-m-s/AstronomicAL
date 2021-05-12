@@ -344,13 +344,17 @@ class ActiveLearningSettings(param.Parameterized):
 
         self._update_default_var_lists()
 
-    def _confirm_settings_cb(self, event):
-        print("Saving settings...")
+    def get_default_variables(self):
 
-        config.settings["default_vars"] = (
+        return (
             self.default_x_variable.value,
             self.default_y_variable.value,
         )
+
+    def _confirm_settings_cb(self, event):
+        print("Saving settings...")
+
+        config.settings["default_vars"] = self.get_default_variables()
         config.settings["labels_to_train"] = self.label_selector.value
         config.settings["features_for_training"] = self.feature_selector.value
 
