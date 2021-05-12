@@ -21,12 +21,6 @@ class ParameterAssignment(param.Parameterized):
         Dropdown for choosing which of the dataset columns is the label column.
     id_column : Panel ObjectSelector
         Dropdown for choosing which of the dataset columns is the id column.
-    default_x_variable : Panel ObjectSelector
-        Dropdown for choosing which of the dataset columns should be the
-        default x_axis variable in any plots.
-    default_y_variable : Panel ObjectSelector
-        Dropdown for choosing which of the dataset columns should be the
-        default y_axis variable in any plots.
     completed : bool
         Flag indicating all active learning settings have been chosen and
         assigned.
@@ -43,8 +37,6 @@ class ParameterAssignment(param.Parameterized):
 
     label_column = param.ObjectSelector(objects=["default"], default="default")
     id_column = param.ObjectSelector(objects=["default"], default="default")
-    default_x_variable = param.ObjectSelector(objects=["default"], default="default")
-    default_y_variable = param.ObjectSelector(objects=["default"], default="default")
 
     completed = param.Boolean(
         default=False,
@@ -121,14 +113,6 @@ class ParameterAssignment(param.Parameterized):
             self.param.label_column.objects = cols
             self.param.label_column.default = cols[0]
             self.label_column = cols[0]
-
-            self.param.default_x_variable.objects = cols
-            self.param.default_x_variable.default = cols[0]
-            self.default_x_variable = cols[0]
-
-            self.param.default_y_variable.objects = cols
-            self.param.default_y_variable.default = cols[1]
-            self.default_y_variable = cols[1]
 
             self.extra_info_selector.options = cols
             self.extra_images_selector.options = cols
@@ -213,19 +197,6 @@ class ParameterAssignment(param.Parameterized):
         config.settings["extra_image_cols"] = self.extra_images_selector.value
         self.confirm_settings_button.name = "Confirmed"
         self.ready = True
-
-    def get_default_variables(self):
-        """Return the default x and y axis for plots.
-
-        Returns
-        -------
-        default_x_variable : str
-            The column used as the default x axis in any plots.
-        default_y_variable : str
-            The column used as the default x axis in any plots.
-
-        """
-        return (self.default_x_variable, self.default_y_variable)
 
     def get_id_column(self):
         """Return the name of the id column.
@@ -324,7 +295,6 @@ class ParameterAssignment(param.Parameterized):
         updated_settings = {}
         updated_settings["id_col"] = self.get_id_column()
         updated_settings["label_col"] = self.get_label_column()
-        updated_settings["default_vars"] = self.get_default_variables()
         updated_settings["labels"] = self.labels
         updated_settings["label_colours"] = self.get_label_colours()
         (
@@ -365,8 +335,6 @@ class ParameterAssignment(param.Parameterized):
                 pn.Row(
                     pn.Row(self.param.id_column, max_width=150),
                     pn.Row(self.param.label_column, max_width=150),
-                    pn.Row(self.param.default_x_variable, max_width=150),
-                    pn.Row(self.param.default_y_variable, max_width=150),
                     max_width=600,
                 )
             )
