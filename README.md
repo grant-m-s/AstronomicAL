@@ -34,4 +34,4 @@ The **Load Config Select** option allows use to choose the extent to which to re
 
 Please remember to cite our software and user guide whenever relevant.
 
-See the Citing page in the documentation for instructions about referencing and citing the astronomicAL software.
+See the [Citing page](astronomical.readthedocs.io/en/latest/content/other/citing.html) in the documentation for instructions about referencing and citing the astronomicAL software.
