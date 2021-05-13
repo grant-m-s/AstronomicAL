@@ -400,9 +400,12 @@ class LabellingDashboard(param.Parameterized):
 
         self.assign_label_button.disabled = True
 
-        if selected_label is not "Unsure":
+        if selected_label != "Unsure":
             raw_label = config.settings["strings_to_labels"][selected_label]
-            self.save_label(id, raw_label)
+        else:
+            raw_label = -1
+
+        self.save_label(id, raw_label)
 
         self.select_random_point()
 
