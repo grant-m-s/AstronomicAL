@@ -10,7 +10,7 @@ An Interactive Dashboard for Active Learning in Astronomy.
 .. image:: https://codecov.io/gh/grant-m-s/astronomicAL/branch/master/graph/badge.svg?token=TCO9J2AD1Z
     :target: https://codecov.io/gh/grant-m-s/astronomicAL
 
-astronomicAL is an iteractive dashboard to enable Astronomy-based researchers to gain valuable insight into their data by showing them the key information they require to make accurate classifications of each source. Combining the use of the Panel_, Bokeh_, modAL_ and `SciKit Learn`_ packages, astronomicAL enables researchers to take full advantage of the benefits of Active Learning, high accuracy models using just a fraction of the total data, without the requirement of being well versed in the Machine Learning theory or implementations.
+AstronomicAL is an iteractive dashboard to enable Astronomy-based researchers to gain valuable insight into their data by showing them the key information they require to make accurate classifications of each source. Combining the use of the Panel_, Bokeh_, modAL_ and `SciKit Learn`_ packages, astronomicAL enables researchers to take full advantage of the benefits of Active Learning, high accuracy models using just a fraction of the total data, without the requirement of being well versed in the Machine Learning theory or implementations.
 
 .. _Panel: https://panel.holoviz.org/
 .. _Bokeh: https://docs.bokeh.org/en/latest/index.html
@@ -34,15 +34,15 @@ Quickstart Instructions
 To begin using the software, run :code:`bokeh serve astronomicAL --show` and your browser should automatically open to `localhost:5006/astronomicAL
 <localhost:5006/astronomicAL>`_.
 
-You can make use of the provided test fits files to enable you to explore the framework, or if you'd like to dive in with your own fits file simply place your file (or a symlink to the file) in the :code:`data/` directory.
+AstronomicAL provides both an example dataset and an example configuration file to allow you to jump right into the software and give it a test run.
 
-To make the integration of your data with the system as seamless as possible, we put very few requirements on what columns your data must contain. Whenever there is a default column required, the user is able to select a corresponding column from their dataset that matches that requirement. This prevents the tedius task of needing to rename column names. We only require the user to have the following columns:
-  - :code:`ID` column - containing unique identifiers for each source
-  - :code:`Labels` column - A set of predefined labels which are solely used in scoring metrics in the training process.
-  - :code:`RA` and :code:`DEC` columns - The location of your source will enable you to gain access to optical and radio images of your sources.
-  - :code:`default_x` and :code:`default_y` columns - These are simply the default axes used for the active learning based plots.
+.. figure:: images/Load_config_AL.gif
 
-For a thorough tutorial on the training process, see :ref:`Training a Classifier: From Start to Finish <Training a Classifier: From Start to Finish>`.
+    AstronomicAL makes it easy to start training your classifier or reload a previous checkpoint.
+
+To begin training you simply have to select **Load Custom Configuration** checkbox and select your config file. Here we have chosen to use the :code:`example_config.json` file.
+
+The **Load Config Select** option allows use to choose the extent to which to reload the configuration.
 
 .. raw:: html
 
@@ -80,6 +80,7 @@ See the :ref:`citing <citing>` page for instructions about referencing and citin
     :caption: Tutorials
 
     content/tutorials/active_learning.rst
+    content/tutorials/labelling_test_set.rst
     content/tutorials/plots.rst
     content/tutorials/feature_generation.rst
 

@@ -3,6 +3,8 @@ from astronomicAL.extensions import models, query_strategies, feature_generation
 import astronomicAL.config as config
 import pandas as pd
 import panel as pn
+import json
+import os
 import param
 
 
@@ -38,7 +40,7 @@ class ActiveLearningSettings(param.Parameterized):
 
     """
 
-    def __init__(self, close_button):
+    def __init__(self, close_button, mode):
 
         self.df = None
 
@@ -54,12 +56,12 @@ class ActiveLearningSettings(param.Parameterized):
 
         self._adjust_widget_layouts()
 
+        self._verify_valid_selection_cb(None)
+
     def _adjust_widget_layouts(self):
 
-        self.label_selector.max_width = 750
-        self.label_selector.max_width = 750
-        self.feature_selector.max_width = 750
-        self.feature_selector.max_width = 750
+        self.label_selector.size = 5
+        self.feature_selector.size = 5
 
         self.label_selector._search[True].max_height = 20
         self.label_selector._search[False].max_height = 20
@@ -72,8 +74,8 @@ class ActiveLearningSettings(param.Parameterized):
 
         self.label_selector._lists[True].max_width = 300
         self.label_selector._lists[False].max_width = 300
-        self.feature_selector._lists[True].max_width = 300
-        self.feature_selector._lists[False].max_width = 300
+        self.feature_selector._lists[True].width = 500
+        self.feature_selector._lists[False].width = 500
 
         self.label_selector._buttons[True].max_width = 50
         self.label_selector._buttons[False].max_width = 50
@@ -114,23 +116,36 @@ class ActiveLearningSettings(param.Parameterized):
             name="**Which Labels would you like to create a classifier for?**",
             value=[],
             options=[],
-            max_height=100,
         )
+
+        self.label_selector._buttons[True].on_click(self._verify_valid_selection_cb)
+        self.label_selector._buttons[False].on_click(self._verify_valid_selection_cb)
 
         self.feature_selector = pn.widgets.CrossSelector(
             name="**Which Features should be used for training?**",
             value=[],
             options=[],
-            max_height=100,
+            width=500,
+            max_width=500,
+            sizing_mode="fixed",
         )
+
+        self.feature_selector._buttons[True].on_click(self._verify_valid_selection_cb)
+        self.feature_selector._buttons[False].on_click(self._verify_valid_selection_cb)
 
         self.feature_generator = pn.widgets.Select(
             name="Create Feature Combinations?",
             options=list(feature_generation.get_oper_dict().keys()),
+            max_height=30,
         )
 
         self.feature_generator_number = pn.widgets.IntInput(
-            name="How many features to combine?", value=2, step=1, start=2, end=5
+            name="How many features to combine?",
+            value=2,
+            step=1,
+            start=2,
+            end=5,
+            max_height=50,
         )
 
         self._add_feature_generator_button = pn.widgets.Button(name=">>", max_width=80)
@@ -147,6 +162,13 @@ class ActiveLearningSettings(param.Parameterized):
             show_index=False,
         )
 
+        self.default_x_variable = pn.widgets.Select(
+            name="Default x variable", options=[]
+        )
+        self.default_y_variable = pn.widgets.Select(
+            name="Default y variable", options=[]
+        )
+
         self.confirm_settings_button = pn.widgets.Button(
             name="Confirm Settings", button_type="primary"
         )
@@ -154,11 +176,10 @@ class ActiveLearningSettings(param.Parameterized):
 
         self.exclude_labels_checkbox = pn.widgets.Checkbox(
             name="Should remaining labels be removed from Active Learning datasets?",
-            value=True,
         )
 
         self._exclude_labels_tooltip = pn.pane.HTML(
-            "<span data-toggle='tooltip' title='If enabled, this will remove all instances of labels without a classifier from the Active Learning train, validation and test sets (visualisations outside the AL panel are unaffected). This is useful for labels representing an unknown classification which would not be compatible with scoring functions.' style='border-radius: 15px;padding: 5px; background: #5e5e5e; ' >❔</span> ",
+            "<span data-toggle='tooltip' title='If enabled, this will remove the unused labels from train, val and test sets. All other plots remain unaffected.' style='border-radius: 15px;padding: 5px; background: #5e5e5e; ' >❔</span> ",
             max_width=5,
         )
 
@@ -170,6 +191,82 @@ class ActiveLearningSettings(param.Parameterized):
             "<span data-toggle='tooltip' title='If enabled, this can improve the performance of your model, however will require you to scale all new data with the produced scaler. This scaler will be saved in your model directory.' style='border-radius: 15px;padding: 5px; background: #5e5e5e; ' >❔</span> ",
             max_width=5,
         )
+
+        labelled_data = {}
+
+        orig_labelled_data = {}
+        if os.path.exists("data/test_set.json"):
+            with open("data/test_set.json", "r") as json_file:
+                orig_labelled_data = json.load(json_file)
+
+        labelled_data = {}
+
+        for id in list(orig_labelled_data.keys()):
+            if orig_labelled_data[id] != -1:
+                labelled_data[id] = orig_labelled_data[id]
+
+        total_labelled = len(list(labelled_data.keys()))
+
+        if total_labelled == 0:
+            self.test_set_checkbox = pn.widgets.Checkbox(
+                name="Should data/test_set.json be used as the test set? [DISABLED: 0 LABELLED DATA]",
+                disabled=True,
+            )
+
+        elif total_labelled < 500:
+            self.test_set_checkbox = pn.widgets.Checkbox(
+                name=f"Should data/test_set.json be the used test set? [currently labelled: {total_labelled} - RECOMMENDED >500]"
+            )
+        else:
+            self.test_set_checkbox = pn.widgets.Checkbox(
+                name=f"Should data/test_set.json be the used test set? [currently labelled: {total_labelled}]"
+            )
+
+        self.exclude_unknown_labels_checkbox = pn.widgets.Checkbox(
+            name="Should unknown labels [-1] be removed from training set?",
+            value=True,
+        )
+        self._exclude_unknown_labels_tooltip = pn.pane.HTML(
+            "<span data-toggle='tooltip' title='If enabled, this will remove the unknown labels from train, val and test sets. By not removing unknown labels you will have more data, however your accuracy metrics will be affected.' style='border-radius: 15px;padding: 5px; background: #5e5e5e; ' >❔</span> ",
+            max_width=5,
+        )
+
+    def _verify_valid_selection_cb(self, event):
+
+        selected_labels = self.label_selector.value
+        selected_features = self.feature_selector.value
+
+        print(selected_features)
+        print(selected_labels)
+
+        exclude_labels = False
+        confirm_settings = False
+
+        if len(selected_labels) < 2:
+            self.exclude_labels_checkbox.name = (
+                "Should remaining labels be removed from Active Learning datasets? "
+                + " [DISABLED: Atleast 2 labels must be selected]"
+            )
+            exclude_labels = True
+
+        if len(selected_features) < 2:
+            confirm_settings = True
+            self.confirm_settings_button.name = "Atleast 2 features must be selected"
+
+        if not exclude_labels:
+            self.exclude_labels_checkbox.name = (
+                "Should remaining labels be removed from Active Learning datasets?"
+            )
+
+        if not confirm_settings:
+            self.confirm_settings_button.name = "Confirm Settings"
+
+        self.confirm_settings_button.disabled = confirm_settings
+        self.exclude_labels_checkbox.disabled = exclude_labels
+
+        self._update_default_var_lists()
+
+        self.panel()
 
     def update_data(self, dataframe=None):
         """Update the classes local copy of the dataset.
@@ -190,12 +287,19 @@ class ActiveLearningSettings(param.Parameterized):
         if self.df is not None:
 
             labels = config.settings["labels"]
+            if -1 in labels:
+                labels.remove(-1)
             options = []
             for label in labels:
                 options.append(config.settings["labels_to_strings"][f"{label}"])
             self.label_selector.options = options
 
-            self.feature_selector.options = list(self.df.columns)
+            features = list(self.df.columns)
+
+            features.remove(config.settings["id_col"])
+            features.remove(config.settings["label_col"])
+
+            self.feature_selector.options = features
 
     def _add_feature_selector_cb(self, event):
 
@@ -212,18 +316,63 @@ class ActiveLearningSettings(param.Parameterized):
                 self.feature_generator_selected, columns=["oper", "n"]
             )
 
+        self._update_default_var_lists()
+
+    def _update_default_var_lists(self):
+
+        selected_features = self.feature_selector.value
+
+        config.settings["features_for_training"] = selected_features
+
+        if selected_features == []:
+            return
+        else:
+
+            oper_dict = feature_generation.get_oper_dict()
+
+            for generator in self.feature_generator_selected:
+
+                oper = generator[0]
+                n = generator[1]
+
+                _, generated_features = oper_dict[oper](
+                    pd.DataFrame(columns=selected_features), n
+                )
+                selected_features = selected_features + generated_features
+
+        self.default_x_variable.options = selected_features
+        self.default_y_variable.options = selected_features
+
     def _remove_feature_selector_cb(self, event):
         self.feature_generator_selected = self.feature_generator_selected[:-1]
         self._feature_generator_dataframe.value = pd.DataFrame(
             self.feature_generator_selected, columns=["oper", "n"]
         )
 
+        self._update_default_var_lists()
+
+    def get_default_variables(self):
+
+        return (
+            self.default_x_variable.value,
+            self.default_y_variable.value,
+        )
+
     def _confirm_settings_cb(self, event):
         print("Saving settings...")
 
+        config.settings["default_vars"] = self.get_default_variables()
         config.settings["labels_to_train"] = self.label_selector.value
         config.settings["features_for_training"] = self.feature_selector.value
-        config.settings["exclude_labels"] = self.exclude_labels_checkbox.value
+
+        if not self.exclude_labels_checkbox.disabled:
+            config.settings["exclude_labels"] = self.exclude_labels_checkbox.value
+        else:
+            config.settings["exclude_labels"] = False
+
+        config.settings[
+            "exclude_unknown_labels"
+        ] = self.exclude_unknown_labels_checkbox.value
 
         unclassified_labels = []
         for label in self.label_selector.options:
@@ -233,6 +382,7 @@ class ActiveLearningSettings(param.Parameterized):
         config.settings["unclassified_labels"] = unclassified_labels
         config.settings["scale_data"] = self.scale_features_checkbox.value
         config.settings["feature_generation"] = self.feature_generator_selected
+        config.settings["test_set_file"] = self.test_set_checkbox.value
         config.settings["confirmed"] = True
 
         self.completed = True
@@ -286,11 +436,28 @@ class ActiveLearningSettings(param.Parameterized):
                 pn.Row(
                     self.label_selector,
                     self.feature_selector,
-                    height=200,
                     sizing_mode="stretch_width",
+                    max_height=150,
                 ),
-                pn.Row(self.exclude_labels_checkbox, self._exclude_labels_tooltip),
-                pn.Row(self.scale_features_checkbox, self._scale_features_tooltip),
+                pn.Row(
+                    self.exclude_unknown_labels_checkbox,
+                    self._exclude_unknown_labels_tooltip,
+                    max_height=35,
+                ),
+                pn.Row(
+                    self.exclude_labels_checkbox,
+                    self._exclude_labels_tooltip,
+                    max_height=35,
+                ),
+                pn.Row(
+                    self.scale_features_checkbox,
+                    self._scale_features_tooltip,
+                    max_height=35,
+                ),
+                pn.Row(
+                    self.test_set_checkbox,
+                    max_height=35,
+                ),
                 pn.Row(
                     self.feature_generator,
                     self.feature_generator_number,
@@ -301,8 +468,9 @@ class ActiveLearningSettings(param.Parameterized):
                     self._feature_generator_dataframe,
                     sizing_mode="stretch_width",
                 ),
+                pn.Row(self.default_x_variable, self.default_y_variable),
                 pn.Row(self.confirm_settings_button, max_height=30),
-                pn.Row(pn.Spacer(height=10)),
+                pn.Row(pn.Spacer(height=30)),
             )
 
         return self.column
