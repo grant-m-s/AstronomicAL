@@ -1264,7 +1264,11 @@ class ActiveLearningModel:
             with open("data/test_set.json", "r") as json_file:
                 labels = json.load(json_file)
 
-        ids_test = list(labels.keys())
+        ids_test = []
+
+        for id_key in list(labels.keys()):
+            if labels[id_key] != -1:
+                ids_test.append(id_key)
 
         ids_trained_on = []
 
@@ -1613,6 +1617,8 @@ class ActiveLearningModel:
         }
 
         test_conf = confusion_matrix(self.y_test, test_pred)
+
+        print(test_conf)
 
         self.num_points_list.append(self.curr_num_points)
 
