@@ -10,7 +10,7 @@ An Interactive Dashboard for Active Learning in Astronomy.
 .. image:: https://codecov.io/gh/grant-m-s/astronomicAL/branch/master/graph/badge.svg?token=TCO9J2AD1Z
     :target: https://codecov.io/gh/grant-m-s/astronomicAL
 
-astronomicAL is an iteractive dashboard to enable Astronomy-based researchers to gain valuable insight into their data by showing them the key information they require to make accurate classifications of each source. Combining the use of the Panel_, Bokeh_, modAL_ and `SciKit Learn`_ packages, astronomicAL enables researchers to take full advantage of the benefits of Active Learning, high accuracy models using just a fraction of the total data, without the requirement of being well versed in the Machine Learning theory or implementations.
+AstronomicAL is an iteractive dashboard to enable Astronomy-based researchers to gain valuable insight into their data by showing them the key information they require to make accurate classifications of each source. Combining the use of the Panel_, Bokeh_, modAL_ and `SciKit Learn`_ packages, astronomicAL enables researchers to take full advantage of the benefits of Active Learning, high accuracy models using just a fraction of the total data, without the requirement of being well versed in the Machine Learning theory or implementations.
 
 .. _Panel: https://panel.holoviz.org/
 .. _Bokeh: https://docs.bokeh.org/en/latest/index.html
@@ -43,8 +43,6 @@ AstronomicAL provides both an example dataset and an example configuration file 
 To begin training you simply have to select **Load Custom Configuration** checkbox and select your config file. Here we have chosen to use the :code:`example_config.json` file.
 
 The **Load Config Select** option allows use to choose the extent to which to reload the configuration.
-
-For a thorough tutorial on the training process, see :ref:`Training a Classifier: From Start to Finish <Training a Classifier: From Start to Finish>`.
 
 .. raw:: html
 
@@ -82,6 +80,7 @@ See the :ref:`citing <citing>` page for instructions about referencing and citin
     :caption: Tutorials
 
     content/tutorials/active_learning.rst
+    content/tutorials/labelling_test_set.rst
     content/tutorials/plots.rst
     content/tutorials/feature_generation.rst
 
