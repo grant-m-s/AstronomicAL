@@ -38,9 +38,9 @@ class SettingsDashboard:
 
         self._initialise_widgets(main)
 
-        self.create_pipeline(src)
+        self.create_mode_selection_menu()
 
-        self._adjust_pipeline_layout()
+        self.pipeline_initialised = False
 
     def _initialise_widgets(self, main):
         self._close_settings_button = pn.widgets.Button(
@@ -50,13 +50,54 @@ class SettingsDashboard:
             partial(self._close_settings_cb, main=main)
         )
 
-    def create_pipeline(self, src):
+        self.select_AL_mode_button = pn.widgets.Button(name="Active Learning Mode")
+
+        self.select_AL_mode_button.on_click(
+            partial(self._create_pipeline_cb, mode="AL", main=main)
+        )
+
+        self.select_labelling_mode_button = pn.widgets.Button(name="Labelling Mode")
+
+        self.select_labelling_mode_button.on_click(
+            partial(self._create_pipeline_cb, mode="Labelling", main=main)
+        )
+
+    def _create_pipeline_cb(self, event, mode, main):
+        main.mode = mode
+        config.mode = mode
+        self.create_pipeline(mode=mode)
+
+    def create_mode_selection_menu(self):
+        layout = pn.Card(
+            pn.Row(
+                pn.Column(
+                    pn.pane.PNG(
+                        "images/classification.png",
+                        width=250,
+                        height=250,
+                        margin=(0, 0, 0, 50),
+                    ),
+                    pn.Row(self.select_labelling_mode_button, max_height=30),
+                ),
+                pn.Column(
+                    pn.pane.PNG(
+                        "images/cluster.png",
+                        width=250,
+                        height=250,
+                        margin=(0, 0, 0, 50),
+                    ),
+                    pn.Row(self.select_AL_mode_button, max_height=30),
+                ),
+            )
+        )
+
+        return layout
+
+    def create_pipeline(self, mode):
         """Create the pipeline of setting stages.
 
         Parameters
         ----------
-        src : ColumnDataSource
-            The shared data source which holds the current selected source.
 
         Returns
         -------
@@ -64,18 +105,48 @@ class SettingsDashboard:
 
         """
         self.pipeline = pn.pipeline.Pipeline()
-        self.pipeline.add_stage(
-            "Select Your Data", DataSelection(src), ready_parameter="ready"
-        ),
-        self.pipeline.add_stage(
-            "Assign Parameters", ParameterAssignment(), ready_parameter="ready"
-        ),
-        self.pipeline.add_stage(
-            "Active Learning Settings",
-            ActiveLearningSettings(self._close_settings_button),
-        )
 
-    def _adjust_pipeline_layout(self):
+        print(f"mode is {mode}")
+
+        valid_mode = True
+
+        if mode == "AL":
+            self.pipeline.add_stage(
+                "Select Your Data",
+                DataSelection(self.src, mode=mode),
+                ready_parameter="ready",
+            ),
+            self.pipeline.add_stage(
+                "Assign Parameters", ParameterAssignment(), ready_parameter="ready"
+            ),
+            self.pipeline.add_stage(
+                "Active Learning Settings",
+                ActiveLearningSettings(self._close_settings_button, mode=mode),
+            )
+        elif mode == "Labelling":
+            self.pipeline.add_stage(
+                "Select Your Data",
+                DataSelection(self.src, mode=mode),
+                ready_parameter="ready",
+            ),
+            self.pipeline.add_stage(
+                "Assign Parameters", ParameterAssignment(), ready_parameter="ready"
+            ),
+            self.pipeline.add_stage(
+                "Active Learning Settings",
+                ActiveLearningSettings(self._close_settings_button, mode=mode),
+            )
+        else:
+            valid_mode = False
+
+        if valid_mode:
+            self._adjust_pipeline_widgets()
+            self.pipeline_initialised = True
+
+        self.panel()
+
+    def _adjust_pipeline_widgets(self):
+
         self.pipeline.layout[0][0][0].sizing_mode = "fixed"
 
         self.pipeline.layout[0][0][0].max_height = 75
@@ -107,7 +178,7 @@ class SettingsDashboard:
             "Assign Parameters"
         ].get_label_column()
         updated_settings["default_vars"] = self.pipeline[
-            "Assign Parameters"
+            "Active Learning Settings"
         ].get_default_variables()
         updated_settings["label_colours"] = self.pipeline[
             "Assign Parameters"
@@ -131,28 +202,31 @@ class SettingsDashboard:
         self._close_settings_button.disabled = True
         self._close_settings_button.name = "Setting up training panels..."
 
-        main.set_contents(updated="Active Learning")
+        if config.mode == "AL":
+            main.set_contents(updated="Active Learning")
+        elif config.mode == "Labelling":
+            main.set_contents(updated="Labelling")
 
         print("\nswitched contents\n")
 
     def _stage_previous_cb(self, event):
 
         self._pipeline_stage -= 1
+        self.panel()
 
     def _stage_next_cb(self, event):
 
         if self.df is None:
             print("updating Settings df")
-            self.df = self.pipeline["Select Your Data"].get_df()
+            self.df = config.main_df
 
         pipeline_list = list(self.pipeline._stages)
-        print("STAGE:")
-        current_stage = pipeline_list[self._pipeline_stage]
 
         next_stage = pipeline_list[self._pipeline_stage + 1]
         self.pipeline[next_stage].update_data(dataframe=self.df)
 
         self._pipeline_stage += 1
+        self.panel()
 
     def panel(self):
         """Render the current view.
@@ -164,34 +238,37 @@ class SettingsDashboard:
             parent Dashboard.
 
         """
-        if self.pipeline["Active Learning Settings"].is_complete():
-            self._close_settings_button.disabled = False
 
-        self.row[0] = pn.Card(
-            pn.Column(
-                pn.Row(
-                    self.pipeline.title,
-                ),
-                pn.Row(self.pipeline.stage),
-                pn.Row(
-                    pn.layout.HSpacer(),
-                    pn.layout.HSpacer(),
-                    pn.layout.HSpacer(),
-                    self.pipeline.buttons,
-                    max_height=50,
-                    max_width=500,
-                ),
-            ),
-            header=pn.Row(
-                pn.widgets.StaticText(
-                    name="Settings Panel",
-                    value="Please choose the appropriate settings for your data",
-                ),
-                pn.layout.HSpacer(max_height=30),
-                pn.layout.HSpacer(max_height=30),
-                self._close_settings_button,
-            ),
-            collapsible=False,
-        )
+        if not self.pipeline_initialised:
+            self.row[0] = self.create_mode_selection_menu()
+            return self.row
 
-        return self.row
+        else:
+
+            if self.pipeline["Active Learning Settings"].is_complete():
+                self._close_settings_button.disabled = False
+
+            self.row[0] = pn.Card(
+                pn.Column(
+                    pn.Row(self.pipeline.stage),
+                    pn.Row(
+                        pn.layout.HSpacer(),
+                        self.pipeline.buttons,
+                        max_height=50,
+                        max_width=500,
+                    ),
+                ),
+                header=pn.Row(
+                    pn.widgets.StaticText(
+                        name="Settings Panel",
+                        value="Please choose the appropriate settings for your data",
+                    ),
+                    pn.pane.Markdown(
+                        "### " + list(self.pipeline._stages)[self._pipeline_stage],
+                    ),
+                    self._close_settings_button,
+                ),
+                collapsible=False,
+            )
+
+            return self.row

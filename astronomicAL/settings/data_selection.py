@@ -2,8 +2,12 @@ from astronomicAL.utils.optimise import optimise
 from astropy.table import Table
 from bokeh.models import TextAreaInput
 from bokeh.models.callbacks import CustomJS
+from functools import partial
 
 import astronomicAL.config as config
+
+import glob
+import json
 import numpy as np
 import pandas as pd
 import panel as pn
@@ -31,22 +35,40 @@ class DataSelection(param.Parameterized):
 
     """
 
-    dataset = param.FileSelector(path="data/*.fits")
-    config_file = param.FileSelector(path="configs/*.json")
+    dataset = param.FileSelector(path="data/*")
+    config_file = param.ObjectSelector(default="", objects=[""])
+    load_config_select = param.ObjectSelector(default="", objects=[""])
 
     load_layout_check = param.Boolean(False, label="Load Custom Configuration?")
 
     ready = param.Boolean(default=False)
 
-    def __init__(self, src):
+    def __init__(self, src, mode):
         super(DataSelection, self).__init__()
 
-        self._initialise_widgets()
+        self.mode = mode
         self.src = src
+        self.error_message = ""
+
+        self._initialise_widgets()
 
         self.panel_col = pn.Column("Loading...")
 
     def _initialise_widgets(self):
+
+        config_files = self._get_config_files()
+        load_config_options = self._init_load_config_options()
+
+        config_files = [""] + config_files
+        load_config_options = [""] + load_config_options
+
+        self.param.load_config_select.objects = load_config_options
+        self.param.config_file.objects = config_files
+        self.param.load_config_select.default = load_config_options[0]
+        self.param.config_file.default = config_files[0]
+        self.load_config_select = load_config_options[0]
+        self.config_file = config_files[0]
+
         print("CONFIG:")
         print(config.layout_file)
         self.memory_optimisation_check = pn.widgets.Checkbox(
@@ -57,55 +79,104 @@ class DataSelection(param.Parameterized):
             max_width=5,
         )
 
-        self.load_config_select = pn.widgets.Select(
-            name="How Much Would You Like To Load?",
-            options=[
-                "Only load layout. Let me choose all my own settings",
-                "Load all settings but let me train the model from scratch.",
-                "Load all settings and train model with provided labels.",
-            ],
-            max_width=400,
-        )
-
         self.load_data_button = pn.widgets.Button(
             name="Load Data File", max_height=30, margin=(45, 0, 0, 0)
         )
         self.load_data_button.on_click(self._load_data_cb)
 
         self.load_data_button_js = pn.widgets.Button(
-            name="Load Configuration File", max_height=30, margin=(45, 0, 0, 0)
+            name="Select values from dropdown to continue",
+            max_height=30,
+            margin=(45, 0, 0, 0),
+            button_type="success",
+            disabled=True,
         )
 
-        self.load_data_button_js.js_on_click(
-            args={"button": self.load_data_button_js},
-            code="""
-                console.log('Reloading...')
-                button.label = 'Loading New Layout - Please Wait, This may take a minute.'
-                button.disabled = true
+        self.load_data_button_js.jscallback(
+            clicks="""
 
-                var i;
-                for (i = 0; i < 25; i++) {
-                  if (i % 3 === 0) {
-                      setTimeout(() => {  button.label = 'Loading New Layout - Please Wait, This may take a minute.'; }, 500*i);
-                   } else if (i % 3 === 1) {
-                      setTimeout(() => {  button.label = 'Loading New Layout - Please Wait, This may take a minute..'; }, 500*i);
-                   } else {
-                      setTimeout(() => {  button.label = 'Loading New Layout - Please Wait, This may take a minute...'; }, 500*i);
-                   }
-                }
+                        console.log('Reloading...')
 
-                setTimeout(() => {  location.reload(); }, 2000);
+                        button.label = 'Loading New Layout - Please Wait, This may take a minute.'
+                        button.disabled = true
 
-                """,
+                        var i;
+                        for (i = 0; i < 40; i++) {
+                          if (i % 3 === 0) {
+                              setTimeout(() => {  button.label = 'Loading New Layout - Please Wait, This may take a minute.'; }, 500*i);
+                           } else if (i % 3 === 1) {
+                              setTimeout(() => {  button.label = 'Loading New Layout - Please Wait, This may take a minute..'; }, 500*i);
+                           } else {
+                              setTimeout(() => {  button.label = 'Loading New Layout - Please Wait, This may take a minute...'; }, 500*i);
+                           }
+                        }
+                        setTimeout(() => {  location.reload(); }, 2000);
+                    """,
+            args=dict(button=self.load_data_button_js),
         )
 
-        self.load_data_button_js.on_click(self._update_layout_file_cb)
+    def _get_config_files(self):
+        files = glob.glob("configs/*.json")
+        return files
 
-    def _update_layout_file_cb(self, event):
+    def _init_load_config_options(self):
+        if self.mode == "AL":
+            options = [
+                "Only load layout. Let me choose all my own settings",
+                "Load all settings but let me train the model from scratch.",
+                "Load all settings and train model with provided labels.",
+            ]
+
+        elif self.mode == "Labelling":
+            options = [
+                "Only load layout. Let me choose all my own settings",
+                "Load all settings and begin labelling data.",
+            ]
+        else:
+            options = []
+
+        return options
+
+    @param.depends("load_config_select", "config_file", watch=True)
+    def _update_layout_file_cb(self):
+
+        if (self.load_config_select == "") or (self.config_file == ""):
+            self.error_message = ""
+            self.load_data_button_js.name = "Select values from dropdown to continue"
+            self.load_data_button_js.disabled = True
+            return
+
+        self.load_data_button_js.name = "Verifying Config..."
+
         config.layout_file = self.config_file
-        config.settings["config_load_level"] = list(
-            self.load_config_select.options
-        ).index(self.load_config_select.value)
+        config.settings["config_load_level"] = (
+            list(self.param.load_config_select.objects).index(self.load_config_select)
+            - 1
+        )
+
+        with open(config.layout_file) as layout_file:
+            curr_config_file = json.load(layout_file)
+
+        from astronomicAL.utils.load_config import (
+            verify_import_config,
+        )  # causes circular import error at top
+
+        has_error, error_message = verify_import_config(curr_config_file)
+
+        if has_error:
+            print(f"has error - {error_message}")
+            self.error_message = error_message
+            self.load_data_button_js.name = "Unable to load config"
+            self.load_data_button_js.disabled = True
+        else:
+            print(f"no error - {error_message}")
+            self.error_message = "verified"
+            self.error_message = ""
+            self.load_data_button_js.name = "Load Data"
+            self.load_data_button_js.disabled = False
+
+        self.panel_col = self.panel()
+
         print(f"Config load level: {config.settings['config_load_level']}")
         print(f"INSIDE CB: {config.layout_file}")
 
@@ -124,7 +195,10 @@ class DataSelection(param.Parameterized):
 
         """
         start = time.time()
-        fits_table = Table.read(filename, format="fits")
+
+        ext = filename[filename.rindex(".") + 1 :]
+        fits_table = Table.read(filename, format=f"{ext}")
+
         end = time.time()
         print(f"Loading FITS Table {end - start}")
         start = time.time()
@@ -138,10 +212,22 @@ class DataSelection(param.Parameterized):
         if optimise_data is None:
             config.settings["optimise_data"] = self.memory_optimisation_check.value
             if self.memory_optimisation_check.value:
+                approx_time = np.ceil(
+                    (np.array(fits_table).shape[0] * len(names)) / 200000000
+                )
+                self.load_data_button.name = (
+                    f"Optimising... Approx time: {int(approx_time)} minute(s)"
+                )
                 df = optimise(fits_table[names].to_pandas())
             else:
                 df = fits_table[names].to_pandas()
         elif optimise_data:
+            approx_time = np.ceil(
+                (np.array(fits_table).shape[0] * len(names)) / 200000000
+            )
+            self.load_data_button.name = (
+                f"Optimising... Approx time: {int(approx_time)} minute(s)"
+            )
             df = optimise(fits_table[names].to_pandas())
         else:
             df = fits_table[names].to_pandas()
@@ -149,11 +235,14 @@ class DataSelection(param.Parameterized):
         print(f"Convert to Pandas {end - start}")
 
         start = time.time()
-        for col, dtype in df.dtypes.items():
-            if dtype == np.object:  # Only process byte object columns.
-                df[col] = df[col].apply(lambda x: x.decode("utf-8"))
+        if ext == "fits":
+            for col, dtype in df.dtypes.items():
+                if dtype == np.object:  # Only process byte object columns.
+                    df[col] = df[col].apply(lambda x: x.decode("utf-8"))
         end = time.time()
         print(f"Pandas object loop {end - start}")
+
+        df = self.add_ra_dec_col(df)
 
         return df
 
@@ -175,6 +264,27 @@ class DataSelection(param.Parameterized):
         self._initialise_src()
         self.ready = True
         self.load_data_button.name = "File Loaded."
+
+    def add_ra_dec_col(self, df):
+
+        new_df = df
+        has_loc = True
+        ra = None
+        dec = None
+        for col in list(new_df.columns):
+            if col.upper() == "RA":
+                ra = col
+            if col.upper() == "DEC":
+                dec = col
+
+        if (ra is None) or (dec is None):
+            has_loc = False
+
+        if has_loc:
+
+            new_df["ra_dec"] = df[ra].astype(str) + "," + df[dec].astype(str)
+
+        return new_df
 
     def get_df(self):
         """Return the dataframe that has been loaded in from a file.
@@ -208,33 +318,47 @@ class DataSelection(param.Parameterized):
             settings Dashboard.
 
         """
+        if (self.error_message == "") or (self.error_message == "verified"):
+            message = "Welcome!"
+        else:
+            message = pn.pane.Markdown(self.error_message)
+
         if self.load_layout_check:
-            self.panel_col[0] = pn.Column(
-                pn.layout.VSpacer(max_height=10),
-                pn.Row(self.param.load_layout_check, max_height=30),
-                pn.Row(self.param.config_file, max_width=300),
-                pn.Row(self.load_config_select),
-                pn.Row(self.load_data_button_js),
+            self.panel_col[0] = pn.Row(
+                pn.Column(
+                    pn.layout.VSpacer(max_height=10),
+                    pn.Row(self.param.load_layout_check, max_height=30),
+                    pn.Row(self.param.config_file, max_width=300),
+                    pn.Row(self.param.load_config_select),
+                    pn.Row(self.load_data_button_js),
+                    pn.layout.VSpacer(),
+                    pn.layout.VSpacer(),
+                    pn.layout.VSpacer(),
+                ),
+                pn.Row(message, scroll=True, max_height=300),
                 pn.layout.VSpacer(),
                 pn.layout.VSpacer(),
                 pn.layout.VSpacer(),
             )
 
         else:
-            self.panel_col[0] = pn.Column(
-                pn.layout.VSpacer(max_height=10),
-                pn.Row(self.param.load_layout_check, max_height=30),
-                pn.Row(self.param.dataset, max_width=300),
-                pn.Row(
-                    self.memory_optimisation_check,
-                    self._memory_opt_tooltip,
+            self.panel_col[0] = pn.Row(
+                pn.Column(
+                    pn.layout.VSpacer(max_height=10),
+                    pn.Row(self.param.load_layout_check, max_height=30),
+                    pn.Row(self.param.dataset, max_width=300),
+                    pn.Row(
+                        self.memory_optimisation_check,
+                        self._memory_opt_tooltip,
+                        max_width=300,
+                    ),
+                    pn.Row(self.load_data_button, max_width=300),
+                    pn.layout.VSpacer(max_width=300),
+                    pn.layout.VSpacer(max_width=300),
+                    pn.layout.VSpacer(max_width=300),
                     max_width=300,
                 ),
-                pn.Row(self.load_data_button, max_width=300),
-                pn.layout.VSpacer(max_width=300),
-                pn.layout.VSpacer(max_width=300),
-                pn.layout.VSpacer(max_width=300),
-                max_width=300,
+                pn.Row("Welcome!"),
             )
 
         return self.panel_col
