@@ -1,12 +1,14 @@
 import os, sys, inspect
 
 sys.path.insert(1, os.path.join(sys.path[0], "../"))
+import numpy as np
 import pandas as pd
 import panel as pn
 
-from astronomicAL.active_learning.active_learning import ActiveLearningTab
+from astronomicAL.active_learning.active_learning import ActiveLearningModel
 from astronomicAL.dashboard.active_learning import ActiveLearningDashboard
 from astronomicAL.dashboard.dashboard import Dashboard
+from astronomicAL.dashboard.labelling import LabellingDashboard
 from astronomicAL.dashboard.menu import MenuDashboard
 from astronomicAL.dashboard.plot import PlotDashboard
 from astronomicAL.dashboard.selected_source import SelectedSourceDashboard
@@ -28,11 +30,13 @@ from astronomicAL.utils import load_config
 from astronomicAL.utils import save_config
 from astronomicAL.utils import optimise
 from bokeh.models import ColumnDataSource
+from bokeh.models import TextAreaInput
 from bokeh.document import Document
 from pyviz_comms import Comm
 
 import astronomicAL.config as config
 import pytest
+import json
 
 
 @pytest.fixture
@@ -70,7 +74,7 @@ class TestSettings:
         data = []
 
         for i in range(100):
-            data.append([i, i % 3, i, i, i])
+            data.append([str(i), i % 3, i, i, i])
 
         df = pd.DataFrame(data, columns=list("ABCDE"))
 
@@ -150,81 +154,81 @@ class TestSettings:
             "E",
         ]
 
-    def test_param_assignment_default_x_variable_contains_correct_columns_on_init(self):
-
-        df = self._create_test_df()
-
-        paramAssignment = ParameterAssignment()
-
-        assert paramAssignment.param.default_x_variable.objects == ["default"]
-
-    def test_param_assignment_default_x_variable_contains_correct_columns_on_update_no_df(
-        self,
-    ):
-
-        df = self._create_test_df()
-
-        paramAssignment = ParameterAssignment()
-
-        paramAssignment.update_data()
-
-        assert paramAssignment.param.default_x_variable.objects == ["default"]
-
-    def test_param_assignment_default_x_variable_contains_correct_columns_on_update_with_df(
-        self,
-    ):
-
-        df = self._create_test_df()
-
-        paramAssignment = ParameterAssignment()
-
-        paramAssignment.update_data(df)
-
-        assert paramAssignment.param.default_x_variable.objects == [
-            "A",
-            "B",
-            "C",
-            "D",
-            "E",
-        ]
-
-    def test_param_assignment_default_y_variable_contains_correct_columns_on_init(self):
-
-        df = self._create_test_df()
-
-        paramAssignment = ParameterAssignment()
-
-        assert paramAssignment.param.default_y_variable.objects == ["default"]
-
-    def test_param_assignment_default_y_variable_contains_correct_columns_on_update_no_df(
-        self,
-    ):
-
-        df = self._create_test_df()
-
-        paramAssignment = ParameterAssignment()
-
-        paramAssignment.update_data()
-
-        assert paramAssignment.param.default_y_variable.objects == ["default"]
-
-    def test_param_assignment_default_y_variable_contains_correct_columns_on_update_with_df(
-        self,
-    ):
-
-        df = self._create_test_df()
-
-        paramAssignment = ParameterAssignment()
-
-        paramAssignment.update_data(df)
-
-        assert paramAssignment.param.default_y_variable.objects == [
-            "A",
-            "B",
-            "C",
-            "D",
-            "E",
-        ]
+    # def test_param_assignment_default_x_variable_contains_correct_columns_on_init(self):
+    #
+    #     df = self._create_test_df()
+    #
+    #     paramAssignment = ParameterAssignment()
+    #
+    #     assert paramAssignment.param.default_x_variable.objects == ["default"]
+    #
+    # def test_param_assignment_default_x_variable_contains_correct_columns_on_update_no_df(
+    #     self,
+    # ):
+    #
+    #     df = self._create_test_df()
+    #
+    #     paramAssignment = ParameterAssignment()
+    #
+    #     paramAssignment.update_data()
+    #
+    #     assert paramAssignment.param.default_x_variable.objects == ["default"]
+    #
+    # def test_param_assignment_default_x_variable_contains_correct_columns_on_update_with_df(
+    #     self,
+    # ):
+    #
+    #     df = self._create_test_df()
+    #
+    #     paramAssignment = ParameterAssignment()
+    #
+    #     paramAssignment.update_data(df)
+    #
+    #     assert paramAssignment.param.default_x_variable.objects == [
+    #         "A",
+    #         "B",
+    #         "C",
+    #         "D",
+    #         "E",
+    #     ]
+    #
+    # def test_param_assignment_default_y_variable_contains_correct_columns_on_init(self):
+    #
+    #     df = self._create_test_df()
+    #
+    #     paramAssignment = ParameterAssignment()
+    #
+    #     assert paramAssignment.param.default_y_variable.objects == ["default"]
+    #
+    # def test_param_assignment_default_y_variable_contains_correct_columns_on_update_no_df(
+    #     self,
+    # ):
+    #
+    #     df = self._create_test_df()
+    #
+    #     paramAssignment = ParameterAssignment()
+    #
+    #     paramAssignment.update_data()
+    #
+    #     assert paramAssignment.param.default_y_variable.objects == ["default"]
+    #
+    # def test_param_assignment_default_y_variable_contains_correct_columns_on_update_with_df(
+    #     self,
+    # ):
+    #
+    #     df = self._create_test_df()
+    #
+    #     paramAssignment = ParameterAssignment()
+    #
+    #     paramAssignment.update_data(df)
+    #
+    #     assert paramAssignment.param.default_y_variable.objects == [
+    #         "A",
+    #         "B",
+    #         "C",
+    #         "D",
+    #         "E",
+    #     ]
 
     def test_param_assignment_greater_than_20_labels_dont_proceed(self):
 
@@ -236,8 +240,6 @@ class TestSettings:
 
         paramAssignment.id_column = "A"
         paramAssignment.label_column = "E"
-        paramAssignment.default_x_variable = "C"
-        paramAssignment.default_y_variable = "D"
 
         paramAssignment._update_labels_cb()
 
@@ -253,8 +255,6 @@ class TestSettings:
 
         paramAssignment.id_column = "A"
         paramAssignment.label_column = "B"
-        paramAssignment.default_x_variable = "C"
-        paramAssignment.default_y_variable = "D"
 
         paramAssignment._update_labels_cb()
 
@@ -270,8 +270,6 @@ class TestSettings:
 
         paramAssignment.id_column = "A"
         paramAssignment.label_column = "B"
-        paramAssignment.default_x_variable = "C"
-        paramAssignment.default_y_variable = "D"
 
         paramAssignment._update_labels_cb()
 
@@ -289,8 +287,6 @@ class TestSettings:
 
         paramAssignment.id_column = "A"
         paramAssignment.label_column = "B"
-        paramAssignment.default_x_variable = "C"
-        paramAssignment.default_y_variable = "D"
 
         paramAssignment._update_labels_cb()
 
@@ -315,8 +311,6 @@ class TestSettings:
 
         paramAssignment.id_column = "A"
         paramAssignment.label_column = "B"
-        paramAssignment.default_x_variable = "C"
-        paramAssignment.default_y_variable = "D"
 
         paramAssignment._update_labels_cb()
 
@@ -342,8 +336,6 @@ class TestSettings:
 
         paramAssignment.id_column = "A"
         paramAssignment.label_column = "B"
-        paramAssignment.default_x_variable = "C"
-        paramAssignment.default_y_variable = "D"
 
         paramAssignment._update_labels_cb()
 
@@ -361,8 +353,6 @@ class TestSettings:
 
         paramAssignment.id_column = "A"
         paramAssignment.label_column = "B"
-        paramAssignment.default_x_variable = "C"
-        paramAssignment.default_y_variable = "D"
 
         paramAssignment._update_labels_cb()
 
@@ -387,8 +377,6 @@ class TestSettings:
 
         paramAssignment.id_column = "A"
         paramAssignment.label_column = "B"
-        paramAssignment.default_x_variable = "C"
-        paramAssignment.default_y_variable = "D"
 
         paramAssignment._update_labels_cb()
 
@@ -414,8 +402,6 @@ class TestSettings:
 
         paramAssignment.id_column = "A"
         paramAssignment.label_column = "B"
-        paramAssignment.default_x_variable = "C"
-        paramAssignment.default_y_variable = "D"
 
         paramAssignment._update_labels_cb()
 
@@ -423,13 +409,13 @@ class TestSettings:
 
         assert config.settings["id_col"] == "A"
         assert config.settings["label_col"] == "B"
-        assert config.settings["default_vars"] == ("C", "D")
+        # assert config.settings["default_vars"] == ("C", "D")
 
     def test_AL_settings_correct_labels_on_init(self):
 
         df = self._create_test_df()
 
-        alSettings = ActiveLearningSettings(None)
+        alSettings = ActiveLearningSettings(None, mode="AL")
 
         assert alSettings.label_selector.options == []
         assert alSettings.label_selector.value == []
@@ -438,7 +424,7 @@ class TestSettings:
 
         df = self._create_test_df()
 
-        alSettings = ActiveLearningSettings(None)
+        alSettings = ActiveLearningSettings(None, mode="AL")
 
         assert alSettings.feature_selector.options == []
         assert alSettings.feature_selector.value == []
@@ -447,7 +433,7 @@ class TestSettings:
 
         df = self._create_test_df()
 
-        alSettings = ActiveLearningSettings(None)
+        alSettings = ActiveLearningSettings(None, mode="AL")
 
         alSettings.update_data(None)
 
@@ -458,7 +444,7 @@ class TestSettings:
 
         df = self._create_test_df()
 
-        alSettings = ActiveLearningSettings(None)
+        alSettings = ActiveLearningSettings(None, mode="AL")
 
         alSettings.update_data(None)
 
@@ -471,7 +457,7 @@ class TestSettings:
 
         labels = df[config.settings["label_col"]].astype(str).unique()
 
-        alSettings = ActiveLearningSettings(None)
+        alSettings = ActiveLearningSettings(None, mode="AL")
 
         alSettings.update_data(df)
 
@@ -482,24 +468,40 @@ class TestSettings:
 
         df = self._create_test_df()
 
-        features = df.columns
+        config.settings = {
+            "id_col": "A",
+            "label_col": "B",
+            "labels": [0, 1, 2],
+            "label_colours": {0: "#ffad0e", 1: "#0057ff", 2: "#a2a2a2"},
+            "labels_to_strings": {"0": "0", "1": "1", "2": "2"},
+            "strings_to_labels": {"0": 0, "1": 1, "2": 2},
+            "extra_info_cols": [
+                "C",
+            ],
+            "extra_image_cols": [],
+        }
 
-        alSettings = ActiveLearningSettings(None)
+        features = list(df.columns)
+
+        alSettings = ActiveLearningSettings(None, mode="AL")
 
         alSettings.update_data(df)
+
+        features.remove("A")
+        features.remove("B")
 
         assert alSettings.feature_selector.options == list(features)
         assert alSettings.feature_selector.value == []
 
     def test_AL_settings_check_is_complete_on_init(self):
 
-        alSettings = ActiveLearningSettings(None)
+        alSettings = ActiveLearningSettings(None, mode="AL")
 
         assert not alSettings.is_complete()
 
     def test_AL_settings_check_is_complete_on_update_no_df(self):
 
-        alSettings = ActiveLearningSettings(None)
+        alSettings = ActiveLearningSettings(None, mode="AL")
 
         alSettings.update_data(None)
 
@@ -509,7 +511,7 @@ class TestSettings:
 
         df = self._create_test_df()
 
-        alSettings = ActiveLearningSettings(None)
+        alSettings = ActiveLearningSettings(None, mode="AL")
 
         alSettings.update_data(df)
 
@@ -517,13 +519,13 @@ class TestSettings:
 
     def test_AL_settings_get_df_on_init(self):
 
-        alSettings = ActiveLearningSettings(None)
+        alSettings = ActiveLearningSettings(None, mode="AL")
 
         assert alSettings.get_df() is None
 
     def test_AL_settings_get_df_on_update_no_df(self):
 
-        alSettings = ActiveLearningSettings(None)
+        alSettings = ActiveLearningSettings(None, mode="AL")
 
         alSettings.update_data(None)
 
@@ -533,7 +535,7 @@ class TestSettings:
 
         df = self._create_test_df()
 
-        alSettings = ActiveLearningSettings(None)
+        alSettings = ActiveLearningSettings(None, mode="AL")
 
         alSettings.update_data(df)
 
@@ -541,7 +543,7 @@ class TestSettings:
 
     def test_AL_settings_correct_feature_generator_on_init(self):
 
-        alSettings = ActiveLearningSettings(None)
+        alSettings = ActiveLearningSettings(None, mode="AL")
 
         ans = feature_generation.get_oper_dict().keys()
 
@@ -549,7 +551,7 @@ class TestSettings:
 
     def test_AL_settings_correct_feature_generator_on_update_no_df(self):
 
-        alSettings = ActiveLearningSettings(None)
+        alSettings = ActiveLearningSettings(None, mode="AL")
 
         alSettings.update_data(None)
 
@@ -561,7 +563,7 @@ class TestSettings:
 
         df = self._create_test_df()
 
-        alSettings = ActiveLearningSettings(None)
+        alSettings = ActiveLearningSettings(None, mode="AL")
 
         alSettings.update_data(df)
 
@@ -572,7 +574,7 @@ class TestSettings:
 
         df = self._create_test_df()
 
-        alSettings = ActiveLearningSettings(None)
+        alSettings = ActiveLearningSettings(None, mode="AL")
 
         alSettings.update_data(df)
 
@@ -592,7 +594,7 @@ class TestSettings:
 
         df = self._create_test_df()
 
-        alSettings = ActiveLearningSettings(None)
+        alSettings = ActiveLearningSettings(None, mode="AL")
 
         alSettings.update_data(df)
 
@@ -623,7 +625,7 @@ class TestSettings:
 
         df = self._create_test_df()
 
-        alSettings = ActiveLearningSettings(None)
+        alSettings = ActiveLearningSettings(None, mode="AL")
 
         alSettings.update_data(df)
 
@@ -651,7 +653,7 @@ class TestSettings:
 
         df = self._create_test_df()
 
-        alSettings = ActiveLearningSettings(None)
+        alSettings = ActiveLearningSettings(None, mode="AL")
 
         alSettings.update_data(df)
 
@@ -693,7 +695,7 @@ class TestSettings:
 
         df = self._create_test_df()
 
-        alSettings = ActiveLearningSettings(None)
+        alSettings = ActiveLearningSettings(None, mode="AL")
 
         alSettings.update_data(df)
 
@@ -715,7 +717,7 @@ class TestSettings:
 
         df = self._create_test_df()
 
-        alSettings = ActiveLearningSettings(None)
+        alSettings = ActiveLearningSettings(None, mode="AL")
 
         alSettings.update_data(df)
 
@@ -732,7 +734,7 @@ class TestSettings:
 
         df = self._create_test_df()
 
-        alSettings = ActiveLearningSettings(None)
+        alSettings = ActiveLearningSettings(None, mode="AL")
 
         alSettings.update_data(df)
 
@@ -767,7 +769,7 @@ class TestSettings:
         df = self._create_test_df()
 
         button = pn.widgets.Button()
-        alSettings = ActiveLearningSettings(button)
+        alSettings = ActiveLearningSettings(button, mode="AL")
 
         alSettings.update_data(df)
 
@@ -783,7 +785,7 @@ class TestSettings:
         df = self._create_test_df()
 
         button = pn.widgets.Button()
-        alSettings = ActiveLearningSettings(button)
+        alSettings = ActiveLearningSettings(button, mode="AL")
 
         alSettings.update_data(df)
 
@@ -799,11 +801,17 @@ class TestSettings:
         df = self._create_test_df()
 
         button = pn.widgets.Button()
-        alSettings = ActiveLearningSettings(button)
+        alSettings = ActiveLearningSettings(button, mode="AL")
 
         alSettings.update_data(df)
 
         alSettings.exclude_labels_checkbox.value = True
+
+        alSettings.label_selector.value = ["0", "1"]
+
+        alSettings._verify_valid_selection_cb(None)
+
+        print(alSettings.exclude_labels_checkbox.disabled)
 
         alSettings._confirm_settings_cb(None)
 
@@ -814,9 +822,13 @@ class TestSettings:
         df = self._create_test_df()
 
         button = pn.widgets.Button()
-        alSettings = ActiveLearningSettings(button)
+        alSettings = ActiveLearningSettings(button, mode="AL")
 
         alSettings.update_data(df)
+
+        alSettings.label_selector.value = ["0", "1"]
+
+        alSettings._verify_valid_selection_cb(None)
 
         alSettings.exclude_labels_checkbox.value = False
 
@@ -829,7 +841,7 @@ class TestSettings:
         df = self._create_test_df()
 
         button = pn.widgets.Button()
-        alSettings = ActiveLearningSettings(button)
+        alSettings = ActiveLearningSettings(button, mode="AL")
 
         alSettings.update_data(df)
 
@@ -845,7 +857,7 @@ class TestSettings:
         df = self._create_test_df()
 
         button = pn.widgets.Button()
-        alSettings = ActiveLearningSettings(button)
+        alSettings = ActiveLearningSettings(button, mode="AL")
 
         alSettings.update_data(df)
 
@@ -860,7 +872,7 @@ class TestSettings:
         df = self._create_test_df()
 
         button = pn.widgets.Button()
-        alSettings = ActiveLearningSettings(button)
+        alSettings = ActiveLearningSettings(button, mode="AL")
 
         alSettings.update_data(df)
 
@@ -875,7 +887,7 @@ class TestSettings:
         df = self._create_test_df()
 
         button = pn.widgets.Button()
-        alSettings = ActiveLearningSettings(button)
+        alSettings = ActiveLearningSettings(button, mode="AL")
 
         alSettings.update_data(df)
 
@@ -900,7 +912,7 @@ class TestSettings:
         t.write("data/table1.fits", format="fits")
 
         src = ColumnDataSource()
-        ds = DataSelection(src)
+        ds = DataSelection(src, "AL")
 
         ds.load_layout_check = False
 
@@ -914,14 +926,17 @@ class TestSettings:
 
     def test_data_selection_check_config_load_level_layout_only(self, document, comm):
 
+        os.makedirs("configs/", exist_ok=True)
+        if not os.path.exists("configs/test.json"):
+            os.system("""echo '{"testing":true}' > configs/test.json""")
+
         src = ColumnDataSource()
-        ds = DataSelection(src)
+        ds = DataSelection(src, "AL")
 
         ds.load_layout_check = True
 
-        ds.load_config_select.value = (
-            "Only load layout. Let me choose all my own settings"
-        )
+        ds.load_config_select = "Only load layout. Let me choose all my own settings"
+        ds.config_file = "configs/test.json"
 
         button = ds.load_data_button_js
 
@@ -933,54 +948,62 @@ class TestSettings:
 
         assert config.settings["config_load_level"] == 0
 
-    def test_data_selection_check_config_load_level_layout_only(self):
-
-        src = ColumnDataSource()
-        ds = DataSelection(src)
+    def test_data_selection_check_config_load_level_0_settings_only(self):
 
         check_folder_exists("configs")
+        if not os.path.exists("configs/test.json"):
+            os.system("""echo '{"testing":true}' > configs/test.json""")
+
+        src = ColumnDataSource()
+        ds = DataSelection(src, "AL")
 
         ds.load_layout_check = True
 
-        ds.load_config_select.value = (
-            "Only load layout. Let me choose all my own settings"
-        )
+        ds.load_config_select = "Only load layout. Let me choose all my own settings"
+        ds.config_file = "configs/test.json"
 
-        ds._update_layout_file_cb(None)
+        ds._update_layout_file_cb()
 
         assert config.settings["config_load_level"] == 0
 
-    def test_data_selection_check_config_load_level_settings_only(self):
-
-        src = ColumnDataSource()
-        ds = DataSelection(src)
+    def test_data_selection_check_config_load_level_1_settings_only(self):
 
         check_folder_exists("configs")
+        if not os.path.exists("configs/test.json"):
+            os.system("""echo '{"testing":true}' > configs/test.json""")
+
+        src = ColumnDataSource()
+        ds = DataSelection(src, "AL")
 
         ds.load_layout_check = True
 
-        ds.load_config_select.value = (
+        ds.load_config_select = (
             "Load all settings but let me train the model from scratch."
         )
 
-        ds._update_layout_file_cb(None)
+        ds.config_file = "configs/test.json"
+
+        ds._update_layout_file_cb()
 
         assert config.settings["config_load_level"] == 1
 
-    def test_data_selection_check_config_load_level_settings_only(self):
-
-        src = ColumnDataSource()
-        ds = DataSelection(src)
+    def test_data_selection_check_config_load_level_2_settings_only(self):
 
         check_folder_exists("configs")
+        if not os.path.exists("configs/test.json"):
+            os.system("""echo '{"testing":true}' > configs/test.json""")
+
+        src = ColumnDataSource()
+        ds = DataSelection(src, "AL")
 
         ds.load_layout_check = True
 
-        ds.load_config_select.value = (
+        ds.load_config_select = (
             "Load all settings and train model with provided labels."
         )
+        ds.config_file = "configs/test.json"
 
-        ds._update_layout_file_cb(None)
+        ds._update_layout_file_cb()
 
         assert config.settings["config_load_level"] == 2
 
@@ -994,7 +1017,7 @@ class TestSettings:
         t.write("data/table1.fits", format="fits")
 
         src = ColumnDataSource()
-        ds = DataSelection(src)
+        ds = DataSelection(src, "AL")
 
         ds.memory_optimisation_check.value = False
 
@@ -1016,7 +1039,7 @@ class TestSettings:
         t.write("data/table1.fits", format="fits")
 
         src = ColumnDataSource()
-        ds = DataSelection(src)
+        ds = DataSelection(src, "AL")
 
         ds.memory_optimisation_check.value = False
 
@@ -1040,7 +1063,7 @@ class TestSettings:
         t.write("data/table1.fits", format="fits")
 
         src = ColumnDataSource()
-        ds = DataSelection(src)
+        ds = DataSelection(src, "AL")
 
         ds.memory_optimisation_check.value = True
 
@@ -1065,7 +1088,7 @@ class TestSettings:
         t.write("data/table1.fits", format="fits")
 
         src = ColumnDataSource()
-        ds = DataSelection(src)
+        ds = DataSelection(src, "AL")
 
         ds.memory_optimisation_check.value = False
 
@@ -1088,7 +1111,7 @@ class TestSettings:
         t.write("data/table1.fits", format="fits")
 
         src = ColumnDataSource()
-        ds = DataSelection(src)
+        ds = DataSelection(src, "AL")
 
         ds.memory_optimisation_check.value = False
 
@@ -1116,7 +1139,7 @@ class TestSettings:
         t.write("data/table1.fits", format="fits")
 
         src = ColumnDataSource()
-        ds = DataSelection(src)
+        ds = DataSelection(src, "AL")
 
         ds.memory_optimisation_check.value = True
 
@@ -1142,7 +1165,7 @@ class TestDashboards:
         data = []
 
         for i in range(100):
-            data.append([i, i % 3, i, i, i])
+            data.append([str(i), i % 3, i, i, i])
 
         df = pd.DataFrame(data, columns=list("ABCDE"))
 
@@ -1154,7 +1177,7 @@ class TestDashboards:
 
         for i in range(100):
             if i % 2 == 0:
-                data.append([i, i % 3, i, i, i, "178.52904,2.1655949", ""])
+                data.append([str(i), i % 3, i, i, i, "178.52904,2.1655949", ""])
             else:
                 data.append(
                     [
@@ -1171,6 +1194,58 @@ class TestDashboards:
         df = pd.DataFrame(data, columns=list("ABCDE") + ["ra_dec", "png_path_DR16"])
 
         return df
+
+    def test_dashboard_init(self):
+        data = self._create_test_df()
+        config.main_df = data
+        src = ColumnDataSource()
+        dashboard = Dashboard(src=src)
+
+        assert dashboard.src.data == src.data
+        assert dashboard.contents == "Menu"
+
+    @pytest.mark.parametrize(
+        "contents_name",
+        [
+            "Menu",
+            "Settings",
+            "Menu",
+            "Basic Plot",
+            "Selected Source Info",
+        ],
+        ids=str,
+    )
+    def test_dashboard_closing_button_check_contents(self, contents_name):
+        data = self._create_test_df()
+        config.main_df = data
+
+        config.settings = {
+            "id_col": "A",
+            "label_col": "B",
+            "default_vars": ["C", "D"],
+            "labels": [0, 1, 2],
+            "label_colours": {0: "#ffad0e", 1: "#0057ff", 2: "#a2a2a2"},
+            "labels_to_strings": {"0": "0", "1": "1", "2": "2"},
+            "strings_to_labels": {"0": 0, "1": 1, "2": 2},
+            "extra_info_cols": [
+                "C",
+            ],
+            "labels_to_train": ["1"],
+            "features_for_training": ["C", "D"],
+            "exclude_unknown_labels": False,
+            "exclude_labels": True,
+            "unclassified_labels": ["0", "2"],
+            "scale_data": False,
+            "feature_generation": [["subtract (a-b)", 2]],
+            "extra_image_cols": [],
+            "confirmed": False,
+        }
+
+        src = ColumnDataSource()
+        dashboard = Dashboard(src=src, contents=contents_name)
+        dashboard._close_button_cb(None)
+
+        assert dashboard.contents == "Menu"
 
     def test_selected_source_init_no_selected(self):
 
@@ -1192,7 +1267,7 @@ class TestDashboards:
         src = ColumnDataSource({str(c): [v] for c, v in data.items()})
         selected_source = SelectedSourceDashboard(src=src, close_button=None)
 
-        assert selected_source.selected_history == [5]
+        assert selected_source.selected_history == ["5"]
         assert selected_source._url_optical_image == ""
         assert selected_source._search_status == ""
         assert selected_source._image_zoom == 0.2
@@ -1202,7 +1277,7 @@ class TestDashboards:
         src = ColumnDataSource({str(c): [v] for c, v in data.items()})
         selected_source = SelectedSourceDashboard(src=src, close_button=None)
 
-        assert selected_source.selected_history == [15]
+        assert selected_source.selected_history == ["15"]
         assert selected_source._url_optical_image == ""
         assert selected_source._search_status == ""
         assert selected_source._image_zoom == 0.2
@@ -1212,7 +1287,7 @@ class TestDashboards:
         src = ColumnDataSource({str(c): [v] for c, v in data.items()})
         selected_source = SelectedSourceDashboard(src=src, close_button=None)
 
-        assert selected_source.selected_history == [72]
+        assert selected_source.selected_history == ["72"]
         assert selected_source._url_optical_image == ""
         assert selected_source._search_status == ""
         assert selected_source._image_zoom == 0.2
@@ -1228,7 +1303,7 @@ class TestDashboards:
         data_selected = data.iloc[72]
         src.data = {str(c): [v] for c, v in data_selected.items()}
 
-        assert selected_source.selected_history == [72]
+        assert selected_source.selected_history == ["72"]
 
     def test_selected_source_check_history_from_selected_to_selected_unique(self):
         data = self._create_test_df()
@@ -1236,12 +1311,12 @@ class TestDashboards:
         src = ColumnDataSource({str(c): [v] for c, v in data_selected.items()})
         selected_source = SelectedSourceDashboard(src=src, close_button=None)
 
-        assert selected_source.selected_history == [72]
+        assert selected_source.selected_history == ["72"]
 
         data_selected = data.iloc[30]
         src.data = {str(c): [v] for c, v in data_selected.items()}
 
-        assert selected_source.selected_history == [30, 72]
+        assert selected_source.selected_history == ["30", "72"]
 
     def test_selected_source_check_history_from_selected_to_selected_same_id_head(self):
         data = self._create_test_df()
@@ -1250,12 +1325,12 @@ class TestDashboards:
         src = ColumnDataSource({str(c): [v] for c, v in data_selected.items()})
         selected_source = SelectedSourceDashboard(src=src, close_button=None)
 
-        assert selected_source.selected_history == [72]
+        assert selected_source.selected_history == ["72"]
 
         data_selected = data.iloc[72]
         src.data = {str(c): [v] for c, v in data_selected.items()}
 
-        assert selected_source.selected_history == [72]
+        assert selected_source.selected_history == ["72"]
 
     def test_selected_source_check_history_from_selected_to_selected_no_id(self):
         data = self._create_test_df()
@@ -1264,13 +1339,13 @@ class TestDashboards:
         src = ColumnDataSource({str(c): [v] for c, v in data_selected.items()})
         selected_source = SelectedSourceDashboard(src=src, close_button=None)
 
-        assert selected_source.selected_history == [72]
+        assert selected_source.selected_history == ["72"]
 
         data_selected = data.iloc[53].copy()
         data_selected["A"] = ""
         src.data = {str(c): [v] for c, v in data_selected.items()}
 
-        assert selected_source.selected_history == [72]
+        assert selected_source.selected_history == ["72"]
 
     def test_selected_source_check_history_from_selected_to_selected_same_id_throughout(
         self,
@@ -1290,7 +1365,7 @@ class TestDashboards:
         data_selected = data.iloc[72]
         src.data = {str(c): [v] for c, v in data_selected.items()}
 
-        assert selected_source.selected_history == [72, 30, 72]
+        assert selected_source.selected_history == ["72", "30", "72"]
 
     def test_selected_source_empty_selected_from_non_selected(self):
         data = self._create_test_df()
@@ -1496,14 +1571,14 @@ class TestDashboards:
         src = ColumnDataSource()
         selected_source = SelectedSourceDashboard(src=src, close_button=None)
 
-        event = Event(5, "")
+        event = Event("5", "")
         selected_source._change_selected(event)
 
         print(selected_source.src.data)
 
         assert selected_source._search_status == "Searching..."
         assert selected_source.src.data == src.data
-        assert selected_source.src.data["A"] == [5]
+        assert selected_source.src.data["A"] == ["5"]
 
     def test_selected_source_check_required_column_has_column(self):
         data = self._create_test_df()
@@ -1531,7 +1606,7 @@ class TestDashboards:
         src = ColumnDataSource()
         selected_source = SelectedSourceDashboard(src=src, close_button=None)
 
-        event = Event(5, "")
+        event = Event("5", "")
         selected_source._change_selected(event)
 
         selected_source._deselect_source_cb(None)
@@ -1558,34 +1633,51 @@ class TestDashboards:
 
         assert selected_source._url_optical_image == _url_optical_image
 
-    def test_selected_source_spectra_image_check_none_selected(self):
+    def test_selected_source_update_custom_images(self):
         data = self._create_test_df_with_image_data()
         config.main_df = data
-        src = ColumnDataSource()
-        selected_source = SelectedSourceDashboard(src=src, close_button=None)
 
-        assert selected_source.spectra_image.object == ""
+        config.settings = {
+            "id_col": "A",
+            "label_col": "B",
+            "default_vars": ["C", "D"],
+            "labels": [0, 1, 2],
+            "label_colours": {0: "#ffad0e", 1: "#0057ff", 2: "#a2a2a2"},
+            "labels_to_strings": {"0": "0", "1": "1", "2": "2"},
+            "strings_to_labels": {"0": 0, "1": 1, "2": 2},
+            "extra_info_cols": [
+                "C",
+            ],
+            "labels_to_train": ["1"],
+            "features_for_training": ["C", "D"],
+            "exclude_unknown_labels": False,
+            "exclude_labels": True,
+            "unclassified_labels": ["0", "2"],
+            "scale_data": False,
+            "feature_generation": [["subtract (a-b)", 2]],
+            "extra_image_cols": ["png_path_DR16"],
+        }
 
-    def test_selected_source_spectra_image_check_selected_has_image(self):
-        data = self._create_test_df_with_image_data()
-        config.main_df = data
         data_selected = data.iloc[71]
         src = ColumnDataSource({str(c): [v] for c, v in data_selected.items()})
         selected_source = SelectedSourceDashboard(src=src, close_button=None)
 
+        image_tab = selected_source._create_image_tab()
+
+        assert len(image_tab) == 1
         assert (
-            selected_source.spectra_image.object
+            image_tab[0].object
             == "https://dr15.sdss.org/sas/dr15/sdss/spectro/redux/images/v5_10_0/8125-56955/spec-image-8125-56955-0534.png"
         )
 
-    def test_selected_source_spectra_image_check_selected_no_image(self):
-        data = self._create_test_df_with_image_data()
-        config.main_df = data
         data_selected = data.iloc[72]
         src = ColumnDataSource({str(c): [v] for c, v in data_selected.items()})
         selected_source = SelectedSourceDashboard(src=src, close_button=None)
 
-        assert selected_source.spectra_image.object == ""
+        image_tab = selected_source._create_image_tab()
+
+        assert len(image_tab) == 1
+        assert image_tab[0].object == "No Image available for this source."
 
     def test_settings_dashboard_init(self):
         data = self._create_test_df()
@@ -1605,6 +1697,30 @@ class TestDashboards:
         main = Dashboard(src)
 
         settings_db = SettingsDashboard(None, src)
+
+        settings_db._create_pipeline_cb(None, "AL", main)
+
+        config.settings = {
+            "id_col": "A",
+            "label_col": "B",
+            "default_vars": ["C", "D"],
+            "labels": [0, 1, 2],
+            "label_colours": {0: "#ffad0e", 1: "#0057ff", 2: "#a2a2a2"},
+            "labels_to_strings": {"0": "0", "1": "1", "2": "2"},
+            "strings_to_labels": {"0": 0, "1": 1, "2": 2},
+            "extra_info_cols": [
+                "C",
+            ],
+            "labels_to_train": ["1"],
+            "features_for_training": ["C", "D"],
+            "exclude_unknown_labels": False,
+            "exclude_labels": True,
+            "unclassified_labels": ["0", "2"],
+            "scale_data": False,
+            "feature_generation": [["subtract (a-b)", 2]],
+            "extra_image_cols": ["png_path_DR16"],
+        }
+
         settings_db.pipeline["Active Learning Settings"].df = data
         settings_db._close_settings_cb(None, main)
 
@@ -1618,19 +1734,22 @@ class TestDashboards:
         src = ColumnDataSource()
 
         settings_db = SettingsDashboard(None, src)
+        settings_db.create_pipeline(mode="AL")
 
-        settings_db._pipeline_stage = 5
+        settings_db._pipeline_stage = 3
 
         settings_db._stage_previous_cb(None)
 
-        assert settings_db._pipeline_stage == 4
+        assert settings_db._pipeline_stage == 2
 
     def test_settings_dashboard_pipeline_next(self):
         data = self._create_test_df()
         config.main_df = data
         src = ColumnDataSource()
 
+        main = Dashboard(src)
         settings_db = SettingsDashboard(None, src)
+        settings_db.create_pipeline(mode="AL")
 
         settings_db.pipeline["Select Your Data"].df = data
 
@@ -1642,8 +1761,10 @@ class TestDashboards:
         data = self._create_test_df()
         config.main_df = data
         src = ColumnDataSource()
+        main = Dashboard(src)
 
         settings_db = SettingsDashboard(None, src)
+        settings_db.create_pipeline(mode="AL")
 
         settings_db.pipeline["Active Learning Settings"].completed = False
         settings_db.panel()
@@ -1659,20 +1780,30 @@ class TestDashboards:
         src = ColumnDataSource()
 
         settings_db = SettingsDashboard(None, src)
+        settings_db.create_pipeline(mode="AL")
+
         settings_db.pipeline["Assign Parameters"].update_data(dataframe=data)
         settings_db.pipeline["Assign Parameters"].id_column = "A"
         settings_db.pipeline["Assign Parameters"].label_column = "B"
-        settings_db.pipeline["Assign Parameters"].default_x_variable = "C"
-        settings_db.pipeline["Assign Parameters"].default_y_variable = "D"
         settings_db.pipeline["Assign Parameters"].update_colours()
+        settings_db.pipeline["Active Learning Settings"].default_x_variable.options = [
+            "C",
+            "D",
+        ]
+        settings_db.pipeline["Active Learning Settings"].default_y_variable.options = [
+            "C",
+            "D",
+        ]
+        settings_db.pipeline["Active Learning Settings"].default_x_variable.value = "C"
+        settings_db.pipeline["Active Learning Settings"].default_y_variable.value = "D"
 
         updated_settings = settings_db.get_settings()
 
         settings = {
             "id_col": "A",
             "label_col": "B",
-            "default_vars": ("C", "D"),
             "label_colours": {0: "#1f77b4", 1: "#ff7f0e", 2: "#2ca02c"},
+            "default_vars": ("C", "D"),
         }
 
         assert updated_settings == settings
@@ -1681,6 +1812,27 @@ class TestDashboards:
         data = self._create_test_df()
         config.main_df = data
         src = ColumnDataSource()
+
+        config.settings = {
+            "id_col": "A",
+            "label_col": "B",
+            "default_vars": ["C", "D"],
+            "labels": [0, 1, 2],
+            "label_colours": {0: "#ffad0e", 1: "#0057ff", 2: "#a2a2a2"},
+            "labels_to_strings": {"0": "0", "1": "1", "2": "2"},
+            "strings_to_labels": {"0": 0, "1": 1, "2": 2},
+            "extra_info_cols": [
+                "C",
+            ],
+            "labels_to_train": [],
+            "features_for_training": ["C", "D"],
+            "exclude_unknown_labels": False,
+            "exclude_labels": True,
+            "unclassified_labels": ["0", "1", "2"],
+            "scale_data": False,
+            "feature_generation": [["subtract (a-b)", 2]],
+            "extra_image_cols": ["png_path_DR16"],
+        }
 
         al_db = ActiveLearningDashboard(src, data)
 
@@ -1710,13 +1862,14 @@ class TestDashboards:
             "default_vars": ["C", "D"],
             "labels": [0, 1, 2],
             "label_colours": {0: "#ffad0e", 1: "#0057ff", 2: "#a2a2a2"},
-            "labels_to_strings": {0: "0", 1: "1", 2: "2"},
+            "labels_to_strings": {"0": "0", "1": "1", "2": "2"},
             "strings_to_labels": {"0": 0, "1": 1, "2": 2},
             "extra_info_cols": [
                 "C",
             ],
             "labels_to_train": ["1"],
             "features_for_training": ["C", "D"],
+            "exclude_unknown_labels": False,
             "exclude_labels": True,
             "unclassified_labels": ["0", "2"],
             "scale_data": False,
@@ -1739,7 +1892,7 @@ class TestDashboards:
             "default_vars": ["C", "D"],
             "labels": [0, 1, 2],
             "label_colours": {0: "#ffad0e", 1: "#0057ff", 2: "#a2a2a2"},
-            "labels_to_strings": {0: "0", 1: "1", 2: "2"},
+            "labels_to_strings": {"0": "0", "1": "1", "2": "2"},
             "strings_to_labels": {"0": 0, "1": 1, "2": 2},
             "extra_info_cols": [
                 "C",
@@ -1747,6 +1900,7 @@ class TestDashboards:
             "labels_to_train": ["0", "1", "2"],
             "features_for_training": ["C", "D"],
             "exclude_labels": True,
+            "exclude_unknown_labels": False,
             "unclassified_labels": [],
             "scale_data": False,
             "feature_generation": [["subtract (a-b)", 2]],
@@ -1779,7 +1933,7 @@ class TestDashboards:
             "default_vars": ["C", "D"],
             "labels": [0, 1, 2],
             "label_colours": {0: "#ffad0e", 1: "#0057ff", 2: "#a2a2a2"},
-            "labels_to_strings": {0: "0", 1: "1", 2: "2"},
+            "labels_to_strings": {"0": "0", "1": "1", "2": "2"},
             "strings_to_labels": {"0": 0, "1": 1, "2": 2},
             "extra_info_cols": [
                 "C",
@@ -1813,7 +1967,7 @@ class TestDashboards:
             "default_vars": ["C", "D"],
             "labels": [0, 1, 2],
             "label_colours": {0: "#ffad0e", 1: "#0057ff", 2: "#a2a2a2"},
-            "labels_to_strings": {0: "0", 1: "1", 2: "2"},
+            "labels_to_strings": {"0": "0", "1": "1", "2": "2"},
             "strings_to_labels": {"0": 0, "1": 1, "2": 2},
             "extra_info_cols": [
                 "C",
@@ -1843,7 +1997,7 @@ class TestDashboards:
             "default_vars": ["C", "D"],
             "labels": [0, 1, 2],
             "label_colours": {0: "#ffad0e", 1: "#0057ff", 2: "#a2a2a2"},
-            "labels_to_strings": {0: "0", 1: "1", 2: "2"},
+            "labels_to_strings": {"0": "0", "1": "1", "2": "2"},
             "strings_to_labels": {"0": 0, "1": 1, "2": 2},
             "extra_info_cols": [
                 "C",
@@ -1873,7 +2027,7 @@ class TestDashboards:
             "default_vars": ["C", "D"],
             "labels": [0, 1, 2],
             "label_colours": {0: "#ffad0e", 1: "#0057ff", 2: "#a2a2a2"},
-            "labels_to_strings": {0: "0", 1: "1", 2: "2"},
+            "labels_to_strings": {"0": "0", "1": "1", "2": "2"},
             "strings_to_labels": {"0": 0, "1": 1, "2": 2},
             "extra_info_cols": [
                 "C",
@@ -1903,7 +2057,7 @@ class TestDashboards:
             "default_vars": ["C", "D"],
             "labels": [0, 1, 2],
             "label_colours": {0: "#ffad0e", 1: "#0057ff", 2: "#a2a2a2"},
-            "labels_to_strings": {0: "0", 1: "1", 2: "2"},
+            "labels_to_strings": {"0": "0", "1": "1", "2": "2"},
             "strings_to_labels": {"0": 0, "1": 1, "2": 2},
             "extra_info_cols": [
                 "C",
@@ -1933,7 +2087,7 @@ class TestDashboards:
             "default_vars": ["C", "D"],
             "labels": [0, 1, 2],
             "label_colours": {0: "#ffad0e", 1: "#0057ff", 2: "#a2a2a2"},
-            "labels_to_strings": {0: "0", 1: "1", 2: "2"},
+            "labels_to_strings": {"0": "0", "1": "1", "2": "2"},
             "strings_to_labels": {"0": 0, "1": 1, "2": 2},
             "extra_info_cols": [
                 "C",
@@ -1962,7 +2116,7 @@ class TestDashboards:
             "default_vars": ["C", "D"],
             "labels": [0, 1, 2],
             "label_colours": {0: "#ffad0e", 1: "#0057ff", 2: "#a2a2a2"},
-            "labels_to_strings": {0: "0", 1: "1", 2: "2"},
+            "labels_to_strings": {"0": "0", "1": "1", "2": "2"},
             "strings_to_labels": {"0": 0, "1": 1, "2": 2},
             "extra_info_cols": [
                 "C",
@@ -2008,7 +2162,7 @@ class TestDashboards:
             "default_vars": ["C", "D"],
             "labels": [0, 1, 2],
             "label_colours": {0: "#ffad0e", 1: "#0057ff", 2: "#a2a2a2"},
-            "labels_to_strings": {0: "0", 1: "1", 2: "2"},
+            "labels_to_strings": {"0": "0", "1": "1", "2": "2"},
             "strings_to_labels": {"0": 0, "1": 1, "2": 2},
             "extra_info_cols": [
                 "C",
@@ -2027,3 +2181,543 @@ class TestDashboards:
         assert plot_db.param.Y_variable.default == "D"
         assert plot_db.X_variable == "C"
         assert plot_db.Y_variable == "D"
+
+    def _create_test_test_set(self):
+
+        if os.path.exists("data/test_set.json"):
+            os.system("mv data/test_set.json data/test_set_cp.json")
+
+        test_data = """{ "2":0,"5":1,"7":0 }"""
+
+        os.system(f"echo '{test_data}' > data/test_set.json")
+
+    def test_labelling_dashboard_init(self):
+
+        data = self._create_test_df()
+        config.main_df = data
+        src = ColumnDataSource()
+
+        self._create_test_test_set()
+
+        labelling = LabellingDashboard(src=src, df=data)
+
+        os.remove("data/test_set.json")
+
+        pd.testing.assert_frame_equal(config.main_df, labelling.sample_region)
+        assert list(labelling.region_criteria_df.columns) == ["column", "oper", "value"]
+        assert (
+            labelling.region_message
+            == f"All Sources Matching ({len(labelling.sample_region)})"
+        )
+        first_key = list(labelling.src.data.keys())[0]
+        assert len(labelling.src.data[first_key]) == 1
+
+        assert labelling.criteria_dict == {}
+
+    def test_labelling_dashboard_check_single_matching_value_in_region(self):
+
+        data = self._create_test_df()
+        config.main_df = data
+        src = ColumnDataSource()
+
+        self._create_test_test_set()
+
+        labelling = LabellingDashboard(src=src, df=data)
+
+        os.remove("data/test_set.json")
+
+        labelling.column_dropdown.value = "C"
+        labelling.operation_dropdown.value = "=="
+        labelling.input_value.value = "1"
+
+        labelling.update_sample_region(None, button="ADD")
+
+        assert len(labelling.sample_region) == 1
+        assert list(labelling.criteria_dict.keys()) == ["C == 1"]
+        assert labelling.criteria_dict["C == 1"] == ["C", "==", "1"]
+        assert labelling.region_message == "1 Matching Sources"
+
+    def test_labelling_dashboard_check_multiple_matching_values_in_region(self):
+
+        data = self._create_test_df()
+        config.main_df = data
+        src = ColumnDataSource()
+
+        self._create_test_test_set()
+
+        labelling = LabellingDashboard(src=src, df=data)
+
+        os.remove("data/test_set.json")
+
+        labelling.column_dropdown.value = "C"
+        labelling.operation_dropdown.value = "<"
+        labelling.input_value.value = "5"
+
+        labelling.update_sample_region(None, button="ADD")
+
+        assert len(labelling.sample_region) == 5
+        assert list(labelling.criteria_dict.keys()) == ["C < 5"]
+        assert labelling.criteria_dict["C < 5"] == ["C", "<", "5"]
+        assert labelling.region_message == "5 Matching Sources"
+
+    def test_labelling_dashboard_check_combined_matching_values_in_region(self):
+
+        data = self._create_test_df()
+        config.main_df = data
+        src = ColumnDataSource()
+
+        self._create_test_test_set()
+
+        labelling = LabellingDashboard(src=src, df=data)
+
+        os.remove("data/test_set.json")
+
+        labelling.column_dropdown.value = "C"
+        labelling.operation_dropdown.value = "<"
+        labelling.input_value.value = "5"
+
+        labelling.update_sample_region(None, button="ADD")
+
+        labelling.column_dropdown.value = "C"
+        labelling.operation_dropdown.value = "=="
+        labelling.input_value.value = "1"
+
+        labelling.update_sample_region(None, button="ADD")
+
+        assert len(labelling.sample_region) == 1
+        assert list(labelling.criteria_dict.keys()) == ["C < 5", "C == 1"]
+        assert labelling.criteria_dict["C == 1"] == ["C", "==", "1"]
+        assert labelling.region_message == "1 Matching Sources"
+
+        assert labelling.remove_sample_selection_dropdown.options == ["C < 5", "C == 1"]
+
+    def test_labelling_dashboard_removing_sample_criteria(self):
+
+        data = self._create_test_df()
+        config.main_df = data
+        src = ColumnDataSource()
+
+        self._create_test_test_set()
+
+        labelling = LabellingDashboard(src=src, df=data)
+
+        os.remove("data/test_set.json")
+
+        labelling.column_dropdown.value = "C"
+        labelling.operation_dropdown.value = "<"
+        labelling.input_value.value = "5"
+
+        labelling.update_sample_region(None, button="ADD")
+
+        labelling.column_dropdown.value = "C"
+        labelling.operation_dropdown.value = "=="
+        labelling.input_value.value = "1"
+
+        labelling.update_sample_region(None, button="ADD")
+
+        labelling.remove_sample_selection_dropdown.value = "C == 1"
+
+        labelling.update_sample_region(None, button="REMOVE")
+
+        assert len(labelling.sample_region) == 5
+        assert list(labelling.criteria_dict.keys()) == ["C < 5"]
+        assert labelling.criteria_dict["C < 5"] == ["C", "<", "5"]
+        assert labelling.region_message == "5 Matching Sources"
+
+        labelling.remove_sample_selection_dropdown.value = "C < 5"
+
+        labelling.update_sample_region(None, button="REMOVE")
+
+        assert len(labelling.sample_region) == len(config.main_df)
+        assert list(labelling.criteria_dict.keys()) == []
+        assert (
+            labelling.region_message == f"All Sources Matching ({len(config.main_df)})"
+        )
+
+    def test_labelling_dashboard_check_looping_through_labelled(self):
+
+        data = self._create_test_df()
+        config.main_df = data
+        src = ColumnDataSource()
+
+        config.settings = {
+            "id_col": "A",
+            "label_col": "B",
+            "default_vars": ["C", "D"],
+            "labels": [0, 1, 2],
+            "label_colours": {0: "#ffad0e", 1: "#0057ff", 2: "#a2a2a2"},
+            "labels_to_strings": {"0": "0", "1": "1", "2": "2"},
+            "strings_to_labels": {"0": 0, "1": 1, "2": 2},
+            "extra_info_cols": [
+                "C",
+            ],
+            "labels_to_train": ["0", "1", "2"],
+            "features_for_training": ["C", "D"],
+            "exclude_labels": True,
+            "unclassified_labels": [],
+            "scale_data": False,
+            "feature_generation": [["subtract (a-b)", 2]],
+        }
+
+        self._create_test_test_set()
+
+        labelling = LabellingDashboard(src=src, df=data)
+
+        os.remove("data/test_set.json")
+
+        assert len(labelling.src.data[config.settings["id_col"]]) == 1
+
+        labelling.update_selected_point_from_buttons(None, button="<")
+
+        first_key = list(labelling.src.data.keys())[0]
+        assert len(labelling.src.data[first_key]) == 1
+
+        assert labelling.src.data["A"][0] == "7"
+        assert labelling.labels[labelling.src.data[config.settings["id_col"]][0]] == 0
+
+        labelling.update_selected_point_from_buttons(None, button="<")
+
+        first_key = list(labelling.src.data.keys())[0]
+        assert len(labelling.src.data[first_key]) == 1
+
+        assert labelling.src.data["A"][0] == "5"
+        assert labelling.labels[labelling.src.data[config.settings["id_col"]][0]] == 1
+        assert labelling.next_labelled_button.disabled == False
+        assert labelling.prev_labelled_button.disabled == False
+
+        labelling.update_selected_point_from_buttons(None, button="<")
+
+        first_key = list(labelling.src.data.keys())[0]
+        assert len(labelling.src.data[first_key]) == 1
+
+        assert labelling.src.data["A"][0] == "2"
+        assert labelling.labels[labelling.src.data[config.settings["id_col"]][0]] == 0
+        assert labelling.next_labelled_button.disabled == False
+        assert labelling.prev_labelled_button.disabled == True
+
+        assert len(labelling.src.data[config.settings["id_col"]]) == 1
+
+        labelling.update_selected_point_from_buttons(None, button=">")
+
+        first_key = list(labelling.src.data.keys())[0]
+        assert len(labelling.src.data[first_key]) == 1
+
+        assert labelling.src.data["A"][0] == "5"
+        assert labelling.next_labelled_button.disabled == False
+        assert labelling.prev_labelled_button.disabled == False
+
+        labelling.update_selected_point_from_buttons(None, button=">")
+
+        first_key = list(labelling.src.data.keys())[0]
+        assert len(labelling.src.data[first_key]) == 1
+
+        assert labelling.src.data["A"][0] == "7"
+
+        labelling.update_selected_point_from_buttons(None, button="First")
+
+        first_key = list(labelling.src.data.keys())[0]
+        assert len(labelling.src.data[first_key]) == 1
+
+        assert labelling.src.data["A"][0] == "2"
+        assert labelling.labels[labelling.src.data[config.settings["id_col"]][0]] == 0
+        assert labelling.next_labelled_button.disabled == False
+        assert labelling.prev_labelled_button.disabled == True
+
+        assert len(labelling.src.data[config.settings["id_col"]]) == 1
+
+    def test_labelling_dashboard_check_new_button_with_single_match(self):
+
+        data = self._create_test_df()
+        config.main_df = data
+        src = ColumnDataSource()
+
+        self._create_test_test_set()
+
+        labelling = LabellingDashboard(src=src, df=data)
+
+        os.remove("data/test_set.json")
+
+        labelling.column_dropdown.value = "C"
+        labelling.operation_dropdown.value = "=="
+        labelling.input_value.value = "1"
+
+        labelling.update_sample_region(None, button="ADD")
+
+        labelling.update_selected_point_from_buttons(None, button="New")
+
+        assert len(labelling.sample_region) == 1
+        assert list(labelling.criteria_dict.keys()) == ["C == 1"]
+        assert labelling.criteria_dict["C == 1"] == ["C", "==", "1"]
+        assert labelling.region_message == "1 Matching Sources"
+
+    def test_labelling_dashboard_check_zero_matching(self):
+
+        data = self._create_test_df()
+        config.main_df = data
+        src = ColumnDataSource()
+
+        self._create_test_test_set()
+
+        labelling = LabellingDashboard(src=src, df=data)
+
+        os.remove("data/test_set.json")
+
+        labelling.column_dropdown.value = "C"
+        labelling.operation_dropdown.value = "=="
+        labelling.input_value.value = "1"
+
+        labelling.update_sample_region(None, button="ADD")
+
+        labelling.column_dropdown.value = "C"
+        labelling.operation_dropdown.value = "=="
+        labelling.input_value.value = "2"
+
+        labelling.update_sample_region(None, button="ADD")
+
+        assert len(labelling.sample_region) == 0
+        assert labelling.region_message == "No Matching Sources!"
+
+        labelling.update_selected_point_from_buttons(None, button="New")
+
+        assert labelling.new_labelled_button.disabled == True
+
+    def test_labelling_dashboard_save_assigned_label(self):
+
+        data = self._create_test_df()
+        config.main_df = data
+        src = ColumnDataSource()
+
+        config.settings = {
+            "id_col": "A",
+            "label_col": "B",
+            "default_vars": ["C", "D"],
+            "labels": [0, 1, 2],
+            "label_colours": {0: "#ffad0e", 1: "#0057ff", 2: "#a2a2a2"},
+            "labels_to_strings": {"0": "0", "1": "1", "2": "2"},
+            "strings_to_labels": {"0": 0, "1": 1, "2": 2},
+            "extra_info_cols": [
+                "C",
+            ],
+            "labels_to_train": ["0", "1", "2"],
+            "features_for_training": ["C", "D"],
+            "exclude_labels": True,
+            "unclassified_labels": [],
+            "scale_data": False,
+            "feature_generation": [["subtract (a-b)", 2]],
+        }
+
+        self._create_test_test_set()
+
+        labelling = LabellingDashboard(src=src, df=data)
+
+        selected = labelling.src.data["A"][0]
+
+        labelling.assign_label_group.value = "0"
+
+        labelling._assign_label_cb(None)
+
+        with open("data/test_set.json", "r") as json_file:
+            labels = json.load(json_file)
+
+        should_be = {"2": 0, "5": 1, "7": 0}
+        should_be[selected] = 0
+
+        assert labels == should_be
+
+        os.remove("data/test_set.json")
+
+
+class TestExtensions:
+    def _create_test_df(self):
+
+        data = []
+
+        for i in range(100):
+            data.append([str(i), i % 3, i, i, i])
+
+        df = pd.DataFrame(data, columns=list("ABCDE"))
+
+        return df
+
+    def test_feature_extension_subtract(self):
+
+        config.settings = {"features_for_training": ["C", "D", "E"]}
+
+        data = self._create_test_df()
+
+        data_df = data.loc[:, ["C", "D", "E"]]
+
+        new_data, gen_features = feature_generation.subtract(data_df, 2)
+
+        expect_features = ["C", "D", "E", "C-D", "C-E", "D-E"]
+        assert len(expect_features) == len(new_data.columns)
+        for feature in expect_features:
+            assert feature in list(new_data.columns)
+
+        for col in ["C-D", "C-E", "D-E"]:
+            assert list(new_data[col].unique()) == [0]
+
+    def test_feature_extension_add(self):
+
+        config.settings = {"features_for_training": ["C", "D", "E"]}
+
+        data = self._create_test_df()
+
+        data_df = data.loc[:, ["C", "D", "E"]]
+
+        new_data, gen_features = feature_generation.add(data_df, 2)
+
+        expect_features = ["C", "D", "E", "C+D", "C+E", "D+E"]
+        assert len(expect_features) == len(new_data.columns)
+        for feature in expect_features:
+            assert feature in list(new_data.columns)
+
+        for col in ["C+D", "C+E", "D+E"]:
+            assert list(new_data[col].unique()) == [2 * x for x in range(len(data))]
+
+    def test_feature_extension_multiply(self):
+
+        config.settings = {"features_for_training": ["C", "D", "E"]}
+
+        data = self._create_test_df()
+
+        data_df = data.loc[:, ["C", "D", "E"]]
+
+        new_data, gen_features = feature_generation.multiply(data_df, 2)
+
+        expect_features = ["C", "D", "E", "C*D", "C*E", "D*E"]
+        assert len(expect_features) == len(new_data.columns)
+        for feature in expect_features:
+            assert feature in list(new_data.columns)
+
+        for col in ["C*D", "C*E", "D*E"]:
+            assert list(new_data[col].unique()) == [x ** 2 for x in range(len(data))]
+
+    def test_feature_extension_divide(self):
+
+        config.settings = {"features_for_training": ["C", "D", "E"]}
+
+        data = self._create_test_df()
+
+        data_df = data.loc[:, ["C", "D", "E"]]
+
+        new_data, gen_features = feature_generation.divide(data_df, 2)
+
+        expect_features = ["C", "D", "E", "C/D", "C/E", "D/E"]
+        assert len(expect_features) == len(new_data.columns)
+        for feature in expect_features:
+            assert feature in list(new_data.columns)
+
+        for col in ["C/D", "C/E", "D/E"]:
+            assert np.isnan(list(new_data[col].unique())[0])
+            assert list(new_data[col].unique())[1] == 1.0
+            assert len(list(new_data[col].unique())) == 2
+
+
+class TestUtils:
+    def _create_test_df(self):
+
+        data = []
+
+        for i in range(100):
+            data.append([str(i), i % 3, i, i, i])
+
+        df = pd.DataFrame(data, columns=list("ABCDE"))
+
+        return df
+
+    def test_load_config_update_config_settings(self):
+
+        config.settings = {}
+
+        imported_config = {
+            "id_col": "A",
+            "label_col": "B",
+            "default_vars": ["C", "D"],
+            "labels": [0, 1, 2],
+            "label_colours": {0: "#ffad0e", 1: "#0057ff", 2: "#a2a2a2"},
+            "labels_to_strings": {"0": "0", "1": "1", "2": "2"},
+            "strings_to_labels": {"0": 0, "1": 1, "2": 2},
+            "extra_info_cols": [
+                "C",
+            ],
+            "labels_to_train": ["0", "1", "2"],
+            "features_for_training": ["C", "D"],
+            "exclude_labels": True,
+            "unclassified_labels": [],
+            "scale_data": False,
+            "feature_generation": [["subtract (a-b)", 2]],
+            "extra_image_cols": ["png_path_DR16"],
+        }
+
+        load_config.update_config_settings(imported_config)
+
+        del config.settings["confirmed"]
+
+        assert config.settings == imported_config, print(
+            f"{config.settings},\n\n {imported_config}"
+        )
+
+    def test_save_config_save_config_file(self):
+
+        config.settings = {
+            "Author": "",
+            "doi": "",
+            "dataset_filepath": "",
+            "layout": {
+                "0": {"x": 0, "y": 0, "w": 6, "h": 6, "contents": "Menu"},
+                "1": {
+                    "x": 0,
+                    "y": 6,
+                    "w": 6,
+                    "h": 6,
+                    "contents": "Menu",
+                },
+                "2": {"x": 6, "y": 0, "w": 6, "h": 6, "contents": "Settings"},
+            },
+            "id_col": "A",
+            "label_col": "B",
+            "default_vars": ["C", "D"],
+            "labels": [0, 1, 2],
+            "label_colours": {"0": "#ffad0e", "1": "#0057ff", "2": "#a2a2a2"},
+            "labels_to_strings": {"0": "0", "1": "1", "2": "2"},
+            "strings_to_labels": {"0": 0, "1": 1, "2": 2},
+            "extra_info_cols": [
+                "C",
+            ],
+            "labels_to_train": ["0", "1", "2"],
+            "features_for_training": ["C", "D"],
+            "exclude_labels": True,
+            "unclassified_labels": [],
+            "scale_data": False,
+            "feature_generation": [["subtract (a-b)", 2]],
+            "extra_image_cols": ["png_path_DR16"],
+            "confirmed": False,
+            "optimise_data": True,
+            "exclude_unknown_labels": True,
+            "classifiers": [],
+        }
+
+        example_layout = """{"0":{"x":0,"y":0,"w":6,"h":6},"1":{"x":0,"y":6,"w":6,"h":6},"2":{"x":6,"y":0,"w":6,"h":6}}"""
+
+        data = self._create_test_df()
+        config.main_df = data
+        src = ColumnDataSource()
+
+        config.dashboards = {
+            "0": Dashboard(src, contents="Menu"),
+            "1": Dashboard(src, contents="Menu"),
+            "2": Dashboard(src, contents="Settings"),
+        }
+
+        save_config.save_config_file(example_layout, TextAreaInput(value=""), test=True)
+
+        with open("configs/config_export.json") as layout_file:
+            created_file = json.load(layout_file)
+
+        for k in list(created_file.keys()):
+            assert (
+                created_file[k] == config.settings[k]
+            ), f"{k}: {created_file[k]} != {config.settings[k]}"
+
+        os.remove("configs/config_export.json")

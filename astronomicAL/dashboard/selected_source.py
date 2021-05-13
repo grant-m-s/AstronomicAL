@@ -35,9 +35,6 @@ class SelectedSourceDashboard:
     radio_image : Panel Pane GIF
         Widget for holding the GIF image of the selected source based its RADEC.
         The image is pulled from the FIRST cutout server.
-    spectra_image : Panel Pane PNG
-        Widget for holding the PNG image of the selected source. The spectra
-        requires a "png_path_DR16" column.
     _image_zoom : float
         A float containing the current zoom level of the `optical_image`. The
         zoom is controlled by the zoom in and out buttons on the dashboard
@@ -58,22 +55,6 @@ class SelectedSourceDashboard:
         min_width=200,
         min_height=200,
         sizing_mode="scale_height",
-    )
-
-    style_dict = {
-        "position": "absolute",
-        "clip": "rect(47px,auto,auto,0px)",
-        "margin": "-47px 0px 0px 0px",
-    }
-
-    spectra_image = pn.pane.PNG(
-        alt_text="Image Unavailable",
-        min_width=350,
-        min_height=350,
-        max_width=550,
-        max_height=550,
-        sizing_mode="scale_height",
-        style=style_dict,
     )
 
     def __init__(self, src, close_button):
@@ -98,6 +79,66 @@ class SelectedSourceDashboard:
         self._initialise_optical_zoom_buttons()
 
         self._add_selected_info()
+
+    def _create_image_tab(self):
+
+        if len(config.settings["extra_image_cols"]) == 0:
+            return
+
+        else:
+            tab = pn.Tabs(
+                sizing_mode="scale_height",
+                tabs_location="left",
+                max_height=1000,
+                max_width=1000,
+            )
+            for col in config.settings["extra_image_cols"]:
+                url = f"{self.src.data[col][0]}"
+                print(f"image_url:{url}")
+                print(f"len: {len(url)}")
+                if len(url) <= 4:
+                    pane = "No Image available for this source."
+                elif "." in url:
+                    ext = url[url.rindex(".") + 1 :]
+
+                    if ext.lower() in ["jpg", "jpeg"]:
+                        pane = pn.pane.JPG(
+                            url,
+                            alt_text="Image Unavailable",
+                            min_width=325,
+                            min_height=325,
+                            max_width=1000,
+                            max_height=1000,
+                            sizing_mode="scale_height",
+                        )
+                    elif ext.lower() == "png":
+                        pane = pn.pane.PNG(
+                            url,
+                            alt_text="Image Unavailable",
+                            min_width=325,
+                            min_height=325,
+                            max_width=1000,
+                            max_height=1000,
+                            sizing_mode="scale_height",
+                        )
+                    elif ext.lower() == "svg":
+                        pane = pn.pane.SVG(
+                            url,
+                            alt_text="Image Unavailable",
+                            min_width=325,
+                            min_height=325,
+                            max_width=1000,
+                            max_height=1000,
+                            sizing_mode="scale_height",
+                        )
+                    else:
+                        pane = f"Unsupported extension {ext}."
+                else:
+                    pane = "Image url does not contain extension."
+
+                tab.append((col, pane))
+
+            return tab
 
     def _add_selected_info(self):
 
@@ -139,7 +180,6 @@ class SelectedSourceDashboard:
         self.panel()
 
     def _panel_cb(self, attr, old, new):
-        print("_panel_cb")
         self.panel()
 
     def _check_valid_selected(self):
@@ -193,7 +233,7 @@ class SelectedSourceDashboard:
         self.src.data = empty
 
     def _generate_radio_url(self, ra, dec):
-        # TODO :: Verify
+
         ra = float(ra)
         dec = float(dec)
         print(f"ra:{ra}, dec:{dec}")
@@ -336,23 +376,8 @@ class SelectedSourceDashboard:
 
             self._update_default_images()
 
-            if self.check_required_column("png_path_DR16"):
-
-                if not self.src.data["png_path_DR16"][0].isspace():
-                    print("beginning if")
-
-                    self.spectra_image.object = self.src.data["png_path_DR16"][0]
-                    spectra = self.spectra_image
-
-                else:
-                    print("beginning else")
-                    spectra = "No Spectra Image Available."
-                    print("leaving else")
-
-            else:
-                spectra = ""
-
             button_row = pn.Row()
+
             if self.check_required_column("ra_dec"):
                 button_row.append(self.zoom_increase)
                 button_row.append(self.zoom_decrease)
@@ -384,20 +409,17 @@ class SelectedSourceDashboard:
                                 self.optical_image,
                                 self.radio_image,
                             ),
-                            spectra,
                         ),
-                        pn.Row(extra_data_pn, max_width=280),
+                        pn.Row(extra_data_pn, max_height=250, max_width=300),
                     ),
+                    self._create_image_tab(),
                 ),
                 collapsible=False,
                 header=pn.Row(self.close_button, deselect_buttton, max_width=300),
             )
 
-            print("row set")
-
         else:
             print("Nothing is selected!")
-            # print(self.src.data)
             self.row[0] = pn.Card(
                 pn.Column(
                     self.search_id,
@@ -411,7 +433,6 @@ class SelectedSourceDashboard:
                         ),
                         max_width=300,
                     ),
-                    # max_width=500,
                 ),
                 header=pn.Row(self.close_button, max_width=300),
             )

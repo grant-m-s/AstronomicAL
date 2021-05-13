@@ -1,3 +1,5 @@
+from datetime import datetime
+
 import astronomicAL.config as config
 import json
 import numpy as np
@@ -62,7 +64,7 @@ def save_config_file_cb(attr, old, new, trigger_text, autosave):
     save_config_file(new, trigger_text=trigger_text, autosave=autosave)
 
 
-def save_config_file(layout_from_js, trigger_text, autosave=False):
+def save_config_file(layout_from_js, trigger_text, autosave=False, test=False):
     print("json updated")
     print(f"LAYOUT VALUE:{layout_from_js}")
 
@@ -87,7 +89,6 @@ def save_config_file(layout_from_js, trigger_text, autosave=False):
 
     export_config["Author"] = ""
     export_config["doi"] = ""
-    export_config["dataset_filepath"] = ""
     export_config["dataset_filepath"] = config.settings["dataset_filepath"]
     export_config["optimise_data"] = config.settings["optimise_data"]
     export_config["layout"] = layout
@@ -99,9 +100,11 @@ def save_config_file(layout_from_js, trigger_text, autosave=False):
     export_config["labels_to_strings"] = config.settings["labels_to_strings"]
     export_config["strings_to_labels"] = config.settings["strings_to_labels"]
     export_config["extra_info_cols"] = config.settings["extra_info_cols"]
+    export_config["extra_image_cols"] = config.settings["extra_image_cols"]
     export_config["labels_to_train"] = config.settings["labels_to_train"]
     export_config["features_for_training"] = config.settings["features_for_training"]
     export_config["exclude_labels"] = config.settings["exclude_labels"]
+    export_config["exclude_unknown_labels"] = config.settings["exclude_unknown_labels"]
     export_config["unclassified_labels"] = config.settings["unclassified_labels"]
     export_config["scale_data"] = config.settings["scale_data"]
     export_config["feature_generation"] = config.settings["feature_generation"]
@@ -113,6 +116,11 @@ def save_config_file(layout_from_js, trigger_text, autosave=False):
         print("AUTOSAVING")
         with open("configs/autosave.json", "w") as fp:
             json.dump(export_config, fp, cls=NumpyEncoder)
+    elif test:
+        with open(f"configs/config_export.json", "w") as fp:
+            json.dump(export_config, fp, cls=NumpyEncoder)
     else:
-        with open("configs/export_config.json", "w") as fp:
+        now = datetime.now()
+        dt_string = now.strftime("%Y%m%d_%H:%M:%S")
+        with open(f"configs/config_{dt_string}.json", "w") as fp:
             json.dump(export_config, fp, cls=NumpyEncoder)
