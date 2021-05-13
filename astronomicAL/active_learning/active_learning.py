@@ -1260,6 +1260,7 @@ class ActiveLearningModel:
         self, x_train, y_train, x_val, y_val, x_test, y_test, excluded_x, excluded_y
     ):
 
+        labels = {}
         if os.path.exists("data/test_set.json"):
             with open("data/test_set.json", "r") as json_file:
                 labels = json.load(json_file)

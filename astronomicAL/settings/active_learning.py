@@ -194,6 +194,7 @@ class ActiveLearningSettings(param.Parameterized):
 
         labelled_data = {}
 
+        orig_labelled_data = {}
         if os.path.exists("data/test_set.json"):
             with open("data/test_set.json", "r") as json_file:
                 orig_labelled_data = json.load(json_file)
