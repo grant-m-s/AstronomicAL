@@ -196,7 +196,13 @@ class ActiveLearningSettings(param.Parameterized):
 
         if os.path.exists("data/test_set.json"):
             with open("data/test_set.json", "r") as json_file:
-                labelled_data = json.load(json_file)
+                orig_labelled_data = json.load(json_file)
+
+        labelled_data = {}
+
+        for id in list(orig_labelled_data.keys()):
+            if orig_labelled_data[id] != -1:
+                labelled_data[id] = orig_labelled_data[id]
 
         total_labelled = len(list(labelled_data.keys()))
 
