@@ -10,6 +10,8 @@ AstronomicAL is an iteractive dashboard to enable Astronomy-based researchers to
 
 With the influx of billions of sources incoming from future surveys, automated classification methods are becoming critical. To produce accurate models, it is often required to have large amounts of labelled data; however, many datasets only consider a narrow window of the electromagnetic spectrum, resulting in key features of a classification going unseen, leading to inaccurate and unreliable labels. Active Learning, a method that automatically and adaptively selects the most informative datapoints to improve a model's performance, has repeatedly been shown to be a valuable tool to address the constraint of large labelled datasets; however, the issue of unreliable labels still exists. AstronomicAL, an interactive dashboard for training and labelling, has been developed to enable domain experts to take advantage of Active Learning whilst ensuring that they are presented with as complete a picture as possible when deciding on a source's classification, resulting in more accurate and reliable labels whilst requiring substantially less labelled training data.
 
+### Documentation
+The documentation for AstronomicAL can be found [here](astronomical.readthedocs.io).
 
 ### Installation
 
