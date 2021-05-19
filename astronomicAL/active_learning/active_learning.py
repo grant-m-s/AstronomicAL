@@ -1383,10 +1383,22 @@ class ActiveLearningModel:
         print("scale_data")
 
         self.scaler = RobustScaler()
-        data_x_tr = self.scaler.fit_transform(x_train)
 
-        data_x_val = self.scaler.transform(x_val)
-        data_x_test = self.scaler.transform(x_test)
+        x_tr = x_train[x_cols]
+        x_tr = x_train.to_numpy()
+        x_tr = x_tr[:, 1:]
+
+        data_x_tr = self.scaler.fit_transform(x_tr)
+
+        x_v = x_val[x_cols]
+        x_v = x_val.to_numpy()
+        x_v = x_v[:, 1:]
+        data_x_val = self.scaler.transform(x_v)
+
+        x_te = x_test[x_cols]
+        x_te = x_test.to_numpy()
+        x_te = x_te[:, 1:]
+        data_x_test = self.scaler.transform(x_te)
 
         data_x_tr = pd.DataFrame(data_x_tr, columns=x_cols)
 
