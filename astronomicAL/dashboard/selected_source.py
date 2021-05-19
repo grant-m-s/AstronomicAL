@@ -76,6 +76,8 @@ class SelectedSourceDashboard:
 
         self._image_zoom = 0.2
 
+        self._image_updated = False
+
         self._initialise_optical_zoom_buttons()
 
         self._add_selected_info()
