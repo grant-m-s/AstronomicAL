@@ -108,6 +108,10 @@ def save_config_file(layout_from_js, trigger_text, autosave=False, test=False):
     export_config["unclassified_labels"] = config.settings["unclassified_labels"]
     export_config["scale_data"] = config.settings["scale_data"]
     export_config["feature_generation"] = config.settings["feature_generation"]
+
+    if "classifiers" not in config.settings.keys():
+        config.settings["classifiers"] = {}
+
     export_config["classifiers"] = config.settings["classifiers"]
 
     print(f"FINAL Export CONFIG SETTINGS: {export_config}")
