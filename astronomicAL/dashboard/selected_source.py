@@ -1,6 +1,6 @@
 from functools import partial
 from requests.exceptions import ConnectionError
-
+from multiprocessing import Process
 import astronomicAL.config as config
 import numpy as np
 import pandas as pd
@@ -75,6 +75,8 @@ class SelectedSourceDashboard:
         self._search_status = ""
 
         self._image_zoom = 0.2
+
+        self._image_updated = False
 
         self._initialise_optical_zoom_buttons()
 
@@ -180,6 +182,7 @@ class SelectedSourceDashboard:
         self.panel()
 
     def _panel_cb(self, attr, old, new):
+        self._image_updated = False
         self.panel()
 
     def _check_valid_selected(self):
@@ -296,6 +299,7 @@ class SelectedSourceDashboard:
             )
 
     def _update_default_images(self):
+
         url = "http://skyserver.sdss.org/dr16/SkyServerWS/ImgCutout/getjpeg?TaskName=Skyserver.Explore.Image&ra="
         # TODO :: Set Ra Dec Columns
 
@@ -309,21 +313,27 @@ class SelectedSourceDashboard:
                 self._url_optical_image = (
                     f"{url}{ra}&dec={dec}&opt=G&scale={self._image_zoom}"
                 )
-                r = requests.get(f"{self._url_optical_image}", timeout=3.0)
+                r = requests.get(f"{self._url_optical_image}", timeout=10.0)
                 self.optical_image.object = self._url_optical_image
+                print(self.optical_image.object)
             except ConnectionError as e:
                 print("optical image unavailable")
                 print(e)
 
             try:
                 self._url_radio_image = self._generate_radio_url(ra, dec)
-                r = requests.get(f"{self._url_radio_image}", timeout=3.0)
+                r = requests.get(f"{self._url_radio_image}", timeout=10.0)
                 self.radio_image.object = self._url_radio_image
             except ConnectionError as e:
                 print("radio image unavailable")
                 print(e)
 
             self._initialise_optical_zoom_buttons()
+
+            self.row[0][0][0][0][1] = pn.Row(
+                self.optical_image,
+                self.radio_image,
+            )
 
     def _initialise_optical_zoom_buttons(self):
 
@@ -374,7 +384,7 @@ class SelectedSourceDashboard:
 
             self._add_selected_to_history()
 
-            self._update_default_images()
+            print(self._image_updated)
 
             button_row = pn.Row()
 
@@ -417,6 +427,10 @@ class SelectedSourceDashboard:
                 collapsible=False,
                 header=pn.Row(self.close_button, deselect_buttton, max_width=300),
             )
+
+            if not self._image_updated:
+                self._image_updated = True
+                Process(target=self._update_default_images).start()
 
         else:
             print("Nothing is selected!")
