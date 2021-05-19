@@ -254,6 +254,8 @@ def create_layout_from_file(react):
                 contents = "Settings"
             elif config.mode == "Labelling":
                 contents = "Labelling"
+            elif config.mode == "AL":
+                contents = "Active Learning"
             main_plot = Dashboard(src=config.source, contents=contents)
             config.dashboards[p] = main_plot
             react.main[start_row:end_row, start_col:end_col] = main_plot.panel()
