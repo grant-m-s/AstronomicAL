@@ -1,10 +1,12 @@
-import os, sys, inspect
+import os
+import sys
 
 sys.path.insert(1, os.path.join(sys.path[0], "../"))
+
+import inspect
 import numpy as np
 import pandas as pd
 import panel as pn
-
 from astronomicAL.active_learning.active_learning import ActiveLearningModel
 from astronomicAL.dashboard.active_learning import ActiveLearningDashboard
 from astronomicAL.dashboard.dashboard import Dashboard
@@ -33,7 +35,6 @@ from bokeh.models import ColumnDataSource
 from bokeh.models import TextAreaInput
 from bokeh.document import Document
 from pyviz_comms import Comm
-
 import astronomicAL.config as config
 import pytest
 import json
@@ -1621,6 +1622,7 @@ class TestDashboards:
         data_selected = data.iloc[72]
         src = ColumnDataSource({str(c): [v] for c, v in data_selected.items()})
         selected_source = SelectedSourceDashboard(src=src, close_button=None)
+        selected_source._update_default_images()
 
         ra_dec = selected_source.src.data["ra_dec"][0]
         ra = ra_dec[: ra_dec.index(",")]
