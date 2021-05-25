@@ -2480,13 +2480,13 @@ class ActiveLearningModel:
 
         if self._queried_is_selected:
             selected_message = pn.pane.Markdown(
-                "The queried source is currently selected",
+                "**The queried source is currently selected**",
                 style={"color": "#558855"},
                 max_width=250,
             )
         else:
             selected_message = pn.pane.Markdown(
-                "The queried source is not currently selected",
+                "**The queried source is not currently selected**",
                 style={"color": "#ff5555"},
                 max_width=250,
             )
