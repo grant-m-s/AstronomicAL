@@ -253,9 +253,10 @@ class SettingsDashboard:
                     pn.Row(self.pipeline.stage),
                     pn.Row(
                         pn.layout.HSpacer(),
-                        self.pipeline.buttons,
+                        pn.layout.HSpacer(),
+                        self.pipeline.buttons[1],
                         max_height=50,
-                        max_width=500,
+                        # max_width=500,
                     ),
                 ),
                 header=pn.Row(
