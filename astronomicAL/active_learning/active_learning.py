@@ -2529,9 +2529,9 @@ class ActiveLearningModel:
                 pn.Row(self.setup_row),
                 pn.Row(
                     pn.Tabs(
-                        ("Train", self._train_tab()),
+                        ("Training Set", self._train_tab()),
                         ("Metric", self._metric_tab()),
-                        ("Val", self._val_tab()),
+                        ("Validation Set", self._val_tab()),
                         ("Scores", self._scores_tab()),
                         # dynamic=True,
                     ),
