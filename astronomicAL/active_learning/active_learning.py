@@ -2283,7 +2283,12 @@ class ActiveLearningModel:
         print("_add_conf_matrices")
         if not self._show_test_results:
             return pn.Column(
-                pn.pane.Markdown("**Training Set:**", sizing_mode="fixed"),
+                pn.pane.Markdown(
+                    "**Training Set:**",
+                    sizing_mode="fixed",
+                    padding=(0, 0, 0, 0),
+                    margin=(0, 0, 0, 0),
+                ),
                 pn.pane.Markdown(
                     f"Acc: {self._train_scores['acc']}, Prec: {self._train_scores['prec']}, Rec: {self._train_scores['rec']}, F1: {self._train_scores['f1']}",
                     sizing_mode="fixed",
