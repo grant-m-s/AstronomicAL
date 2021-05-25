@@ -1,7 +1,6 @@
 import astronomicAL.config as config
 from astronomicAL.dashboard.plot import PlotDashboard
 from astronomicAL.active_learning.active_learning import ActiveLearningModel
-from holoviews import opts
 import panel as pn
 import numpy as np
 import datashader as ds
@@ -101,27 +100,32 @@ class LabellingDashboard(param.Parameterized):
         self.next_labelled_button.on_click(
             partial(self.update_selected_point_from_buttons, button=">")
         )
-        self.new_labelled_button = pn.widgets.Button(name="New", max_height=35)
+        self.new_labelled_button = pn.widgets.Button(
+            name="New", max_height=35, max_width=20
+        )
         self.new_labelled_button.on_click(
             partial(self.update_selected_point_from_buttons, button="New")
         )
         self.column_dropdown = pn.widgets.Select(
-            name="Column", options=list(self.df.columns)
+            name="Column",
+            options=list(self.df.columns),
+            max_width=100,
+            width=100,
         )
         self.operation_dropdown = pn.widgets.Select(
-            name="Operation", options=[">", ">=", "==", "!=", "<=", "<"]
+            name="Operation", options=[">", ">=", "==", "!=", "<=", "<"], max_width=75
         )
-        self.input_value = pn.widgets.TextInput(name="Value")
+        self.input_value = pn.widgets.TextInput(name="Value", max_width=50)
 
         self.add_sample_criteria_button = pn.widgets.Button(
-            name="Add Criterion", max_height=30
+            name="Add Criterion", max_height=30, max_width=300
         )
         self.add_sample_criteria_button.on_click(
             partial(self.update_sample_region, button="ADD")
         )
 
         self.remove_sample_criteria_button = pn.widgets.Button(
-            name="Remove Criterion", max_height=30
+            name="Remove Criterion", max_height=30, max_width=300
         )
         self.remove_sample_criteria_button.on_click(
             partial(self.update_sample_region, button="REMOVE")
@@ -129,7 +133,10 @@ class LabellingDashboard(param.Parameterized):
 
         self.criteria_dict = {}
         self.remove_sample_selection_dropdown = pn.widgets.Select(
-            name="Criterion to Remove", options=[""]
+            name="Criterion to Remove",
+            options=[""],
+            max_width=300,
+            width=300,
         )
 
     def _update_variable_lists(self):
@@ -533,6 +540,7 @@ class LabellingDashboard(param.Parameterized):
                 max_height=30,
             ),
             max_height=30,
+            max_width=600,
         )
 
         plot = pn.Row(self.plot, height=400, width=500, sizing_mode="fixed")
@@ -584,6 +592,7 @@ class LabellingDashboard(param.Parameterized):
                 ),
                 max_height=100,
                 margin=(0, 0, 50, 0),
+                max_width=400,
             ),
             pn.Row(
                 self.column_dropdown,
@@ -621,9 +630,9 @@ class LabellingDashboard(param.Parameterized):
             buttons_row,
             header=pn.Row(
                 pn.Spacer(width=25, sizing_mode="fixed"),
-                pn.Row(self.param.X_variable, max_width=200),
-                pn.Row(self.param.Y_variable, max_width=200),
-                max_width=400,
+                pn.Row(self.param.X_variable, max_width=100),
+                pn.Row(self.param.Y_variable, max_width=100),
+                max_width=100,
                 sizing_mode="fixed",
             ),
             collapsible=False,
