@@ -69,9 +69,6 @@ class ActiveLearningModel:
         The label that will be the positive case in the one-vs-rest classifier.
     _label_alias : str
         The string alias of `_label`
-    _last_label : str
-        The string alias of the last assigned label in the Active Learning
-        process. Used for visual improvements.
     _training : bool
         Flag for whether the training process has begun.
     _assigned : bool
@@ -241,8 +238,6 @@ class ActiveLearningModel:
 
         self._label = config.settings["strings_to_labels"][label]
         self._label_alias = label
-
-        self._last_label = str(label)
 
         self._training = False
         self._assigned = False
@@ -469,13 +464,15 @@ class ActiveLearningModel:
                     "query": list_c2,
                 }
 
-        self.add_classifier_button = pn.widgets.Button(name=">>", max_height=40)
-        self.remove_classifier_button = pn.widgets.Button(name="<<", max_height=40)
+        self.add_classifier_button = pn.widgets.Button(name=">>", max_height=30)
+        self.remove_classifier_button = pn.widgets.Button(name="<<", max_height=30)
 
         self.add_classifier_button.on_click(self._add_classifier_cb)
         self.remove_classifier_button.on_click(self._remove_classifier_cb)
 
-        self.start_training_button = pn.widgets.Button(name="Start Training")
+        self.start_training_button = pn.widgets.Button(
+            name="Start Training", max_height=30
+        )
         self.start_training_button.on_click(self._start_training_cb)
 
         self.next_iteration_button = pn.widgets.Button(name="Next Iteration")
@@ -910,7 +907,6 @@ class ActiveLearningModel:
     def _assign_label_cb(self, event):
 
         selected_label = self.assign_label_group.value
-        self._last_label = selected_label
 
         query = self.query_instance
         query_idx = self.query_index
@@ -2286,7 +2282,6 @@ class ActiveLearningModel:
                 pn.pane.Markdown(
                     "**Training Set:**",
                     sizing_mode="fixed",
-                    padding=(0, 0, 0, 0),
                     margin=(0, 0, 0, 0),
                 ),
                 pn.pane.Markdown(
@@ -2310,9 +2305,7 @@ class ActiveLearningModel:
                         pn.Row(pn.pane.Str(self.conf_mat_tr_tp), min_height=50),
                     ),
                 ),
-                pn.layout.Divider(
-                    max_height=5, margin=(0, 0, 0, 0), padding=(0, 0, 0, 0)
-                ),
+                pn.layout.Divider(max_height=5, margin=(0, 0, 0, 0)),
                 pn.pane.Markdown("**Validation Set:**", sizing_mode="fixed"),
                 pn.pane.Markdown(
                     f"Acc: {self._val_scores['acc']}, Prec: {self._val_scores['prec']}, Rec: {self._val_scores['rec']}, F1: {self._val_scores['f1']}",
@@ -2500,7 +2493,6 @@ class ActiveLearningModel:
             )
 
         if not button_update:
-            self.assign_label_group.value = self._last_label
 
             start = time.time()
             self.setup_panel()
