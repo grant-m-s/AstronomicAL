@@ -2273,7 +2273,7 @@ class ActiveLearningModel:
             * hv.Path(
                 self._f1_list["train"], ["num_points", "score"], label="F1"
             ).options(show_legend=True)
-        ).opts(legend_position="top_left", toolbar=None, default_tools=[])
+        ).opts(legend_position="bottom_right", toolbar=None, default_tools=[])
 
     def _add_conf_matrices(self):
         print("_add_conf_matrices")
