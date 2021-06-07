@@ -10,6 +10,8 @@ import astronomicAL.config as config
 import numpy as np
 import pandas as pd
 import panel as pn
+import json
+import os
 import param
 
 
@@ -28,6 +30,7 @@ def get_plot_dict():
                 "Log10(OIII_5007_FLUX/H_BETA_FLUX)",
             ],
         ),
+        "SED Plot": SEDPlot(sed_plot, []),
     }
 
     return plot_dict
@@ -95,6 +98,8 @@ def create_plot(
     y,
     plot_type="scatter",
     selected=None,
+    show_selected=True,
+    slow_render=False,
     label_plot=True,
     colours=True,
     smaller_axes_limits=False,
@@ -115,33 +120,37 @@ def create_plot(
             data,
             [x, y],
         ).opts(active_tools=["pan", "wheel_zoom"])
+        print(p)
     elif plot_type == "line":
         p = hv.Path(
             data,
             [x, y],
         ).opts(active_tools=["pan", "wheel_zoom"])
-    if selected is not None:
-        cols = list(data.columns)
+    if show_selected:
+        if selected is not None:
+            cols = list(data.columns)
 
-        if len(selected.data[cols[0]]) == 1:
-            selected = pd.DataFrame(selected.data, columns=cols, index=[0])
-            if bounds is not None:
-                if (
-                    (selected[x][0] < bounds[0])
-                    or (selected[y][0] > bounds[1])
-                    or (selected[x][0] > bounds[2])
-                    or (selected[y][0] < bounds[3])
-                ):
-                    selected = pd.DataFrame(columns=cols)
-        else:
-            selected = pd.DataFrame(columns=cols)
+            if len(selected.data[cols[0]]) == 1:
+                selected = pd.DataFrame(selected.data, columns=cols, index=[0])
+                if bounds is not None:
+                    if (
+                        (selected[x][0] < bounds[0])
+                        or (selected[y][0] > bounds[1])
+                        or (selected[x][0] > bounds[2])
+                        or (selected[y][0] < bounds[3])
+                    ):
+                        selected = pd.DataFrame(columns=cols)
+            else:
+                selected = pd.DataFrame(columns=cols)
 
-        selected_plot = hv.Scatter(selected, x, y,).opts(
-            fill_color="black",
-            marker="circle",
-            size=10,
-            active_tools=["pan", "wheel_zoom"],
-        )
+            selected_plot = hv.Scatter(selected, x, y,).opts(
+                fill_color="black",
+                marker="circle",
+                size=10,
+                active_tools=["pan", "wheel_zoom"],
+            )
+
+            print(selected_plot)
 
     if colours:
         color_key = config.settings["label_colours"]
@@ -154,6 +163,9 @@ def create_plot(
                 for n in color_key
             }
         )
+
+    print("after colours")
+
     if smaller_axes_limits:
         max_x = np.max(data[x])
         min_x = np.min(data[x])
@@ -172,14 +184,16 @@ def create_plot(
         max_y = np.min([y_mu + 4 * y_sd, max_y])
         min_y = np.max([y_mu - 4 * y_sd, min_y])
 
-        if selected is not None:
-            if selected.shape[0] > 0:
+        if show_selected:
+            if selected is not None:
+                if selected.shape[0] > 0:
 
-                max_x = np.max([max_x, np.max(selected[x])])
-                min_x = np.min([min_x, np.min(selected[x])])
+                    max_x = np.max([max_x, np.max(selected[x])])
+                    min_x = np.min([min_x, np.min(selected[x])])
 
-                max_y = np.max([max_y, np.max(selected[y])])
-                min_y = np.min([min_y, np.min(selected[y])])
+                    max_y = np.max([max_y, np.max(selected[y])])
+                    min_y = np.min([min_y, np.min(selected[y])])
+    print("after smaller_axes_limits")
 
     if colours:
         if smaller_axes_limits:
@@ -202,6 +216,7 @@ def create_plot(
                 threshold=0.75,
                 how="saturate",
             )
+        print("after colours 2")
 
     else:
         if smaller_axes_limits:
@@ -213,6 +228,8 @@ def create_plot(
                 how="saturate",
             ).redim.range(xdim=(min_x, max_x), ydim=(min_y, max_y))
         else:
+            print("final else else")
+            print(p)
             plot = dynspread(
                 datashade(
                     p,
@@ -220,12 +237,19 @@ def create_plot(
                 threshold=0.75,
                 how="saturate",
             )
+            print(plot)
+        print("after no colours")
 
-    if selected is not None:
+    if slow_render:
+        plot = p
+    print(plot)
+    if show_selected and (selected is not None):
         plot = plot * selected_plot
 
-    if label_plot:
+    if label_plot and colours:
         plot = plot * color_points
+
+    print("returning plot")
 
     return plot
 
@@ -365,5 +389,169 @@ def mateos_2012_wedge(data, selected=None, **kwargs):
     )
 
     plot = plot * p1 * p2 * p3
+
+    return plot
+
+
+class SEDPlot(CustomPlot):
+    def __init__(self, plot_fn, extra_features):
+
+        self.plot_fn = plot_fn
+        self.extra_features = extra_features
+        self.row = pn.Row("Loading...")
+
+    def create_settings(self, unknown_cols):
+        print("creating settings...")
+        print(unknown_cols)
+        self.waiting = True
+        settings_column = pn.Column()
+        for i, col in enumerate(unknown_cols):
+
+            if i % 3 == 0:
+                settings_row = pn.Row()
+
+            settings_row.append(
+                pn.widgets.Select(
+                    name=col, options=list(config.main_df.columns), max_height=120
+                )
+            )
+
+            if (i % 3 == 2) or (i == len(unknown_cols) - 1):
+                settings_column.append(settings_row)
+
+            if i == len(unknown_cols) - 1:
+                settings_column.append(self.submit_button)
+
+        return settings_column
+
+    def create_photometry_band_file(self):
+
+        bands_dict = {}
+
+        for col in list(config.main_df.columns):
+            bands_dict[col] = {"wavelength": -99, "FWHM": 0, "error": 0}
+
+        if not os.path.isdir("data/sed_data"):
+            os.mkdir("data/sed_data")
+
+        if not os.path.isfile("data/sed_data/photometry_bands.json"):
+            with open("data/sed_data/photometry_bands.json", "w") as fp:
+                json.dump(bands_dict, fp, indent=2)
+
+    def render(self, data, selected=None):
+        self.data = data
+        self.selected = selected
+        self.row[0] = self.col_selection
+        return self.row
+
+    def plot(self, submit_button):
+        self.submit_button = submit_button
+
+        self.create_photometry_band_file()
+
+        file = "data/sed_data/photometry_bands.json"
+        config.settings["sed_file"] = file
+        with open(file, "r") as fp:
+            self.extra_columns = json.load(fp)
+
+        current_cols = config.main_df.columns
+
+        unknown_cols = []
+        for col in self.extra_features:
+            if col not in list(config.settings.keys()):
+                if col not in current_cols:
+                    unknown_cols.append(col)
+                else:
+                    config.settings[col] = col
+
+        if len(unknown_cols) > 0:
+            self.col_selection = self.create_settings(unknown_cols)
+            return self.render
+        else:
+            print("returning plot")
+            return self.plot_fn
+
+
+def sed_plot(data, selected=None, **kwargs):
+
+    df_columns = list(config.main_df.columns)
+
+    with open(config.settings["sed_file"], "r") as fp:
+        bands = json.load(fp)
+
+    new_data = []
+
+    for i in bands:
+        if i in df_columns:
+            if len(selected.data[i]) > 0:
+                new_data.append(
+                    [
+                        bands[i]["wavelength"],
+                        selected.data[i][0],
+                        bands[i]["FWHM"],
+                        bands[i]["error"],
+                    ]
+                )
+        elif i in list(config.settings.keys()):
+            if config.settings[i] in df_columns:
+                if len(selected.data[config.settings[i]]) > 0:
+                    new_data.append(
+                        [
+                            bands[i]["wavelength"],
+                            selected.data[config.settings[i]][0],
+                            bands[i]["FWHM"],
+                            bands[i]["error"],
+                        ]
+                    )
+
+    new_data = pd.DataFrame(
+        new_data, columns=["wavelength (µm)", "magnitude", "FWHM", "error"]
+    )
+    new_data = new_data[new_data["wavelength (µm)"] != -99]
+    new_data = new_data[new_data["magnitude"] != -99]
+
+    if len(new_data) > 0:
+        plot = create_plot(
+            new_data,
+            "wavelength (µm)",
+            "magnitude",
+            plot_type="line",
+            colours=False,
+            label_plot=False,
+            show_selected=False,
+            slow_render=True,
+        )
+        points = hv.Scatter(new_data, kdims=["wavelength (µm)", "magnitude"],).opts(
+            fill_color="black",
+            marker="circle",
+            alpha=0.5,
+            size=4,
+            active_tools=["pan", "wheel_zoom"],
+        )
+        error_data_x = [
+            (
+                new_data["wavelength (µm)"].values[i],
+                new_data["magnitude"].values[i],
+                new_data["error"].values[i],
+            )
+            for i in range(len(new_data))
+        ]
+
+        error_data_y = [
+            (
+                new_data["wavelength (µm)"].values[i],
+                new_data["magnitude"].values[i],
+                new_data["FWHM"].values[i] * 0.5,
+            )
+            for i in range(len(new_data))
+        ]
+
+        errors_x = hv.Spread(error_data_x, horizontal=True)
+        errors_y = hv.ErrorBars(error_data_y, horizontal=True)
+        plot = plot * points * errors_x * errors_y
+        plot.opts(invert_yaxis=True)
+        print(plot)
+    else:
+        plot = "Empty"
 
     return plot
