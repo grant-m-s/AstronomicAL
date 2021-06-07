@@ -16,8 +16,8 @@ import param
 def get_plot_dict():
 
     plot_dict = {
-        "AGN Wedge": CustomPlot(
-            agn_wedge, ["Log10(W3_Flux/W2_Flux)", "Log10(W2_Flux/W1_Flux)"]
+        "Mateos 2012 Wedge": CustomPlot(
+            mateos_2012_wedge, ["Log10(W3_Flux/W2_Flux)", "Log10(W2_Flux/W1_Flux)"]
         ),
         "BPT Plots": CustomPlot(
             bpt_plot,
@@ -311,7 +311,7 @@ def bpt_plot(data, selected=None, **kwargs):
     return tabs
 
 
-def agn_wedge(data, selected=None, **kwargs):
+def mateos_2012_wedge(data, selected=None, **kwargs):
 
     plot = create_plot(
         data,

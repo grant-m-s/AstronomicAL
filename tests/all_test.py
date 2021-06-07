@@ -20,7 +20,7 @@ from astronomicAL.extensions.extension_plots import (
     get_plot_dict,
     create_plot,
     bpt_plot,
-    agn_wedge,
+    mateos_2012_wedge,
 )
 from astronomicAL.extensions import feature_generation
 from astronomicAL.extensions import models
