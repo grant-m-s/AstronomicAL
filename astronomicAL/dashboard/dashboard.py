@@ -60,12 +60,17 @@ class Dashboard(param.Parameterized):
     def _submit_button_cb(self, event):
         self._submit_button.name = "Loading Plot..."
         self._submit_button.disabled = True
-        for i, row in enumerate(self.plot_dict[self.contents].col_selection):
-            if i == len(self.plot_dict[self.contents].col_selection) - 1:
-                continue
-            for selector in row:
-                config.settings[selector.name] = selector.value
-                print(selector)
+        if hasattr(self.plot_dict[self.contents], "col_selection"):
+            for i, row in enumerate(self.plot_dict[self.contents].col_selection):
+                if i == len(self.plot_dict[self.contents].col_selection) - 1:
+                    continue
+                for selector in row:
+                    config.settings[selector.name] = selector.value
+                    print(selector)
+        else:
+            self._submit_button.name = "Submit updated column names"
+            self._submit_button.disabled = False
+            self.plot_dict[self.contents]._load_file()
         self._update_contents()
 
     def _close_button_cb(self, event):
@@ -139,7 +144,7 @@ class Dashboard(param.Parameterized):
         None
 
         """
-        print(updated)
+
         self.contents = updated
 
     def panel(self):
@@ -160,7 +165,5 @@ class Dashboard(param.Parameterized):
                 header=pn.Row(self._close_button),
                 collapsible=False,
             )
-
-        print("Returned panel")
 
         return self.row
