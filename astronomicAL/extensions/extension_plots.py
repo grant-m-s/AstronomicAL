@@ -1,3 +1,4 @@
+from datetime import datetime
 from holoviews.operation.datashader import (
     datashade,
     dynspread,
@@ -10,6 +11,7 @@ import astronomicAL.config as config
 import numpy as np
 import pandas as pd
 import panel as pn
+import glob
 import json
 import os
 import param
@@ -424,7 +426,7 @@ class SEDPlot(CustomPlot):
 
         return settings_column
 
-    def create_photometry_band_file(self):
+    def create_photometry_band_file(self, event):
 
         bands_dict = {}
 
@@ -438,32 +440,102 @@ class SEDPlot(CustomPlot):
             with open("data/sed_data/photometry_bands.json", "w") as fp:
                 json.dump(bands_dict, fp, indent=2)
 
+        else:
+            now = datetime.now()
+            dt_string = now.strftime("%Y%m%d_%H:%M:%S")
+            with open(f"data/sed_data/photometry_bands_{dt_string}.json", "w") as fp:
+                json.dump(bands_dict, fp, indent=2)
+
+        self.plot(self.submit_button)
+
+    def _get_unknown_features(self):
+
+        unknown_cols = []
+        df_columns = list(config.main_df.columns)
+
+        with open(config.settings["sed_file"], "r") as fp:
+            bands = json.load(fp)
+
+        for i in bands:
+            if bands[i]["wavelength"] != -99:
+                if i not in df_columns:
+                    if i not in list(config.settings.keys()):
+                        unknown_cols.append(i)
+                    elif config.settings[i] not in df_columns:
+                        unknown_cols.append(i)
+            if type(bands[i]["wavelength"]) == str:
+                if bands[i]["wavelength"] not in config.main_df.columns:
+                    if bands[i]["wavelength"] not in config.settings.keys():
+                        unknown_cols.append(bands[i]["wavelength"])
+            if type(bands[i]["FWHM"]) == str:
+                if bands[i]["FWHM"] not in config.main_df.columns:
+                    if bands[i]["FWHM"] not in config.settings.keys():
+                        unknown_cols.append(bands[i]["FWHM"])
+            if type(bands[i]["error"]) == str:
+                if bands[i]["error"] not in config.main_df.columns:
+                    if bands[i]["error"] not in config.settings.keys():
+                        unknown_cols.append(bands[i]["error"])
+
+                else:
+                    continue
+
+        return unknown_cols
+
     def render(self, data, selected=None):
         self.data = data
         self.selected = selected
         self.row[0] = self.col_selection
         return self.row
 
+    def _load_file(self):
+        selected = self.files_selection.value
+
+        if selected != "":
+            config.settings["sed_file"] = selected
+        else:
+            config.settings["sed_file"] = None
+
+    def _load_file_menu(self, data, selected=None):
+
+        files = glob.glob("data/sed_data/*.json")
+        self.files_selection = pn.widgets.Select(name="Select", options=[""] + files)
+
+        self.create_new_file_button = pn.widgets.Button(name="Create new SED data file")
+        self.create_new_file_button.on_click(self.create_photometry_band_file)
+
+        load_column = pn.Column(
+            self.files_selection, self.submit_button, self.create_new_file_button
+        )
+
+        self.row[0] = load_column
+
+        return self.row
+
     def plot(self, submit_button):
         self.submit_button = submit_button
 
-        self.create_photometry_band_file()
+        if self.submit_button.disabled:
+            pass
 
-        file = "data/sed_data/photometry_bands.json"
-        config.settings["sed_file"] = file
-        with open(file, "r") as fp:
+        elif "sed_file" not in config.settings.keys():
+            print("no key")
+            return self._load_file_menu
+
+        elif config.settings["sed_file"] is None:
+            print("None")
+            return self._load_file_menu
+
+        elif not os.path.isfile(config.settings["sed_file"]):
+            print("Wrong file")
+            config.settings["sed_file"] = None
+            return self._load_file_menu
+
+        with open(config.settings["sed_file"], "r") as fp:
             self.extra_columns = json.load(fp)
 
-        current_cols = config.main_df.columns
+        unknown_cols = self._get_unknown_features()
 
-        unknown_cols = []
-        for col in self.extra_features:
-            if col not in list(config.settings.keys()):
-                if col not in current_cols:
-                    unknown_cols.append(col)
-                else:
-                    config.settings[col] = col
-
+        print(f"unk_cols: {unknown_cols}")
         if len(unknown_cols) > 0:
             self.col_selection = self.create_settings(unknown_cols)
             return self.render
@@ -478,36 +550,69 @@ def sed_plot(data, selected=None, **kwargs):
 
     with open(config.settings["sed_file"], "r") as fp:
         bands = json.load(fp)
-
     new_data = []
-
     for i in bands:
+        mag = -99
         if i in df_columns:
             if len(selected.data[i]) > 0:
-                new_data.append(
-                    [
-                        bands[i]["wavelength"],
-                        selected.data[i][0],
-                        bands[i]["FWHM"],
-                        bands[i]["error"],
-                    ]
-                )
+                if bands[i]["wavelength"] == -99:
+                    continue
+                else:
+                    mag = selected.data[i][0]
+
         elif i in list(config.settings.keys()):
             if config.settings[i] in df_columns:
                 if len(selected.data[config.settings[i]]) > 0:
-                    new_data.append(
-                        [
-                            bands[i]["wavelength"],
-                            selected.data[config.settings[i]][0],
-                            bands[i]["FWHM"],
-                            bands[i]["error"],
-                        ]
-                    )
+                    if bands[i]["wavelength"] == -99:
+                        continue
+                    else:
+                        mag = selected.data[config.settings[i]][0]
+
+        wavelength = bands[i]["wavelength"]
+        if len(selected.data[f"{config.settings['id_col']}"]) > 0:
+            if type(bands[i]["wavelength"]) == str:
+                if wavelength in config.main_df.columns:
+                    wavelength = selected.data[wavelength][0]
+                elif config.settings[wavelength] in config.main_df.columns:
+                    wavelength = selected.data[config.settings[wavelength]][0]
+                else:
+                    continue
+
+        fwhm = bands[i]["FWHM"]
+        if len(selected.data[f"{config.settings['id_col']}"]) > 0:
+            if type(bands[i]["FWHM"]) == str:
+                if fwhm in config.main_df.columns:
+                    fwhm = selected.data[fwhm][0]
+                elif config.settings[fwhm] in config.main_df.columns:
+                    fwhm = selected.data[config.settings[fwhm]][0]
+                else:
+                    continue
+        mag_err = bands[i]["error"]
+        if len(selected.data[f"{config.settings['id_col']}"]) > 0:
+            if type(bands[i]["error"]) == str:
+                if mag_err in config.main_df.columns:
+                    mag_err = selected.data[mag_err][0]
+                elif config.settings[mag_err] in config.main_df.columns:
+                    mag_err = selected.data[config.settings[mag_err]][0]
+                else:
+                    continue
+
+        if mag == -99:
+            continue
+
+        new_data.append(
+            [
+                wavelength,
+                mag,
+                fwhm,
+                mag_err,
+            ]
+        )
 
     new_data = pd.DataFrame(
         new_data, columns=["wavelength (µm)", "magnitude", "FWHM", "error"]
     )
-    new_data = new_data[new_data["wavelength (µm)"] != -99]
+
     new_data = new_data[new_data["magnitude"] != -99]
 
     if len(new_data) > 0:
@@ -549,9 +654,13 @@ def sed_plot(data, selected=None, **kwargs):
         errors_x = hv.Spread(error_data_x, horizontal=True)
         errors_y = hv.ErrorBars(error_data_y, horizontal=True)
         plot = plot * points * errors_x * errors_y
-        plot.opts(invert_yaxis=True)
-        print(plot)
+        plot.opts(invert_yaxis=True, logx=True)
+
     else:
-        plot = "Empty"
+        plot = hv.Scatter(
+            pd.DataFrame({"wavelength (µm)": [], "magnitude": []}),
+            vdims=["wavelength (µm)", "magnitude"],
+            kdims=["wavelength (µm)", "magnitude"],
+        )
 
     return plot
