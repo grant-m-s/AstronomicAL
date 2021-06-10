@@ -46,8 +46,6 @@ class CustomPlot:
         self.row = pn.Row("Loading...")
 
     def create_settings(self, unknown_cols):
-        print("creating settings...")
-        print(unknown_cols)
         self.waiting = True
         settings_column = pn.Column()
         for i, col in enumerate(unknown_cols):
@@ -122,7 +120,6 @@ def create_plot(
             data,
             [x, y],
         ).opts(active_tools=["pan", "wheel_zoom"])
-        print(p)
     elif plot_type == "line":
         p = hv.Path(
             data,
@@ -152,8 +149,6 @@ def create_plot(
                 active_tools=["pan", "wheel_zoom"],
             )
 
-            print(selected_plot)
-
     if colours:
         color_key = config.settings["label_colours"]
 
@@ -165,8 +160,6 @@ def create_plot(
                 for n in color_key
             }
         )
-
-    print("after colours")
 
     if smaller_axes_limits:
         max_x = np.max(data[x])
@@ -195,7 +188,6 @@ def create_plot(
 
                     max_y = np.max([max_y, np.max(selected[y])])
                     min_y = np.min([min_y, np.min(selected[y])])
-    print("after smaller_axes_limits")
 
     if colours:
         if smaller_axes_limits:
@@ -218,7 +210,6 @@ def create_plot(
                 threshold=0.75,
                 how="saturate",
             )
-        print("after colours 2")
 
     else:
         if smaller_axes_limits:
@@ -230,8 +221,6 @@ def create_plot(
                 how="saturate",
             ).redim.range(xdim=(min_x, max_x), ydim=(min_y, max_y))
         else:
-            print("final else else")
-            print(p)
             plot = dynspread(
                 datashade(
                     p,
@@ -239,19 +228,14 @@ def create_plot(
                 threshold=0.75,
                 how="saturate",
             )
-            print(plot)
-        print("after no colours")
 
     if slow_render:
         plot = p
-    print(plot)
     if show_selected and (selected is not None):
         plot = plot * selected_plot
 
     if label_plot and colours:
         plot = plot * color_points
-
-    print("returning plot")
 
     return plot
 
@@ -403,8 +387,7 @@ class SEDPlot(CustomPlot):
         self.row = pn.Row("Loading...")
 
     def create_settings(self, unknown_cols):
-        print("creating settings...")
-        print(unknown_cols)
+
         self.waiting = True
         settings_column = pn.Column()
         for i, col in enumerate(unknown_cols):
@@ -535,12 +518,10 @@ class SEDPlot(CustomPlot):
 
         unknown_cols = self._get_unknown_features()
 
-        print(f"unk_cols: {unknown_cols}")
         if len(unknown_cols) > 0:
             self.col_selection = self.create_settings(unknown_cols)
             return self.render
         else:
-            print("returning plot")
             return self.plot_fn
 
 

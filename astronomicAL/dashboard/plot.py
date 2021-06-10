@@ -70,7 +70,6 @@ class PlotDashboard(param.Parameterized):
         None
 
         """
-        print(f"x_var currently is: {self.X_variable}")
 
         self.update_df()
 
@@ -87,8 +86,6 @@ class PlotDashboard(param.Parameterized):
         self.param.Y_variable.default = config.settings["default_vars"][1]
         self.X_variable = config.settings["default_vars"][0]
         self.Y_variable = config.settings["default_vars"][1]
-
-        print(f"x_var has now changed to: {self.X_variable}")
 
     def _panel_cb(self, attr, old, new):
         self.panel()
@@ -107,8 +104,6 @@ class PlotDashboard(param.Parameterized):
             A Holoviews plot
 
         """
-
-        print(f"x_var is {x_var}")
 
         if x_var is None:
             x_var = self.X_variable
@@ -201,8 +196,6 @@ class PlotDashboard(param.Parameterized):
             parent Dashboard.
 
         """
-
-        print("Panel Plot")
 
         self.row[0] = pn.Card(
             pn.Row(self.plot, sizing_mode="stretch_both"),
