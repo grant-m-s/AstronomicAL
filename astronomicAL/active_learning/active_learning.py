@@ -3,6 +3,7 @@ from astronomicAL.utils.optimise import optimise
 from astronomicAL.utils import save_config
 from bokeh.models import (
     ColumnDataSource,
+    CheckboxButtonGroup,
     DataTable,
     TableColumn,
     TextAreaInput,
@@ -228,8 +229,6 @@ class ActiveLearningModel:
     """
 
     def __init__(self, src, df, label):
-
-        print("init")
 
         self.df = df
 
@@ -531,6 +530,27 @@ class ActiveLearningModel:
 
         self._queried_is_selected = False
 
+        self._train_tab_colour_switch = CheckboxButtonGroup(
+            labels=["Show Incorrect", "Show Correct"],
+            active=[0, 1],
+            max_height=35,
+            height=35,
+            sizing_mode="fixed",
+        )
+
+        self._train_tab_colour_switch.on_change("active", self._update_tab_plots_cb)
+
+        self._val_tab_colour_switch = CheckboxButtonGroup(
+            labels=["Show Incorrect", "Show Correct"],
+            active=[0, 1],
+            max_height=35,
+            height=35,
+            sizing_mode="fixed",
+        )
+        self._val_tab_colour_switch.on_change("active", self._update_tab_plots_cb)
+
+        self.active_tab = 0
+
         self.setup_row = pn.Row("Loading")
         self.panel_row = pn.Row("Loading")
 
@@ -811,27 +831,17 @@ class ActiveLearningModel:
 
         """
 
-        print("show_queried_point")
-        start = time.time()
         query_instance = self.query_instance
         query_idx = self.query_index
-        end = time.time()
-        print(f"queries {end - start}")
 
         data = self.df
 
-        start = time.time()
         queried_id = self.id_pool.iloc[query_idx][config.settings["id_col"]].copy()
-        end = time.time()
-        print(f"queried_id {end - start}")
 
         # print(f"\n\n\n id is {queried_id.values} \n\n\n")
-        start = time.time()
-        sel_idx = np.where(data[f'{config.settings["id_col"]}'] == queried_id.values[0])
-        end = time.time()
-        print(f"np.where {end - start}")
+
         act_label = self.y_pool[query_idx]
-        print(f"Should be a {act_label}")
+
         selected_source = self.df[
             self.df[config.settings["id_col"]] == queried_id.values[0]
         ]
@@ -865,7 +875,6 @@ class ActiveLearningModel:
         None
 
         """
-        print("iterate al")
 
         # self.assign_label = False
 
@@ -875,20 +884,15 @@ class ActiveLearningModel:
 
         print("fitting")
         self.learner.fit(self.x_al_train, self.y_al_train)
-        print("fitted")
 
         self.save_model(checkpoint=False)
 
-        print("getting predictions")
         self._update_predictions()
         print("got predictions")
 
         self.query_new_point()
 
-        start = time.time()
         self.show_queried_point()
-        end = time.time()
-        print(f"show_queried_point {end - start}")
 
         self.assign_label_button.name = "Assign"
 
@@ -902,7 +906,6 @@ class ActiveLearningModel:
 
         """
         self.query_index, self.query_instance = self.learner.query(self.x_pool)
-        print("queried")
 
     def _assign_label_cb(self, event):
 
@@ -939,9 +942,6 @@ class ActiveLearningModel:
             new_label = np.concatenate((self.y_al_train, selected_label))
 
             new_id = self.id_al_train.append(self.id_pool.iloc[query_idx])
-
-            print(f"new_label: {new_label}")
-            print(f"new_id: {new_id}")
 
             self.x_al_train = new_train
             self.y_al_train = new_label
@@ -982,8 +982,6 @@ class ActiveLearningModel:
 
     def _empty_data(self):
 
-        print("empty_data")
-
         empty = {
             f'{config.settings["default_vars"][0]}': [],
             f'{config.settings["default_vars"][1]}': [],
@@ -992,7 +990,6 @@ class ActiveLearningModel:
         return empty
 
     def _next_iteration_cb(self, event):
-        print("next_iter_cb")
 
         self.next_iteration_button.disabled = True
 
@@ -1010,8 +1007,6 @@ class ActiveLearningModel:
         self.checkpoint_button.disabled = False
 
     def _start_training_cb(self, event):
-        print("start_training_cb")
-
         table = self.classifier_table_source.data
 
         if len(table["classifier"]) == 0:
@@ -1063,7 +1058,6 @@ class ActiveLearningModel:
         self.panel()
 
     def _add_classifier_cb(self, event):
-        print("add_classifier_cb")
 
         clf = self.classifier_dropdown.value
         qs = self.query_strategy_dropdown.value
@@ -1079,8 +1073,6 @@ class ActiveLearningModel:
         }
 
     def _remove_classifier_cb(self, event):
-
-        print("remove_classifier_cb")
 
         list_c1 = self.classifier_table_source.data["classifier"]
         list_c2 = self.classifier_table_source.data["query"]
@@ -1111,8 +1103,6 @@ class ActiveLearningModel:
             to `df_data_x`.
 
         """
-
-        print("split_x_y_ids")
 
         df_data_y_ids = df_data[
             [config.settings["label_col"], config.settings["id_col"]]
@@ -1152,7 +1142,6 @@ class ActiveLearningModel:
             A subset of `df_data_y` which only has rows with label `excluded`.
 
         """
-        print(f"Before excluding {excluded}: {len(df_data_x)}")
         excluded_label = config.settings["strings_to_labels"][excluded]
         excluded_x = df_data_x[
             df_data_y[config.settings["label_col"]] == excluded_label
@@ -1163,7 +1152,6 @@ class ActiveLearningModel:
 
         data_x = df_data_x[df_data_y[config.settings["label_col"]] != excluded_label]
         data_y = df_data_y[df_data_y[config.settings["label_col"]] != excluded_label]
-        print(f"After excluding {excluded}: {len(data_x)}")
 
         return data_x, data_y, excluded_x, excluded_y
 
@@ -1203,8 +1191,6 @@ class ActiveLearningModel:
             A dataframe containing the labels corresponding to `x_test`.
 
         """
-
-        print("train_dev_split")
 
         np.random.seed(0)
         rng = np.random.RandomState(seed=0)
@@ -1376,7 +1362,6 @@ class ActiveLearningModel:
             A dataframe containing the normalised testing set.
 
         """
-        print("scale_data")
 
         self.scaler = RobustScaler()
 
@@ -1432,8 +1417,6 @@ class ActiveLearningModel:
             Dataframe containing only the id column of `y_id_test`.
 
         """
-
-        print("split_y_id_ids")
 
         data_y_tr = pd.DataFrame(
             y_id_train[config.settings["label_col"]],
@@ -1493,23 +1476,13 @@ class ActiveLearningModel:
 
     def _update_predictions(self):
 
-        start = time.time()
         proba = self.learner.predict_proba(config.ml_data["x_train"])
-        end = time.time()
-        print(f"pred proba {end - start}")
 
-        print("get_predicitions")
-        start = time.time()
         tr_pred = np.argmax(proba, axis=1).reshape((-1, 1))
-        end = time.time()
-        print(f"predict {end - start}")
-        temp = self.y_train.to_numpy().reshape((-1, 1))
-        start = time.time()
-        is_correct = tr_pred == temp
-        end = time.time()
-        print(f"is_correct {end - start}")
 
-        start = time.time()
+        temp = self.y_train.to_numpy().reshape((-1, 1))
+        is_correct = tr_pred == temp
+
         default_x = (
             config.ml_data["x_train"][config.settings["default_vars"][0]]
             .to_numpy()
@@ -1520,9 +1493,7 @@ class ActiveLearningModel:
             .to_numpy()
             .reshape((-1, 1))
         )
-        end = time.time()
-        print(f"def x_y {end - start}")
-        start = time.time()
+
         corr_data = {
             f'{config.settings["default_vars"][0]}': default_x[is_correct],
             f'{config.settings["default_vars"][1]}': default_y[is_correct],
@@ -1531,17 +1502,15 @@ class ActiveLearningModel:
             f'{config.settings["default_vars"][0]}': default_x[~is_correct],
             f'{config.settings["default_vars"][1]}': default_y[~is_correct],
         }
-        end = time.time()
-        print(f"corr and incorr {end - start}")
+
         self.corr_train.data = corr_data
         self.incorr_train.data = incorr_data
-        start = time.time()
+
         curr_tr_acc = accuracy_score(self.y_train, tr_pred)
         curr_tr_f1 = f1_score(self.y_train, tr_pred)
         curr_tr_prec = precision_score(self.y_train, tr_pred)
         curr_tr_rec = recall_score(self.y_train, tr_pred)
-        end = time.time()
-        print(f"scores {end - start}")
+
         self._train_scores = {
             "acc": "%.3f" % round(curr_tr_acc, 3),
             "prec": "%.3f" % round(curr_tr_prec, 3),
@@ -1553,15 +1522,11 @@ class ActiveLearningModel:
         self._f1_list["train"]["score"].append(curr_tr_f1)
         self._precision_list["train"]["score"].append(curr_tr_prec)
         self._recall_list["train"]["score"].append(curr_tr_rec)
-        start = time.time()
-        t_conf = confusion_matrix(self.y_train, tr_pred)
-        end = time.time()
-        print(f"conf matrix {end - start}")
 
-        start = time.time()
+        t_conf = confusion_matrix(self.y_train, tr_pred)
+
         val_pred = self.learner.predict(config.ml_data["x_val"]).reshape((-1, 1))
-        end = time.time()
-        print(f"pred val {end - start}")
+
         temp = self.y_val.to_numpy().reshape((-1, 1))
 
         is_correct = val_pred == temp
@@ -1609,8 +1574,7 @@ class ActiveLearningModel:
         v_conf = confusion_matrix(self.y_val, val_pred)
 
         test_pred = self.learner.predict(config.ml_data["x_test"]).reshape((-1, 1))
-        end = time.time()
-        print(f"pred test {end - start}")
+
         temp = self.y_test.to_numpy().reshape((-1, 1))
 
         curr_test_acc = accuracy_score(self.y_test, test_pred)
@@ -1626,8 +1590,6 @@ class ActiveLearningModel:
         }
 
         test_conf = confusion_matrix(self.y_test, test_pred)
-
-        print(test_conf)
 
         self.num_points_list.append(self.curr_num_points)
 
@@ -1655,10 +1617,7 @@ class ActiveLearningModel:
         self.conf_mat_test_fn = str(test_conf[1][0])
         self.conf_mat_test_tp = str(test_conf[1][1])
 
-        start = time.time()
         proba = 1 - np.max(proba, axis=1)
-        end = time.time()
-        print(f"1-proba {end - start}")
 
         x_axis = config.ml_data["x_train"][
             config.settings["default_vars"][0]
@@ -1666,10 +1625,6 @@ class ActiveLearningModel:
         y_axis = config.ml_data["x_train"][
             config.settings["default_vars"][1]
         ].to_numpy()
-
-        print(f"tr_pred:{tr_pred.shape}")
-        print(f"y_train:{self.y_train.shape}")
-        print(f"metric:{proba.shape}")
 
         self._model_output_data_tr[config.settings["default_vars"][0]] = x_axis
         self._model_output_data_tr[config.settings["default_vars"][1]] = y_axis
@@ -1698,8 +1653,6 @@ class ActiveLearningModel:
 
         """
 
-        print("create_pool")
-
         np.random.seed(0)
 
         if preselected is None:
@@ -1716,12 +1669,10 @@ class ActiveLearningModel:
             print(
                 f"\n\n=======  {config.ml_data['x_train'].shape} vs. {config.ml_data['x_train'].to_numpy().shape}  ==========\n\n"
             )
-            print(f"{list(config.ml_data['x_train'].columns)}")
+
             X_pool = config.ml_data["x_train"].to_numpy()
             y_pool = self.y_train.to_numpy().ravel()
             id_pool = self.id_train.to_numpy()
-
-            print(X_pool.shape)
 
             train_idx = list(
                 np.random.choice(
@@ -1742,9 +1693,6 @@ class ActiveLearningModel:
             self.y_pool = np.delete(y_pool, train_idx)
             self.id_pool = self.id_train.drop(self.id_train.index[train_idx])
 
-            print(self.id_al_train)
-            print(config.settings["classifiers"][f"{self._label}"])
-
             config.settings["classifiers"][f"{self._label}"]["id"] = self.id_al_train[
                 config.settings["id_col"]
             ].values.tolist()
@@ -1759,13 +1707,8 @@ class ActiveLearningModel:
 
         else:
 
-            print(preselected)
-
             new_y = preselected[0]
             new_id = preselected[1]
-
-            print(f"new_y: {new_y}")
-            print(f"new_id: {new_id}")
 
             y_tr = self.y_train.copy()
 
@@ -1779,12 +1722,6 @@ class ActiveLearningModel:
             y_pool = self.y_train.to_numpy().ravel()
             id_pool = self.id_train.to_numpy()
 
-            print(f"X_pool: {X_pool}")
-            print(f"y_pool: {y_pool}")
-            print(f"id_pool: {id_pool}")
-
-            print(X_pool.shape)
-
             train_idx = []
 
             for id in new_id:
@@ -1797,11 +1734,6 @@ class ActiveLearningModel:
             self.x_pool = np.delete(X_pool, train_idx, axis=0)
             self.y_pool = np.delete(y_pool, train_idx)
             self.id_pool = self.id_train.drop(self.id_train.index[train_idx])
-
-            # print("\n\n\n\n\n\n")
-            print(self.id_al_train)
-            print(self.y_al_train)
-            # print("\n\n\n\n\n\n")
 
             config.settings["classifiers"][f"{self._label}"][
                 "y"
@@ -1820,7 +1752,6 @@ class ActiveLearningModel:
         None
 
         """
-        print("setup_learners")
 
         table = self.classifier_table_source.data
 
@@ -1834,7 +1765,6 @@ class ActiveLearningModel:
         setup = False
 
         if self.retrain:
-            print("inside inner loop")
 
             new_y_with_unknowns = config.settings["classifiers"][f"{self._label}"]["y"]
             new_id_with_unknowns = config.settings["classifiers"][f"{self._label}"][
@@ -1859,8 +1789,6 @@ class ActiveLearningModel:
 
             preselected = [new_y, new_id]
 
-            print(preselected)
-
             self.create_pool(preselected=preselected)
 
             for id in unknowns_id:
@@ -1869,10 +1797,8 @@ class ActiveLearningModel:
             setup = True
 
         if not setup:
-            print("Didnt Train")
             self.create_pool()
 
-        print(f"{self._label_alias}: {self.y_al_train}, {self.id_al_train}")
         if len(table["classifier"]) == 1:
             self.committee = False
             learner = ActiveLearner(
@@ -1919,16 +1845,12 @@ class ActiveLearningModel:
             features for training.
 
         """
-        print("generate_features")
         np.random.seed(0)
 
         # CHANGED :: Change this to selected["AL_Features"]
         bands = config.settings["features_for_training"]
 
-        print(bands)
-
         features = bands + [config.settings["label_col"], config.settings["id_col"]]
-        print(features[-5:])
 
         oper_dict = feature_generation.get_oper_dict()
 
@@ -1945,12 +1867,7 @@ class ActiveLearningModel:
 
         shuffled = np.random.permutation(list(df_al.index.values))
 
-        print("shuffled...")
-
         df_al = df_al.reindex(shuffled)
-
-        print("reindexed")
-
         df_al = df_al.reset_index()
 
         return df, df_al
@@ -1958,7 +1875,6 @@ class ActiveLearningModel:
     # CHANGED :: Remove static declarations
     def _combine_data(self):
 
-        print("combine_data")
         data = np.array(
             self._model_output_data_tr[config.settings["default_vars"][0]]
         ).reshape((-1, 1))
@@ -1993,46 +1909,31 @@ class ActiveLearningModel:
 
     def _train_tab(self):
 
-        print("train_tab")
-        start = time.time()
-        self._model_output_data_tr["acc"] = np.equal(
+        self._model_output_data_tr["acc"] = 1 * np.equal(
             np.array(self._model_output_data_tr["pred"]),
             np.array(self._model_output_data_tr["y"]),
         )
-        end = time.time()
-        print(f"equal {end - start}")
-
-        start = time.time()
 
         df = pd.DataFrame(
             self._model_output_data_tr, columns=list(self._model_output_data_tr.keys())
         )
 
-        end = time.time()
-        print(f"DF {end - start}")
+        df = df[df["acc"].isin(self._train_tab_colour_switch.active)]
 
-        start = time.time()
         p = hv.Points(
             df,
             [config.settings["default_vars"][0], config.settings["default_vars"][1]],
         ).opts(toolbar=None, default_tools=[])
-        end = time.time()
-        print(f"P {end - start}")
 
         if hasattr(self, "x_al_train"):
-            start = time.time()
             x_al_train = pd.DataFrame(
                 self.x_al_train, columns=config.ml_data["x_train"].columns
             )
-            end = time.time()
-            print(f"hasattr {end - start}")
-        else:
-            start = time.time()
-            x_al_train = self._empty_data()
-            end = time.time()
-            print(f"x_al_train {end - start}")
 
-        start = time.time()
+        else:
+
+            x_al_train = self._empty_data()
+
         x_al_train_plot = hv.Scatter(
             x_al_train,
             config.settings["default_vars"][0],
@@ -2047,23 +1948,17 @@ class ActiveLearningModel:
             default_tools=[],
             show_legend=True,
         )
-        end = time.time()
-        print(f"x_al_train_plot {end - start}")
 
         if hasattr(self, "query_instance"):
-            start = time.time()
+
             query_point = pd.DataFrame(
                 self.query_instance, columns=config.ml_data["x_train"].columns
             )
-            end = time.time()
-            print(f"query_point {end - start}")
-        else:
-            start = time.time()
-            query_point = self._empty_data()
-            end = time.time()
-            print(f"query_point {end - start}")
 
-        start = time.time()
+        else:
+
+            query_point = self._empty_data()
+
         query_point_plot = hv.Scatter(
             query_point,
             config.settings["default_vars"][0],
@@ -2078,10 +1973,6 @@ class ActiveLearningModel:
             default_tools=[],
             show_legend=True,
         )
-        end = time.time()
-        print(f"query_point_plot {end - start}")
-
-        color_key = {1: "#2eb800", 0: "#c20000", "q": "yellow", "t": "black"}
 
         if len(x_al_train[config.settings["default_vars"][0]]) > 0:
 
@@ -2128,12 +2019,13 @@ class ActiveLearningModel:
                 self._min_y,
             )
 
-        start = time.time()
         plot = dynspread(
             datashade(
                 p,
-                color_key=color_key,
-                aggregator=ds.by("acc", ds.count()),
+                aggregator=ds.max("acc"),
+                cmap="RdYlGn",
+                normalization="linear",
+                clims=(-0.2, 1.2),
             ).opts(
                 xlim=(min_x, max_x),
                 ylim=(min_y, max_y),
@@ -2145,66 +2037,83 @@ class ActiveLearningModel:
             threshold=0.75,
             how="saturate",
         )
-        end = time.time()
-        print(f"plot {end - start}")
+
         full_plot = (plot * x_al_train_plot * query_point_plot).opts(
             toolbar=None, default_tools=[]
         )  # * color_points
 
-        print(f"FULL_PLOT:{full_plot}")
-
-        return full_plot
+        plot_col = pn.Column(
+            pn.Row(
+                self._train_tab_colour_switch,
+                max_height=35,
+                max_width=500,
+                sizing_mode="stretch_width",
+            ),
+            pn.Row(full_plot, sizing_mode="stretch_both"),
+            sizing_mode="stretch_both",
+            name="Training Set",
+        )
+        return plot_col
 
     def _val_tab(self):
-        print("_val_tab")
-        start = time.time()
-        self._model_output_data_val["acc"] = np.equal(
+
+        self._model_output_data_val["acc"] = 1 * np.equal(
             np.array(self._model_output_data_val["pred"]),
             np.array(self._model_output_data_val["y"]),
         )
-        end = time.time()
-        print(f"output_data_val {end - start}")
-        start = time.time()
 
         df = pd.DataFrame(
             self._model_output_data_val,
             columns=list(self._model_output_data_val.keys()),
         )
 
-        end = time.time()
-        print(f"df-val {end - start}")
-        start = time.time()
+        max_x = np.max(df[f"{config.settings['default_vars'][0]}"])
+        min_x = np.min(df[f"{config.settings['default_vars'][0]}"])
+        max_y = np.max(df[f"{config.settings['default_vars'][1]}"])
+        min_y = np.min(df[f"{config.settings['default_vars'][1]}"])
+
+        df = df[df["acc"].isin(self._val_tab_colour_switch.active)]
+
         p = hv.Points(
             df,
             [config.settings["default_vars"][0], config.settings["default_vars"][1]],
         ).opts(toolbar=None, default_tools=[])
-        end = time.time()
-        print(f"p-val {end - start}")
 
-        color_key = {1: "#2eb800", 0: "#c20000"}
-        start = time.time()
         plot = dynspread(
             datashade(
                 p,
-                color_key=color_key,
-                aggregator=ds.by("acc", ds.count()),
+                aggregator=ds.max("acc"),
+                cmap="RdYlGn",
+                normalization="linear",
+                clims=(-0.2, 1.2),
             ).opts(
-                xlim=(self._min_x, self._max_x),
-                ylim=(self._min_y, self._max_y),
-                shared_axes=False,
+                xlim=(min_x, max_x),
+                ylim=(min_y, max_y),
                 responsive=True,
+                shared_axes=False,
+                toolbar=None,
+                default_tools=[],
             ),
             threshold=0.75,
             how="saturate",
         )
-        end = time.time()
-        print(f"plot-val {end - start}")
-        return plot.opts(toolbar=None, default_tools=[])
+
+        full_plot = plot.opts(toolbar=None, default_tools=[])
+
+        plot_col = pn.Column(
+            pn.Row(
+                self._val_tab_colour_switch,
+                max_height=35,
+                max_width=500,
+                sizing_mode="stretch_width",
+            ),
+            pn.Row(full_plot, sizing_mode="stretch_both"),
+            sizing_mode="stretch_both",
+            name="Validation Set",
+        )
+        return plot_col
 
     def _metric_tab(self):
-
-        print("_metric_tab")
-        start = time.time()
 
         if "acc" not in self._model_output_data_tr.keys():
             self._model_output_data_tr["acc"] = np.equal(
@@ -2222,18 +2131,10 @@ class ActiveLearningModel:
             self._model_output_data_tr, columns=list(self._model_output_data_tr.keys())
         )
 
-        end = time.time()
-        print(f"df {end - start}")
-
-        start = time.time()
         p = hv.Points(
             df, [config.settings["default_vars"][0], config.settings["default_vars"][1]]
         ).opts(toolbar=None, default_tools=[])
 
-        end = time.time()
-        print(f"p {end - start}")
-
-        start = time.time()
         plot = dynspread(
             datashade(
                 p,
@@ -2251,12 +2152,9 @@ class ActiveLearningModel:
             how="saturate",
         )
 
-        end = time.time()
-        print(f"plot {end - start}")
         return plot.opts(toolbar=None, default_tools=[])
 
     def _scores_tab(self):
-        print("_scores_tab")
 
         return (
             hv.Path(
@@ -2276,7 +2174,6 @@ class ActiveLearningModel:
         ).opts(legend_position="bottom_right", toolbar=None, default_tools=[])
 
     def _add_conf_matrices(self):
-        print("_add_conf_matrices")
         if not self._show_test_results:
             return pn.Column(
                 pn.pane.Markdown(
@@ -2426,7 +2323,6 @@ class ActiveLearningModel:
             respective Dashboard.
 
         """
-        print("setup_panel")
 
         if not self._training:
             self.setup_row[0] = pn.Row(
@@ -2455,6 +2351,14 @@ class ActiveLearningModel:
                 ),
             )
 
+    def _update_tab_plots_cb(self, attr, old, new):
+        self.active_tab = self.tabs_view.active
+
+        if self.active_tab == 0:
+            self.tabs_view[self.active_tab] = self._train_tab()
+        elif self.active_tab == 2:
+            self.tabs_view[self.active_tab] = self._val_tab()
+
     def _panel_cb(self, attr, old, new):
         if self._training:
 
@@ -2477,7 +2381,15 @@ class ActiveLearningModel:
             respective Dashboard.
 
         """
-        print("panel")
+
+        self.tabs_view = pn.Tabs(
+            ("Training Set", self._train_tab()),
+            ("Metric", self._metric_tab()),
+            ("Validation Set", self._val_tab()),
+            ("Scores", self._scores_tab()),
+            active=self.active_tab,
+            # dynamic=True,
+        )
 
         if self._queried_is_selected:
             selected_message = pn.pane.Markdown(
@@ -2494,11 +2406,7 @@ class ActiveLearningModel:
 
         if not button_update:
 
-            start = time.time()
             self.setup_panel()
-            end = time.time()
-            print(f"setup {end - start}")
-            start = time.time()
 
             buttons_row = pn.Row(max_height=30)
             if self._training:
@@ -2528,21 +2436,12 @@ class ActiveLearningModel:
             self.panel_row[0] = pn.Column(
                 pn.Row(self.setup_row),
                 pn.Row(
-                    pn.Tabs(
-                        ("Training Set", self._train_tab()),
-                        ("Metric", self._metric_tab()),
-                        ("Validation Set", self._val_tab()),
-                        ("Scores", self._scores_tab()),
-                        # dynamic=True,
-                    ),
+                    self.tabs_view,
                     self._add_conf_matrices(),
                 ),
                 pn.Row(max_height=20),
                 buttons_row,
             )
-            end = time.time()
-            print(f"panel_row {end - start}")
-            print("\n====================\n")
             return self.panel_row
         else:
             buttons_row = pn.Row(max_height=30)
