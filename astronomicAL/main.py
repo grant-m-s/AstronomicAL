@@ -2,16 +2,10 @@ import os
 import sys
 
 sys.path.insert(1, os.path.join(sys.path[0], "../"))
-from astronomicAL.utils import save_config, load_config
-from bokeh.models import ColumnDataSource, TextAreaInput
-from functools import partial
-from multiprocessing import Process
-
+from astronomicAL.utils import load_config
 import astronomicAL.config as config
 import holoviews as hv
-import pandas as pd
 import panel as pn
-import time
 
 hv.extension("bokeh")
 hv.renderer("bokeh").webgl = True
@@ -27,42 +21,17 @@ if os.path.isfile(config.layout_file):
 else:
     react = load_config.create_default_layout(react)
 
-save_layout_button = pn.widgets.Button(name="Save Current Configuration")
+export_fits_file = pn.widgets.Button(
+    name="Export Labelled Data to Fits File", disabled=True
+)
 
 
-def _save_layout_button_rename():
-    save_layout_button.disabled = True
-    save_layout_button.name = (
-        "Configuration saved to configs folder with current timestamp."
+react.header.append(
+    pn.Row(
+        config.get_save_layout_button(config.settings["confirmed"], True),
+        export_fits_file,
     )
-    time.sleep(3)
-    save_layout_button.name = "Save Current Configuration"
-    save_layout_button.disabled = False
-
-
-def _save_layout_button_cb(event):
-    Process(target=_save_layout_button_rename).start()
-
-
-save_layout_button.on_click(_save_layout_button_cb)
-
-layout_dict = {}
-text_area_input = TextAreaInput(value="")
-text_area_input.on_change(
-    "value",
-    partial(
-        save_config.save_config_file_cb,
-        trigger_text=text_area_input,
-        autosave=False,
-    ),
 )
-
-save_layout_button.jscallback(
-    clicks=save_config.save_layout_js_cb,
-    args=dict(text_area_input=text_area_input),
-)
-
-react.header.append(pn.Row(save_layout_button))
 
 react.servable()
 
