@@ -384,6 +384,7 @@ class ActiveLearningSettings(param.Parameterized):
         config.settings["feature_generation"] = self.feature_generator_selected
         config.settings["test_set_file"] = self.test_set_checkbox.value
         config.settings["confirmed"] = True
+        config.settings["save_button"].disabled = False
 
         self.completed = True
 
