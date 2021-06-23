@@ -2186,8 +2186,9 @@ class TestDashboards:
 
     def _create_test_test_set(self):
 
-        if os.path.exists("data/test_set.json"):
-            os.system("mv data/test_set.json data/test_set_cp.json")
+        if not os.path.isfile("data/test_set_cp.json"):
+            if os.path.exists("data/test_set.json"):
+                os.system("mv data/test_set.json data/test_set_cp.json")
 
         test_data = """{ "2":0,"5":1,"7":0 }"""
 
