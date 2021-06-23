@@ -2698,6 +2698,7 @@ class TestUtils:
             "optimise_data": True,
             "exclude_unknown_labels": True,
             "classifiers": [],
+            "test_set_file": False,
         }
 
         example_layout = """{"0":{"x":0,"y":0,"w":6,"h":6},"1":{"x":0,"y":6,"w":6,"h":6},"2":{"x":6,"y":0,"w":6,"h":6}}"""
