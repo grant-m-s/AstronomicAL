@@ -403,6 +403,8 @@ class ActiveLearningModel:
             sizing_mode="stretch_width",
         )
 
+        self.assign_label_group.value = "Unsure"
+
         self.assign_label_button = pn.widgets.Button(
             name="Assign Label",
             button_type="primary",
@@ -990,6 +992,8 @@ class ActiveLearningModel:
         return empty
 
     def _next_iteration_cb(self, event):
+
+        self.assign_label_group.value = "Unsure"
 
         self.next_iteration_button.disabled = True
 
