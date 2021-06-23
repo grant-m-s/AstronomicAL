@@ -183,7 +183,7 @@ class PlotDashboard(param.Parameterized):
             )
             * selected_plot
             * color_points
-        )
+        ).opts(legend_position="bottom_right")
         return plot
 
     def panel(self):
