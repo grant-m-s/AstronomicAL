@@ -231,6 +231,11 @@ class ActiveLearningSettings(param.Parameterized):
             max_width=5,
         )
 
+        self._memory_opt_tooltip = pn.pane.HTML(
+            "<span data-toggle='tooltip' title='These are the axes that will be displayed in the Active Learning panel. This does not restrict the axes in any of the other plots.' style='border-radius: 15px;padding: 5px; background: #5e5e5e; ' >❔</span> ",
+            max_width=5,
+        )
+
     def _verify_valid_selection_cb(self, event):
 
         selected_labels = self.label_selector.value
@@ -470,7 +475,11 @@ class ActiveLearningSettings(param.Parameterized):
                     self._feature_generator_dataframe,
                     sizing_mode="stretch_width",
                 ),
-                pn.Row(self.default_x_variable, self.default_y_variable),
+                pn.Row(
+                    self.default_x_variable,
+                    self.default_y_variable,
+                    self._memory_opt_tooltip,
+                ),
                 pn.Row(self.confirm_settings_button, max_height=30),
                 pn.Row(pn.Spacer(height=30)),
             )
