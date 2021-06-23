@@ -241,9 +241,6 @@ class ActiveLearningSettings(param.Parameterized):
         selected_labels = self.label_selector.value
         selected_features = self.feature_selector.value
 
-        print(selected_features)
-        print(selected_labels)
-
         exclude_labels = False
         confirm_settings = False
 
