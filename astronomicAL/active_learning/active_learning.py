@@ -315,17 +315,12 @@ class ActiveLearningModel:
     def _initialise_placeholders(self):
 
         if not config.settings["default_vars"][0] in config.ml_data["x_train"].keys():
-            print(
-                f"{config.settings['default_vars'][0]} not in training features, reassigning to {config.settings['features_for_training'][0]}"
-            )
             config.settings["default_vars"] = (
                 config.settings["features_for_training"][0],
                 config.settings["default_vars"][1],
             )
+
         if not config.settings["default_vars"][1] in config.ml_data["x_train"].keys():
-            print(
-                f"{config.settings['default_vars'][1]} not in training features, reassigning to {config.settings['features_for_training'][1]}"
-            )
             config.settings["default_vars"] = (
                 config.settings["default_vars"][0],
                 config.settings["features_for_training"][1],
@@ -572,8 +567,6 @@ class ActiveLearningModel:
     def _preprocess_data(self):
 
         self.df, self.all_al_data = self.generate_features(self.df)
-        print(f"df:{sys.getsizeof(self.df)}")
-        print(f"data df:{sys.getsizeof(self.all_al_data)}")
 
         x, y = self.split_x_y_ids(self.all_al_data)
 
@@ -654,7 +647,6 @@ class ActiveLearningModel:
         total += sys.getsizeof(config.ml_data)
         for dataframe in config.ml_data.keys():
             total += sys.getsizeof(config.ml_data[dataframe])
-        print(f"config.ml_data :{total}")
 
         for key in config.ml_data.keys():
             if isinstance(config.ml_data[key], pd.DataFrame):
@@ -664,7 +656,6 @@ class ActiveLearningModel:
         total += sys.getsizeof(config.ml_data)
         for dataframe in config.ml_data.keys():
             total += sys.getsizeof(config.ml_data[dataframe])
-        print(f"optimised ml_data :{total}")
 
     def assign_global_data(self):
         """Assign the current train, validation and test sets to the shared
@@ -884,13 +875,12 @@ class ActiveLearningModel:
 
         self.curr_num_points = self.x_al_train.shape[0]
 
-        print("fitting")
+        print("fitting...")
         self.learner.fit(self.x_al_train, self.y_al_train)
 
         self.save_model(checkpoint=False)
 
         self._update_predictions()
-        print("got predictions")
 
         self.query_new_point()
 
@@ -1672,20 +1662,6 @@ class ActiveLearningModel:
 
             y_tr = self.y_train.copy()
 
-            # y_tr = y_tr.to_numpy()
-            print(
-                f"\n\n=======  {config.ml_data['x_train'].shape} vs. {config.ml_data['x_train'].to_numpy().shape}  ==========\n\n"
-            )
-
-            # print(
-            #     config.main_df[
-            #         pd.DataFrame(config.main_df[config.settings["id_col"]].tolist())
-            #         .isin(self.id_train.values.tolist())
-            #         .any(1)
-            #         .values
-            #     ]
-            # )
-
             X_pool = config.ml_data["x_train"].to_numpy()
             y_pool = self.y_train.to_numpy().ravel()
             id_pool = self.id_train.to_numpy()
@@ -1713,7 +1689,7 @@ class ActiveLearningModel:
 
                     if label != -1:
                         idx = np.where(self.id_train.values.tolist() == p)[0][0]
-                        print(idx)
+
                         if idx not in train_idx:
                             if label != self._label:
                                 missing_negative = False
@@ -1747,7 +1723,6 @@ class ActiveLearningModel:
             train_labels.append(self._label)
 
             train_idx = train_idx + [c1]
-            print(train_idx)
 
             self.x_al_train = X_pool[train_idx]
             self.y_al_train = y_pool[train_idx]
@@ -1783,12 +1758,6 @@ class ActiveLearningModel:
             new_id = preselected[1]
 
             y_tr = self.y_train.copy()
-
-            # y_tr = y_tr.to_numpy()
-
-            print(
-                f"\n\n=======  {config.ml_data['x_train'].shape} vs. {config.ml_data['x_train'].to_numpy().shape}  ==========\n\n"
-            )
 
             X_pool = config.ml_data["x_train"].to_numpy()
             y_pool = self.y_train.to_numpy().ravel()
@@ -1847,13 +1816,12 @@ class ActiveLearningModel:
 
             for i in range(len(new_y_with_unknowns)):
                 if new_y_with_unknowns[i] == self._label:
-                    print(f"{new_y_with_unknowns[i]}->{1}")
                     new_y_converted[i] = 1
+
                 elif str(new_y_with_unknowns[i]) == "-1":
-                    print(f"{new_y_with_unknowns[i]}->{-1}")
                     new_y_converted[i] = -1
+
                 else:
-                    print(f"{new_y_with_unknowns[i]}->{0}")
                     new_y_converted[i] = 0
 
             self.full_labelled_data["y"] = new_y_with_unknowns

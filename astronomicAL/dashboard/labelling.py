@@ -150,7 +150,6 @@ class LabellingDashboard(param.Parameterized):
         None
 
         """
-        print(f"x_var currently is: {self.X_variable}")
 
         cols = list(config.main_df.columns)
 
@@ -167,8 +166,6 @@ class LabellingDashboard(param.Parameterized):
         self.param.Y_variable.default = config.settings["default_vars"][1]
         self.X_variable = config.settings["default_vars"][0]
         self.Y_variable = config.settings["default_vars"][1]
-
-        print(f"x_var has now changed to: {self.X_variable}")
 
     def update_sample_region(self, event=None, button="ADD"):
 
@@ -256,8 +253,6 @@ class LabellingDashboard(param.Parameterized):
             else:
                 all_bools = f"{all_bools} & {bool}"
 
-            print(all_bools)
-
         if all_bools == "":
             self.sample_region = self.df
         else:
@@ -288,8 +283,6 @@ class LabellingDashboard(param.Parameterized):
             A Holoviews plot
 
         """
-
-        print(f"x_var is {x_var}")
 
         if x_var is None:
             x_var = self.X_variable
@@ -528,8 +521,6 @@ class LabellingDashboard(param.Parameterized):
             parent Dashboard.
 
         """
-
-        print("Labelling panel rendering...")
 
         df_pane = hv.Table(self.region_criteria_df).opts(hooks=[self._apply_format])
 
