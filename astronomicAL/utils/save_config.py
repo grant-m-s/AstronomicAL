@@ -1,6 +1,7 @@
 from datetime import datetime
 
 import astronomicAL.config as config
+from astropy.table import Table
 import json
 import numpy as np
 
@@ -108,6 +109,7 @@ def save_config_file(layout_from_js, trigger_text, autosave=False, test=False):
     export_config["unclassified_labels"] = config.settings["unclassified_labels"]
     export_config["scale_data"] = config.settings["scale_data"]
     export_config["feature_generation"] = config.settings["feature_generation"]
+    export_config["test_set_file"] = config.settings["test_set_file"]
 
     if "classifiers" not in config.settings.keys():
         config.settings["classifiers"] = {}
@@ -128,3 +130,11 @@ def save_config_file(layout_from_js, trigger_text, autosave=False, test=False):
         dt_string = now.strftime("%Y%m%d_%H:%M:%S")
         with open(f"configs/config_{dt_string}.json", "w") as fp:
             json.dump(export_config, fp, cls=NumpyEncoder)
+
+
+def save_dataframe_to_fits(df, filename, overwrite=True):
+    assert (
+        len(df.columns) <= 999
+    ), f"FITS Files only allow up to 999 columns, dataframe contains {len(df.columns)}"
+    t = Table.from_pandas(df)
+    t.write(filename, overwrite=overwrite)
