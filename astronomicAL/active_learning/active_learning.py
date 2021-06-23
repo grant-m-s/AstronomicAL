@@ -414,7 +414,7 @@ class ActiveLearningModel:
         self.assign_label_button.on_click(self._assign_label_cb)
 
         self.show_queried_button = pn.widgets.Button(
-            name="Show Queried", sizing_mode="stretch_width"
+            name="Select Current Queried Point", sizing_mode="stretch_width"
         )
         self.show_queried_button.on_click(self._show_queried_point_cb)
 
