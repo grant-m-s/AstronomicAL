@@ -641,7 +641,7 @@ def sed_plot(data, selected=None, **kwargs):
         plot = hv.Scatter(
             pd.DataFrame({"wavelength (µm)": [], "magnitude": []}),
             vdims=["wavelength (µm)", "magnitude"],
-            kdims=["wavelength (µm)", "magnitude"],
+            kdims=["magnitude"],
         )
 
     return plot
