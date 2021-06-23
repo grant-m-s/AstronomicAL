@@ -208,25 +208,18 @@ def update_config_settings(imported_config):
             for i in imported_config["label_colours"]:
                 label_colours[int(i)] = imported_config["label_colours"][i]
             config.settings[key] = label_colours
-            print(config.settings["label_colours"])
         else:
-            print(key)
             config.settings[key] = imported_config[key]
 
     config.settings["confirmed"] = True
-
-    print(config.settings)
 
 
 def create_layout_from_file(react):
 
     with open(config.layout_file) as layout_file:
         curr_config_file = json.load(layout_file)
-    print(curr_config_file)
-    if len(curr_config_file.keys()) > 1:
-        print("IS LOADING NEW")
 
-        print(config.settings.keys())
+    if len(curr_config_file.keys()) > 1:
 
         if config.settings["config_load_level"] > 0:
 

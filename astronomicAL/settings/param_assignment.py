@@ -99,7 +99,6 @@ class ParameterAssignment(param.Parameterized):
             self.df = dataframe
 
         if (self.initial_update) and (self.df is not None):
-            print("Not None")
             cols = list(self.df.columns)
 
             if cols == []:
@@ -173,10 +172,7 @@ class ParameterAssignment(param.Parameterized):
                 max_width=int(500 / len(labels)),
             )
 
-        print(self.colours_param)
-
     def _initialise_label_strings_input(self):
-        print("Updating Label Strings...")
         labels = config.settings["labels"]
         for i, data_label in enumerate(labels):
             self.label_strings_param[f"{data_label}"] = pn.widgets.TextInput(
@@ -240,10 +236,8 @@ class ParameterAssignment(param.Parameterized):
         for key in colours.keys():
             try:
                 i = int(key)
-                print(f"{i} is int")
             except:
                 is_int = False
-                print(f"{key} is not int")
                 break
 
         if is_int:
@@ -327,7 +321,6 @@ class ParameterAssignment(param.Parameterized):
             settings Dashboard.
 
         """
-        print("ASSIGN PARAMETERS IS RENDERING...")
         if self.completed:
             self.column[0] = pn.pane.Str("Settings Saved.")
         else:

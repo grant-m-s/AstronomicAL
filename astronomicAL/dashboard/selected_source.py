@@ -183,8 +183,6 @@ class SelectedSourceDashboard:
     def _check_valid_selected(self):
         selected = False
 
-        print("checking valid selection")
-
         if config.settings["id_col"] in list(self.src.data.keys()):
             if len(self.src.data[config.settings["id_col"]]) > 0:
                 if self.src.data[config.settings["id_col"]][0] in list(
@@ -231,8 +229,6 @@ class SelectedSourceDashboard:
         self.src.data = empty
 
     def _generate_radio_url(self, ra, dec):
-
-        print("generating radio url...")
 
         ra = float(ra)
         dec = float(dec)

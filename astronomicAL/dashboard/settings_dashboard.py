@@ -106,8 +106,6 @@ class SettingsDashboard:
         """
         self.pipeline = pn.pipeline.Pipeline()
 
-        print(f"mode is {mode}")
-
         valid_mode = True
 
         if mode == "AL":
@@ -207,8 +205,6 @@ class SettingsDashboard:
         elif config.mode == "Labelling":
             main.set_contents(updated="Labelling")
 
-        print("\nswitched contents\n")
-
     def _stage_previous_cb(self, event):
 
         self._pipeline_stage -= 1
@@ -217,7 +213,6 @@ class SettingsDashboard:
     def _stage_next_cb(self, event):
 
         if self.df is None:
-            print("updating Settings df")
             self.df = config.main_df
 
         pipeline_list = list(self.pipeline._stages)

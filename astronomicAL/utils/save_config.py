@@ -66,15 +66,12 @@ def save_config_file_cb(attr, old, new, trigger_text, autosave):
 
 
 def save_config_file(layout_from_js, trigger_text, autosave=False, test=False):
-    print("json updated")
-    print(f"LAYOUT VALUE:{layout_from_js}")
 
     if layout_from_js == "":
         return
 
     layout = json.loads(layout_from_js)
     trigger_text.value = ""
-    print(layout)
     for i in layout:
         curr_contents = config.dashboards[i].contents
         layout[i]["contents"] = curr_contents
@@ -83,8 +80,6 @@ def save_config_file(layout_from_js, trigger_text, autosave=False, test=False):
                 config.dashboards[i].panel_contents.X_variable,
                 config.dashboards[i].panel_contents.Y_variable,
             ]
-
-    print(f"FINAL CONFIG SETTINGS: {config.settings}")
 
     export_config = {}
 
@@ -119,7 +114,7 @@ def save_config_file(layout_from_js, trigger_text, autosave=False, test=False):
     print(f"FINAL Export CONFIG SETTINGS: {export_config}")
 
     if autosave:
-        print("AUTOSAVING")
+        print("AUTOSAVING...")
         with open("configs/autosave.json", "w") as fp:
             json.dump(export_config, fp, cls=NumpyEncoder)
     elif test:
