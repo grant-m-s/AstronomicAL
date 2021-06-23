@@ -516,11 +516,9 @@ class SEDPlot(CustomPlot):
             pass
 
         elif "sed_file" not in config.settings.keys():
-            print("no key")
             return self._load_file_menu
 
         elif config.settings["sed_file"] is None:
-            print("None")
             return self._load_file_menu
 
         elif not os.path.isfile(config.settings["sed_file"]):

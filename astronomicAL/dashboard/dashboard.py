@@ -66,7 +66,6 @@ class Dashboard(param.Parameterized):
                     continue
                 for selector in row:
                     config.settings[selector.name] = selector.value
-                    print(selector)
         else:
             self._submit_button.name = "Submit updated column names"
             self._submit_button.disabled = False
@@ -86,8 +85,6 @@ class Dashboard(param.Parameterized):
 
     @param.depends("contents", watch=True)
     def _update_contents(self):
-
-        print("Updating contents")
 
         if self.contents == "Settings":
 
@@ -126,8 +123,6 @@ class Dashboard(param.Parameterized):
             self.panel_contents = self.plot_dict[self.contents].plot(
                 self._submit_button
             )(config.main_df, self.src)
-
-        print("Successfully updated contents")
 
         self.panel()
 
