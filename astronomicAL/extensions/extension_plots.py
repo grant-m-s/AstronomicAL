@@ -104,6 +104,7 @@ def create_plot(
     colours=True,
     smaller_axes_limits=False,
     bounds=None,
+    legend_position=None,
 ):
 
     assert x in list(data.columns), f"Column {x} is not a column in your dataframe."
@@ -237,6 +238,9 @@ def create_plot(
     if label_plot and colours:
         plot = plot * color_points
 
+    if legend_position is not None:
+        plot = plot.opts(legend_position=legend_position)
+
     return plot
 
 
@@ -250,6 +254,7 @@ def bpt_plot(data, selected=None, **kwargs):
         label_plot=True,
         selected=selected,
         bounds=[-1.8, 1.25, 1, -2.2],
+        legend_position="bottom_right",
     )
 
     x1 = np.linspace(-1.6, -0.2, 60)
@@ -278,6 +283,7 @@ def bpt_plot(data, selected=None, **kwargs):
         label_plot=True,
         selected=selected,
         bounds=[-2.1, 1.2, 0.9, -2.1],
+        legend_position="bottom_right",
     )
 
     x1 = np.linspace(-2, 0.1, 60)
@@ -299,6 +305,7 @@ def bpt_plot(data, selected=None, **kwargs):
         label_plot=True,
         selected=selected,
         bounds=[-3.3, 1.25, 1.65, -2.3],
+        legend_position="bottom_right",
     )
 
     x1 = np.linspace(-3, -0.8, 60)
@@ -313,9 +320,9 @@ def bpt_plot(data, selected=None, **kwargs):
     plot_OI = plot_OI * OI_line1
 
     tabs = pn.Tabs(
-        ("NII", plot_NII),
-        ("SII", plot_SII),
-        ("OI", plot_OI),
+        ("NII", plot_NII.opts(legend_position="bottom_right")),
+        ("SII", plot_SII.opts(legend_position="bottom_right")),
+        ("OI", plot_OI.opts(legend_position="bottom_right")),
     )
 
     return tabs
@@ -330,6 +337,7 @@ def mateos_2012_wedge(data, selected=None, **kwargs):
         plot_type="scatter",
         label_plot=True,
         selected=selected,
+        legend_position="bottom_right",
     )
 
     x = data[config.settings["Log10(W3_Flux/W2_Flux)"]]
@@ -375,6 +383,8 @@ def mateos_2012_wedge(data, selected=None, **kwargs):
     )
 
     plot = plot * p1 * p2 * p3
+
+    plot.opts(legend_position="bottom_left")
 
     return plot
 
