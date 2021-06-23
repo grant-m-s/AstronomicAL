@@ -918,6 +918,13 @@ class ActiveLearningModel:
 
         if not selected_label == "Unsure":
 
+            self.full_labelled_data["id"].append(
+                list(self.id_pool.iloc[query_idx].values)[0][0]
+            )
+            self.full_labelled_data["y"].append(
+                config.settings["strings_to_labels"][selected_label]
+            )
+
             self._assigned = True
             self.next_iteration_button.name = "Next Iteration"
 
@@ -932,11 +939,6 @@ class ActiveLearningModel:
             else:
                 selected_label = 0
 
-            self.full_labelled_data["id"].append(
-                list(self.id_pool.iloc[query_idx].values)[0][0]
-            )
-            self.full_labelled_data["y"].append(selected_label)
-
             selected_label = np.array([selected_label])
 
             new_train = np.vstack((self.x_al_train, query))
@@ -950,13 +952,14 @@ class ActiveLearningModel:
             self.id_al_train = new_id
 
         else:
-            self.assign_label_button.name = "Querying..."
-            self.assign_label_button.disabled = True
 
             self.full_labelled_data["id"].append(
                 list(self.id_pool.iloc[query_idx].values)[0][0]
             )
             self.full_labelled_data["y"].append(-1)
+
+            self.assign_label_button.name = "Querying..."
+            self.assign_label_button.disabled = True
 
             self.remove_from_pool()
             self.query_new_point()
@@ -1674,20 +1677,77 @@ class ActiveLearningModel:
                 f"\n\n=======  {config.ml_data['x_train'].shape} vs. {config.ml_data['x_train'].to_numpy().shape}  ==========\n\n"
             )
 
+            # print(
+            #     config.main_df[
+            #         pd.DataFrame(config.main_df[config.settings["id_col"]].tolist())
+            #         .isin(self.id_train.values.tolist())
+            #         .any(1)
+            #         .values
+            #     ]
+            # )
+
             X_pool = config.ml_data["x_train"].to_numpy()
             y_pool = self.y_train.to_numpy().ravel()
             id_pool = self.id_train.to_numpy()
 
-            train_idx = list(
-                np.random.choice(
-                    range(X_pool.shape[0]), size=initial_points - 2, replace=False
+            train_idx = []
+            train_labels = []
+            missing_negative = True
+            for i in range(initial_points - 1):
+                valid = False
+                while not valid:
+                    # print(self.id_train.values.tolist())
+                    p = np.random.choice(
+                        [
+                            item
+                            for sublist in self.id_train.values.tolist()
+                            for item in sublist
+                        ],
+                        size=1,
+                        replace=False,
+                    )
+
+                    label = config.main_df[
+                        config.main_df[config.settings["id_col"]] == p[0]
+                    ][config.settings["label_col"]].values[0]
+
+                    if label != -1:
+                        idx = np.where(self.id_train.values.tolist() == p)[0][0]
+                        print(idx)
+                        if idx not in train_idx:
+                            if label != self._label:
+                                missing_negative = False
+                            train_idx.append(idx)
+                            train_labels.append(label)
+                            valid = True
+
+            while missing_negative:
+                p = np.random.choice(
+                    [
+                        item
+                        for sublist in self.id_train.values.tolist()
+                        for item in sublist
+                    ],
+                    size=1,
+                    replace=False,
                 )
-            )
 
-            c0 = np.random.choice(np.where(y_tr == 0)[0])
+                label = config.main_df[
+                    config.main_df[config.settings["id_col"]] == p[0]
+                ][config.settings["label_col"]].values[0]
+
+                if label != -1:
+                    if label != self._label:
+                        missing_negative = False
+                        idx = np.where(self.id_train.values.tolist() == p)
+                        train_idx.append(idx)
+                        train_labels.append(label)
+
             c1 = np.random.choice(np.where(y_tr == 1)[0])
+            train_labels.append(self._label)
 
-            train_idx = train_idx + [c0] + [c1]
+            train_idx = train_idx + [c1]
+            print(train_idx)
 
             self.x_al_train = X_pool[train_idx]
             self.y_al_train = y_pool[train_idx]
@@ -1704,10 +1764,18 @@ class ActiveLearningModel:
                 config.settings["id_col"]
             ].values.tolist()
 
-            config.settings["classifiers"][f"{self._label}"][
-                "y"
-            ] = self.y_al_train.tolist()
-            self.full_labelled_data["y"] = self.y_al_train.tolist()
+            # raw_y_train = []
+            # for id in config.settings["classifiers"][f"{self._label}"]["id"]:
+            #     raw_label = config.main_df[
+            #         config.main_df[config.settings["id_col"]] == id
+            #     ][config.settings["label_col"]].values[0]
+            #
+            #     if raw_label == -1:
+            #         raw_label = 0
+            #     raw_y_train.append(raw_label)
+
+            config.settings["classifiers"][f"{self._label}"]["y"] = train_labels
+            self.full_labelled_data["y"] = train_labels
 
         else:
 
@@ -1775,14 +1843,27 @@ class ActiveLearningModel:
                 "id"
             ]
 
+            new_y_converted = new_y_with_unknowns.copy()
+
+            for i in range(len(new_y_with_unknowns)):
+                if new_y_with_unknowns[i] == self._label:
+                    print(f"{new_y_with_unknowns[i]}->{1}")
+                    new_y_converted[i] = 1
+                elif str(new_y_with_unknowns[i]) == "-1":
+                    print(f"{new_y_with_unknowns[i]}->{-1}")
+                    new_y_converted[i] = -1
+                else:
+                    print(f"{new_y_with_unknowns[i]}->{0}")
+                    new_y_converted[i] = 0
+
             self.full_labelled_data["y"] = new_y_with_unknowns
             self.full_labelled_data["id"] = new_id_with_unknowns
 
-            new_y = [x for x in new_y_with_unknowns if x != -1]
+            new_y = [x for x in new_y_converted if x != -1]
             new_id = [
                 x
                 for i, x in enumerate(new_id_with_unknowns)
-                if new_y_with_unknowns[i] != -1
+                if new_y_converted[i] != -1
             ]
 
             unknowns_id = [
