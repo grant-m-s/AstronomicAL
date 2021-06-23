@@ -319,7 +319,25 @@ class DataSelection(param.Parameterized):
 
         """
         if (self.error_message == "") or (self.error_message == "verified"):
-            message = "Welcome!"
+            message = pn.pane.Markdown(
+                """
+                Welcome to AstronomicAL, an interactive dashboard for visualisation, integration and classification of data using active learning methods.
+
+                For tutorials and API reference documents, please visit our documentation [here](https://astronomical.readthedocs.io).
+
+                AstronomicAL provides both an example dataset and an example configuration file to allow you to jump right into the software and give it a test run.
+
+                To begin training you simply have to select **Load Custom Configuration** checkbox and select your config file. Here we have chosen to use the `example_config.json` file.
+
+                The **Load Config Select** option allows use to choose the extent to which to reload the configuration.
+
+                #### Referencing the Package
+
+                Please remember to cite our software and user guide whenever relevant. See the [Citing page](https://astronomical.readthedocs.io/en/latest/content/other/citing.html) in the documentation for instructions about referencing and citing the astronomicAL software.
+                """,
+                sizing_mode="stretch_width",
+                margin=(0, 0, 0, 0),
+            )
         else:
             message = pn.pane.Markdown(self.error_message)
 
@@ -335,10 +353,11 @@ class DataSelection(param.Parameterized):
                     pn.layout.VSpacer(),
                     pn.layout.VSpacer(),
                 ),
-                pn.Row(message, scroll=True, max_height=300),
+                pn.Row(message, scroll=True, sizing_mode="stretch_width"),
                 pn.layout.VSpacer(),
                 pn.layout.VSpacer(),
                 pn.layout.VSpacer(),
+                sizing_mode="stretch_width",
             )
 
         else:
@@ -356,9 +375,28 @@ class DataSelection(param.Parameterized):
                     pn.layout.VSpacer(max_width=300),
                     pn.layout.VSpacer(max_width=300),
                     pn.layout.VSpacer(max_width=300),
-                    max_width=300,
                 ),
-                pn.Row("Welcome!"),
+                pn.Row(
+                    pn.pane.Markdown(
+                        """
+                    Welcome to AstronomicAL, an interactive dashboard for visualisation, integration and classification of data using active learning methods.
+
+                    For tutorials and API reference documents, please visit our documentation [here](https://astronomical.readthedocs.io).
+
+                    AstronomicAL provides both an example dataset and an example configuration file to allow you to jump right into the software and give it a test run.
+
+                    To begin training you simply have to select **Load Custom Configuration** checkbox and select your config file. Here we have chosen to use the `example_config.json` file.
+
+                    The **Load Config Select** option allows use to choose the extent to which to reload the configuration.
+
+                    #### Referencing the Package
+
+                    Please remember to cite our software and user guide whenever relevant. See the [Citing page](https://astronomical.readthedocs.io/en/latest/content/other/citing.html) in the documentation for instructions about referencing and citing the astronomicAL software.
+                    """,
+                        sizing_mode="stretch_width",
+                        margin=(0, 0, 0, 0),
+                    )
+                ),
             )
 
         return self.panel_col
