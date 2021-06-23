@@ -48,7 +48,9 @@ def _save_layout_button_rename():
         settings["confirmed"]
     ).name = "Configuration saved to configs folder with current timestamp."
     time.sleep(3)
-    get_save_layout_button(settings["confirmed"]).name = "Save Current Configuration"
+    get_save_layout_button(
+        settings["confirmed"], True
+    ).name = "Save Current Configuration"
     if settings["confirmed"]:
         get_save_layout_button(settings["confirmed"], True).disabled = False
 
