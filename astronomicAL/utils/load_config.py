@@ -45,6 +45,7 @@ def verify_import_config(curr_config_file):
             "unclassified_labels",
             "scale_data",
             "feature_generation",
+            "test_set_file",
         ]
 
         missing_settings = list(
@@ -181,6 +182,12 @@ def verify_import_config(curr_config_file):
                 error_message += f"AstronomicAL is missing the following classifiers in `extensions/query_strategies.py`:\n\n{missing_qrys}\n\n **[If they have not been uploaded to the astronomicAL repo you may need to contact the researcher who uploaded the config for the correct code]**\n\n\n"
                 error_message += "\n\n-------------------------------\n\n"
 
+        if "test_set_file" in list(curr_config_file.keys()):
+            if curr_config_file["test_set_file"]:
+                if not os.path.isfile("data/test_set.json"):
+                    has_error = True
+                    error_message += f"AstronomicAL is missing the following test set file:\n\n `data/test_set.json` \n\n **[Your configuration file states it uses this file to create a verified test set. Change flag `test_file_set` to `false` in your config file to create a test set from the data (Classifier performance may be affected from previously stated results)]**\n\n\n"
+                    error_message += "\n\n-------------------------------\n\n"
     if has_error:
         error_message = (
             "**Unable to import file due to the following errors:**\n\n\n\n"
