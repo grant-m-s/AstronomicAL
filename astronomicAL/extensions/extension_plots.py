@@ -429,6 +429,11 @@ class SEDPlot(CustomPlot):
             with open(f"data/sed_data/photometry_bands_{dt_string}.json", "w") as fp:
                 json.dump(bands_dict, fp, indent=2)
 
+        files = glob.glob("data/sed_data/*.json")
+        self.files_selection.options = [""] + files
+
+        self.files_selection.value = f"data/sed_data/photometry_bands_{dt_string}.json"
+
         self.plot(self.submit_button)
 
     def _get_unknown_features(self):
