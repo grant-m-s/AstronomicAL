@@ -2255,6 +2255,13 @@ class ActiveLearningModel:
                             pn.Row(pn.pane.Str(self.conf_mat_test_tp), min_height=50),
                         ),
                     ),
+                    pn.pane.Markdown(
+                        """
+                        Please remember to cite our software if you publish these results. See the [Citing page](https://astronomical.readthedocs.io/en/latest/content/other/citing.html) in the documentation for instructions about referencing and citing the astronomicAL software.
+                        """,
+                        sizing_mode="stretch_width",
+                        margin=(0, 0, 0, 0),
+                    ),
                     pn.Row(self._return_to_train_view_button, max_height=20),
                     min_height=400,
                 )
