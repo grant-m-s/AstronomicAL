@@ -111,8 +111,6 @@ def save_config_file(layout_from_js, trigger_text, autosave=False, test=False):
 
     export_config["classifiers"] = config.settings["classifiers"]
 
-    print(f"FINAL Export CONFIG SETTINGS: {export_config}")
-
     if autosave:
         print("AUTOSAVING...")
         with open("configs/autosave.json", "w") as fp:
@@ -125,6 +123,9 @@ def save_config_file(layout_from_js, trigger_text, autosave=False, test=False):
         dt_string = now.strftime("%Y%m%d_%H:%M:%S")
         with open(f"configs/config_{dt_string}.json", "w") as fp:
             json.dump(export_config, fp, cls=NumpyEncoder)
+
+        print(f"Final Export Config Settings: {export_config}")
+        print(f"Config File saved to: configs/config_{dt_string}.json")
 
 
 def save_dataframe_to_fits(df, filename, overwrite=True):
