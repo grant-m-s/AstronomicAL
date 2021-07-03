@@ -96,8 +96,6 @@ class SelectedSourceDashboard:
             )
             for col in config.settings["extra_image_cols"]:
                 url = f"{self.src.data[col][0]}"
-                print(f"image_url:{url}")
-                print(f"len: {len(url)}")
                 if len(url) <= 4:
                     pane = "No Image available for this source."
                 elif "." in url:
@@ -139,7 +137,6 @@ class SelectedSourceDashboard:
                     pane = "Image url does not contain extension."
 
                 tab.append((col, pane))
-
             return tab
 
     def _add_selected_info(self):
@@ -177,18 +174,15 @@ class SelectedSourceDashboard:
         selected_dict[config.settings["id_col"]] = [event.new]
         self.src.data = selected_dict
 
-        print("Changed selected")
-
         self.panel()
 
     def _panel_cb(self, attr, old, new):
         self._image_updated = False
+        self._image_zoom = 0.2
         self.panel()
 
     def _check_valid_selected(self):
         selected = False
-
-        print("checking valid selection")
 
         if config.settings["id_col"] in list(self.src.data.keys()):
             if len(self.src.data[config.settings["id_col"]]) > 0:
@@ -217,9 +211,16 @@ class SelectedSourceDashboard:
             ] + self.selected_history
 
     def _deselect_source_cb(self, event):
+        self.deselect_buttton.disabled = True
+        self.deselect_buttton.name = "Deselecting..."
+        print("deselecting...")
+        self.empty_selected()
+        print("deselected...")
         self.search_id.value = ""
         self._search_status = ""
-        self.empty_selected()
+        print("blank...")
+        self.deselect_buttton.disabled = False
+        self.deselect_buttton.name = "Deselect"
 
     def empty_selected(self):
         """Deselect sources by emptying `src.data`.
@@ -239,7 +240,6 @@ class SelectedSourceDashboard:
 
         ra = float(ra)
         dec = float(dec)
-        print(f"ra:{ra}, dec:{dec}")
 
         h = np.floor(ra / 15.0)
         d = ra - h * 15
@@ -264,8 +264,6 @@ class SelectedSourceDashboard:
 
         dec_conv = f"{d} {m} {s}"
 
-        print(f"ra_conv: {ra_conv}, dec_conv: {dec_conv}")
-
         url1 = "https://third.ucllnl.org/cgi-bin/firstimage?RA="
         url2 = "&Equinox=J2000&ImageSize=2.5&MaxInt=200&GIF=1"
         url = f"{url1}{ra_conv} {dec_conv}{url2}"
@@ -275,45 +273,69 @@ class SelectedSourceDashboard:
         return url
 
     def _change_zoom_cb(self, event, oper):
+
+        self.zoom_increase.disabled = False
         if oper == "out":
             self._image_zoom += 0.1
             self._image_zoom = round(self._image_zoom, 1)
         if oper == "in":
             if self._image_zoom <= 0.1:
                 self._image_zoom = 0.1
+                self.zoom_increase.disabled = True
             else:
                 self._image_zoom -= 0.1
                 self._image_zoom = round(self._image_zoom, 1)
-        try:
-            index = self._url_optical_image.rfind("&")
-            self._url_optical_image = (
-                f"{self._url_optical_image[:index]}&scale={self._image_zoom}"
-            )
-            self.optical_image.object = self._url_optical_image
-        except:
 
-            print("\n\n\n IMAGE ERROR: \n\n\n")
-            print(f"index:{self._url_optical_image.rfind('&')}")
-            print(
-                f"new url_optical_image: {self._url_optical_image[:self._url_optical_image.rfind('&')]}&scale={self._image_zoom}"
-            )
+        optical_url = self._get_optical_url()
 
-    def _update_default_images(self):
+        if len(optical_url) > 0:
 
+            try:
+                index = self._url_optical_image.rfind("&")
+                self.optical_image = pn.pane.JPG(
+                    alt_text="Image Unavailable",
+                    min_width=200,
+                    min_height=200,
+                    sizing_mode="scale_height",
+                )
+                self._url_optical_image = f"{optical_url}{self._image_zoom}"
+                self.optical_image.object = self._url_optical_image
+                # Process(target=self._update_default_images).start()
+                self.row[0][0][0][0][1][0] = pn.Row(self.optical_image)
+
+            except:
+
+                print("\n\n\n IMAGE ERROR: \n\n\n")
+                print(f"orig:{self._url_optical_image}")
+                print(f"index:{self._url_optical_image.rfind('&')}")
+                print(
+                    f"new url_optical_image: {self._url_optical_image[:self._url_optical_image.rfind('&')]}&scale={self._image_zoom}"
+                )
+
+            self._update_default_images()
+
+    def _get_optical_url(self):
         url = "http://skyserver.sdss.org/dr16/SkyServerWS/ImgCutout/getjpeg?TaskName=Skyserver.Explore.Image&ra="
-        # TODO :: Set Ra Dec Columns
 
         if self.check_required_column("ra_dec"):
             ra_dec = self.src.data["ra_dec"][0]
             ra = ra_dec[: ra_dec.index(",")]
-            print(f"RA_DEC:{ra_dec}")
             dec = ra_dec[ra_dec.index(",") + 1 :]
 
+            url = f"{url}{ra}&dec={dec}&opt=G&scale="
+
+            return url
+
+        else:
+            return ""
+
+    def _update_default_images(self):
+
+        optical_url = self._get_optical_url()
+        if len(optical_url) > 0:
             try:
-                self._url_optical_image = (
-                    f"{url}{ra}&dec={dec}&opt=G&scale={self._image_zoom}"
-                )
-                r = requests.get(f"{self._url_optical_image}", timeout=10.0)
+                self._url_optical_image = f"{optical_url}{self._image_zoom}"
+                r = requests.get(f"{self._url_optical_image}", timeout=20.0)
                 self.optical_image.object = self._url_optical_image
                 print(self.optical_image.object)
             except ConnectionError as e:
@@ -321,8 +343,11 @@ class SelectedSourceDashboard:
                 print(e)
 
             try:
+                ra_dec = self.src.data["ra_dec"][0]
+                ra = ra_dec[: ra_dec.index(",")]
+                dec = ra_dec[ra_dec.index(",") + 1 :]
                 self._url_radio_image = self._generate_radio_url(ra, dec)
-                r = requests.get(f"{self._url_radio_image}", timeout=10.0)
+                r = requests.get(f"{self._url_radio_image}", timeout=20.0)
                 self.radio_image.object = self._url_radio_image
             except ConnectionError as e:
                 print("radio image unavailable")
@@ -331,9 +356,11 @@ class SelectedSourceDashboard:
             self._initialise_optical_zoom_buttons()
 
             self.row[0][0][0][0][1] = pn.Row(
-                self.optical_image,
+                pn.Row(self.optical_image),
                 self.radio_image,
             )
+
+            # self.panel()
 
     def _initialise_optical_zoom_buttons(self):
 
@@ -384,19 +411,15 @@ class SelectedSourceDashboard:
 
             self._add_selected_to_history()
 
-            print(self._image_updated)
-
             button_row = pn.Row()
 
             if self.check_required_column("ra_dec"):
                 button_row.append(self.zoom_increase)
                 button_row.append(self.zoom_decrease)
 
-            print("creating deselect")
-            deselect_buttton = pn.widgets.Button(name="Deselect")
-            deselect_buttton.on_click(self._deselect_source_cb)
+            self.deselect_buttton = pn.widgets.Button(name="Deselect")
+            self.deselect_buttton.on_click(self._deselect_source_cb)
 
-            print("setting extra row")
             extra_data_list = [
                 ["Source ID", self.src.data[config.settings["id_col"]][0]]
             ]
@@ -405,7 +428,6 @@ class SelectedSourceDashboard:
 
                 extra_data_list.append([col, self.src.data[f"{col}"][0]])
 
-            print("setting row")
             extra_data_df = pd.DataFrame(extra_data_list, columns=["Column", "Value"])
             extra_data_pn = pn.widgets.DataFrame(
                 extra_data_df, show_index=False, autosize_mode="fit_viewport"
@@ -416,7 +438,7 @@ class SelectedSourceDashboard:
                         pn.Column(
                             button_row,
                             pn.Row(
-                                self.optical_image,
+                                pn.Row(self.optical_image),
                                 self.radio_image,
                             ),
                         ),
@@ -425,7 +447,7 @@ class SelectedSourceDashboard:
                     self._create_image_tab(),
                 ),
                 collapsible=False,
-                header=pn.Row(self.close_button, deselect_buttton, max_width=300),
+                header=pn.Row(self.close_button, self.deselect_buttton, max_width=300),
             )
 
             if not self._image_updated:
@@ -433,7 +455,6 @@ class SelectedSourceDashboard:
                 Process(target=self._update_default_images).start()
 
         else:
-            print("Nothing is selected!")
             self.row[0] = pn.Card(
                 pn.Column(
                     self.search_id,
@@ -450,7 +471,5 @@ class SelectedSourceDashboard:
                 ),
                 header=pn.Row(self.close_button, max_width=300),
             )
-
-        print("selected source rendered...")
 
         return self.row

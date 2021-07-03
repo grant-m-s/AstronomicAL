@@ -169,7 +169,6 @@ class DataSelection(param.Parameterized):
             self.load_data_button_js.name = "Unable to load config"
             self.load_data_button_js.disabled = True
         else:
-            print(f"no error - {error_message}")
             self.error_message = "verified"
             self.error_message = ""
             self.load_data_button_js.name = "Load Data"
@@ -178,7 +177,6 @@ class DataSelection(param.Parameterized):
         self.panel_col = self.panel()
 
         print(f"Config load level: {config.settings['config_load_level']}")
-        print(f"INSIDE CB: {config.layout_file}")
 
     def get_dataframe_from_fits_file(self, filename, optimise_data=None):
         """Load data from FITS file into dataframe.
@@ -194,21 +192,13 @@ class DataSelection(param.Parameterized):
             DataFrame containing the loaded in data from `filename`.
 
         """
-        start = time.time()
-
         ext = filename[filename.rindex(".") + 1 :]
         fits_table = Table.read(filename, format=f"{ext}")
 
-        end = time.time()
-        print(f"Loading FITS Table {end - start}")
-        start = time.time()
         names = [
             name for name in fits_table.colnames if len(fits_table[name].shape) <= 1
         ]
-        end = time.time()
-        print(f"names list {end - start}")
 
-        start = time.time()
         if optimise_data is None:
             config.settings["optimise_data"] = self.memory_optimisation_check.value
             if self.memory_optimisation_check.value:
@@ -231,16 +221,11 @@ class DataSelection(param.Parameterized):
             df = optimise(fits_table[names].to_pandas())
         else:
             df = fits_table[names].to_pandas()
-        end = time.time()
-        print(f"Convert to Pandas {end - start}")
 
-        start = time.time()
         if ext == "fits":
             for col, dtype in df.dtypes.items():
                 if dtype == np.object:  # Only process byte object columns.
                     df[col] = df[col].apply(lambda x: x.decode("utf-8"))
-        end = time.time()
-        print(f"Pandas object loop {end - start}")
 
         df = self.add_ra_dec_col(df)
 
@@ -305,7 +290,6 @@ class DataSelection(param.Parameterized):
 
     @param.depends("load_layout_check", watch=True)
     def _panel_cb(self):
-        print("PANEL CB RAN")
         self.panel_col = self.panel()
 
     def panel(self):
@@ -319,7 +303,25 @@ class DataSelection(param.Parameterized):
 
         """
         if (self.error_message == "") or (self.error_message == "verified"):
-            message = "Welcome!"
+            message = pn.pane.Markdown(
+                """
+                Welcome to AstronomicAL, an interactive dashboard for visualisation, integration and classification of data using active learning methods.
+
+                For tutorials and API reference documents, please visit our documentation [here](https://astronomical.readthedocs.io).
+
+                AstronomicAL provides both an example dataset and an example configuration file to allow you to jump right into the software and give it a test run.
+
+                To begin training you simply have to select **Load Custom Configuration** checkbox and select your config file. Here we have chosen to use the `example_config.json` file.
+
+                The **Load Config Select** option allows use to choose the extent to which to reload the configuration.
+
+                #### Referencing the Package
+
+                Please remember to cite our software and user guide whenever relevant. See the [Citing page](https://astronomical.readthedocs.io/en/latest/content/other/citing.html) in the documentation for instructions about referencing and citing the astronomicAL software.
+                """,
+                sizing_mode="stretch_width",
+                margin=(0, 0, 0, 0),
+            )
         else:
             message = pn.pane.Markdown(self.error_message)
 
@@ -335,10 +337,11 @@ class DataSelection(param.Parameterized):
                     pn.layout.VSpacer(),
                     pn.layout.VSpacer(),
                 ),
-                pn.Row(message, scroll=True, max_height=300),
+                pn.Row(message, scroll=True, sizing_mode="stretch_width"),
                 pn.layout.VSpacer(),
                 pn.layout.VSpacer(),
                 pn.layout.VSpacer(),
+                sizing_mode="stretch_width",
             )
 
         else:
@@ -356,9 +359,28 @@ class DataSelection(param.Parameterized):
                     pn.layout.VSpacer(max_width=300),
                     pn.layout.VSpacer(max_width=300),
                     pn.layout.VSpacer(max_width=300),
-                    max_width=300,
                 ),
-                pn.Row("Welcome!"),
+                pn.Row(
+                    pn.pane.Markdown(
+                        """
+                    Welcome to AstronomicAL, an interactive dashboard for visualisation, integration and classification of data using active learning methods.
+
+                    For tutorials and API reference documents, please visit our documentation [here](https://astronomical.readthedocs.io).
+
+                    AstronomicAL provides both an example dataset and an example configuration file to allow you to jump right into the software and give it a test run.
+
+                    To begin training you simply have to select **Load Custom Configuration** checkbox and select your config file. Here we have chosen to use the `example_config.json` file.
+
+                    The **Load Config Select** option allows use to choose the extent to which to reload the configuration.
+
+                    #### Referencing the Package
+
+                    Please remember to cite our software and user guide whenever relevant. See the [Citing page](https://astronomical.readthedocs.io/en/latest/content/other/citing.html) in the documentation for instructions about referencing and citing the astronomicAL software.
+                    """,
+                        sizing_mode="stretch_width",
+                        margin=(0, 0, 0, 0),
+                    )
+                ),
             )
 
         return self.panel_col
