@@ -20,7 +20,7 @@ from astronomicAL.extensions.extension_plots import (
     get_plot_dict,
     create_plot,
     bpt_plot,
-    agn_wedge,
+    mateos_2012_wedge,
 )
 from astronomicAL.extensions import feature_generation
 from astronomicAL.extensions import models
@@ -2186,8 +2186,9 @@ class TestDashboards:
 
     def _create_test_test_set(self):
 
-        if os.path.exists("data/test_set.json"):
-            os.system("mv data/test_set.json data/test_set_cp.json")
+        if not os.path.isfile("data/test_set_cp.json"):
+            if os.path.exists("data/test_set.json"):
+                os.system("mv data/test_set.json data/test_set_cp.json")
 
         test_data = """{ "2":0,"5":1,"7":0 }"""
 
@@ -2698,6 +2699,7 @@ class TestUtils:
             "optimise_data": True,
             "exclude_unknown_labels": True,
             "classifiers": [],
+            "test_set_file": False,
         }
 
         example_layout = """{"0":{"x":0,"y":0,"w":6,"h":6},"1":{"x":0,"y":6,"w":6,"h":6},"2":{"x":6,"y":0,"w":6,"h":6}}"""

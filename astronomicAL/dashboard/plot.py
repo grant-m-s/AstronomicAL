@@ -70,7 +70,6 @@ class PlotDashboard(param.Parameterized):
         None
 
         """
-        print(f"x_var currently is: {self.X_variable}")
 
         self.update_df()
 
@@ -88,9 +87,28 @@ class PlotDashboard(param.Parameterized):
         self.X_variable = config.settings["default_vars"][0]
         self.Y_variable = config.settings["default_vars"][1]
 
-        print(f"x_var has now changed to: {self.X_variable}")
-
     def _panel_cb(self, attr, old, new):
+        cols = list(self.df.columns)
+
+        if config.settings["id_col"] in cols:
+            cols.remove(config.settings["id_col"])
+        if config.settings["label_col"] in cols:
+            cols.remove(config.settings["label_col"])
+
+        for i in config.dashboards.keys():
+            if config.dashboards[i].contents == "Basic Plot":
+                curr_x = config.dashboards[i].panel_contents.X_variable
+                curr_y = config.dashboards[i].panel_contents.Y_variable
+                if (curr_x == self.X_variable) and (curr_y == self.Y_variable):
+                    try:
+                        config.dashboards[i].panel_contents.X_variable = curr_x
+                        config.dashboards[i].panel_contents.Y_variable = curr_y
+                        config.dashboards[i].panel_contents.panel()
+                    except:
+                        config.dashboards[i].set_contents = "Menu"
+
+                    break
+
         self.panel()
 
     @param.depends("X_variable", "Y_variable")
@@ -107,8 +125,6 @@ class PlotDashboard(param.Parameterized):
             A Holoviews plot
 
         """
-
-        print(f"x_var is {x_var}")
 
         if x_var is None:
             x_var = self.X_variable
@@ -188,7 +204,7 @@ class PlotDashboard(param.Parameterized):
             )
             * selected_plot
             * color_points
-        )
+        ).opts(legend_position="bottom_right", shared_axes=False)
         return plot
 
     def panel(self):
@@ -201,8 +217,6 @@ class PlotDashboard(param.Parameterized):
             parent Dashboard.
 
         """
-
-        print("Panel Plot")
 
         self.row[0] = pn.Card(
             pn.Row(self.plot, sizing_mode="stretch_both"),
