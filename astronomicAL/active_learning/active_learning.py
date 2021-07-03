@@ -883,18 +883,24 @@ class ActiveLearningModel:
 
         queried_id = self.id_pool.iloc[query_idx][config.settings["id_col"]].copy()
 
-        # print(f"\n\n\n id is {queried_id.values} \n\n\n")
-
         act_label = self.y_pool[query_idx]
 
         selected_source = self.df[
             self.df[config.settings["id_col"]] == queried_id.values[0]
         ]
+
         selected_dict = selected_source.set_index(config.settings["id_col"]).to_dict(
             "list"
         )
+
         selected_dict[config.settings["id_col"]] = [queried_id.values[0]]
-        self.src.data = selected_dict
+
+        try:
+            self.src.data = selected_dict
+        except ValueError:
+            print(
+                "Please make sure that your data does not contain any Inf or NaN values."
+            )
 
         plot_idx = [
             list(config.ml_data["x_train_without_unknowns"].columns).index(
@@ -984,8 +990,7 @@ class ActiveLearningModel:
             selected_label = np.array([selected_label])
 
             new_train = np.vstack((self.x_al_train, query))
-            print(self.y_al_train)
-            print(selected_label)
+
             new_label = np.concatenate((self.y_al_train, selected_label))
 
             new_id = self.id_al_train.append(self.id_pool.iloc[query_idx])
@@ -1557,9 +1562,6 @@ class ActiveLearningModel:
         self.corr_train.data = corr_data
         self.incorr_train.data = incorr_data
 
-        print(self.y_train_without_unknowns[config.settings["label_col"]].unique())
-        print(np.unique(tr_pred))
-
         curr_tr_acc = accuracy_score(self.y_train_without_unknowns, tr_pred)
         curr_tr_f1 = f1_score(self.y_train_without_unknowns, tr_pred)
         curr_tr_prec = precision_score(self.y_train_without_unknowns, tr_pred)
@@ -1817,9 +1819,6 @@ class ActiveLearningModel:
             config.settings["classifiers"][f"{self._label}"][
                 "id"
             ] = self.full_labelled_data["id"]
-
-            print(self.y_al_train)
-            print(self.x_al_train)
 
     def setup_learners(self):
         """Initialise the classifiers used during active learning.
@@ -2165,7 +2164,6 @@ class ActiveLearningModel:
         min_y = np.min(df[f"{config.settings['default_vars'][1]}"])
 
         df = df[df["acc"].isin(self._val_tab_colour_switch.active)]
-
         p = hv.Points(
             df,
             [config.settings["default_vars"][0], config.settings["default_vars"][1]],
@@ -2451,12 +2449,9 @@ class ActiveLearningModel:
             )
 
     def _update_tab_plots_cb(self, attr, old, new):
-        self.active_tab = self.tabs_view.active
 
-        if self.active_tab == 0:
-            self.tabs_view[self.active_tab] = self._train_tab()
-        elif self.active_tab == 2:
-            self.tabs_view[self.active_tab] = self._val_tab()
+        self.tabs_view[0] = self._train_tab()
+        self.tabs_view[2] = self._val_tab()
 
     def _panel_cb(self, attr, old, new):
         if self._training:
