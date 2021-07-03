@@ -90,8 +90,8 @@ Finally adding the new entry in the :code:`plot_dict` dictionary, **without spec
   def get_plot_dict():
 
       plot_dict = {
-          "AGN Wedge": CustomPlot(
-              agn_wedge, ["Log10(W3_Flux/W2_Flux)", "Log10(W2_Flux/W1_Flux)"]
+          "Mateos 2012 Wedge": CustomPlot(
+              mateos_2012_wedge, ["Log10(W3_Flux/W2_Flux)", "Log10(W2_Flux/W1_Flux)"]
           ),
           "BPT Plots": CustomPlot(
               bpt_plot,

@@ -17,7 +17,7 @@ def get_oper_dict():
 
 
 def add(df, n):
-    print("gen add features")
+
     np.random.seed(0)
 
     bands = config.settings["features_for_training"]
@@ -46,7 +46,7 @@ def add(df, n):
 
 
 def subtract(df, n):
-    print("gen subtract features")
+
     np.random.seed(0)
 
     bands = config.settings["features_for_training"]
@@ -73,7 +73,7 @@ def subtract(df, n):
 
 
 def multiply(df, n):
-    print("gen multiply features")
+
     np.random.seed(0)
 
     bands = config.settings["features_for_training"]
@@ -100,7 +100,7 @@ def multiply(df, n):
 
 
 def divide(df, n):
-    print("gen divide features")
+
     np.random.seed(0)
 
     bands = config.settings["features_for_training"]
