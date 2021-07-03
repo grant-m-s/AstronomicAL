@@ -620,7 +620,7 @@ def sed_plot(data, selected=None, **kwargs):
             show_selected=False,
             slow_render=True,
         )
-        points = hv.Scatter(new_data, kdims=["wavelength (µm)", "magnitude"],).opts(
+        points = hv.Scatter(new_data, kdims=["wavelength (µm)"],).opts(
             fill_color="black",
             marker="circle",
             alpha=0.5,
