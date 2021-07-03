@@ -320,9 +320,9 @@ def bpt_plot(data, selected=None, **kwargs):
     plot_OI = plot_OI * OI_line1
 
     tabs = pn.Tabs(
-        ("NII", plot_NII.opts(legend_position="bottom_right")),
-        ("SII", plot_SII.opts(legend_position="bottom_right")),
-        ("OI", plot_OI.opts(legend_position="bottom_right")),
+        ("NII", plot_NII.opts(legend_position="bottom_right", shared_axes=False)),
+        ("SII", plot_SII.opts(legend_position="bottom_right", shared_axes=False)),
+        ("OI", plot_OI.opts(legend_position="bottom_right", shared_axes=False)),
     )
 
     return tabs
