@@ -178,6 +178,7 @@ class SelectedSourceDashboard:
 
     def _panel_cb(self, attr, old, new):
         self._image_updated = False
+        self._image_zoom = 0.2
         self.panel()
 
     def _check_valid_selected(self):
@@ -210,9 +211,16 @@ class SelectedSourceDashboard:
             ] + self.selected_history
 
     def _deselect_source_cb(self, event):
+        self.deselect_buttton.disabled = True
+        self.deselect_buttton.name = "Deselecting..."
+        print("deselecting...")
+        self.empty_selected()
+        print("deselected...")
         self.search_id.value = ""
         self._search_status = ""
-        self.empty_selected()
+        print("blank...")
+        self.deselect_buttton.disabled = False
+        self.deselect_buttton.name = "Deselect"
 
     def empty_selected(self):
         """Deselect sources by emptying `src.data`.
@@ -266,12 +274,14 @@ class SelectedSourceDashboard:
 
     def _change_zoom_cb(self, event, oper):
 
+        self.zoom_increase.disabled = False
         if oper == "out":
             self._image_zoom += 0.1
             self._image_zoom = round(self._image_zoom, 1)
         if oper == "in":
             if self._image_zoom <= 0.1:
                 self._image_zoom = 0.1
+                self.zoom_increase.disabled = True
             else:
                 self._image_zoom -= 0.1
                 self._image_zoom = round(self._image_zoom, 1)
@@ -282,8 +292,17 @@ class SelectedSourceDashboard:
 
             try:
                 index = self._url_optical_image.rfind("&")
+                self.optical_image = pn.pane.JPG(
+                    alt_text="Image Unavailable",
+                    min_width=200,
+                    min_height=200,
+                    sizing_mode="scale_height",
+                )
                 self._url_optical_image = f"{optical_url}{self._image_zoom}"
                 self.optical_image.object = self._url_optical_image
+                # Process(target=self._update_default_images).start()
+                self.row[0][0][0][0][1][0] = pn.Row(self.optical_image)
+
             except:
 
                 print("\n\n\n IMAGE ERROR: \n\n\n")
@@ -292,6 +311,8 @@ class SelectedSourceDashboard:
                 print(
                     f"new url_optical_image: {self._url_optical_image[:self._url_optical_image.rfind('&')]}&scale={self._image_zoom}"
                 )
+
+            self._update_default_images()
 
     def _get_optical_url(self):
         url = "http://skyserver.sdss.org/dr16/SkyServerWS/ImgCutout/getjpeg?TaskName=Skyserver.Explore.Image&ra="
@@ -335,7 +356,7 @@ class SelectedSourceDashboard:
             self._initialise_optical_zoom_buttons()
 
             self.row[0][0][0][0][1] = pn.Row(
-                self.optical_image,
+                pn.Row(self.optical_image),
                 self.radio_image,
             )
 
@@ -396,8 +417,8 @@ class SelectedSourceDashboard:
                 button_row.append(self.zoom_increase)
                 button_row.append(self.zoom_decrease)
 
-            deselect_buttton = pn.widgets.Button(name="Deselect")
-            deselect_buttton.on_click(self._deselect_source_cb)
+            self.deselect_buttton = pn.widgets.Button(name="Deselect")
+            self.deselect_buttton.on_click(self._deselect_source_cb)
 
             extra_data_list = [
                 ["Source ID", self.src.data[config.settings["id_col"]][0]]
@@ -417,7 +438,7 @@ class SelectedSourceDashboard:
                         pn.Column(
                             button_row,
                             pn.Row(
-                                self.optical_image,
+                                pn.Row(self.optical_image),
                                 self.radio_image,
                             ),
                         ),
@@ -426,7 +447,7 @@ class SelectedSourceDashboard:
                     self._create_image_tab(),
                 ),
                 collapsible=False,
-                header=pn.Row(self.close_button, deselect_buttton, max_width=300),
+                header=pn.Row(self.close_button, self.deselect_buttton, max_width=300),
             )
 
             if not self._image_updated:
