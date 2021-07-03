@@ -56,6 +56,9 @@ def export_fits_file_cb(event):
 
         export_fits_file_button.disabled = True
         export_fits_file_button.name = f"{len(list_ids)} labelled sources saved to 'data/labelled_data_{dt_string}.FITS'"
+        print(
+            f"{len(list_ids)} labelled sources saved to 'data/labelled_data_{dt_string}.FITS'"
+        )
         time.sleep(3)
         export_fits_file_button.name = "Export Labelled Data to Fits File"
         export_fits_file_button.disabled = False
