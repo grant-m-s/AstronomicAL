@@ -42,9 +42,7 @@ class ActiveLearningDashboard:
         """
         # CHANGED :: Add to AL settings
         for label in config.settings["labels_to_train"]:
-            print(f"Label is {label} with type: {type(label)}")
             raw_label = config.settings["strings_to_labels"][label]
-            print(f"Raw Label is {raw_label} with type: {type(raw_label)}")
             self.active_learning.append(
                 ActiveLearningModel(df=self.df, src=self.src, label=label)
             )
@@ -52,7 +50,6 @@ class ActiveLearningDashboard:
         for i, al_tab in enumerate(self.active_learning):
             self.al_tabs.append((al_tab._label_alias, al_tab.panel()))
 
-        print("Added all classifiers")
         self.panel()
 
     def panel(self):

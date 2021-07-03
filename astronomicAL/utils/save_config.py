@@ -1,6 +1,7 @@
 from datetime import datetime
 
 import astronomicAL.config as config
+from astropy.table import Table
 import json
 import numpy as np
 
@@ -65,15 +66,12 @@ def save_config_file_cb(attr, old, new, trigger_text, autosave):
 
 
 def save_config_file(layout_from_js, trigger_text, autosave=False, test=False):
-    print("json updated")
-    print(f"LAYOUT VALUE:{layout_from_js}")
 
     if layout_from_js == "":
         return
 
     layout = json.loads(layout_from_js)
     trigger_text.value = ""
-    print(layout)
     for i in layout:
         curr_contents = config.dashboards[i].contents
         layout[i]["contents"] = curr_contents
@@ -82,8 +80,6 @@ def save_config_file(layout_from_js, trigger_text, autosave=False, test=False):
                 config.dashboards[i].panel_contents.X_variable,
                 config.dashboards[i].panel_contents.Y_variable,
             ]
-
-    print(f"FINAL CONFIG SETTINGS: {config.settings}")
 
     export_config = {}
 
@@ -108,16 +104,15 @@ def save_config_file(layout_from_js, trigger_text, autosave=False, test=False):
     export_config["unclassified_labels"] = config.settings["unclassified_labels"]
     export_config["scale_data"] = config.settings["scale_data"]
     export_config["feature_generation"] = config.settings["feature_generation"]
+    export_config["test_set_file"] = config.settings["test_set_file"]
 
     if "classifiers" not in config.settings.keys():
         config.settings["classifiers"] = {}
 
     export_config["classifiers"] = config.settings["classifiers"]
 
-    print(f"FINAL Export CONFIG SETTINGS: {export_config}")
-
     if autosave:
-        print("AUTOSAVING")
+        print("AUTOSAVING...")
         with open("configs/autosave.json", "w") as fp:
             json.dump(export_config, fp, cls=NumpyEncoder)
     elif test:
@@ -128,3 +123,14 @@ def save_config_file(layout_from_js, trigger_text, autosave=False, test=False):
         dt_string = now.strftime("%Y%m%d_%H:%M:%S")
         with open(f"configs/config_{dt_string}.json", "w") as fp:
             json.dump(export_config, fp, cls=NumpyEncoder)
+
+        print(f"Final Export Config Settings: {export_config}")
+        print(f"Config File saved to: configs/config_{dt_string}.json")
+
+
+def save_dataframe_to_fits(df, filename, overwrite=True):
+    assert (
+        len(df.columns) <= 999
+    ), f"FITS Files only allow up to 999 columns, dataframe contains {len(df.columns)}"
+    t = Table.from_pandas(df)
+    t.write(filename, overwrite=overwrite)

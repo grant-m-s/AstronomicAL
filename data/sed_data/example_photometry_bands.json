@@ -1,0 +1,57 @@
+{
+    "u": {
+        "wavelength": 0.3572,
+        "FWHM": 0.0565,
+        "error": "u_err"
+    },
+    "g": {
+        "wavelength": 0.4751,
+        "FWHM": 0.1176,
+        "error": "g_err"
+    },
+    "r": {
+        "wavelength": 0.6204,
+        "FWHM": 0.113,
+        "error": "r_err"
+    },
+    "i": {
+        "wavelength": 0.7519,
+        "FWHM": 0.1253,
+        "error": "i_err"
+    },
+    "z": {
+        "wavelength": 0.8992,
+        "FWHM": 0.0998,
+        "error": "z_err"
+    },
+    "y": {
+        "wavelength": 1.0247,
+        "FWHM": 0.0921,
+        "error": "y_err"
+    },
+    "j": {
+        "wavelength": 1.2575,
+        "FWHM": 0.1719,
+        "error": "j_err"
+    },
+    "h": {
+        "wavelength": 1.6511,
+        "FWHM": 0.2906,
+        "error": "h_err"
+    },
+    "k": {
+        "wavelength": 2.1517,
+        "FWHM": 0.3073,
+        "error": "k_err"
+    },
+    "w1": {
+        "wavelength": 3.4003,
+        "FWHM": 0.6358,
+        "error": 0.125
+    },
+    "w2": {
+        "wavelength": 4.652,
+        "FWHM": 1.1073,
+        "error": 0.125
+    }
+}
