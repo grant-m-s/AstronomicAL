@@ -45,7 +45,7 @@ def get_save_layout_button(enable_button, from_main):
 def _save_layout_button_rename():
     get_save_layout_button(settings["confirmed"], True).disabled = True
     get_save_layout_button(
-        settings["confirmed"]
+        settings["confirmed"], True
     ).name = "Configuration saved to configs folder with current timestamp."
     time.sleep(3)
     get_save_layout_button(
@@ -57,9 +57,6 @@ def _save_layout_button_rename():
 
 def _save_layout_button_cb(event):
     Process(target=_save_layout_button_rename).start()
-
-
-# get_save_layout_button(settings["confirmed"], True).on_click(_save_layout_button_cb)
 
 
 layout_file = "astronomicAL/layout.json"
