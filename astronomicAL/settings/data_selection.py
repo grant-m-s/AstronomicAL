@@ -35,7 +35,7 @@ class DataSelection(param.Parameterized):
 
     """
 
-    dataset = param.FileSelector(path="data/*")
+    dataset = param.FileSelector(path="data/*.*")
     config_file = param.ObjectSelector(default="", objects=[""])
     load_config_select = param.ObjectSelector(default="", objects=[""])
 
