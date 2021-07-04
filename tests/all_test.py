@@ -35,6 +35,7 @@ from bokeh.models import ColumnDataSource
 from bokeh.models import TextAreaInput
 from bokeh.document import Document
 from pyviz_comms import Comm
+from pathlib import Path
 import astronomicAL.config as config
 import pytest
 import json
@@ -906,6 +907,8 @@ class TestSettings:
 
         from astropy.table import Table
 
+        Path("data/table1.fits").touch()
+
         t = Table([[1, 2], [4, 5], [7, 8]], names=("a", "b", "c"))
 
         check_folder_exists("data")
@@ -1106,6 +1109,8 @@ class TestSettings:
 
         from astropy.table import Table
 
+        Path("data/table1.fits").touch()
+
         t = Table([[1, 2], [4, 5], [7, 8]], names=("a", "b", "c"))
 
         check_folder_exists("data")
@@ -1134,6 +1139,7 @@ class TestSettings:
 
         from astropy.table import Table
 
+        Path("data/table1.fits").touch()
         t = Table([[1, 2], [4, 5], [7, 8]], names=("a", "b", "c"))
 
         check_folder_exists("data")
