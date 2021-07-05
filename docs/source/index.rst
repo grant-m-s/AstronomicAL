@@ -10,6 +10,10 @@ An Interactive Dashboard for Active Learning in Astronomy.
 .. image:: https://codecov.io/gh/grant-m-s/astronomicAL/branch/master/graph/badge.svg?token=TCO9J2AD1Z
     :target: https://codecov.io/gh/grant-m-s/astronomicAL
 
+.. image:: https://readthedocs.org/projects/astronomical/badge/?version=latest
+    :target: https://astronomical.readthedocs.io
+
+
 AstronomicAL is an iteractive dashboard to enable Astronomy-based researchers to gain valuable insight into their data by showing them the key information they require to make accurate classifications of each source. Combining the use of the Panel_, Bokeh_, modAL_ and `SciKit Learn`_ packages, astronomicAL enables researchers to take full advantage of the benefits of Active Learning, high accuracy models using just a fraction of the total data, without the requirement of being well versed in the Machine Learning theory or implementations.
 
 .. _Panel: https://panel.holoviz.org/
@@ -19,8 +23,15 @@ AstronomicAL is an iteractive dashboard to enable Astronomy-based researchers to
 
 Statement of Need
 *****************
-With the influx of billions of sources incoming from future surveys, automated classification methods are becoming critical. To produce accurate models, it is often required to have large amounts of labelled data; however, many datasets only consider a narrow window of the electromagnetic spectrum, resulting in key features of a classification going unseen, leading to inaccurate and unreliable labels. Active Learning, a method that automatically and adaptively selects the most informative datapoints to improve a model's performance, has repeatedly been shown to be a valuable tool to address the constraint of large labelled datasets; however, the issue of unreliable labels still exists. AstronomicAL, an interactive dashboard for training and labelling, has been developed to enable domain experts to take advantage of Active Learning whilst ensuring that they are presented with as complete a picture as possible when deciding on a source's classification, resulting in more accurate and reliable labels whilst requiring substantially less labelled training data.
+With ever-growing datasets, it is becoming impossible to manually inspect and verify ground truth used to train machine learning systems. The reliability of the training data limits the performance of any supervised learning model, so consistent classifications become more problematic as data sizes increase. The problem is exacerbated when a dataset does not contain any labelled data, preventing supervised learning techniques entirely. Active learning `(Settles, 2012)`_ addresses these issues by removing the requirement for large amounts of labelled training data whilst still producing high accuracy models.
 
+Although initially designed for astronomers, by providing the functionality for data fusion of catalogued data and online cutout services, AstronomicAL has been developed to be sufficiently general for any tabular data. Large datasets, unreliable labels and vastly imbalanced classes make astronomy data the ideal vehicle to develop this software. Each of these issues is an examplar of more generalised problems that active learning could solve in any dataset.
+
+Using its modular and extensible design, researchers can quickly adapt AstronomicAL for their research to allow for domain-specific plots, novel query strategies, and improved models. Further, there is no requirement to be well-versed in the underlying libraries that the software uses as large parts of the complexity are abstracted whilst still allowing more experienced users to access full customisability.
+
+As the software runs entirely locally on the user’s system, AstronomicAL provides a private space to experiment whilst providing a public mechanism to share results. By sharing only the configuration file, users remain in charge of distributing their potentially sensitive data, enabling collaboration whilst respecting privacy.
+
+.. _`(Settles, 2012)`: https://www.morganclaypool.com/doi/abs/10.2200/S00429ED1V01Y201207AIM018
 
 Installation
 ------------------
