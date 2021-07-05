@@ -1668,11 +1668,22 @@ class ActiveLearningModel:
         self.conf_mat_val_fn = str(v_conf[1][0])
         self.conf_mat_val_tp = str(v_conf[1][1])
 
-        self.conf_mat_test_tn = str(test_conf[0][0])
-        self.conf_mat_test_fp = str(test_conf[0][1])
-        self.conf_mat_test_fn = str(test_conf[1][0])
-        self.conf_mat_test_tp = str(test_conf[1][1])
-
+        try:
+            self.conf_mat_test_tn = str(test_conf[0][0])
+            self.conf_mat_test_fp = str(test_conf[0][1])
+            self.conf_mat_test_fn = str(test_conf[1][0])
+            self.conf_mat_test_tp = str(test_conf[1][1])
+        except:
+            self.conf_mat_test_tn = str("N/A")
+            self.conf_mat_test_fp = str("N/A")
+            self.conf_mat_test_fn = str("N/A")
+            self.conf_mat_test_tp = str("N/A")
+            print(
+                f"Your test set either contains all {self._label_alias} labels or does not contain any {self._label_alias} labels at all."
+            )
+            print(
+                "Please return to Labelling Mode and add some of the missing labels to your test set."
+            )
         proba = 1 - np.max(proba, axis=1)
 
         x_axis = config.ml_data["x_train_without_unknowns"][
