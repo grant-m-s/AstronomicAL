@@ -90,6 +90,8 @@ See the :ref:`citing <citing>` page for instructions about referencing and citin
     :maxdepth: 1
     :caption: Tutorials
 
+    content/tutorials/preparing_dataset.rst
+    content/tutorials/settings.rst
     content/tutorials/active_learning.rst
     content/tutorials/labelling_test_set.rst
     content/tutorials/plots.rst
