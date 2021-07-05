@@ -1,3 +1,4 @@
+.. _labelling:
 Creating a Labelled Test Set
 ========================================
 
