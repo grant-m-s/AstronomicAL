@@ -66,7 +66,7 @@ In this example we will show how we would go about creating a new :code:`max` fu
                   new_feature_name = new_feature_name + ")"
           generated_features.append(new_feature_name) # add new feature name which is the form: max(f_1,f_2,...,f_n)
           if new_feature_name not in cols: # if the feature already exists in the data, dont recalculate
-              for i in range(n):
+              for i in range(n): # Loop of each individual feature in comb
                   if i == 0:
                       df[new_feature_name] = df[comb[i]] # add the new column and set its value to the starting feature
                   else:
