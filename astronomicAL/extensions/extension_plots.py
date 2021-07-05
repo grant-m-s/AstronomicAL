@@ -33,14 +33,6 @@ def get_plot_dict():
             ],
         ),
         "SED Plot": SEDPlot(sed_plot, []),
-        "colours_false": CustomPlot(colours_false, ["g-j", "y-w1"]),
-        "legend_false": CustomPlot(legend_false, ["g-j", "y-w1"]),
-        "axes_limits": CustomPlot(axes_limits, ["g-j", "y-w1"]),
-        "bounded": CustomPlot(bounded, ["g-j", "y-w1"]),
-        "normal": CustomPlot(normal, ["g-j", "y-w1"]),
-        "legend_position_inside": CustomPlot(legend_position_inside, ["g-j", "y-w1"]),
-        "legend_position_outside": CustomPlot(legend_position_outside, ["g-j", "y-w1"]),
-        "slow_render": CustomPlot(slow_render, ["g-j", "y-w1"]),
     }
 
     return plot_dict
