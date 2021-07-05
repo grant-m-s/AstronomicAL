@@ -28,7 +28,6 @@ There are some requirements when declaring a new feature generation function:
 1. The new function must have 2 input parameters:
   - :code:`data` - The dataframe containing the entire dataset.
   - :code:`selected` - The currently selected points (Default:None)
-  - :code:`**kwargs` - keyword arguments for customising plots
 
 2. The function must return the following:
   - :code:`plot` - The final plot to be rendered
@@ -50,7 +49,7 @@ In this example we will show the simple case of creating a custom plot which sho
 .. code-block:: python
   :linenos:
 
-  def x_squared(data, selected=None, **kwargs): # The function must include the parameters df, selected=None, and **Kwargs
+  def x_squared(data, selected=None): # The function must include the parameters df, selected=None, and **Kwargs
 
       plot_data = create_plot(
           data,
@@ -75,7 +74,7 @@ In this example we will show the simple case of creating a custom plot which sho
           line_data,
           "x","y", # config.settings is not required here as these column names are not in reference to the main dataset
           plot_type="line", # we want a line drawn
-          label_plot=False, # we don't need a legend for this data
+          legend=False, # we don't need a legend for this data
           colours=False # Use default colours
       )
 
@@ -145,21 +144,46 @@ The default for this value is :code:`True`.
 
    <hr>
 
-Labels
+Legends
 *******************
 
-.. image:: ../../images/fig_flags_labels.png
+.. image:: ../../images/fig_flags_legend.png
     :width: 47%
-.. image:: ../../images/fig_flags_labelsN.png
+.. image:: ../../images/fig_flags_legendN.png
     :width: 47%
 
-The :code:`label_plot` flag will render a legend on the plot, using the user labels in the opening settings.
+The :code:`legend` flag will include the plotted points in the plot legend. If all plots have this flag set to :code:`False` then no legend will be rendered.
 
 The default for this value is :code:`True`.
 
 .. raw:: html
 
    <hr>
+
+Legend Positions
+*******************
+
+.. image:: ../../images/fig_flags_legend_position_inside.png
+   :width: 47%
+.. image:: ../../images/fig_flags_legend_position_outside.png
+   :width: 47%
+
+The :code:`legend_position` option allows you to position the legend in a more suitable place than the default positioning.
+
+To keep the legend within the plot window you can choose between the following options: :code:`["top_left","top_right","bottom_left","bottom_right"]`.
+
+To position the legend outside of the plot window you can use one of the following options: :code:`["top","bottom","left","right"]`.
+
+The examples above show :code:`["bottom_right"]` and :code:`["left"]` positions.
+
+.. note::
+    If all plots have the :code:`legend` flag set to :code:`False` then the :code:`legend_position` flag is ignored and no legend is rendered.
+
+The default for this value is :code:`None`.
+
+.. raw:: html
+
+  <hr>
 
 Smaller Axes Limits
 *************************
@@ -192,7 +216,7 @@ Bounded Axes
 
 The :code:`bounds` parameter, much like :code:`smaller_axes_limits`, will reduce the x and y axes limits, however it does this much more abruptly and any data points not within the specified bounds will be removed from the plot completely. The bound is specified as follows :code:`[xmin,ymax,xmax,ymin]` using the *[left,top,right,bottom]* style.
 
-In the example above we have specified assigned :code:`bounds=[0,1,1,0]` and as you can see below if you zoom out there exists not rendered points outside this region.
+In the example above we have assigned :code:`bounds=[0,1,1,0]` and as you can see below if you zoom out there are no points rendered outside this region.
 
 .. image:: ../../images/fig_flags_bounded_1.png
     :width: 47%
@@ -203,3 +227,28 @@ This parameter is useful when you have missing data that default to extreme valu
 If a selected source falls outside this region and is not shown on the plot, you can use this as a indication that the data for the chosen axes are not available for that datapoint.
 
 The default for this value is :code:`None` and so no axes limits are changed.
+
+Slow Render
+*******************
+
+.. image:: ../../images/fig_flags_slow_render.png
+    :width: 47%
+.. image:: ../../images/fig_flags_legendN.png
+    :width: 47%
+
+The :code:`slow_render` flag removes all optimisations applied by the Datashader_ library and renders points using solely Bokeh. These points provide the user with much more customisability when it comes to glyph shapes and styles (see `Holoviews documentation`_ for more details).
+
+.. _`Holoviews documentation`: http://holoviews.org/user_guide/Plotting_with_Bokeh.html
+
+.. caution::
+    Rendering points without Datashader requires substantially more processing power and as such, if you are rendering more than a few tens of thousands of points, you may notice the plots become laggy and unresponsive.
+
+    It is recommended that this is only used when you have only a small sample of points that you want to emphasise in your plot.
+
+    An example of this is when we render selected or queried points.
+
+The default for this value is :code:`False`.
+
+.. raw:: html
+
+   <hr>
