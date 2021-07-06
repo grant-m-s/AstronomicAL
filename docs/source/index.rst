@@ -1,6 +1,6 @@
 Welcome to astronomicAL's documentation!
 ========================================
-An Interactive Dashboard for Active Learning in Astronomy.
+An interactive dashboard for visualisation, integration and classification of data using Active Learning.
 --------------------------------------------------------------------
 
 .. image:: https://travis-ci.com/grant-m-s/astronomicAL.svg?token=upRGxrMseZqj7kT3bSGx&branch=master
@@ -13,8 +13,7 @@ An Interactive Dashboard for Active Learning in Astronomy.
 .. image:: https://readthedocs.org/projects/astronomical/badge/?version=latest
     :target: https://astronomical.readthedocs.io
 
-
-AstronomicAL is an iteractive dashboard to enable Astronomy-based researchers to gain valuable insight into their data by showing them the key information they require to make accurate classifications of each source. Combining the use of the Panel_, Bokeh_, modAL_ and `SciKit Learn`_ packages, astronomicAL enables researchers to take full advantage of the benefits of Active Learning, high accuracy models using just a fraction of the total data, without the requirement of being well versed in the Machine Learning theory or implementations.
+AstronomicAL is a human-in-the-loop interactive labelling and training dashboard that allows users to create reliable datasets and robust classifiers using active learning. The system allows users to visualise and integrate data from different sources and deal with issues such as incorrect or missing labels and imbalanced class sizes by using active learning to help the user focus on correcting the labels of a few key examples. Combining the use of the Panel_, Bokeh_, modAL_ and `SciKit Learn`_ packages, astronomicAL enables researchers to take full advantage of the benefits of Active Learning, high accuracy models using just a fraction of the total data, without the requirement of being well versed in the Machine Learning theory or implementations.
 
 .. _Panel: https://panel.holoviz.org/
 .. _Bokeh: https://docs.bokeh.org/en/latest/index.html
