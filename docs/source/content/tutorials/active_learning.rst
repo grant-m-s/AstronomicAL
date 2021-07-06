@@ -9,9 +9,9 @@ Creating an Active Learning-based Classifier
 
 The Active Learning Dashboard is arranged in two sets of tabs:
 
-  1. A Tab for each label classifier that you chose in the previous settings will encapsulate everything you need to know about that particular one-vs-rest classifier.
+  1. A Tab for each label classifier you chose in the previous settings will encapsulate everything you need to know about that particular one-vs-rest classifier.
 
-  2. Inside each classifier tab, you have a set of tabs showing different plots related to how the classifier is performing.
+  2. Inside each classifier tab, you have a set of tabs showing different plots related to how the classifier performs.
 
 In this example, we will only be using the :code:`Star` tab as we are only training the Star classifier, but the same steps will apply for each classifier you choose to train.
 
@@ -49,13 +49,13 @@ Creating a Committee
 *****************************
 Even though we have only used a single classifier in this example, you are not restricted to only one. You can use any number of classifiers for your model, leading to an ensemble of classifiers known as a committee in Active Learning.
 
-If you choose to create a committee, at each iteration of Active Learning, each classifier will have to retrain, increasing the waiting times between queries.
+If you choose to create a committee, each classifier will have to retrain at each iteration of Active Learning, increasing the waiting times between queries.
 
 When using a committee, whenever the model is saved, rather than being a single file for the classifier, it is saved as a folder of classifier files, which would need to continue being used together as an ensemble.
 
 .. note::
 
-	When adding multiple classifiers, you will still add a separate query strategy for each; however, these are not used during training. Instead, the query strategy becomes the *vote entropy*, where the most informative point is the one that has the biggest disagreement between classifiers.
+	When adding multiple classifiers, you will still add a different query strategy for each; however, these are not used during training. Instead, the query strategy becomes the *vote entropy*, where the most informative point is the one that has the most significant disagreement between classifiers.
 
 .. raw:: html
 
@@ -81,32 +81,32 @@ Here is the final setup for our Star classifier.
 Let the training begin!
 -------------------------------------
 
-Immediately after confirming the classifier settings, your model will begin training on some randomly selected points; how many is determined by the number you selected in the previous section.
+Immediately after confirming the classifier settings, your model will begin training on some randomly selected points; how many is determined by the number you set in the previous section.
 
 The First Results
 ***************************
 
 .. image:: ../../images/active_learning_initial_train.png
 
-Once trained, you will be presented with a colourful plot showing all your training data, with the axes specified in your :code:`default_x_variable` and :code:`default_y_variable` parameters from :ref:`settings <choosing-default-axis-variables>`. All the green points are your model's correct predictions, and red is your incorrect predictions. The blue dots are the 5 randomly chosen initial points, and the yellow point is the most informative data point based on the chosen classifier and query strategy.
+Once trained, you will be presented with a colourful plot showing all your training data, with the axes specified in your :code:`default_x_variable` and :code:`default_y_variable` parameters from :ref:`settings <choosing-default-axis-variables>`. All the green points are your model's correct predictions, and red is your incorrect predictions. The blue dots are the five randomly chosen initial points, and the yellow point is the most informative data point based on the chosen classifier and query strategy.
 
 Good Results, Bad Predictions
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-At first glance, it seems like the model is performing pretty well: nearly 80% accuracy in both training and validation sets using only 5 points! However, these result may be deceiving.
+At first glance, it seems like the model is performing pretty well: nearly 80% accuracy in both training and validation sets using only 5 points! However, these results may be deceiving.
 
-The split between Stars and non-Stars here is roughly 33:66. This means that the classifier may develop a preference for predicting non-Star due to this imbalance. However, one of the benefits of active learning is that by training on smaller amounts of data it becomes easier to avoid the negative affects of imbalanced datasets.
+The split between Stars and non-Stars here is roughly 33:66. Due to this imbalance, the classifier may develop a preference for predicting non-Star. However, one of the benefits of active learning is that by training on smaller amounts of data, it becomes easier to avoid the adverse effects of imbalanced datasets.
 
-If we look at the correct and incorrect predictions (green and red areas), we see that the region of points from bottom left to top right looks almost all correct. However, this is a very dense area, meaning that if there are an incorrect predictions they may be overwelmed by correct predicts (or vice-versa). To check how many incorrect points are really there we can hide the correct points by toggling off the :code:`Show Correct` button.
+If we look at the correct and incorrect predictions (green and red areas), we see that the points from bottom left to top right look almost all correct. However, this is a very dense area, meaning that they may be overwhelmed by correct predictions if there are incorrect predictions (or vice-versa). To check how many incorrect points are actually there, we can hide the correct points by toggling off the :code:`Show Correct` button.
 
 .. image:: ../../images/active_learning_toggle_correct.png
 
-After removing the correct points its much easier to see that there are only a couple of incorrect points in the centre region. It is even more obvious now that the problem lies in the two *branches* appearing from the bottom right.
+After removing the correct points, it is much easier to see only a couple of incorrect points are in the centre region. It is even more apparent now that the problem lies in the two *branches* appearing from the bottom right.
 
 The Labelling Process
 -------------------------------------
 
 
-To improve our results across all metrics, we will need to add some more labelled data for the model to train on. However, we know very little about the current queried point and cannot make a confident classification without more information about the source.
+We will need to add some more labelled data for the model to train on to improve our results across all metrics. However, we know very little about the current queried point and cannot make a confident classification without more information about the source.
 
 So let's get more information about the source.
 
@@ -116,23 +116,23 @@ Exploring each source
 .. image:: ../../images/choose_plot_type.png
     :align: center
 
-Throughout the UI, you will have already noticed several **Choose plot type** panels. This is where the user is able to see more about each source at one time than would normally be possible.
+Throughout the UI, you will have already noticed several **Choose plot type** panels. This is where the user can see more about each source at one time than would typically be possible.
 
 Selected Source Information
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-One of the available plots is the :code:`Selected Source Information`, which is more of a mini dashboard than a plot, but it allows us to see key information about the selected source.
+One of the available plots is the :code:`Selected Source Information`, which is more of a mini dashboard than a plot, but it allows us to see critical information about the selected source.
 
 .. image:: ../../images/selected_source_info.png
 
 As you can see, we now get the crucial information required to make a confident classification of the source.
 
-By default, the Optical and Radio images of the source are pulled from the SDSS_ and FIRST_ cutout services, respectively. These are provided free to the user as all that is required is the location of the source (RA and Dec columns). Given that area of the sky has been sampled, the images will be provided. (If you do not have these columns, or are not using an astronomical dataset, these images will not be shown)
+By default, the Optical and Radio images of the source are pulled from the SDSS_ and FIRST_ cutout services, respectively. These are provided free to the user as all that is required is the source's location (RA and Dec columns). Given that area of the sky has been sampled, the images will be provided. (If you do not have these columns or are not using an astronomical dataset, these images will not be shown)
 
 .. _SDSS: http://skyserver.sdss.org/dr16/en/help/docs/api.aspx#imgcutout
 .. _FIRST: https://third.ucllnl.org/cgi-bin/firstcutout
 
-We also see the 2 columns we specified in the settings earlier, as well as the ID of the datapoint.
+We also see the two columns we specified in the settings earlier and the ID of the datapoint.
 
 Sometimes, however, even this information may not be enough, and that is where the other plots are extremely useful.
 
@@ -150,9 +150,9 @@ When you first load the basic plot, the axes displayed will be your specified :c
 .. image:: ../../images/toggle_correct_cropped.png
   :width: 46%
 
-It is now much more obvious why we have the two branches of incorrect values. The branch trailing off the right are majoritively Stars, whereas the centre regions of majoritively Galaxies. The classifier is likely using the labels from the 3 trained on centre points (which will be labelled as non-Star as this is a one-vs-rest classifier) and labelling the Stars as non-Stars leading to all the red.
+It is now much more apparent why we have the two branches of incorrect values. The branch trailing off the right are majoritively Stars, whereas the centre regions of majoritively Galaxies. The classifier is likely using the labels from the three trained on centre points (which will be labelled as non-Star as this is a one-vs-rest classifier) and labelling the Stars as non-Stars.
 
-The branch on the left, which as you approach the top half of the plot are majoritively QSOs, are evidently being classed as Stars. This is likely due to no QSOs being included in the classifier yet, leading it to view Stars as its closest match. Once a point is queried in that area and labelled as a non-Star, it is likely a large amount of the those red points will turn green.
+The branch on the left, which, as you approach the top half of the plot, are majoritively QSOs, is being classed as Stars. This is likely due to no QSOs being included in the classifier yet, leading it to view Stars as its closest match. Once a point is queried in that area and labelled as a non-Star, a large amount of those red points will likely turn green.
 
 .. raw:: html
 
@@ -185,11 +185,11 @@ Once again, we can see clear clustering between the sets of objects; however, th
 
    <hr>
 
-The model has now been retrained with the addition of the extra Galaxy and now a new *most informative* point has been queried.
+The model has now been retrained with the addition of the extra Galaxy, and now a new *most informative* point has been queried.
 
 .. image:: ../../images/updated_queried_point.png
 
-As you can see the left branch of incorrect points has been largely reduced and so our accuracy has increased up to 86% for both training and validation.
+As you can see, the left branch of incorrect points has been largely reduced, and so our accuracy has increased up to 86% for both training and validation.
 
 Analysing the Performance Scores
 -------------------------------------
@@ -213,9 +213,9 @@ Let's first begin with the definition for each of the metrics:
 
     F1 Score = \frac{2 * Precision * Recall}{Precision+Recall}
 
-Where TP is True Positives, FP is False Positives and FN is False Negatives.
+Where TP is True Positives, FP is False Positives, and FN is False Negatives.
 
-If we look at the change in precision, an increase of nearly 0.25, it shows that the classifier is better at labelling only Stars as Stars. Unfortunately, the drop in recall shows that we are now misclassifying more Stars than before. Paired with the increase in accuracy, this indicates that we are predicting more points to be non-Stars overall and due to the higher number of non-Stars, this leads us to predicting more points correctly. This is confirmed when we view the confusion matrices where the bottom right (TP) has decreased, whereas the sum of the left hand columns (Predicted 0) have increased by around 2000 points.
+If we look at the change in precision, an increase of nearly 0.25 shows that the classifier is better at labelling only Stars as Stars. Unfortunately, the drop in recall shows that we are now misclassifying more Stars than before. Pair these with the increase in accuracy, which indicates that we are predicting more points to be non-Stars overall, and due to the higher number of non-Stars, this leads us to predict more points correctly. This is confirmed when we view the confusion matrices where the bottom right (TP) has decreased, whereas the sum of the left-hand columns (Predicted 0) has increased by around 2000 points.
 
 .. image:: ../../images/conf_mat_train_orig.png
   :width: 60%
