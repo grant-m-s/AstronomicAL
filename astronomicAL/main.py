@@ -52,12 +52,12 @@ def export_fits_file_cb(event):
 
         now = datetime.now()
         dt_string = now.strftime("%Y%m%d_%H:%M:%S")
-        save_dataframe_to_fits(exported_labels, f"data/labelled_data_{dt_string}.FITS")
+        save_dataframe_to_fits(exported_labels, f"data/labelled_data_{dt_string}.fits")
 
         export_fits_file_button.disabled = True
-        export_fits_file_button.name = f"{len(list_ids)} labelled sources saved to 'data/labelled_data_{dt_string}.FITS'"
+        export_fits_file_button.name = f"{len(list_ids)} labelled sources saved to 'data/labelled_data_{dt_string}.fits'"
         print(
-            f"{len(list_ids)} labelled sources saved to 'data/labelled_data_{dt_string}.FITS'"
+            f"{len(list_ids)} labelled sources saved to 'data/labelled_data_{dt_string}.fits'"
         )
         time.sleep(3)
         export_fits_file_button.name = "Export Labelled Data to Fits File"
