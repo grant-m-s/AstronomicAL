@@ -4,9 +4,9 @@ Creating a Labelled Test Set
 
 Overview
 ----------
-Pre-assigned labels in surveys are often unreliable due to ambigious class boundaries and data limited information about each source. This is especially true when dealing with rarer classes. AstronomicAL allows you to create your own test set by allowing you to manually label the points whilst viewing all the required information to ensure that the labels are reliable and sifficient for proving your model is accurate and generalisable.
+Pre-assigned labels in surveys are often unreliable due to ambigious class boundaries and data limited information about each source. This is especially true when dealing with rarer classes. AstronomicAL allows you to create your own test set by allowing you to manually label the points whilst viewing all the required information to ensure that the labels are reliable and sufficient for proving your model is accurate and generalisable.
 
-.. figure:: ../../images/Load_config_AL.gif
+.. figure:: ../../images/labelling_mode_load.gif
 
 Load Configuration
 **********************************
@@ -16,7 +16,7 @@ Search Space
 **********************************
 By default, AstronomicAL will choose a point at random within your dataset when selecting a new point to label. However, it is often the case that sources with certain information available are more desirable to have in your test set than one that are missing this information.
 
-.. figure:: ../../images/Update_Labelling_criterion.gif
+.. figure:: ../../images/labelling_mode_demo.gif
 
 AstronomicAL allows you to restrict your search space to only sources that match your specified criteria. Each addition criteria is match with an *AND* operator and so only when a source matches all criteria will it be available.
 
