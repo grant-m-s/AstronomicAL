@@ -1,5 +1,8 @@
+.. _settings:
 Completing the Data Setup
 -----------------------------------
+
+.. image:: ../../images/settings_completed.gif
 
 Choosing your mode
 ***********************
@@ -164,6 +167,7 @@ For all the combinations you add, which are displayed to you on the right-hand s
 
 In this run, we have generated the colours from the photometric bands we chose earlier.
 
+.. _choosing-default-axis-variables:
 Choosing Default Axis Variables
 #######################################
 
