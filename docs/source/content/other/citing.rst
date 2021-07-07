@@ -1,4 +1,4 @@
-.. title:: Citing astronomicAL
+.. title:: Citing AstronomicAL
 .. _citing:
 
 

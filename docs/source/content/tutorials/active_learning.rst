@@ -33,7 +33,7 @@ For each classifier tab, you can assign which classifiers you want to use for th
 Choosing a Query strategy
 **************************************
 
-The main idea of Active Learning is that instead of piling as much data as possible onto a model to train on, you can get equal or better performance with substantially less data if you analytically choose the most informative data points according to a metric. The query strategy *is* that metric.
+The main idea of Active Learning is that instead of piling as much data as possible onto a model to train on, you can get equal or better performance with substantially less training data if you analytically choose the most informative data points according to a metric. The query strategy *is* that metric.
 
 Each classifier that you select is paired with your chosen query strategy.
 
@@ -51,7 +51,7 @@ Even though we have only used a single classifier in this example, you are not r
 
 If you choose to create a committee, each classifier will have to retrain at each iteration of Active Learning, increasing the waiting times between queries.
 
-When using a committee, whenever the model is saved, rather than being a single file for the classifier, it is saved as a folder of classifier files, which would need to continue being used together as an ensemble.
+When using a committee, when the model is saved, rather than being a single file for the classifier, it is saved as a folder of classifier files, which would need to continue being used together as an ensemble.
 
 .. note::
 
@@ -100,7 +100,7 @@ If we look at the correct and incorrect predictions (green and red areas), we se
 
 .. image:: ../../images/active_learning_toggle_correct.png
 
-After removing the correct points, it is much easier to see only a couple of incorrect points are in the centre region. It is even more apparent now that the problem lies in the two *branches* appearing from the bottom right.
+After removing the correct points, it is much easier to see only a couple of incorrect points are in the centre region. It is even more apparent that the problem lies in the two *branches* appearing from the bottom right.
 
 The Labelling Process
 -------------------------------------
@@ -127,7 +127,7 @@ One of the available plots is the :code:`Selected Source Information`, which is 
 
 As you can see, we now get the crucial information required to make a confident classification of the source.
 
-By default, the Optical and Radio images of the source are pulled from the SDSS_ and FIRST_ cutout services, respectively. These are provided free to the user as all that is required is the source's location (RA and Dec columns). Given that area of the sky has been sampled, the images will be provided. (If you do not have these columns or are not using an astronomical dataset, these images will not be shown)
+By default, the source's optical and Radio images are pulled from the SDSS_ and FIRST_ cutout services, respectively. These are provided free to the user as all that is required is the source's location (RA and Dec columns). As long as that area of the sky has been sampled, the images will be provided. (If you do not have these columns or are not using an astronomical dataset, these images will not be shown)
 
 .. _SDSS: http://skyserver.sdss.org/dr16/en/help/docs/api.aspx#imgcutout
 .. _FIRST: https://third.ucllnl.org/cgi-bin/firstcutout
@@ -152,7 +152,7 @@ When you first load the basic plot, the axes displayed will be your specified :c
 
 It is now much more apparent why we have the two branches of incorrect values. The branch trailing off the right are majoritively Stars, whereas the centre regions of majoritively Galaxies. The classifier is likely using the labels from the three trained on centre points (which will be labelled as non-Star as this is a one-vs-rest classifier) and labelling the Stars as non-Stars.
 
-The branch on the left, which, as you approach the top half of the plot, are majoritively QSOs, is being classed as Stars. This is likely due to no QSOs being included in the classifier yet, leading it to view Stars as its closest match. Once a point is queried in that area and labelled as a non-Star, a large amount of those red points will likely turn green.
+The branch on the left, which, as you approach the top half of the plot, are majoritively QSOs, is being classed as Stars. This is likely due to no QSOs being included in the classifier yet, leading it to view Stars as its closest match. Once a point is queried in that area and labelled as a non-Star, many red points will likely turn green.
 
 .. raw:: html
 
@@ -164,7 +164,7 @@ Let's look at some of the other generated features and see if they can separate 
 .. image:: ../../images/basic_plot_alternative_large.png
   :width: 70%
 
-All plots are rendered using Bokeh_ and optimised using Datashader_, enabling you to plot millions of points at once whilst still remaining responsive.
+All plots are rendered using Bokeh_ and optimised using Datashader_, enabling you to plot millions of points at once whilst remaining responsive.
 
 .. _Datashader: http://holoviews.org/user_guide/Large_Data.html
 .. _Bokeh: https://docs.bokeh.org/en/latest/index.html
@@ -239,7 +239,7 @@ Training Set Plot
 
 .. image:: ../../images/training_set_plot.png
 
-As we have seen already, in this plot, we seen all the data within our training set, plotted according to whether our current model has predicted correctly. We also see which points the model has so far trained on and also the queried point which would provide the most information to the model if it was labelled.
+As we have seen already, this plot shows all the data within our training set, plotted according to whether our current model has predicted correctly. We also see which points the model has so far trained on and also the queried point, which would provide the most information to the model if it was labelled.
 
 .. note::
 
@@ -267,7 +267,7 @@ Arguably the most interesting of the plots to look at is the metric plot, which 
 
 	It is important to note that it will, at times, look as though the areas of high uncertainty match the areas of incorrect predictions from the model. However, with the query strategies we are using, the Active Learning query process completely ignores which label the model assigns to a source and therefore is not affected by correctness.
 
-  It is easy to misunderstand this as *Active Learning improves your model's accuracy* when all it is doing is reducing the uncertainty of the most uncertain point at that particular iteration. It just so happens that for many cases, the accuracy and other performance scores increase as a byproduct.
+  It is easy to misunderstand this as *Active Learning improves your model's accuracy* when all it is doing is reducing the uncertainty of the most uncertain point at that particular iteration. It just so happens that, for many cases, the accuracy and other performance scores increase as a byproduct.
 
 .. raw:: html
 
@@ -293,7 +293,7 @@ Score Tracking Plot
 
 .. image:: ../../images/scores_plot.png
 
-The score tracking plot does exactly that - tracks scores. This is useful for seeing the overall trend of your models improvement. As is commonly the case, you may start to notice your scores make smaller and smaller gains as more labelled data are added to the model, eventually leading to a near flat line over multiple iterations. Although there aren't specific stopping criteria for active learning, having your scores converge in this way with no changes in performance as you add more data, might be a good time to stop.
+The score tracking plot does exactly that - tracks scores. This is useful for seeing the overall trend of your models improvement. As is commonly the case, you may start to notice your scores make smaller and smaller gains as more labelled data are added to the model, eventually leading to a nearly flat line over multiple iterations. Although there aren't specific stopping criteria for active learning, having your scores converge in this way with no changes in performance as you add more data might be a good time to stop.
 
 
 .. raw:: html
@@ -304,14 +304,14 @@ The score tracking plot does exactly that - tracks scores. This is useful for se
 It's OK to be Unsure
 -------------------------------------
 
-As you query more points, there will inevitable be a time when you are presented with a point that is inconclusive. This may be caused by certain features giving conflicting results, or just that a particular source is missing too much key information for you to assign a confident and justifiable label.
+As you query more points, there will inevitably be a time when you are presented with an inconclusive point. This may be caused by specific features giving conflicting results or just that a particular source is missing too much key information for you to assign a confident and justifiable label.
 
 Given that the model is likely to be training on such a small amount of data, it is not worth risking a potential incorrect label that *may* dramatically affect our models' performance.
 
 
 .. image:: ../../images/assign_unsure.png
 
-By labelling a point as unsure it removes this point from the training set, and then re-queries the training pool for the next most informative source.
+Labelling a point as unsure removes this point from the training set and then re-queries the training pool for the following most informative source.
 
 No harm done!
 
@@ -326,14 +326,14 @@ Training a little further (up to 20 points), let's see how our Star classifier h
 .. image:: ../../images/after_20_points_train.png
   :width: 49%
 
-As you can see, the performance overall continues to improve. There are occasional drops, likely due to a queried point being in a part of the search space that has yet to be explored and causing local points to change label abruptly; however, they bounce back almost immediately.
+As you can see, the performance overall continues to improve. There are occasional drops, likely due to a queried point being in a part of the search space that has yet to be explored and causing local points to change labels abruptly; however, they bounce back almost immediately.
 
 Saving your model
 ----------------------------
 
 Now that the model has reached a suitable performance for us to apply it to new and unseen data, it is important that we save it for reusability and portability.
 
-Well, the good news is that after each iteration of active learning, astronomicAL automatically saves a copy of your model inside the :code:`models/` directory in the form :code:`label-Classifier_QueryStrategy.joblib`. This gets overwritten at each iteration, so it is always the most up-to-date. However, when you require something more permanent, you can use the :code:`Checkpoint` button.
+Well, the good news is that after each iteration of active learning, AstronomicAL automatically saves a copy of your model inside the :code:`models/` directory in the form :code:`label-Classifier_QueryStrategy.joblib`. This gets overwritten at each iteration, so it is always the most up-to-date. However, when you require something more permanent, you can use the :code:`Checkpoint` button.
 
 .. image:: ../../images/training_tutorial_AL_28.png
 
@@ -343,11 +343,11 @@ to allow you to choose your best performing or most recent model quickly.
 What About The Other Classifiers?
 ----------------------------------
 
-In this example, we only made use of the Star classifier; well, what about the Galaxy classifier?
+In this example, we only used the Star classifier; well, what about the Galaxy classifier?
 
 .. image:: ../../images/galaxy_al_panel.png
 
-As you can see, each classifier tab is independent of the others, allowing you to tailor each classifier for each label. The workflow for training multiple classifiers is down to preference. You could focus on a single classifier until you are happy with its performance, then move on to the next, or you could assign a label for a source on one classifier, then switch over tabs and label a source on one of the other classifiers, each will produce the same results.
+As you can see, each classifier tab is independent of the others, allowing you to tailor each classifier for each label. The workflow for training multiple classifiers is down to preference. You could focus on a single classifier until you are happy with its performance, then move on to the next. Alternatively, you could assign a label for a source on one classifier, switch tabs and label a source on one of the other classifiers. Each will produce the same results.
 
 .. raw:: html
 
@@ -357,4 +357,4 @@ As you can see, each classifier tab is independent of the others, allowing you t
 
 .. image:: ../../images/currently_not_selected.png
 
-If you lose track of which tab the selected source is from it is always shown at the bottom of each classifier tab whether the selected point is that classifiers queried point. If it is not the currently selected point you can simply select the :code:`Show Queried` button to reselect the current classifier's queried point.
+If you lose track of which tab the selected source is from, it is always shown at the bottom of each classifier tab whether the selected point is that classifier's queried point. If not, you can simply press the :code:`Show Queried` button to reselect the current classifier's queried point.
