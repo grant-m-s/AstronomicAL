@@ -1,7 +1,7 @@
 .. _custom_features:
 
 
-Adding custom features to your model
+Adding Custom Features to Your Model
 ====================================================
 
 The features that are given to the model can often be the deciding factor for how well a model is able to produce accurate predictions. This is arguably even more so when approaching the problem using a method such as Active Learning, where you may only being using a tiny fraction of your entire dataset.
@@ -36,7 +36,7 @@ Within the function, you can generate the combinations of features using:
 
 Creating Colours
 ********************************************
-Given the prevalence of photometry data, the most common additional features to create are colours. In astronomicAL, these are provided with the default `subtract (a-b)` with a combination value of 2.
+Given the prevalence of photometry data in astronomical datasets, the most common additional features to create are colours. In astronomicAL, these are provided with the default `subtract (a-b)` with a combination value of 2.
 
 
 Example: Max(a, b)
@@ -56,7 +56,10 @@ In this example we will show how we would go about creating a new :code:`max` fu
 
       cols = list(df.columns) # all the columns in the dataset
       generated_features = [] # The list that will keep track of all the new feature names
+
       for comb in combs: #loop over all combination tuples
+
+          # This loop is to create the feature name string for the dataframe
           new_feature_name = "max(" # start of feature name
           for i in range(n): # loop over each feature in tuple
               new_feature_name = new_feature_name + f"{comb[i]}" # add each feature in operation
@@ -64,11 +67,16 @@ In this example we will show how we would go about creating a new :code:`max` fu
                   new_feature_name = new_feature_name + "," # seperate features by a comma
               else:
                   new_feature_name = new_feature_name + ")"
+
           generated_features.append(new_feature_name) # add new feature name which is the form: max(f_1,f_2,...,f_n)
+
+
           if new_feature_name not in cols: # if the feature already exists in the data, dont recalculate
+
+              # This loop applies the operation over all the feature in the combination and adds it as the new column in the dataframe
               for i in range(n): # Loop of each individual feature in comb
                   if i == 0:
-                      df[new_feature_name] = df[comb[i]] # add the new column and set its value to the starting feature
+                      df[new_feature_name] = df[comb[i]] # add the new column and set its value to the starting feature (without this you will get a KeyError)
                   else:
                       df[new_feature_name] = np.maximum(df[new_feature_name], df[comb[i]]) #calculate the running maximum
 
