@@ -49,8 +49,9 @@ In this example we will show the simple case of creating a custom plot which sho
 .. code-block:: python
   :linenos:
 
-  def x_squared(data, selected=None): # The function must include the parameters df, selected=None, and **Kwargs
+  def x_squared(data, selected=None): # The function must include the parameters df, selected=None
 
+      # This plots all the data on your chosen axes
       plot_data = create_plot(
           data,
           config.settings["x_axis"], # always use dataset column names as keys to config.settings
@@ -70,6 +71,7 @@ In this example we will show the simple case of creating a custom plot which sho
           columns=["x", "y"]
       ) # create dataframe with the newly created data
 
+      # This plots the X^2 line
       line = create_plot(
           line_data,
           "x","y", # config.settings is not required here as these column names are not in reference to the main dataset
