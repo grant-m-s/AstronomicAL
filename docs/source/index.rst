@@ -81,9 +81,9 @@ See the :ref:`citing <citing>` page for instructions about referencing and citin
 
     content/apireference/active_learning.rst
     content/apireference/dashboard.rst
-    content/apireference/extensions.rst
+    .. content/apireference/extensions.rst
     content/apireference/settings.rst
-    content/apireference/utils.rst
+    .. content/apireference/utils.rst
 
 .. toctree::
     :maxdepth: 1
@@ -95,6 +95,7 @@ See the :ref:`citing <citing>` page for instructions about referencing and citin
     content/tutorials/labelling_test_set.rst
     content/tutorials/plots.rst
     content/tutorials/feature_generation.rst
+    content/tutorials/using_model.rst
 
 .. toctree::
     :maxdepth: 1
