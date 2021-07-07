@@ -1,4 +1,4 @@
-Welcome to astronomicAL's documentation!
+Welcome to AstronomicAL's documentation!
 ========================================
 An interactive dashboard for visualisation, integration and classification of data using Active Learning.
 --------------------------------------------------------------------
@@ -13,7 +13,7 @@ An interactive dashboard for visualisation, integration and classification of da
 .. image:: https://readthedocs.org/projects/astronomical/badge/?version=latest
     :target: https://astronomical.readthedocs.io
 
-AstronomicAL is a human-in-the-loop interactive labelling and training dashboard that allows users to create reliable datasets and robust classifiers using active learning. The system allows users to visualise and integrate data from different sources and deal with issues such as incorrect or missing labels and imbalanced class sizes by using active learning to help the user focus on correcting the labels of a few key examples. Combining the use of the Panel_, Bokeh_, modAL_ and `SciKit Learn`_ packages, astronomicAL enables researchers to take full advantage of the benefits of Active Learning, high accuracy models using just a fraction of the total data, without the requirement of being well versed in the Machine Learning theory or implementations.
+AstronomicAL is a human-in-the-loop interactive labelling and training dashboard that allows users to create reliable datasets and robust classifiers using active learning. The system allows users to visualise and integrate data from different sources and deal with issues such as incorrect or missing labels and imbalanced class sizes by using active learning to help the user focus on correcting the labels of a few key examples. Combining the use of the Panel_, Bokeh_, modAL_ and `SciKit Learn`_ packages, AstronomicAL enables researchers to take full advantage of the benefits of Active Learning, high accuracy models using just a fraction of the total data, without the requirement of being well versed in the Machine Learning theory or implementations.
 
 .. _Panel: https://panel.holoviz.org/
 .. _Bokeh: https://docs.bokeh.org/en/latest/index.html
@@ -34,7 +34,7 @@ As the software runs entirely locally on the user’s system, AstronomicAL provi
 
 Installation
 ------------------
-To install astronomicAL and all its dependencies, the user can simply clone the repository and from within the repo folder run :code:`pip install -r requirements.txt`. It is recommended that the user creates a virtual environment using tools such as Virtualenv_ or Conda_, to prevent any conflicting package versions.
+To install AstronomicAL and all its dependencies, the user can simply clone the repository and from within the repo folder run :code:`pip install -r requirements.txt`. It is recommended that the user creates a virtual environment using tools such as Virtualenv_ or Conda_, to prevent any conflicting package versions.
 
 .. _Virtualenv: https://packaging.python.org/guides/installing-using-pip-and-virtual-environments/#installing-virtualenv
 .. _Conda: https://docs.conda.io/projects/conda/en/latest/user-guide/tasks/manage-environments.html
@@ -63,7 +63,7 @@ Referencing the Package
 
 Please remember to cite our software and user guide whenever relevant.
 
-See the :ref:`citing <citing>` page for instructions about referencing and citing the astronomicAL software.
+See the :ref:`citing <citing>` page for instructions about referencing and citing the AstronomicAL software.
 
 
 .. raw:: html
@@ -92,6 +92,7 @@ See the :ref:`citing <citing>` page for instructions about referencing and citin
     content/tutorials/preparing_dataset.rst
     content/tutorials/settings.rst
     content/tutorials/active_learning.rst
+    content/tutorials/reload_config.rst
     content/tutorials/labelling_test_set.rst
     content/tutorials/plots.rst
     content/tutorials/feature_generation.rst

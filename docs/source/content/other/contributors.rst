@@ -41,7 +41,7 @@ Referencing the Package
 -------------------------
 
 Please see the :ref:`citing <citing>` page for instructions about referencing and citing
-the astronomicAL software.
+the AstronomicAL software.
 
 .. _`University of Bristol`: https://www.bristol.ac.uk/
 .. _`UKRI`: https://gtr.ukri.org/projects?ref=studentship-2466020
