@@ -709,6 +709,10 @@ class ActiveLearningModel:
         self.x_val = self.x_val[self.x_cols]
         self.x_test = self.x_test[self.x_cols]
 
+        print(self.x_train.shape)
+        print(self.y_train.shape)
+        print(self.y_train[config.settings["label_col"]] != -1)
+
         config.ml_data["x_train_without_unknowns"] = self.x_train[
             self.y_train[config.settings["label_col"]] != -1
         ]
@@ -1432,11 +1436,11 @@ class ActiveLearningModel:
         x_te = x_te[:, 1:]
         data_x_test = self.scaler.transform(x_te)
 
-        data_x_tr = pd.DataFrame(data_x_tr, columns=x_cols)
+        data_x_tr = pd.DataFrame(data_x_tr, columns=x_cols, index=x_train.index)
 
-        data_x_val = pd.DataFrame(data_x_val, columns=x_cols)
+        data_x_val = pd.DataFrame(data_x_val, columns=x_cols, index=x_val.index)
 
-        data_x_test = pd.DataFrame(data_x_test, columns=x_cols)
+        data_x_test = pd.DataFrame(data_x_test, columns=x_cols, index=x_test.index)
 
         return data_x_tr, data_x_val, data_x_test
 
@@ -1668,11 +1672,22 @@ class ActiveLearningModel:
         self.conf_mat_val_fn = str(v_conf[1][0])
         self.conf_mat_val_tp = str(v_conf[1][1])
 
-        self.conf_mat_test_tn = str(test_conf[0][0])
-        self.conf_mat_test_fp = str(test_conf[0][1])
-        self.conf_mat_test_fn = str(test_conf[1][0])
-        self.conf_mat_test_tp = str(test_conf[1][1])
-
+        try:
+            self.conf_mat_test_tn = str(test_conf[0][0])
+            self.conf_mat_test_fp = str(test_conf[0][1])
+            self.conf_mat_test_fn = str(test_conf[1][0])
+            self.conf_mat_test_tp = str(test_conf[1][1])
+        except:
+            self.conf_mat_test_tn = str("N/A")
+            self.conf_mat_test_fp = str("N/A")
+            self.conf_mat_test_fn = str("N/A")
+            self.conf_mat_test_tp = str("N/A")
+            print(
+                f"Your test set either contains all {self._label_alias} labels or does not contain any {self._label_alias} labels at all."
+            )
+            print(
+                "Please return to Labelling Mode and add some of the missing labels to your test set."
+            )
         proba = 1 - np.max(proba, axis=1)
 
         x_axis = config.ml_data["x_train_without_unknowns"][
@@ -1727,6 +1742,9 @@ class ActiveLearningModel:
 
             X_pool = config.ml_data["x_train_with_unknowns"].to_numpy()
             y_pool = self.y_train_with_unknowns.to_numpy().ravel()
+
+            self.id_train = config.ml_data["id_train_with_unknowns"].copy()
+
             id_pool = self.id_train.to_numpy()
 
             train_idx = list(
