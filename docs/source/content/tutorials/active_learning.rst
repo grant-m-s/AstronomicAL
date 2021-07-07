@@ -261,7 +261,7 @@ Metric Plot
 
 .. image:: ../../images/metric_plot.png
 
-Arguably the most interesting of the plots to look at, due to it being the driver for the entire Active Learning process, the metric plot is a visualisation of the query strategy. As we are using **Uncertainty Sampling**, this visualises the certainty the model has in its prediction. Green means the model is very confident in its prediction; Red means it's very unsure and can't decide whether the source is a Star or Galaxy.
+Arguably the most interesting of the plots to look at is the metric plot, which is a visualisation of the query strategy and the driver for the active learning process. As we are using **Uncertainty Sampling**, this visualises the certainty the model has in its prediction. Green means the model is very confident in its prediction; Red means it's very unsure and can't decide whether the source is a Star or Galaxy.
 
 .. caution::
 
@@ -293,7 +293,7 @@ Score Tracking Plot
 
 .. image:: ../../images/scores_plot.png
 
-The score tracking plot does exactly that - tracks scores. This is useful for seeing the overall trend of your models improvement. As is commonly the case, you may start to notice your scores make smaller and smaller changes as more labelled data are added to the model, eventually possibly leading to basically a flat line over multiple iterations. Although there aren't specific stopping criteria for Active Learning, having your scores converge in this way, with no changes in performance as you add more data, might be a good time to stop.
+The score tracking plot does exactly that - tracks scores. This is useful for seeing the overall trend of your models improvement. As is commonly the case, you may start to notice your scores make smaller and smaller gains as more labelled data are added to the model, eventually leading to a near flat line over multiple iterations. Although there aren't specific stopping criteria for active learning, having your scores converge in this way with no changes in performance as you add more data, might be a good time to stop.
 
 
 .. raw:: html
@@ -304,54 +304,40 @@ The score tracking plot does exactly that - tracks scores. This is useful for se
 It's OK to be Unsure
 -------------------------------------
 
+As you query more points, there will inevitable be a time when you are presented with a point that is inconclusive. This may be caused by certain features giving conflicting results, or just that a particular source is missing too much key information for you to assign a confident and justifiable label.
 
-If we skip ahead in the training process a bit, we can see how to approach the situation where you don't know what you should label the source.
-
-.. image:: ../../images/training_tutorial_AL_22.png
-
-As you can see, our model has improved all its metrics to over 0.91, with accuracy now at 98%, all whilst only training on 25 points. Pretty good!
-
-.. image:: ../../images/training_tutorial_AL_23.png
-However, our latest source has caused us to pause for a moment. This source is missing its spectra, meaning we need to use the other plots to determine its label. The optical image definitely shows what looks like a bulge, indicating it could be a Galaxy.
-
-.. image:: ../../images/training_tutorial_AL_24.png
-
-However, this plot shows this source is in a region heavily dominated by stars.
-
-Given that the model is training on such a small amount of data (only 25 points!), it is not worth risking a potential incorrect label that could dramatically affect our models' performance.
+Given that the model is likely to be training on such a small amount of data, it is not worth risking a potential incorrect label that *may* dramatically affect our models' performance.
 
 
-.. image:: ../../images/training_tutorial_AL_25.png
+.. image:: ../../images/assign_unsure.png
 
-So we will assign it as Unsure, which removes this point from the training set, and then re-query for the next most informative source.
+By labelling a point as unsure it removes this point from the training set, and then re-queries the training pool for the next most informative source.
 
 No harm done!
 
 Seeing the Results
 -----------------------------
 
-Training a little further (up to 30 points), let's see how our Star classifier has performed.
+Training a little further (up to 20 points), let's see how our Star classifier has performed.
 
-.. image:: ../../images/training_tutorial_AL_27.png
+.. image:: ../../images/after_20_points_score.png
   :width: 47%
 
-.. image:: ../../images/training_tutorial_AL_26.png
+.. image:: ../../images/after_20_points_train.png
   :width: 49%
 
 As you can see, the performance overall continues to improve. There are occasional drops, likely due to a queried point being in a part of the search space that has yet to be explored and causing local points to change label abruptly; however, they bounce back almost immediately.
-
-The model would likely improve further if we continued to add a few extra points. Even the next queried point shown on the right would likely correct most of the incorrect points trailing off to its right.
 
 Saving your model
 ----------------------------
 
 Now that the model has reached a suitable performance for us to apply it to new and unseen data, it is important that we save it for reusability and portability.
 
-Well, the good news is that after each iteration of Active Learning, astronomicAL automatically saves a copy of your model inside the :code:`models/` directory in the form :code:`label-Classifier_QueryStrategy.joblib`. This gets overwritten at each iteration, so it is always the most up-to-date. However, when you require something more permanent, you can use the :code:`Checkpoint` button.
+Well, the good news is that after each iteration of active learning, astronomicAL automatically saves a copy of your model inside the :code:`models/` directory in the form :code:`label-Classifier_QueryStrategy.joblib`. This gets overwritten at each iteration, so it is always the most up-to-date. However, when you require something more permanent, you can use the :code:`Checkpoint` button.
 
 .. image:: ../../images/training_tutorial_AL_28.png
 
-This can be pressed once per iteration and will save your current model in the form :code:`label-Classifier_QueryStrategy-iteration-validationF1score-YYYYMMDD_H:M:S.joblib`
+This can be pressed once per iteration and will save your current model in the form :code:`label-Classifier_QueryStrategy-iteration-validationF1score-YYYYMMDD_HH:MM:SS.joblib`
 to allow you to choose your best performing or most recent model quickly.
 
 What About The Other Classifiers?
