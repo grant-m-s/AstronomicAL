@@ -35,7 +35,7 @@ class DataSelection(param.Parameterized):
 
     """
 
-    dataset = param.FileSelector(path="data/*")
+    dataset = param.ObjectSelector(default="", objects=[""])
     config_file = param.ObjectSelector(default="", objects=[""])
     load_config_select = param.ObjectSelector(default="", objects=[""])
 
@@ -56,16 +56,24 @@ class DataSelection(param.Parameterized):
 
     def _initialise_widgets(self):
 
+        data_files = self._get_data_files()
+
+        if len(data_files) == 0:
+            data_files = [""]
+
         config_files = self._get_config_files()
         load_config_options = self._init_load_config_options()
 
         config_files = [""] + config_files
         load_config_options = [""] + load_config_options
 
+        self.param.dataset.objects = data_files
         self.param.load_config_select.objects = load_config_options
         self.param.config_file.objects = config_files
+        self.param.dataset.default = data_files[0]
         self.param.load_config_select.default = load_config_options[0]
         self.param.config_file.default = config_files[0]
+        self.dataset = data_files[0]
         self.load_config_select = load_config_options[0]
         self.config_file = config_files[0]
 
@@ -114,6 +122,10 @@ class DataSelection(param.Parameterized):
                     """,
             args=dict(button=self.load_data_button_js),
         )
+
+    def _get_data_files(self):
+        files = glob.glob("data/*.*")
+        return files
 
     def _get_config_files(self):
         files = glob.glob("configs/*.json")
