@@ -100,13 +100,12 @@ def create_plot(
     selected=None,
     show_selected=True,
     slow_render=False,
-    label_plot=True,
+    legend=True,
     colours=True,
     smaller_axes_limits=False,
     bounds=None,
     legend_position=None,
 ):
-
     assert x in list(data.columns), f"Column {x} is not a column in your dataframe."
     assert y in list(data.columns), f"Column {y} is not a column in your dataframe."
 
@@ -127,6 +126,7 @@ def create_plot(
             [x, y],
         ).opts(active_tools=["pan", "wheel_zoom"])
     if show_selected:
+
         if selected is not None:
             cols = list(data.columns)
 
@@ -163,6 +163,7 @@ def create_plot(
         )
 
     if smaller_axes_limits:
+
         max_x = np.max(data[x])
         min_x = np.min(data[x])
 
@@ -232,10 +233,11 @@ def create_plot(
 
     if slow_render:
         plot = p
+
     if show_selected and (selected is not None):
         plot = plot * selected_plot
 
-    if label_plot and colours:
+    if legend and colours:
         plot = plot * color_points
 
     if legend_position is not None:
@@ -244,14 +246,14 @@ def create_plot(
     return plot
 
 
-def bpt_plot(data, selected=None, **kwargs):
+def bpt_plot(data, selected=None):
 
     plot_NII = create_plot(
         data,
         config.settings["Log10(NII_6584_FLUX/H_ALPHA_FLUX)"],
         config.settings["Log10(OIII_5007_FLUX/H_BETA_FLUX)"],
         plot_type="scatter",
-        label_plot=True,
+        legend=True,
         selected=selected,
         bounds=[-1.8, 1.25, 1, -2.2],
         legend_position="bottom_right",
@@ -265,13 +267,9 @@ def bpt_plot(data, selected=None, **kwargs):
     l1 = pd.DataFrame(np.array([x1, y1]).T, columns=["x", "y"])
     l2 = pd.DataFrame(np.array([x2, y2]).T, columns=["x", "y"])
 
-    NII_line1 = create_plot(
-        l1, "x", "y", plot_type="line", label_plot=False, colours=False
-    )
+    NII_line1 = create_plot(l1, "x", "y", plot_type="line", legend=False, colours=False)
 
-    NII_line2 = create_plot(
-        l2, "x", "y", plot_type="line", label_plot=False, colours=False
-    )
+    NII_line2 = create_plot(l2, "x", "y", plot_type="line", legend=False, colours=False)
 
     plot_NII = plot_NII * NII_line1 * NII_line2
 
@@ -280,7 +278,7 @@ def bpt_plot(data, selected=None, **kwargs):
         config.settings["Log10(SII_6717_FLUX/H_ALPHA_FLUX)"],
         config.settings["Log10(OIII_5007_FLUX/H_BETA_FLUX)"],
         plot_type="scatter",
-        label_plot=True,
+        legend=True,
         selected=selected,
         bounds=[-2.1, 1.2, 0.9, -2.1],
         legend_position="bottom_right",
@@ -291,9 +289,7 @@ def bpt_plot(data, selected=None, **kwargs):
 
     l1 = pd.DataFrame(np.array([x1, y1]).T, columns=["x", "y"])
 
-    SII_line1 = create_plot(
-        l1, "x", "y", plot_type="line", label_plot=False, colours=False
-    )
+    SII_line1 = create_plot(l1, "x", "y", plot_type="line", legend=False, colours=False)
 
     plot_SII = plot_SII * SII_line1
 
@@ -302,7 +298,7 @@ def bpt_plot(data, selected=None, **kwargs):
         config.settings["Log10(OI_6300_FLUX/H_ALPHA_FLUX)"],
         config.settings["Log10(OIII_5007_FLUX/H_BETA_FLUX)"],
         plot_type="scatter",
-        label_plot=True,
+        legend=True,
         selected=selected,
         bounds=[-3.3, 1.25, 1.65, -2.3],
         legend_position="bottom_right",
@@ -313,9 +309,7 @@ def bpt_plot(data, selected=None, **kwargs):
 
     l1 = pd.DataFrame(np.array([x1, y1]).T, columns=["x", "y"])
 
-    OI_line1 = create_plot(
-        l1, "x", "y", plot_type="line", label_plot=False, colours=False
-    )
+    OI_line1 = create_plot(l1, "x", "y", plot_type="line", legend=False, colours=False)
 
     plot_OI = plot_OI * OI_line1
 
@@ -328,14 +322,14 @@ def bpt_plot(data, selected=None, **kwargs):
     return tabs
 
 
-def mateos_2012_wedge(data, selected=None, **kwargs):
+def mateos_2012_wedge(data, selected=None):
 
     plot = create_plot(
         data,
         config.settings["Log10(W3_Flux/W2_Flux)"],
         config.settings["Log10(W2_Flux/W1_Flux)"],
         plot_type="scatter",
-        label_plot=True,
+        legend=True,
         selected=selected,
         legend_position="bottom_right",
     )
@@ -374,13 +368,9 @@ def mateos_2012_wedge(data, selected=None, **kwargs):
         np.array([threshold_x, threshold_y]).transpose(), columns=["x", "y"]
     )
 
-    p1 = create_plot(top, "x", "y", plot_type="line", label_plot=False, colours=False)
-    p2 = create_plot(
-        bottom, "x", "y", plot_type="line", label_plot=False, colours=False
-    )
-    p3 = create_plot(
-        threshold, "x", "y", plot_type="line", label_plot=False, colours=False
-    )
+    p1 = create_plot(top, "x", "y", plot_type="line", legend=False, colours=False)
+    p2 = create_plot(bottom, "x", "y", plot_type="line", legend=False, colours=False)
+    p3 = create_plot(threshold, "x", "y", plot_type="line", legend=False, colours=False)
 
     plot = plot * p1 * p2 * p3
 
@@ -538,7 +528,7 @@ class SEDPlot(CustomPlot):
             return self.plot_fn
 
 
-def sed_plot(data, selected=None, **kwargs):
+def sed_plot(data, selected=None):
 
     df_columns = list(config.main_df.columns)
 
@@ -616,7 +606,7 @@ def sed_plot(data, selected=None, **kwargs):
             "magnitude",
             plot_type="line",
             colours=False,
-            label_plot=False,
+            legend=False,
             show_selected=False,
             slow_render=True,
         )
