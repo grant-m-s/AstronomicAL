@@ -13,12 +13,14 @@ An interactive dashboard for visualisation, integration and classification of da
 .. image:: https://readthedocs.org/projects/astronomical/badge/?version=latest
     :target: https://astronomical.readthedocs.io
 
-AstronomicAL is a human-in-the-loop interactive labelling and training dashboard that allows users to create reliable datasets and robust classifiers using active learning. The system allows users to visualise and integrate data from different sources and deal with issues such as incorrect or missing labels and imbalanced class sizes by using active learning to help the user focus on correcting the labels of a few key examples. Combining the use of the Panel_, Bokeh_, modAL_ and `SciKit Learn`_ packages, AstronomicAL enables researchers to take full advantage of the benefits of Active Learning, high accuracy models using just a fraction of the total data, without the requirement of being well versed in the Machine Learning theory or implementations.
+AstronomicAL is a human-in-the-loop interactive labelling and training dashboard that allows users to create reliable datasets and robust classifiers using active learning. The system enables users to visualise and integrate data from different sources and deal with incorrect or missing labels and imbalanced class sizes by using active learning to help the user focus on correcting the labels of a few key examples. Combining the use of the Panel_, Bokeh_, modAL_ and `SciKit Learn`_ packages, AstronomicAL enables researchers to take full advantage of the benefits of active learning: high accuracy models using just a fraction of the total data, without the requirement of being well versed in underlying libraries.
 
 .. _Panel: https://panel.holoviz.org/
 .. _Bokeh: https://docs.bokeh.org/en/latest/index.html
 .. _modAL: https://github.com/modAL-python/modAL
 .. _`SciKit Learn`: https://scikit-learn.org/stable/
+
+.. figure:: images/AstronomicAL_demo.gif
 
 Statement of Need
 *****************
@@ -34,25 +36,31 @@ As the software runs entirely locally on the user’s system, AstronomicAL provi
 
 Installation
 ------------------
-To install AstronomicAL and all its dependencies, the user can simply clone the repository and from within the repo folder run :code:`pip install -r requirements.txt`. It is recommended that the user creates a virtual environment using tools such as Virtualenv_ or Conda_, to prevent any conflicting package versions.
+To install AstronomicAL and its dependencies, the user can clone the repository and from within the repo folder run :code:`pip install -r requirements.txt`. It is recommended that the user creates a virtual environment using tools such as Virtualenv_ or Conda_, to prevent any conflicting package versions.
+
+.. code-block:: bash
+
+    git clone https://github.com/grant-m-s/astronomicAL.git
+    conda create --name astronomical --file requirements.txt
+    conda activate astronomical
 
 .. _Virtualenv: https://packaging.python.org/guides/installing-using-pip-and-virtual-environments/#installing-virtualenv
 .. _Conda: https://docs.conda.io/projects/conda/en/latest/user-guide/tasks/manage-environments.html
 
 Quickstart Instructions
 -----------------------
-To begin using the software, run :code:`bokeh serve astronomicAL --show` and your browser should automatically open to `localhost:5006/astronomicAL
+To begin using the software, run :code:`bokeh serve astronomicAL --show`, and your browser should automatically open to `localhost:5006/astronomicAL
 <localhost:5006/astronomicAL>`_.
 
-AstronomicAL provides both an example dataset and an example configuration file to allow you to jump right into the software and give it a test run.
+AstronomicAL provides an example dataset and an example configuration file to allow you to jump right into the software and give it a test run.
 
 .. figure:: images/Load_config_AL.gif
 
     AstronomicAL makes it easy to start training your classifier or reload a previous checkpoint.
 
-To begin training you simply have to select **Load Custom Configuration** checkbox and select your config file. Here we have chosen to use the :code:`example_config.json` file.
+To begin training, you simply have to select **Load Custom Configuration** checkbox and select your config file. Here we have chosen to use the :code:`example_config.json` file.
 
-The **Load Config Select** option allows use to choose the extent to which to reload the configuration.
+The **Load Config Select** option allows users to choose the extent to which to reload the configuration.
 
 .. raw:: html
 
