@@ -449,6 +449,7 @@ class LabellingDashboard(param.Parameterized):
         selected_dict = selected_source.to_dict("list")
 
         self.src.data = selected_dict
+        self.assign_label_group.value = "Unsure"
 
     def update_selected_point_from_buttons(self, event, button):
 
@@ -476,6 +477,9 @@ class LabellingDashboard(param.Parameterized):
 
             selected_source = self.df[self.df[config.settings["id_col"]] == updated]
             selected_dict = selected_source.to_dict("list")
+            self.assign_label_group.value = config.settings["labels_to_strings"][
+                f"{self.labels[updated]}"
+            ]
 
             self.src.data = selected_dict
 
