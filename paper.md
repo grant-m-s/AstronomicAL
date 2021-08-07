@@ -16,10 +16,8 @@ authors:
    orcid: 0000-0002-9686-254X
    affiliation: 2
  - name: Malcolm N. Bremer
-   orcid:
    affiliation: 2
  - name: Oliver Ray
-   orcid:
    affiliation: 1
 
 affiliations:
