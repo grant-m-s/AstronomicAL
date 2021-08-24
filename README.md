@@ -26,7 +26,8 @@ The documentation for AstronomicAL can be found [here](https://astronomical.read
 To install AstronomicAL and its dependencies, the user can clone the repository and from within the repo folder run `pip install -r requirements.txt`. . It is recommended that the user creates a virtual environment using tools such as [Virtualenv](https://packaging.python.org/guides/installing-using-pip-and-virtual-environments/#installing-virtualenv) or [Conda](https://docs.conda.io/projects/conda/en/latest/user-guide/tasks/manage-environments.html), to prevent any conflicting package versions.
 
 ```
-    git clone https://github.com/grant-m-s/astronomicAL.git
+    git clone https://github.com/grant-m-s/AstronomicAL.git
+    cd AstronomicAL
     conda create --name astronomical --file requirements.txt
     conda activate astronomical
 ```
