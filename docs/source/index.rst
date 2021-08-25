@@ -40,7 +40,8 @@ To install AstronomicAL and its dependencies, the user can clone the repository 
 
 .. code-block:: bash
 
-    git clone https://github.com/grant-m-s/astronomicAL.git
+    git clone https://github.com/grant-m-s/AstronomicAL.git
+    cd AstronomicAL
     conda create --name astronomical --file requirements.txt
     conda activate astronomical
 
@@ -61,6 +62,41 @@ AstronomicAL provides an example dataset and an example configuration file to al
 To begin training, you simply have to select **Load Custom Configuration** checkbox and select your config file. Here we have chosen to use the :code:`example_config.json` file.
 
 The **Load Config Select** option allows users to choose the extent to which to reload the configuration.
+
+.. raw:: html
+
+   <hr>
+
+
+Contributing to AstronomicAL
+-------------------------
+
+Reporting Bugs
+*****************
+
+If you encounter a bug, you can directly report it in the `issues section <https://github.com/grant-m-s/AstronomicAL/issues>`_.
+
+Please describe how to reproduce the bug and include as much information as possible that can be helpful for fixing it.
+
+**Are you able to fix a bug?**
+
+You can open a new pull request or include your suggested fix in the issue.
+
+Submission of extensions
+*****************
+
+**Have you created an extension that you want to share with the community?**
+
+Create a pull request describing your extension and how it can improve research for others.
+
+Support and Feedback
+*****************
+
+We would love to hear your thoughts on AstronomicAL.
+
+Are there any features that would improve the effectiveness and usability of AstronomicAL? Let us know!
+
+Any feedback can be submitted as an `issue <https://github.com/grant-m-s/AstronomicAL/issues>`_.
 
 .. raw:: html
 
