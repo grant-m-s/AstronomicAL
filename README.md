@@ -21,7 +21,7 @@ As the software runs entirely locally on the user’s system, AstronomicAL provi
 ### Documentation
 The documentation for AstronomicAL can be found [here](https://astronomical.readthedocs.io).
 
-### Installation
+## Installation
 
 To install AstronomicAL and its dependencies, the user can clone the repository and from within the repo folder run `pip install -r requirements.txt`. . It is recommended that the user creates a virtual environment using tools such as [Virtualenv](https://packaging.python.org/guides/installing-using-pip-and-virtual-environments/#installing-virtualenv) or [Conda](https://docs.conda.io/projects/conda/en/latest/user-guide/tasks/manage-environments.html), to prevent any conflicting package versions.
 
@@ -44,8 +44,31 @@ To begin training you simply have to select **Load Custom Configuration** checkb
 
 The **Load Config Select** option allows use to choose the extent to which to reload the configuration.
 
-### Referencing the Package
--------------------------
+## Contributing to AstronomicAL
+
+### Reporting Bugs
+If you encounter a bug, you can directly report it in the [issues section](https://github.com/grant-m-s/AstronomicAL/issues).
+
+Please describe how to reproduce the bug and include as much information as possible that can be helpful for fixing it.
+
+**Are you able to fix a bug?**
+
+You can open a new pull request or include your suggested fix in the issue.
+
+### Submission of extensions
+
+**Have you created an extension that you want to share with the community?**
+
+Create a pull request describing your extension and how it can improve research for others.
+
+### Support and Feedback 
+We would love to hear your thoughts on AstronomicAL.
+
+Are there any features that would improve the effectiveness and usability of AstronomicAL? Let us know!
+
+Any feedback can be submitted as an [issue](https://github.com/grant-m-s/AstronomicAL/issues).
+
+## Referencing the Package
 
 Please remember to cite our software and user guide whenever relevant.
 
