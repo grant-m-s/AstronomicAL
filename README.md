@@ -28,6 +28,7 @@ To install AstronomicAL and its dependencies, the user can clone the repository 
 ```
     git clone https://github.com/grant-m-s/AstronomicAL.git
     cd AstronomicAL
+    conda config --add channels conda-forge
     conda create --name astronomical --file requirements.txt
     conda activate astronomical
 ```
