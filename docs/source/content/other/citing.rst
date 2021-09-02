@@ -11,14 +11,3 @@ Citing the Software
 
 To reference the software and its functionality, consider citing the paper
 published in JOSS_.
-
-
-
-----
-
-|arXiv|_
-
-astronomicAL has also been published as an arXiv_ preprint.
-
-Citing the Code
-~~~~~~~~~~~~~~~~~~~~~~
