@@ -40,6 +40,11 @@ import astronomicAL.config as config
 import pytest
 import json
 
+if sys.version_info >= (3, 8):
+    # Account for python version dependence in the default multiprocessing 
+    # starting of processes: https://github.com/pytest-dev/pytest-flask/issues/104
+    import multiprocessing
+    multiprocessing.set_start_method("fork")
 
 @pytest.fixture
 def document():
