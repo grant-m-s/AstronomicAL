@@ -13,6 +13,9 @@ An interactive dashboard for visualisation, integration and classification of da
 .. image:: https://readthedocs.org/projects/astronomical/badge/?version=latest
     :target: https://astronomical.readthedocs.io
 
+.. image:: https://joss.theoj.org/papers/10.21105/joss.03635/status.svg
+   :target: https://doi.org/10.21105/joss.03635
+
 AstronomicAL is a human-in-the-loop interactive labelling and training dashboard that allows users to create reliable datasets and robust classifiers using active learning. The system enables users to visualise and integrate data from different sources and deal with incorrect or missing labels and imbalanced class sizes by using active learning to help the user focus on correcting the labels of a few key examples. Combining the use of the Panel_, Bokeh_, modAL_ and `SciKit Learn`_ packages, AstronomicAL enables researchers to take full advantage of the benefits of active learning: high accuracy models using just a fraction of the total data, without the requirement of being well versed in underlying libraries.
 
 .. _Panel: https://panel.holoviz.org/
