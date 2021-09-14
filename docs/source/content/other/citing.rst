@@ -28,4 +28,9 @@ published in JOSS_.
     journal = {Journal of Open Source Software}
   }
 
-.. _JOSS: https://joss.theoj.org/papers/10.21105/joss.03635#
+.. _JOSS: https://joss.theoj.org/papers/10.21105/joss.03635
+
+
+The paper is also available through arXiv_.
+
+.. _arXiv: https://arxiv.org/abs/2109.05207
