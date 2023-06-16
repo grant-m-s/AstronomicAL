@@ -2,6 +2,8 @@
 
 [![DOI](https://joss.theoj.org/papers/10.21105/joss.03635/status.svg)](https://doi.org/10.21105/joss.03635)
 
+[![python](https://img.shields.io/badge/Python-3.8-blue?style=flat&logo=python&logoColor=white)](https://www.python.org)
+
 # AstronomicAL
 
 ## An interactive dashboard for visualisation, integration and classification of data using Active Learning.
