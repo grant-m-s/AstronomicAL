@@ -15,6 +15,9 @@ An interactive dashboard for visualisation, integration and classification of da
 
 .. image:: https://joss.theoj.org/papers/10.21105/joss.03635/status.svg
    :target: https://doi.org/10.21105/joss.03635
+   
+.. image:: https://img.shields.io/badge/Python-3.8-blue?style=flat&logo=python&logoColor=white
+   :target: https://www.python.org/
 
 AstronomicAL is a human-in-the-loop interactive labelling and training dashboard that allows users to create reliable datasets and robust classifiers using active learning. The system enables users to visualise and integrate data from different sources and deal with incorrect or missing labels and imbalanced class sizes by using active learning to help the user focus on correcting the labels of a few key examples. Combining the use of the Panel_, Bokeh_, modAL_ and `SciKit Learn`_ packages, AstronomicAL enables researchers to take full advantage of the benefits of active learning: high accuracy models using just a fraction of the total data, without the requirement of being well versed in underlying libraries.
 
@@ -46,7 +49,7 @@ To install AstronomicAL and its dependencies, the user can clone the repository 
     git clone https://github.com/grant-m-s/AstronomicAL.git
     cd AstronomicAL
     conda config --add channels conda-forge
-    conda create --name astronomical --file requirements.txt
+    conda create --name astronomical --file requirements.txt python=3.8
     conda activate astronomical
 
 .. _Virtualenv: https://packaging.python.org/guides/installing-using-pip-and-virtual-environments/#installing-virtualenv
