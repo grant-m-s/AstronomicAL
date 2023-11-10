@@ -11,4 +11,4 @@ pytest
 jinja2
 scikit-learn
 dask[dataframe]
-urllib3
+urllib3==1.26.6
