@@ -63,4 +63,5 @@ class ActiveLearningDashboard:
 
         """
         self.row[0] = pn.Card(self.al_tabs, collapsible=False)
+        print("returned tabs")
         return self.row

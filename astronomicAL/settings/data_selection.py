@@ -236,8 +236,12 @@ class DataSelection(param.Parameterized):
 
         if ext == "fits":
             for col, dtype in df.dtypes.items():
-                if dtype == np.object:  # Only process byte object columns.
-                    df[col] = df[col].apply(lambda x: x.decode("utf-8"))
+                try:
+                    if dtype == np.object:  # Only process byte object columns.
+                        df[col] = df[col].apply(lambda x: x.decode("utf-8"))
+                except:
+                    if dtype == object:  # Only process byte object columns.
+                        df[col] = df[col].apply(lambda x: x.decode("utf-8"))
 
         df = self.add_ra_dec_col(df)
 

@@ -78,8 +78,11 @@ react = pn.template.ReactTemplate(title="astronomicAL")
 pn.config.sizing_mode = "stretch_both"
 
 if os.path.isfile(config.layout_file):
+    print("creating layout from file")
     react = load_config.create_layout_from_file(react)
 else:
+    print("creating default layout")
+
     react = load_config.create_default_layout(react)
 
 export_fits_file_button = pn.widgets.Button(

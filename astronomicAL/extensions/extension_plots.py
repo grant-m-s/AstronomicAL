@@ -106,6 +106,8 @@ def create_plot(
     bounds=None,
     legend_position=None,
 ):
+    
+    print("creating plot...")
     assert x in list(data.columns), f"Column {x} is not a column in your dataframe."
     assert y in list(data.columns), f"Column {y} is not a column in your dataframe."
 
@@ -126,7 +128,7 @@ def create_plot(
             [x, y],
         ).opts(active_tools=["pan", "wheel_zoom"])
     if show_selected:
-
+        print("showing selected")
         if selected is not None:
             cols = list(data.columns)
 
@@ -151,16 +153,18 @@ def create_plot(
             )
 
     if colours:
-        color_key = config.settings["label_colours"]
+        print("showing colors")
 
-        color_points = hv.NdOverlay(
-            {
-                config.settings["labels_to_strings"][f"{n}"]: hv.Points(
-                    [0, 0], label=config.settings["labels_to_strings"][f"{n}"]
-                ).opts(style=dict(color=color_key[n], size=0))
-                for n in color_key
-            }
-        )
+        color_key = config.settings["label_colours"]
+        # TODO :: REPLACE
+        # color_points = hv.NdOverlay(
+        #     {
+        #         config.settings["labels_to_strings"][f"{n}"]: hv.Points(
+        #             [0, 0], label=config.settings["labels_to_strings"][f"{n}"]
+        #         ).opts(style=dict(color=color_key[n], size=0))
+        #         for n in color_key
+        #     }
+        # )
 
     if smaller_axes_limits:
 
@@ -192,6 +196,8 @@ def create_plot(
                     min_y = np.min([min_y, np.min(selected[y])])
 
     if colours:
+        print("showing colors with datashade")
+
         if smaller_axes_limits:
             plot = dynspread(
                 datashade(
@@ -212,8 +218,11 @@ def create_plot(
                 threshold=0.75,
                 how="saturate",
             )
+        print("colors with datashade shown")
+        
 
     else:
+        print("showing colors with datashade")
         if smaller_axes_limits:
             plot = dynspread(
                 datashade(
@@ -230,6 +239,7 @@ def create_plot(
                 threshold=0.75,
                 how="saturate",
             )
+        print("colors with datashade shown")
 
     if slow_render:
         plot = p
@@ -237,12 +247,12 @@ def create_plot(
     if show_selected and (selected is not None):
         plot = plot * selected_plot
 
-    if legend and colours:
-        plot = plot * color_points
+    # if legend and colours:
+    #     plot = plot * color_points
 
     if legend_position is not None:
         plot = plot.opts(legend_position=legend_position)
-
+    print("returning plot")
     return plot
 
 

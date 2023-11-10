@@ -86,6 +86,8 @@ class Dashboard(param.Parameterized):
     @param.depends("contents", watch=True)
     def _update_contents(self):
 
+        print("CONTENTS: ",self.contents)
+
         if self.contents == "Settings":
 
             self.mode = ""
@@ -160,5 +162,6 @@ class Dashboard(param.Parameterized):
                 header=pn.Row(self._close_button),
                 collapsible=False,
             )
+        print("returning self.row dashboard")
 
         return self.row

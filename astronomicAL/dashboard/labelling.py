@@ -80,6 +80,7 @@ class LabellingDashboard(param.Parameterized):
         options.append("Unsure")
         self.assign_label_group = pn.widgets.RadioButtonGroup(
             name="Label button group",
+            button_type="light",
             options=options,
         )
 
@@ -315,15 +316,15 @@ class LabellingDashboard(param.Parameterized):
         )
 
         color_key = config.settings["label_colours"]
-
-        color_points = hv.NdOverlay(
-            {
-                config.settings["labels_to_strings"][f"{n}"]: hv.Points(
-                    [0, 0], label=config.settings["labels_to_strings"][f"{n}"]
-                ).opts(style=dict(color=color_key[n], size=0))
-                for n in color_key
-            }
-        )
+        # TODO:: REPLACE
+        # color_points = hv.NdOverlay(
+        #     {
+        #         config.settings["labels_to_strings"][f"{n}"]: hv.Points(
+        #             [0, 0], label=config.settings["labels_to_strings"][f"{n}"]
+        #         ).opts(style=dict(color=color_key[n], size=0))
+        #         for n in color_key
+        #     }
+        # )
 
         max_x = np.max(self.df[x_var])
         min_x = np.min(self.df[x_var])
@@ -387,7 +388,9 @@ class LabellingDashboard(param.Parameterized):
             threshold=0.7,
             how="saturate",
         )
-        plot = (all_points * sample_region_plot * selected_plot * color_points).opts(
+        #TODO:: REPLACE
+        plot = (all_points * sample_region_plot * selected_plot# * color_points
+                ).opts(
             shared_axes=False,
         )
 

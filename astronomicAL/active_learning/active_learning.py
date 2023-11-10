@@ -416,6 +416,7 @@ class ActiveLearningModel:
         self.assign_label_group = pn.widgets.RadioButtonGroup(
             name="Label button group",
             options=options,
+            button_type="light",
             sizing_mode="stretch_width",
         )
 
@@ -2133,8 +2134,8 @@ class ActiveLearningModel:
                 p,
                 aggregator=ds.max("acc"),
                 cmap="RdYlGn",
-                normalization="linear",
-                clims=(-0.2, 1.2),
+                # normalization="linear",
+                # clims=(-0.2, 1.2),
             ).opts(
                 xlim=(min_x, max_x),
                 ylim=(min_y, max_y),
@@ -2192,8 +2193,8 @@ class ActiveLearningModel:
                 p,
                 aggregator=ds.max("acc"),
                 cmap="RdYlGn",
-                normalization="linear",
-                clims=(-0.2, 1.2),
+                # normalization="linear",
+                # clims=(-0.2, 1.2),
             ).opts(
                 xlim=(min_x, max_x),
                 ylim=(min_y, max_y),
@@ -2248,8 +2249,8 @@ class ActiveLearningModel:
                 p,
                 cmap="RdYlGn_r",
                 aggregator=ds.max("metric"),
-                normalization="linear",
-                clims=(0, 0.5),
+                # normalization="linear",
+                # clims=(0, 0.5),
             ).opts(
                 xlim=(self._min_x, self._max_x),
                 ylim=(self._min_y, self._max_y),
@@ -2296,18 +2297,18 @@ class ActiveLearningModel:
                 pn.Row(
                     pn.Column(
                         pn.Row("", max_height=30),
-                        pn.Row("Actual 0", min_height=50),
-                        pn.Row("Actual 1", min_height=50),
+                        pn.Row("Actual 0", max_height=50),
+                        pn.Row("Actual 1", max_height=50),
                     ),
                     pn.Column(
                         pn.Row("Predicted 0", max_height=30),
-                        pn.Row(pn.pane.Str(self.conf_mat_tr_tn), min_height=50),
-                        pn.Row(pn.pane.Str(self.conf_mat_tr_fn), min_height=50),
+                        pn.Row(pn.pane.Str(self.conf_mat_tr_tn), max_height=50),
+                        pn.Row(pn.pane.Str(self.conf_mat_tr_fn), max_height=50),
                     ),
                     pn.Column(
                         pn.Row("Predicted 1", max_height=30),
-                        pn.Row(pn.pane.Str(self.conf_mat_tr_fp), min_height=50),
-                        pn.Row(pn.pane.Str(self.conf_mat_tr_tp), min_height=50),
+                        pn.Row(pn.pane.Str(self.conf_mat_tr_fp), max_height=50),
+                        pn.Row(pn.pane.Str(self.conf_mat_tr_tp), max_height=50),
                     ),
                 ),
                 pn.layout.Divider(max_height=5, margin=(0, 0, 0, 0)),
@@ -2506,13 +2507,13 @@ class ActiveLearningModel:
         if self._queried_is_selected:
             selected_message = pn.pane.Markdown(
                 "**The queried source is currently selected**",
-                style={"color": "#558855"},
+                styles={"color": "#558855"},
                 max_width=250,
             )
         else:
             selected_message = pn.pane.Markdown(
                 "**The queried source is not currently selected**",
-                style={"color": "#ff5555"},
+                styles={"color": "#ff5555"},
                 max_width=250,
             )
 
@@ -2542,11 +2543,12 @@ class ActiveLearningModel:
                             max_height=30,
                             max_width=2000,
                         ),
-                        max_height=70,
+                        max_height=100,
+                        margin=(5,5,5,5)
                     )
 
             self.panel_row[0] = pn.Column(
-                pn.Row(self.setup_row),
+                pn.Row(self.setup_row, max_height=25),
                 pn.Row(
                     self.tabs_view,
                     self._add_conf_matrices(),
@@ -2578,7 +2580,8 @@ class ActiveLearningModel:
                             max_height=30,
                             max_width=2000,
                         ),
-                        max_height=70,
+                        max_height=100,
+                        margin=(5,5,5,5)
                     )
             self.panel_row[0][3] = buttons_row
 

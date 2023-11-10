@@ -152,15 +152,15 @@ class PlotDashboard(param.Parameterized):
         )
 
         color_key = config.settings["label_colours"]
-
-        color_points = hv.NdOverlay(
-            {
-                config.settings["labels_to_strings"][f"{n}"]: hv.Points(
-                    [0, 0], label=config.settings["labels_to_strings"][f"{n}"]
-                ).opts(style=dict(color=color_key[n], size=0))
-                for n in color_key
-            }
-        )
+        # TODO:: REPLACE
+        # color_points = hv.NdOverlay(
+        #     {
+        #         config.settings["labels_to_strings"][f"{n}"]: hv.Points(
+        #             [0, 0], label=config.settings["labels_to_strings"][f"{n}"]
+        #         ).opts(style=dict(color=color_key[n], size=0))
+        #         for n in color_key
+        #     }
+        # )
 
         max_x = np.max(self.df[x_var])
         min_x = np.min(self.df[x_var])
@@ -187,25 +187,26 @@ class PlotDashboard(param.Parameterized):
             max_y = np.max([max_y, np.max(selected[y_var])])
             min_y = np.min([min_y, np.min(selected[y_var])])
 
-        plot = (
-            dynspread(
-                datashade(
-                    p,
-                    color_key=color_key,
-                    aggregator=ds.by(config.settings["label_col"], ds.count()),
-                ).opts(
-                    xlim=(min_x, max_x),
-                    ylim=(min_y, max_y),
-                    responsive=True,
-                    shared_axes=False,
-                ),
-                threshold=0.75,
-                how="saturate",
-            )
-            * selected_plot
-            * color_points
-        ).opts(legend_position="bottom_right", shared_axes=False)
-        return plot
+        # plot = (
+        #     dynspread(
+        #         datashade(
+        #             p,
+        #             color_key=color_key,
+        #             aggregator=ds.by(config.settings["label_col"], ds.count()),
+        #         ).opts(
+        #             xlim=(min_x, max_x),
+        #             ylim=(min_y, max_y),
+        #             responsive=True,
+        #             shared_axes=False,
+        #         ),
+        #         threshold=0.75,
+        #         how="saturate",
+        #     )
+        #     * selected_plot
+        #     # * color_points
+        # ).opts(legend_position="bottom_right", shared_axes=False)
+
+        return p
 
     def panel(self):
         """Render the current view.
