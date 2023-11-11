@@ -38,6 +38,7 @@ import json
 import sys
 import time
 
+pn.extension('mathjax')
 
 class ActiveLearningModel:
     """This class handles the Machine Learning aspect of the codebase.
@@ -2284,57 +2285,104 @@ class ActiveLearningModel:
 
     def _add_conf_matrices(self):
         if not self._show_test_results:
-            return pn.Column(
-                pn.pane.Markdown(
-                    "**Training Set:**",
-                    sizing_mode="fixed",
-                    margin=(0, 0, 0, 0),
-                ),
-                pn.pane.Markdown(
-                    f"Acc: {self._train_scores['acc']}, Prec: {self._train_scores['prec']}, Rec: {self._train_scores['rec']}, F1: {self._train_scores['f1']}",
-                    sizing_mode="fixed",
-                ),
-                pn.Row(
-                    pn.Column(
-                        pn.Row("", max_height=30),
-                        pn.Row("Actual 0", max_height=50),
-                        pn.Row("Actual 1", max_height=50),
-                    ),
-                    pn.Column(
-                        pn.Row("Predicted 0", max_height=30),
-                        pn.Row(pn.pane.Str(self.conf_mat_tr_tn), max_height=50),
-                        pn.Row(pn.pane.Str(self.conf_mat_tr_fn), max_height=50),
-                    ),
-                    pn.Column(
-                        pn.Row("Predicted 1", max_height=30),
-                        pn.Row(pn.pane.Str(self.conf_mat_tr_fp), max_height=50),
-                        pn.Row(pn.pane.Str(self.conf_mat_tr_tp), max_height=50),
-                    ),
-                ),
-                pn.layout.Divider(max_height=5, margin=(0, 0, 0, 0)),
-                pn.pane.Markdown("**Validation Set:**", sizing_mode="fixed"),
-                pn.pane.Markdown(
-                    f"Acc: {self._val_scores['acc']}, Prec: {self._val_scores['prec']}, Rec: {self._val_scores['rec']}, F1: {self._val_scores['f1']}",
-                    sizing_mode="fixed",
-                ),
-                pn.Row(
-                    pn.Column(
-                        pn.Row("", max_height=30),
-                        pn.Row("Actual 0", min_height=50),
-                        pn.Row("Actual 1", min_height=50),
-                    ),
-                    pn.Column(
-                        pn.Row("Predicted 0", max_height=30),
-                        pn.Row(pn.pane.Str(self.conf_mat_val_tn), min_height=50),
-                        pn.Row(pn.pane.Str(self.conf_mat_val_fn), min_height=50),
-                    ),
-                    pn.Column(
-                        pn.Row("Predicted 1", max_height=30),
-                        pn.Row(pn.pane.Str(self.conf_mat_val_fp), min_height=50),
-                        pn.Row(pn.pane.Str(self.conf_mat_val_tp), min_height=50),
-                    ),
-                ),
-            )
+            # return pn.Column(
+            #     pn.pane.Markdown(
+            #         "**Training Set:**",
+            #         sizing_mode="fixed",
+            #         margin=(0, 0, 0, 0),
+            #     ),
+            #     pn.pane.Markdown(
+            #         f"Acc: {self._train_scores['acc']}, Prec: {self._train_scores['prec']}, Rec: {self._train_scores['rec']}, F1: {self._train_scores['f1']}",
+            #         sizing_mode="fixed",
+            #     ),
+            #     pn.Row(
+            #         pn.Column(
+            #             pn.Row("", max_height=30),
+            #             pn.Row("Actual 0", max_height=50),
+            #             pn.Row("Actual 1", max_height=50),
+            #         ),
+            #         pn.Column(
+            #             pn.Row("Predicted 0", max_height=30),
+            #             pn.Row(pn.pane.Str(self.conf_mat_tr_tn), max_height=50),
+            #             pn.Row(pn.pane.Str(self.conf_mat_tr_fn), max_height=50),
+            #         ),
+            #         pn.Column(
+            #             pn.Row("Predicted 1", max_height=30),
+            #             pn.Row(pn.pane.Str(self.conf_mat_tr_fp), max_height=50),
+            #             pn.Row(pn.pane.Str(self.conf_mat_tr_tp), max_height=50),
+            #         ),
+            #     ),
+            #     pn.layout.Divider(max_height=5, margin=(0, 0, 0, 0)),
+            #     pn.pane.Markdown("**Validation Set:**", sizing_mode="fixed"),
+            #     pn.pane.Markdown(
+            #         f"Acc: {self._val_scores['acc']}, Prec: {self._val_scores['prec']}, Rec: {self._val_scores['rec']}, F1: {self._val_scores['f1']}",
+            #         sizing_mode="fixed",
+            #     ),
+            #     pn.Row(
+            #         pn.Column(
+            #             pn.Row("", max_height=30),
+            #             pn.Row("Actual 0", min_height=50),
+            #             pn.Row("Actual 1", min_height=50),
+            #         ),
+            #         pn.Column(
+            #             pn.Row("Predicted 0", max_height=30),
+            #             pn.Row(pn.pane.Str(self.conf_mat_val_tn), min_height=50),
+            #             pn.Row(pn.pane.Str(self.conf_mat_val_fn), min_height=50),
+            #         ),
+            #         pn.Column(
+            #             pn.Row("Predicted 1", max_height=30),
+            #             pn.Row(pn.pane.Str(self.conf_mat_val_fp), min_height=50),
+            #             pn.Row(pn.pane.Str(self.conf_mat_val_tp), min_height=50),
+            #         ),
+            #     ),
+            # )
+
+
+            try:
+                return pn.Column(
+                    pn.pane.Markdown(
+                        fr"""
+                        ### Training:
+
+                        |                        | **Actual Positive**             | **Actual Negative** |               |
+                        |:----:|:----:|:----:|:----:|
+                        | **Predicted Positive** |   **{int(self.conf_mat_tr_tp)}** <br> <small><i>TP</i></small>          |  **{int(self.conf_mat_tr_fn)}** <br> <small><i>FN</i></small>               |  **{(float(self.conf_mat_tr_tp))/(float(self.conf_mat_tr_tp)+float(self.conf_mat_tr_fn)):.2f}** <br> <small><i>Recall</i></small>                  |
+                        | **Predicted Negative** |   **{int(self.conf_mat_tr_fp)}** <br> <small><i>FP</i></small>          |  **{int(self.conf_mat_tr_tn)}** <br> <small><i>TN</i></small>               |  **{(float(self.conf_mat_tr_fp))/(float(self.conf_mat_tr_fp)+float(self.conf_mat_tr_tn)):.2f}** <br> <small><i>False Positive Rate</i></small>|
+                        |                        |   **{(float(self.conf_mat_tr_tp))/(float(self.conf_mat_tr_tp)+float(self.conf_mat_tr_fp)):.2f}** <br>  <small><i>Precision</i></small>   | **{(float(self.conf_mat_tr_fn))/(float(self.conf_mat_tr_fn)+float(self.conf_mat_tr_tn)):.2f}** <br> <small><i>False Omission Rate</i></small>     |  **{100*((float(self.conf_mat_tr_tp)+float(self.conf_mat_tr_tn))/(float(self.conf_mat_tr_tp)+float(self.conf_mat_tr_tn)+float(self.conf_mat_tr_fp)+float(self.conf_mat_tr_fn))):.2f}%** <br> <small><i>Accuracy</i></small>              |
+
+                        ### Validation:
+                        
+
+                        |                        | **Actual Positive**             | **Actual Negative** |               |
+                        |:----:|:----:|:----:|:----:|
+                        | **Predicted Positive** |   **{int(self.conf_mat_val_tp)}** <br> <small><i>TP</i></small>          |  **{int(self.conf_mat_val_fn)}** <br> <small><i>FN</i></small>               |  **{(float(self.conf_mat_val_tp))/(float(self.conf_mat_val_tp)+float(self.conf_mat_val_fn)):.2f}** <br> <small><i>Recall</i></small>                  |
+                        | **Predicted Negative** |   **{int(self.conf_mat_val_fp)}** <br> <small><i>FP</i></small>          |  **{int(self.conf_mat_val_tn)}** <br> <small><i>TN</i></small>               |  **{(float(self.conf_mat_val_fp))/(float(self.conf_mat_val_fp)+float(self.conf_mat_val_tn)):.2f}** <br> <small><i>False Positive Rate</i></small>|
+                        |                        |   **{(float(self.conf_mat_val_tp))/(float(self.conf_mat_val_tp)+float(self.conf_mat_val_fp)):.2f}** <br>  <small><i>Precision</i></small>   | **{(float(self.conf_mat_val_fn))/(float(self.conf_mat_val_fn)+float(self.conf_mat_val_tn)):.2f}** <br> <small><i>False Omission Rate</i></small>     | <div><div style='float:left;width:47%;margin-right: 1px;'>**{100*((float(self.conf_mat_val_tp)+float(self.conf_mat_val_tn))/(float(self.conf_mat_val_tp)+float(self.conf_mat_val_tn)+float(self.conf_mat_val_fp)+float(self.conf_mat_val_fn))):.2f}%** <br> <small><i>Accuracy</i></small> </div> <div style='float:left;width:47%; border-left: 1px solid; margin-left: 1px;'>**{((float(self.conf_mat_val_tp)+float(self.conf_mat_val_tp))/(float(self.conf_mat_val_tp)+float(self.conf_mat_val_tp)+float(self.conf_mat_val_fp)+float(self.conf_mat_val_fn))):.3f}** <br> <small><i>F1</i></small></div></div>              |
+                        
+                    """)
+                )
+            except:
+                return pn.Column(
+                    pn.pane.Markdown(
+                        fr"""
+                        ### Training:
+
+                        |                        | **Actual Positive**             | **Actual Negative** |               |
+                        |:----:|:----:|:----:|:----:|
+                        | **Predicted Positive** |   **{self.conf_mat_tr_tp}** <br> <small><i>TP</i></small>          |  **{self.conf_mat_tr_fn}** <br> <small><i>FN</i></small>               |  **** <br> <small><i>Recall</i></small>                  |
+                        | **Predicted Negative** |   **{self.conf_mat_tr_fp}** <br> <small><i>FP</i></small>          |  **{self.conf_mat_tr_tn}** <br> <small><i>TN</i></small>               |  **** <br> <small><i>False Positive Rate</i></small>|
+                        |                        |   **** <br>  <small><i>Precision</i></small>   | **** <br> <small><i>False Omission Rate</i></small>     |  **%** <br> <small><i>Accuracy</i></small>              |
+
+                        ### Validation:
+
+                        |                        | **Actual Positive**             | **Actual Negative** |               |
+                        |:----:|:----:|:----:|:----:|
+                        | **Predicted Positive** |   **{self.conf_mat_val_tp}** <br> <small><i>TP</i></small>          |  **{self.conf_mat_val_fn}** <br> <small><i>FN</i></small>               |  **** <br> <small><i>Recall</i></small>                  |
+                        | **Predicted Negative** |   **{self.conf_mat_val_fp}** <br> <small><i>FP</i></small>          |  **{self.conf_mat_val_tn}** <br> <small><i>TN</i></small>               |  **** <br> <small><i>False Positive Rate</i></small>|
+                        |                        |   **** <br>  <small><i>Precision</i></small>   | **** <br> <small><i>False Omission Rate</i></small>     |  **%** <br> <small><i>Accuracy</i></small>              |
+                        
+                    """)
+                )
         else:
             if (not self._show_caution) or (self._seen_caution):
                 return pn.Column(
