@@ -1,8 +1,12 @@
 from datetime import datetime
+
 from holoviews.operation.datashader import (
     datashade,
     dynspread,
+    rasterize,
 )
+
+# from datashader.transfer_functions import dynspread
 
 import datashader as ds
 import holoviews as hv
@@ -100,7 +104,7 @@ def create_plot(
     selected=None,
     show_selected=True,
     slow_render=False,
-    legend=True,
+    legend=False,
     colours=True,
     smaller_axes_limits=False,
     bounds=None,
@@ -110,6 +114,12 @@ def create_plot(
     print("creating plot...")
     assert x in list(data.columns), f"Column {x} is not a column in your dataframe."
     assert y in list(data.columns), f"Column {y} is not a column in your dataframe."
+
+    if colours:
+        data["labels_str"] = data[config.settings["label_col"]].copy()
+        data['labels_str'] = data['labels_str'].map(str)
+        data['labels_str'] = data['labels_str'].map(config.settings["labels_to_strings"])
+
 
     if bounds is not None:
         data = data[data[x] >= bounds[0]]
@@ -156,12 +166,13 @@ def create_plot(
         print("showing colors")
 
         color_key = config.settings["label_colours"]
+
         # TODO :: REPLACE
         # color_points = hv.NdOverlay(
         #     {
         #         config.settings["labels_to_strings"][f"{n}"]: hv.Points(
         #             [0, 0], label=config.settings["labels_to_strings"][f"{n}"]
-        #         ).opts(style=dict(color=color_key[n], size=0))
+        #         ).opts(color=color_key[n], size=0)
         #         for n in color_key
         #     }
         # )
@@ -197,13 +208,19 @@ def create_plot(
 
     if colours:
         print("showing colors with datashade")
+        # plot = p
+
+        color_key = {
+            config.settings["labels_to_strings"][f"{k}"]: v
+            for k,v in color_key.items()
+        }
 
         if smaller_axes_limits:
             plot = dynspread(
                 datashade(
                     p,
                     color_key=color_key,
-                    aggregator=ds.by(config.settings["label_col"], ds.count()),
+                    aggregator=ds.by("labels_str", ds.count()),
                 ).opts(xlim=(min_x, max_x), ylim=(min_y, max_y), responsive=True),
                 threshold=0.75,
                 how="saturate",
@@ -213,7 +230,7 @@ def create_plot(
                 datashade(
                     p,
                     color_key=color_key,
-                    aggregator=ds.by(config.settings["label_col"], ds.count()),
+                    aggregator=ds.by("labels_str", ds.count()),
                 ).opts(responsive=True),
                 threshold=0.75,
                 how="saturate",
@@ -222,24 +239,34 @@ def create_plot(
         
 
     else:
-        print("showing colors with datashade")
+        print("not showing colors with datashade")
+        # plot = p
         if smaller_axes_limits:
+            print("smaller axes")
             plot = dynspread(
                 datashade(
                     p,
                 ).opts(xlim=(min_x, max_x), ylim=(min_y, max_y), responsive=True),
                 threshold=0.75,
-                how="saturate",
+                how="add",
             ).redim.range(xdim=(min_x, max_x), ydim=(min_y, max_y))
         else:
-            plot = dynspread(
-                datashade(
-                    p,
-                ).opts(responsive=True),
-                threshold=0.75,
-                how="saturate",
-            )
-        print("colors with datashade shown")
+            print("default axes")
+
+            if plot_type == "line":
+                print("is line")
+                plot = rasterize(p, line_width=2)
+
+            else:
+                print(f"non line: {plot_type}")
+                plot = dynspread(
+                    datashade(
+                        p,
+                    ).opts(responsive=True),
+                    threshold=0.75,
+                    how="add",
+                )
+        print("colors not shown with datashade shown")
 
     if slow_render:
         plot = p
@@ -247,11 +274,14 @@ def create_plot(
     if show_selected and (selected is not None):
         plot = plot * selected_plot
 
+    
     # if legend and colours:
     #     plot = plot * color_points
 
     if legend_position is not None:
         plot = plot.opts(legend_position=legend_position)
+    
+    plot.opts(show_legend=legend)
     print("returning plot")
     return plot
 
@@ -333,6 +363,7 @@ def bpt_plot(data, selected=None):
 
 
 def mateos_2012_wedge(data, selected=None):
+    print("create first plot of wedge...")
 
     plot = create_plot(
         data,
@@ -344,6 +375,7 @@ def mateos_2012_wedge(data, selected=None):
         legend_position="bottom_right",
     )
 
+    print("data x...")
     x = data[config.settings["Log10(W3_Flux/W2_Flux)"]]
 
     top_y_orig = (0.315 * x) + 0.297
@@ -371,20 +403,27 @@ def mateos_2012_wedge(data, selected=None):
     bottom = pd.DataFrame(
         np.array([bottom_x, bottom_y]).transpose(), columns=["x", "y"]
     )
+    print("thresholds...")
 
     threshold_x = np.array([np.min(threshold_x), np.max(threshold_x)])
     threshold_y = (-3.172 * threshold_x) + 0.436
     threshold = pd.DataFrame(
         np.array([threshold_x, threshold_y]).transpose(), columns=["x", "y"]
     )
+    print("creating 3 plots")
 
     p1 = create_plot(top, "x", "y", plot_type="line", legend=False, colours=False)
     p2 = create_plot(bottom, "x", "y", plot_type="line", legend=False, colours=False)
     p3 = create_plot(threshold, "x", "y", plot_type="line", legend=False, colours=False)
+    print("created 3 plots")
 
     plot = plot * p1 * p2 * p3
 
+    print("after adding plots")
+
     plot.opts(legend_position="bottom_left")
+
+    print("returning plot")
 
     return plot
 

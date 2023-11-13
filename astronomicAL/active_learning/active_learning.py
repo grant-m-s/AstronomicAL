@@ -998,18 +998,24 @@ class ActiveLearningModel:
             new_train = np.vstack((self.x_al_train, query))
 
             new_label = np.concatenate((self.y_al_train, selected_label))
-
-            new_id = self.id_al_train.append(self.id_pool.iloc[query_idx])
+            new_id = pd.concat( [self.id_al_train, self.id_pool.iloc[query_idx]], ignore_index=True)
+            # new_id = self.id_al_train.append(self.id_pool.iloc[query_idx])
 
             self.x_al_train = new_train
             self.y_al_train = new_label
             self.id_al_train = new_id
 
         else:
+            print("unsure was assigned")
+            print(type(self.full_labelled_data["id"]))
+            print(self.full_labelled_data["id"])
 
             self.full_labelled_data["id"].append(
                 list(self.id_pool.iloc[query_idx].values)[0][0]
             )
+            print(type(self.full_labelled_data["id"]))
+            print(self.full_labelled_data["id"])
+            
             self.full_labelled_data["y"].append(-1)
 
             self.assign_label_button.name = "Querying..."

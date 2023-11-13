@@ -132,6 +132,8 @@ class PlotDashboard(param.Parameterized):
         if y_var is None:
             y_var = self.Y_variable
 
+        self.df["labels_str"] = self.df[config.settings["label_col"]].copy()
+        self.df['labels_str'] = self.df['labels_str'].map(str)
         p = hv.Points(
             self.df,
             [x_var, y_var],
@@ -153,14 +155,14 @@ class PlotDashboard(param.Parameterized):
 
         color_key = config.settings["label_colours"]
         # TODO:: REPLACE
-        # color_points = hv.NdOverlay(
-        #     {
-        #         config.settings["labels_to_strings"][f"{n}"]: hv.Points(
-        #             [0, 0], label=config.settings["labels_to_strings"][f"{n}"]
-        #         ).opts(style=dict(color=color_key[n], size=0))
-        #         for n in color_key
-        #     }
-        # )
+        color_points = hv.NdOverlay(
+            {
+                config.settings["labels_to_strings"][f"{n}"]: hv.Points(
+                    [0, 0], label=config.settings["labels_to_strings"][f"{n}"]
+                ).opts(color=color_key[n], size=0)
+                for n in color_key
+            }
+        )
 
         max_x = np.max(self.df[x_var])
         min_x = np.min(self.df[x_var])
@@ -186,27 +188,40 @@ class PlotDashboard(param.Parameterized):
 
             max_y = np.max([max_y, np.max(selected[y_var])])
             min_y = np.min([min_y, np.min(selected[y_var])])
+        # plot = p
+        # print(type(config.settings["label_col"]))
+        # print(config.settings["label_col"])
 
-        # plot = (
-        #     dynspread(
-        #         datashade(
-        #             p,
-        #             color_key=color_key,
-        #             aggregator=ds.by(config.settings["label_col"], ds.count()),
-        #         ).opts(
-        #             xlim=(min_x, max_x),
-        #             ylim=(min_y, max_y),
-        #             responsive=True,
-        #             shared_axes=False,
-        #         ),
-        #         threshold=0.75,
-        #         how="saturate",
-        #     )
-        #     * selected_plot
-        #     # * color_points
-        # ).opts(legend_position="bottom_right", shared_axes=False)
+        # print(self.df[config.settings["label_col"]])
 
-        return p
+        # print(color_key)
+
+        color_key = {
+            f"{k}": v
+            for k,v in color_key.items()
+        }
+
+        # assert False
+        plot = (
+            dynspread(
+                datashade(
+                    p,
+                    color_key=color_key,
+                    aggregator=ds.by("labels_str", ds.count()),
+                ).opts(
+                    xlim=(min_x, max_x),
+                    ylim=(min_y, max_y),
+                    responsive=True,
+                    shared_axes=False,
+                ),
+                threshold=0.75,
+                how="saturate",
+            )
+            * selected_plot
+            * color_points
+        ).opts(legend_position="bottom_right", shared_axes=False)
+
+        return plot
 
     def panel(self):
         """Render the current view.
