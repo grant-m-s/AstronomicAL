@@ -1,3 +1,4 @@
+from astronomicAL.settings.dataset import get_dataset
 from astronomicAL.utils.optimise import optimise
 from astropy.table import Table
 from bokeh.models import TextAreaInput
@@ -74,6 +75,7 @@ class DataSelection(param.Parameterized):
         self.param.load_config_select.default = load_config_options[0]
         self.param.config_file.default = config_files[0]
         self.dataset = data_files[0]
+        self.other_data_name = "cifar10"
         self.load_config_select = load_config_options[0]
         self.config_file = config_files[0]
 
@@ -254,10 +256,27 @@ class DataSelection(param.Parameterized):
 
         config.settings["dataset_filepath"] = self.dataset
 
+        config.settings["other_data"] = self.other_data_name
+
+
         print(config.settings)
 
         config.main_df = self.get_dataframe_from_fits_file(self.dataset)
         self.df = config.main_df
+        if self.other_data_name is not None:
+            X_tr, Y_tr, X_te, Y_te = get_dataset("CIFAR10", "data")
+
+            self.other_data_X_tr = X_tr
+            self.other_data_Y_tr = Y_tr
+            self.other_data_X_te = X_te
+            self.other_data_Y_te = Y_te
+
+        else:
+            self.other_data_X_tr = None
+            self.other_data_Y_tr = None
+            self.other_data_X_te = None
+            self.other_data_Y_te = None            
+
         self.src.data = dict(pd.DataFrame())
 
         print(f" dataset shape: {self.df.shape}")

@@ -134,6 +134,9 @@ class PlotDashboard(param.Parameterized):
 
         self.df["labels_str"] = self.df[config.settings["label_col"]].copy()
         self.df['labels_str'] = self.df['labels_str'].map(str)
+        self.df['labels_str'] = self.df['labels_str'].map(config.settings["labels_to_strings"])
+
+    
         p = hv.Points(
             self.df,
             [x_var, y_var],
@@ -155,12 +158,14 @@ class PlotDashboard(param.Parameterized):
 
         color_key = config.settings["label_colours"]
         # TODO:: REPLACE
+        print([config.settings["labels_to_strings"][f"{n}"] for n in color_key])
+        # assert False
         color_points = hv.NdOverlay(
             {
                 config.settings["labels_to_strings"][f"{n}"]: hv.Points(
-                    [0, 0], label=config.settings["labels_to_strings"][f"{n}"]
+                    [0,0], label=config.settings["labels_to_strings"][f"{n}"]
                 ).opts(color=color_key[n], size=0)
-                for n in color_key
+                for i,n in enumerate(color_key)
             }
         )
 
@@ -197,28 +202,33 @@ class PlotDashboard(param.Parameterized):
         # print(color_key)
 
         color_key = {
-            f"{k}": v
+            config.settings["labels_to_strings"][f"{k}"]: v
             for k,v in color_key.items()
         }
+        print("\n\n\n\n\n")
+        print(color_key)
+        print("\n\n\n\n\n")
 
+        # {'0': '#ff7f0e', '1': '#2ca02c', '2': '#d62728', '-1': '#1f77b4'}
         # assert False
         plot = (
             dynspread(
                 datashade(
                     p,
                     color_key=color_key,
-                    aggregator=ds.by("labels_str", ds.count()),
+                    aggregator=ds.count_cat('labels_str'),
                 ).opts(
                     xlim=(min_x, max_x),
                     ylim=(min_y, max_y),
                     responsive=True,
                     shared_axes=False,
+                    show_legend=False,
                 ),
                 threshold=0.75,
                 how="saturate",
             )
             * selected_plot
-            * color_points
+            # * color_points
         ).opts(legend_position="bottom_right", shared_axes=False)
 
         return plot
@@ -241,7 +251,7 @@ class PlotDashboard(param.Parameterized):
                 self.close_button,
                 pn.Row(self.param.X_variable, max_width=100),
                 pn.Row(self.param.Y_variable, max_width=100),
-                max_width=400,
+                max_width=300,
                 sizing_mode="fixed",
             ),
             collapsible=False,

@@ -10,5 +10,8 @@ coverage
 pytest
 jinja2
 scikit-learn
+matplotlib
+shapely
+geopandas
 dask[dataframe]
 urllib3==1.26.6

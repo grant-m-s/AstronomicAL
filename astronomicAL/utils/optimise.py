@@ -1,5 +1,4 @@
 import pandas as pd
-
 # Following optimisation functions credited to:
 # https://medium.com/bigdatarepublic/advanced-pandas-optimize-speed-and-memory-a654b53be6c2
 

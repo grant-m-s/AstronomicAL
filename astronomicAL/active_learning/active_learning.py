@@ -1,4 +1,5 @@
 from astronomicAL.extensions import models, query_strategies, feature_generation
+from astronomicAL.settings.dataset import get_dataset, get_handler, get_wa_handler, get_net_args
 from astronomicAL.utils.optimise import optimise
 from astronomicAL.utils import save_config
 from bokeh.models import (
@@ -26,8 +27,11 @@ from sklearn.metrics import (
     precision_score,
     recall_score,
 )
+from torchvision import transforms
+
 
 import astronomicAL.config as config
+import copy
 import datashader as ds
 import holoviews as hv
 import numpy as np
@@ -592,7 +596,7 @@ class ActiveLearningModel:
         self.df, self.all_al_data = self.generate_features(self.df)
 
         x, y = self.split_x_y_ids(self.all_al_data)
-
+        
         excluded_x = {}
         excluded_y = {}
         if config.settings["exclude_labels"]:
@@ -887,19 +891,19 @@ class ActiveLearningModel:
 
         data = self.df
 
-        queried_id = self.id_pool.iloc[query_idx][config.settings["id_col"]].copy()
+        queried_id = self.id_pool.iloc[query_idx][config.settings["id_col"]]
 
         act_label = self.y_pool[query_idx]
 
         selected_source = self.df[
-            self.df[config.settings["id_col"]] == queried_id.values[0]
+            self.df[config.settings["id_col"]] == queried_id
         ]
 
         selected_dict = selected_source.set_index(config.settings["id_col"]).to_dict(
             "list"
         )
 
-        selected_dict[config.settings["id_col"]] = [queried_id.values[0]]
+        selected_dict[config.settings["id_col"]] = [queried_id]
 
         try:
             self.src.data = selected_dict
@@ -916,11 +920,14 @@ class ActiveLearningModel:
                 config.settings["default_vars"][1]
             ),
         ]
-
+        print(query_instance.shape)
         q = {
-            f'{config.settings["default_vars"][0]}': query_instance[:, plot_idx[0]],
-            f'{config.settings["default_vars"][1]}': [query_instance[:, plot_idx[1]]],
+            f'{config.settings["default_vars"][0]}': [query_instance[plot_idx[0]]],
+            f'{config.settings["default_vars"][1]}': [query_instance[plot_idx[1]]],
         }
+
+        print(q)
+
 
         self.queried_points.data = q
 
@@ -961,7 +968,9 @@ class ActiveLearningModel:
         None
 
         """
-        self.query_index, self.query_instance = self.learner.query(self.x_pool)
+        self.query_index = self.learner.query(1)
+
+        self.query_instance = self.x_pool[self.query_index]
 
     def _assign_label_cb(self, event):
 
@@ -1111,7 +1120,11 @@ class ActiveLearningModel:
 
         self.setup_learners()
 
-        self.query_index, self.query_instance = self.learner.query(self.x_pool)
+        print(self.x_pool)
+
+        self.query_index = self.learner.query(1)
+
+        self.query_instance = self.x_pool[self.query_index]
 
         self.show_queried_point()
 
@@ -1126,6 +1139,8 @@ class ActiveLearningModel:
 
     def _add_classifier_cb(self, event):
 
+        print("add classifier callback")
+
         clf = self.classifier_dropdown.value
         qs = self.query_strategy_dropdown.value
         list_c1 = self.classifier_table_source.data["classifier"]
@@ -1134,23 +1149,29 @@ class ActiveLearningModel:
         list_c1.append(clf)
         list_c2.append(qs)
 
+        print(self.classifier_table_source)
+
+
         self.classifier_table_source.data = {
             "classifier": list_c1,
             "query": list_c2,
         }
 
-    def _remove_classifier_cb(self, event):
+        print(self.classifier_table_source)
 
+    def _remove_classifier_cb(self, event):
+        # print("remove classifier callback")
         list_c1 = self.classifier_table_source.data["classifier"]
         list_c2 = self.classifier_table_source.data["query"]
 
         list_c1 = list_c1[:-1]
         list_c2 = list_c2[:-1]
-
+        # print(self.classifier_table_source)
         self.classifier_table_source.data = {
             "classifier": list_c1,
             "query": list_c2,
         }
+        # print(self.classifier_table_source)
 
     def split_x_y_ids(self, df_data):
         """Separate the data into X and [y,ids] dataframes.
@@ -1540,11 +1561,13 @@ class ActiveLearningModel:
 
     def _update_predictions(self):
 
-        proba = self.learner.predict_proba(self.x_train_without_unknowns)
+        proba = self.learner.predict_prob(self.other_data_X_pool, Y=self.other_data_Y_pool).cpu().numpy()
+
+        print(proba)
 
         tr_pred = np.argmax(proba, axis=1).reshape((-1, 1))
 
-        temp = self.y_train_without_unknowns.to_numpy().reshape((-1, 1))
+        temp = self.other_data_Y_pool.cpu().numpy().reshape((-1, 1))
         is_correct = tr_pred == temp
 
         default_x = (
@@ -1562,6 +1585,12 @@ class ActiveLearningModel:
             .reshape((-1, 1))
         )
 
+        print(config.settings["default_vars"][0])
+        print(default_x.shape)
+        print(default_y.shape)
+
+        print(is_correct.shape)
+
         corr_data = {
             f'{config.settings["default_vars"][0]}': default_x[is_correct],
             f'{config.settings["default_vars"][1]}': default_y[is_correct],
@@ -1574,10 +1603,10 @@ class ActiveLearningModel:
         self.corr_train.data = corr_data
         self.incorr_train.data = incorr_data
 
-        curr_tr_acc = accuracy_score(self.y_train_without_unknowns, tr_pred)
-        curr_tr_f1 = f1_score(self.y_train_without_unknowns, tr_pred)
-        curr_tr_prec = precision_score(self.y_train_without_unknowns, tr_pred)
-        curr_tr_rec = recall_score(self.y_train_without_unknowns, tr_pred)
+        curr_tr_acc = accuracy_score(self.other_data_Y_pool, tr_pred)
+        curr_tr_f1 = f1_score(self.other_data_Y_pool, tr_pred)
+        curr_tr_prec = precision_score(self.other_data_Y_pool, tr_pred)
+        curr_tr_rec = recall_score(self.other_data_Y_pool, tr_pred)
 
         self._train_scores = {
             "acc": "%.3f" % round(curr_tr_acc, 3),
@@ -1586,18 +1615,31 @@ class ActiveLearningModel:
             "f1": "%.3f" % round(curr_tr_f1, 3),
         }
 
+        print(self._train_scores)
+
         self._accuracy_list["train"]["score"].append(curr_tr_acc)
         self._f1_list["train"]["score"].append(curr_tr_f1)
         self._precision_list["train"]["score"].append(curr_tr_prec)
         self._recall_list["train"]["score"].append(curr_tr_rec)
 
-        t_conf = confusion_matrix(self.y_train_without_unknowns, tr_pred)
+        print("done list")
 
-        val_pred = self.learner.predict(config.ml_data["x_val"]).reshape((-1, 1))
+        t_conf = confusion_matrix(self.other_data_Y_pool, tr_pred)
 
-        temp = self.y_val.to_numpy().reshape((-1, 1))
+        # val_pred = self.learner.predict(config.ml_data["x_val"]).reshape((-1, 1))
+
+        val_pred = self.learner.predict(self.other_data_X_val).cpu().numpy().reshape((-1, 1))
+
+        temp = self.other_data_Y_val.cpu().numpy().reshape((-1, 1))
+
+
+        print("v_pred: ", val_pred.shape)
+        print("temp: ", temp.shape)
+
 
         is_correct = val_pred == temp
+
+        print("is_correct: ", is_correct.shape)
 
         default_x = (
             config.ml_data["x_val"][config.settings["default_vars"][0]]
@@ -1609,6 +1651,9 @@ class ActiveLearningModel:
             .to_numpy()
             .reshape((-1, 1))
         )
+
+        print(default_x.shape)
+        print(is_correct.shape)
 
         corr_data = {
             f'{config.settings["default_vars"][0]}': default_x[is_correct],
@@ -1622,10 +1667,10 @@ class ActiveLearningModel:
         self.corr_val.data = corr_data
         self.incorr_val.data = incorr_data
 
-        curr_val_acc = accuracy_score(self.y_val, val_pred)
-        curr_val_f1 = f1_score(self.y_val, val_pred)
-        curr_val_prec = precision_score(self.y_val, val_pred)
-        curr_val_rec = recall_score(self.y_val, val_pred)
+        curr_val_acc = accuracy_score(self.other_data_Y_val, val_pred)
+        curr_val_f1 = f1_score(self.other_data_Y_val, val_pred)
+        curr_val_prec = precision_score(self.other_data_Y_val, val_pred)
+        curr_val_rec = recall_score(self.other_data_Y_val, val_pred)
 
         self._val_scores = {
             "acc": "%.3f" % round(curr_val_acc, 3),
@@ -1633,22 +1678,22 @@ class ActiveLearningModel:
             "rec": "%.3f" % round(curr_val_rec, 3),
             "f1": "%.3f" % round(curr_val_f1, 3),
         }
-        self._accuracy_list["val"]["score"].append(curr_val_acc)
 
+        self._accuracy_list["val"]["score"].append(curr_val_acc)
         self._f1_list["val"]["score"].append(curr_val_f1)
         self._precision_list["val"]["score"].append(curr_val_prec)
         self._recall_list["val"]["score"].append(curr_val_rec)
 
-        v_conf = confusion_matrix(self.y_val, val_pred)
+        v_conf = confusion_matrix(self.other_data_Y_val, val_pred)
 
-        test_pred = self.learner.predict(config.ml_data["x_test"]).reshape((-1, 1))
+        test_pred = self.learner.predict(self.other_data_X_te).cpu().numpy().reshape((-1, 1))
 
-        temp = self.y_test.to_numpy().reshape((-1, 1))
+        temp = self.other_data_Y_te.cpu().numpy().reshape((-1, 1))
 
-        curr_test_acc = accuracy_score(self.y_test, test_pred)
-        curr_test_f1 = f1_score(self.y_test, test_pred)
-        curr_test_prec = precision_score(self.y_test, test_pred)
-        curr_test_rec = recall_score(self.y_test, test_pred)
+        curr_test_acc = accuracy_score(self.other_data_Y_te, test_pred)
+        curr_test_f1 = f1_score(self.other_data_Y_te, test_pred)
+        curr_test_prec = precision_score(self.other_data_Y_te, test_pred)
+        curr_test_rec = recall_score(self.other_data_Y_te, test_pred)
 
         self._test_scores = {
             "acc": "%.3f" % round(curr_test_acc, 3),
@@ -1657,7 +1702,7 @@ class ActiveLearningModel:
             "f1": "%.3f" % round(curr_test_f1, 3),
         }
 
-        test_conf = confusion_matrix(self.y_test, test_pred)
+        test_conf = confusion_matrix(self.other_data_Y_te, test_pred)
 
         self.num_points_list.append(self.curr_num_points)
 
@@ -1737,82 +1782,315 @@ class ActiveLearningModel:
         np.random.seed(0)
 
         if preselected is None:
-            initial_points = int(self.starting_num_points.value)
 
-            if initial_points >= len(config.ml_data["x_train_without_unknowns"].index):
-                self.starting_num_points.value = len(
-                    config.ml_data["x_train_without_unknowns"].index
+            if config.settings["other_data_name"] is None:
+                initial_points = int(self.starting_num_points.value)
+
+                if initial_points >= len(config.ml_data["x_train_without_unknowns"].index):
+                    self.starting_num_points.value = len(
+                        config.ml_data["x_train_without_unknowns"].index
+                    )
+
+                    initial_points = len(config.ml_data["x_train_without_unknowns"].index)
+
+                y_tr = self.y_train_without_unknowns.copy()
+
+                X_pool = config.ml_data["x_train_with_unknowns"].to_numpy()
+                y_pool = self.y_train_with_unknowns.to_numpy().ravel()
+
+                self.id_train = config.ml_data["id_train_with_unknowns"].copy()
+
+                id_pool = self.id_train.to_numpy()
+
+                train_idx = list(
+                    np.random.choice(
+                        range(len(config.ml_data["x_train_without_unknowns"])),
+                        size=initial_points - 2,
+                        replace=False,
+                    )
                 )
 
-                initial_points = len(config.ml_data["x_train_without_unknowns"].index)
+                c0 = train_idx[0]
+                c1 = train_idx[1]
 
-            y_tr = self.y_train_without_unknowns.copy()
+                while c0 in train_idx:
+                    c0 = np.random.choice(np.where(y_tr == 0)[0])
+                while c1 in train_idx:
+                    c1 = np.random.choice(np.where(y_tr == 1)[0])
 
-            X_pool = config.ml_data["x_train_with_unknowns"].to_numpy()
-            y_pool = self.y_train_with_unknowns.to_numpy().ravel()
+                train_idx = train_idx + [c0, c1]
 
-            self.id_train = config.ml_data["id_train_with_unknowns"].copy()
+                print(train_idx)
 
-            id_pool = self.id_train.to_numpy()
-
-            train_idx = list(
-                np.random.choice(
-                    range(len(config.ml_data["x_train_without_unknowns"])),
-                    size=initial_points - 2,
-                    replace=False,
-                )
-            )
-
-            c0 = train_idx[0]
-            c1 = train_idx[1]
-
-            while c0 in train_idx:
-                c0 = np.random.choice(np.where(y_tr == 0)[0])
-            while c1 in train_idx:
-                c1 = np.random.choice(np.where(y_tr == 1)[0])
-
-            train_idx = train_idx + [c0, c1]
-
-            self.x_al_train = X_pool[train_idx]
-            self.y_al_train = self.y_train_without_unknowns.iloc[
-                train_idx
-            ].values.ravel()
-            self.id_al_train = self.id_train.iloc[train_idx]
-
-            self.x_pool = np.delete(X_pool, train_idx, axis=0)
-            self.y_pool = np.delete(y_pool, train_idx)
-            self.id_pool = self.id_train.drop(self.id_train.index[train_idx])
-
-            config.settings["classifiers"][f"{self._label}"]["id"] = self.id_al_train[
-                config.settings["id_col"]
-            ].values.tolist()
-            self.full_labelled_data["id"] = self.id_al_train[
-                config.settings["id_col"]
-            ].values.tolist()
-
-            # raw_y_train = []
-            # for id in config.settings["classifiers"][f"{self._label}"]["id"]:
-            #     raw_label = config.main_df[
-            #         config.main_df[config.settings["id_col"]] == id
-            #     ][config.settings["label_col"]].values[0]
-            #
-            #     if raw_label == -1:
-            #         raw_label = 0
-            #     raw_y_train.append(raw_label)
-
-            config.settings["classifiers"][f"{self._label}"][
-                "y"
-            ] = self.y_train_with_unknowns.iloc[train_idx]
-
-            flat_list = [
-                item
-                for sublist in self.y_train_with_unknowns.iloc[
+                self.x_al_train = X_pool[train_idx]
+                print(self.x_al_train)
+                self.y_al_train = self.y_train_without_unknowns.iloc[
                     train_idx
-                ].values.tolist()
-                for item in sublist
-            ]
+                ].values.ravel()
+                self.id_al_train = self.id_train.iloc[train_idx]
+                print(self.id_al_train)
 
-            self.full_labelled_data["y"] = flat_list
+                # assert False
+
+                self.x_pool = np.delete(X_pool, train_idx, axis=0)
+                self.y_pool = np.delete(y_pool, train_idx)
+                self.id_pool = self.id_train.drop(self.id_train.index[train_idx])
+
+                config.settings["classifiers"][f"{self._label}"]["id"] = self.id_al_train[
+                    config.settings["id_col"]
+                ].values.tolist()
+                self.full_labelled_data["id"] = self.id_al_train[
+                    config.settings["id_col"]
+                ].values.tolist()
+
+                # raw_y_train = []
+                # for id in config.settings["classifiers"][f"{self._label}"]["id"]:
+                #     raw_label = config.main_df[
+                #         config.main_df[config.settings["id_col"]] == id
+                #     ][config.settings["label_col"]].values[0]
+                #
+                #     if raw_label == -1:
+                #         raw_label = 0
+                #     raw_y_train.append(raw_label)
+
+                config.settings["classifiers"][f"{self._label}"][
+                    "y"
+                ] = self.y_train_with_unknowns.iloc[train_idx]
+
+                flat_list = [
+                    item
+                    for sublist in self.y_train_with_unknowns.iloc[
+                        train_idx
+                    ].values.tolist()
+                    for item in sublist
+                ]
+
+                self.full_labelled_data["y"] = flat_list
+
+            else:
+
+                X_tr, Y_tr, X_te, Y_te = get_dataset("CIFAR10", "data")
+
+                split = int(len(X_tr)*0.75)
+
+                X_val = X_tr[split:]
+                Y_val = Y_tr[split:]
+
+                val_min = min(len(X_val),len(config.ml_data["x_val"]))
+
+                X_val = X_tr[:val_min]
+                Y_val = Y_tr[:val_min]
+
+                config.ml_data["x_val"] = config.ml_data["x_val"][:val_min]
+                config.ml_data["y_val"] = config.ml_data["y_val"][:val_min]
+
+                X_tr = X_tr[:split]
+                Y_tr = Y_tr[:split]
+
+                dim = np.shape(X_tr)[1:]
+                handler = get_handler("cifar10")
+
+                test_min = min(len(X_te),len(config.ml_data["x_test"]))
+
+                X_te = X_te[:test_min]
+                Y_te = Y_te[:test_min]
+
+
+                config.ml_data["x_test"] = config.ml_data["x_test"][:test_min]
+                config.ml_data["y_test"] = config.ml_data["y_test"][:test_min]
+
+
+
+                ##TODO:: REMOVE THIS
+
+                X_pool = config.ml_data["x_train_with_unknowns"].to_numpy()
+                y_pool = self.y_train_with_unknowns.to_numpy().ravel()
+
+                min_val = min(len(X_tr), len(X_pool))
+
+                print("\n\n min_val: ",min_val," \n\n")
+
+                X_pool = config.ml_data["x_train_with_unknowns"].to_numpy()[:min_val]
+                y_pool = self.y_train_with_unknowns.to_numpy().ravel()[:min_val]
+
+                X_tr = X_tr[:min_val]
+                Y_tr = Y_tr[:min_val]
+
+                ids = config.ml_data["id_train_with_unknowns"].copy()[:min_val]
+
+                assert len(X_pool) == len(X_tr)
+
+                ###########################
+
+
+
+                n_pool = len(Y_tr)
+
+                n_test = len(Y_te)
+
+                NUM_INIT_LB = int(self.starting_num_points.value)
+
+                if NUM_INIT_LB >= len(X_pool):
+                    self.starting_num_points.value = len(
+                        X_pool
+                    )
+
+                    NUM_INIT_LB = len(X_pool)
+
+                print("Starting points:", NUM_INIT_LB)
+
+                idxs_lb = np.zeros(n_pool, dtype=bool)
+                print(idxs_lb)
+                idxs_tmp = np.arange(n_pool)
+                print(idxs_tmp)
+
+                np.random.shuffle(idxs_tmp)
+
+                idxs_lb[idxs_tmp[:NUM_INIT_LB-2]] = True
+
+                not_used = np.arange(len(idxs_lb))
+
+                not_used = not_used[~idxs_lb]
+
+                np.random.shuffle(not_used)
+
+                for i in not_used:
+                    if Y_tr[i] == 0:
+                        idxs_lb[i] = True
+                        break
+                for i in not_used:
+                    if Y_tr[i] == 1:
+                        idxs_lb[i] = True
+                        break
+
+                print()
+                
+                # initial_points = int(self.starting_num_points.value)
+
+                self.id_train = ids.copy()
+
+                self.other_data_X_tr = X_tr[idxs_lb]
+                self.other_data_Y_tr = Y_tr[idxs_lb]
+
+                is_label = self.other_data_Y_tr == self._label
+                isnt_label = self.other_data_Y_tr != self._label
+
+                self.other_data_Y_tr[is_label] = 1
+                self.other_data_Y_tr[isnt_label] = 0
+
+                self.other_data_X_pool = X_tr
+                self.other_data_Y_pool = Y_tr
+
+                is_label = self.other_data_Y_pool == self._label
+                isnt_label = self.other_data_Y_pool != self._label
+
+                self.other_data_Y_pool[is_label] = 1
+                self.other_data_Y_pool[isnt_label] = 0
+
+                self.other_data_X_val = X_val
+                self.other_data_Y_val = Y_val
+
+                is_label = self.other_data_Y_val == self._label
+                isnt_label = self.other_data_Y_val != self._label
+
+                self.other_data_Y_val[is_label] = 1
+                self.other_data_Y_val[isnt_label] = 0
+
+                self.other_data_X_te = X_te
+                self.other_data_Y_te = Y_te
+
+                is_label = self.other_data_Y_te == self._label
+                isnt_label = self.other_data_Y_te != self._label
+
+                self.other_data_Y_te[is_label] = 1
+                self.other_data_Y_te[isnt_label] = 0
+
+                self.idxs_lb = idxs_lb
+
+                # id_pool = self.id_train.to_numpy()
+
+                # train_idx = list(
+                #     np.random.choice(
+                #         range(len(config.ml_data["x_train_without_unknowns"])),
+                #         size=initial_points - 2,
+                #         replace=False,
+                #     )
+                # )
+
+                # c0 = train_idx[0]
+                # c1 = train_idx[1]
+
+                # while c0 in train_idx:
+                #     c0 = np.random.choice(np.where(y_tr == 0)[0])
+                # while c1 in train_idx:
+                #     c1 = np.random.choice(np.where(y_tr == 1)[0])
+
+                # train_idx = train_idx + [c0, c1]
+
+                # print(train_idx)
+
+                self.x_al_train = X_pool[idxs_lb]
+                print(self.x_al_train)
+                self.y_al_train = self.y_train_without_unknowns.iloc[
+                    idxs_lb
+                ].values.ravel()
+                self.id_al_train = self.id_train.iloc[idxs_lb]
+                print(self.id_al_train)
+
+                # assert False
+
+                self.x_pool = np.delete(X_pool, idxs_lb, axis=0)
+                self.y_pool = np.delete(y_pool, idxs_lb)
+                self.id_pool = self.id_train.drop(self.id_train.index[idxs_lb])
+
+                print("\n========== SIZES ==========\n")
+
+                print("train")
+                print(len(self.x_al_train))
+                print(len(self.y_al_train))
+                print(len(self.id_al_train))
+
+                print(self.x_al_train.shape)
+
+                print("pools")
+                print(len(self.x_pool))
+                print(len(self.y_pool))
+                print(len(self.id_pool))
+
+
+                print("========================")
+
+
+                config.settings["classifiers"][f"{self._label}"]["id"] = self.id_al_train[
+                    config.settings["id_col"]
+                ].values.tolist()
+                self.full_labelled_data["id"] = self.id_al_train[
+                    config.settings["id_col"]
+                ].values.tolist()
+
+                # raw_y_train = []
+                # for id in config.settings["classifiers"][f"{self._label}"]["id"]:
+                #     raw_label = config.main_df[
+                #         config.main_df[config.settings["id_col"]] == id
+                #     ][config.settings["label_col"]].values[0]
+                #
+                #     if raw_label == -1:
+                #         raw_label = 0
+                #     raw_y_train.append(raw_label)
+
+                config.settings["classifiers"][f"{self._label}"][
+                    "y"
+                ] = self.y_train_with_unknowns.iloc[idxs_lb]
+
+                flat_list = [
+                    item
+                    for sublist in self.y_train_with_unknowns.iloc[
+                        idxs_lb
+                    ].values.tolist()
+                    for item in sublist
+                ]
+
+                self.full_labelled_data["y"] = flat_list                
 
         else:
 
@@ -1917,26 +2195,151 @@ class ActiveLearningModel:
 
         if len(table["classifier"]) == 1:
             self.committee = False
-            learner = ActiveLearner(
-                estimator=clone(classifier_dict[table["classifier"][0]]),
-                query_strategy=qs_dict[table["query"][0]],
-                X_training=self.x_al_train,
-                y_training=self.y_al_train,
-            )
+            print(type(classifier_dict[table["classifier"][0]]))
+            if "sklearn" in str(type(classifier_dict[table["classifier"][0]])):
+                print(type(classifier_dict[table["classifier"][0]]))
 
-            self.learner = learner
+                qs_dict = {"Dataset":"test_dataset", "QS":table["query"][0],"Embedding":"UMAP", "method":"Default", "sub":"Top-N", "Tessellations":100}
+                path = f"{qs_dict['Dataset']}/{qs_dict['Embedding']}/{qs_dict['Tessellations']}/{100}/"
+                folders = ["models","metrics","plots"]
+                print(qs_dict)
+
+                for f in folders:
+                    try:
+                        os.makedirs(f+"/"+path)
+                    except:
+                        continue
+                    print(qs_dict)
+
+                learner = ActiveLearner(
+                    estimator=clone(classifier_dict[table["classifier"][0]]),
+                    query_strategy=qs_dict[table["query"][0]],
+                    X_training=self.x_al_train,
+                    y_training=self.y_al_train,
+                )
+            else:
+                is_torch = False
+
+                def classlookup(cls):
+                    c = list(cls.__bases__)
+                    for base in c:
+                        c.extend(classlookup(base))
+                    return c
+
+                try:
+
+                    print("()")
+                    print(str(type(classifier_dict[table["classifier"][0]]())))
+
+                    b = classifier_dict[table["classifier"][0]]()
+
+                    a = classlookup(type(b))
+                    print(a)
+                    for i in a:
+                        print(i)
+                        if "torch" in str(i):
+                            is_torch = True
+
+                    print("finished")
+                except:
+
+                    print("no ()")
+                    print(str(type(classifier_dict[table["classifier"][0]])))
+                    b = classifier_dict[table["classifier"][0]]
+
+                    a = classlookup(b)
+                    print(a)
+                    for i in a:
+                        if "torch" in i:
+                            is_torch = True
+                if is_torch:
+
+                    print("\n\n\n TORCH \n\n\n")
+
+                    qs_dict = {"Dataset":"test_dataset", "QS":table["query"][0],"Embedding":"UMAP", "method":"Default", "sub":"Top-N", "Tessellations":100}
+                    path = f"{qs_dict['Dataset']}/{qs_dict['Embedding']}/{qs_dict['Tessellations']}/{100}/"
+                    folders = ["models","metrics","plots"]
+                    for f in folders:
+                        try:
+                            os.makedirs(f+"/"+path)
+                        except:
+                            continue
+                    print(qs_dict)
+
+                    net = models.__dict__[table["classifier"][0]](n_class=2, channels=3)
+                    # try:
+                    # except:
+                    #     print(sorted(name for name in models.__dict__
+                    #     if callable(models.__dict__[name])))
+
+                    #     print(table["query"][0])
+                    print(net)
+
+                    handler = get_handler("cifar10")
+                    
+                    args = get_net_args("testing")
+
+                    if args is None:
+                        args =  {
+                            'n_class':2,
+                            'channels':1,
+                            'size': 28,
+                            'transform_tr': transforms.Compose([
+                                            transforms.RandomHorizontalFlip(),
+                                            transforms.ToTensor()]),
+                            'transform_te': transforms.Compose([transforms.ToTensor()]),
+                            'loader_tr_args':{'batch_size': 128, 'num_workers': 8},
+                            'loader_te_args':{'batch_size': 128, 'num_workers': 8},
+                        }
+                    
+                    args["seed"] = 0
+
+                    strategy = query_strategies.__dict__[table["query"][0]](self.other_data_X_pool, self.other_data_Y_pool, self.other_data_X_val, self.other_data_Y_val, self.idxs_lb, net, handler, args)
+
+                    # learner = ActiveLearner(
+                    #     estimator=copy.deepcopy(classifier_dict[table["classifier"][0]]),
+                    #     query_strategy=qs_dict[table["query"][0]],
+                    #     X_training=self.x_al_train,
+                    #     y_training=self.y_al_train,
+                    # )
+
+
+                    # print(learner)
+
+
+            self.learner = strategy
 
         else:
             learners = []
             self.committee = True
             for i in range(len(table["classifier"])):
-                learner = ActiveLearner(
-                    estimator=clone(classifier_dict[table["classifier"][i]]),
-                    query_strategy=qs_dict[table["query"][i]],
-                    X_training=self.x_al_train,
-                    y_training=self.y_al_train,
-                )
-                learners.append(learner)
+                print(type(classifier_dict[table["classifier"][i]]))
+                if "sklearn" in str(type(classifier_dict[table["classifier"][i]])):
+
+                    learner = ActiveLearner(
+                        estimator=clone(classifier_dict[table["classifier"][i]]),
+                        query_strategy=qs_dict[table["query"][i]],
+                        X_training=self.x_al_train,
+                        y_training=self.y_al_train,
+                    )
+
+                    learners.append(learner)
+                else:
+
+                    # continue
+                    learner = ActiveLearner(
+                        estimator=copy.deepcopy(classifier_dict[table["classifier"][i]](n_class=3)),
+                        query_strategy=qs_dict[table["query"][i]],
+                        X_training=self.x_al_train,
+                        y_training=self.y_al_train,
+                    )
+
+                    learners.append(learner)
+                    # else:
+                    #     print(type(classifier_dict[table["classifier"][i]]()))
+                    #     continue
+
+
 
             self.learner = Committee(learner_list=learners)
 
@@ -2068,7 +2471,7 @@ class ActiveLearningModel:
         if hasattr(self, "query_instance"):
 
             query_point = pd.DataFrame(
-                self.query_instance,
+                self.query_instance.reshape((1,-1)),
                 columns=config.ml_data["x_train_with_unknowns"].columns,
             )
 
@@ -2162,8 +2565,6 @@ class ActiveLearningModel:
         plot_col = pn.Column(
             pn.Row(
                 self._train_tab_colour_switch,
-                max_height=35,
-                max_width=500,
                 sizing_mode="stretch_width",
             ),
             pn.Row(full_plot, sizing_mode="stretch_both"),
@@ -2219,8 +2620,6 @@ class ActiveLearningModel:
         plot_col = pn.Column(
             pn.Row(
                 self._val_tab_colour_switch,
-                max_height=35,
-                max_width=500,
                 sizing_mode="stretch_width",
             ),
             pn.Row(full_plot, sizing_mode="stretch_both"),
@@ -2354,7 +2753,7 @@ class ActiveLearningModel:
                         |:----:|:----:|:----:|:----:|
                         | **Predicted Positive** |   **{int(self.conf_mat_tr_tp)}** <br> <small><i>TP</i></small>          |  **{int(self.conf_mat_tr_fn)}** <br> <small><i>FN</i></small>               |  **{(float(self.conf_mat_tr_tp))/(float(self.conf_mat_tr_tp)+float(self.conf_mat_tr_fn)):.2f}** <br> <small><i>Recall</i></small>                  |
                         | **Predicted Negative** |   **{int(self.conf_mat_tr_fp)}** <br> <small><i>FP</i></small>          |  **{int(self.conf_mat_tr_tn)}** <br> <small><i>TN</i></small>               |  **{(float(self.conf_mat_tr_fp))/(float(self.conf_mat_tr_fp)+float(self.conf_mat_tr_tn)):.2f}** <br> <small><i>False Positive Rate</i></small>|
-                        |                        |   **{(float(self.conf_mat_tr_tp))/(float(self.conf_mat_tr_tp)+float(self.conf_mat_tr_fp)):.2f}** <br>  <small><i>Precision</i></small>   | **{(float(self.conf_mat_tr_fn))/(float(self.conf_mat_tr_fn)+float(self.conf_mat_tr_tn)):.2f}** <br> <small><i>False Omission Rate</i></small>     |  **{100*((float(self.conf_mat_tr_tp)+float(self.conf_mat_tr_tn))/(float(self.conf_mat_tr_tp)+float(self.conf_mat_tr_tn)+float(self.conf_mat_tr_fp)+float(self.conf_mat_tr_fn))):.2f}%** <br> <small><i>Accuracy</i></small>              |
+                        |                        |   **{(float(self.conf_mat_tr_tp))/(float(self.conf_mat_tr_tp)+float(self.conf_mat_tr_fp)):.2f}** <br>  <small><i>Precision</i></small>   | **{(float(self.conf_mat_tr_fn))/(float(self.conf_mat_tr_fn)+float(self.conf_mat_tr_tn)):.2f}** <br> <small><i>False Omission Rate</i></small>     |  **{100*((float(self.conf_mat_tr_tp)+float(self.conf_mat_tr_tn))/(float(self.conf_mat_tr_tp)+float(self.conf_mat_tr_tn)+float(self.conf_mat_tr_fp)+float(self.conf_mat_tr_fn))):.2f}%** <br> <small><i>Acc</i></small>              |
 
                         ### Validation:
                         
@@ -2363,7 +2762,7 @@ class ActiveLearningModel:
                         |:----:|:----:|:----:|:----:|
                         | **Predicted Positive** |   **{int(self.conf_mat_val_tp)}** <br> <small><i>TP</i></small>          |  **{int(self.conf_mat_val_fn)}** <br> <small><i>FN</i></small>               |  **{(float(self.conf_mat_val_tp))/(float(self.conf_mat_val_tp)+float(self.conf_mat_val_fn)):.2f}** <br> <small><i>Recall</i></small>                  |
                         | **Predicted Negative** |   **{int(self.conf_mat_val_fp)}** <br> <small><i>FP</i></small>          |  **{int(self.conf_mat_val_tn)}** <br> <small><i>TN</i></small>               |  **{(float(self.conf_mat_val_fp))/(float(self.conf_mat_val_fp)+float(self.conf_mat_val_tn)):.2f}** <br> <small><i>False Positive Rate</i></small>|
-                        |                        |   **{(float(self.conf_mat_val_tp))/(float(self.conf_mat_val_tp)+float(self.conf_mat_val_fp)):.2f}** <br>  <small><i>Precision</i></small>   | **{(float(self.conf_mat_val_fn))/(float(self.conf_mat_val_fn)+float(self.conf_mat_val_tn)):.2f}** <br> <small><i>False Omission Rate</i></small>     | <div><div style='float:left;width:47%;margin-right: 1px;'>**{100*((float(self.conf_mat_val_tp)+float(self.conf_mat_val_tn))/(float(self.conf_mat_val_tp)+float(self.conf_mat_val_tn)+float(self.conf_mat_val_fp)+float(self.conf_mat_val_fn))):.2f}%** <br> <small><i>Accuracy</i></small> </div> <div style='float:left;width:47%; border-left: 1px solid; margin-left: 1px;'>**{((float(self.conf_mat_val_tp)+float(self.conf_mat_val_tp))/(float(self.conf_mat_val_tp)+float(self.conf_mat_val_tp)+float(self.conf_mat_val_fp)+float(self.conf_mat_val_fn))):.3f}** <br> <small><i>F1</i></small></div></div>              |
+                        |                        |   **{(float(self.conf_mat_val_tp))/(float(self.conf_mat_val_tp)+float(self.conf_mat_val_fp)):.2f}** <br>  <small><i>Precision</i></small>   | **{(float(self.conf_mat_val_fn))/(float(self.conf_mat_val_fn)+float(self.conf_mat_val_tn)):.2f}** <br> <small><i>False Omission Rate</i></small>     | <div><div style='float:left;width:47%;margin-right: 1px;'>**{100*((float(self.conf_mat_val_tp)+float(self.conf_mat_val_tn))/(float(self.conf_mat_val_tp)+float(self.conf_mat_val_tn)+float(self.conf_mat_val_fp)+float(self.conf_mat_val_fn))):.2f}%** <br> <small><i>Acc</i></small> </div> <div style='float:left;width:47%; border-left: 1px solid; margin-left: 1px;'>**{((float(self.conf_mat_val_tp)+float(self.conf_mat_val_tp))/(float(self.conf_mat_val_tp)+float(self.conf_mat_val_tp)+float(self.conf_mat_val_fp)+float(self.conf_mat_val_fn))):.3f}** <br> <small><i>F1</i></small></div></div>              |
                         
                     """)
                 )
@@ -2377,7 +2776,7 @@ class ActiveLearningModel:
                         |:----:|:----:|:----:|:----:|
                         | **Predicted Positive** |   **{self.conf_mat_tr_tp}** <br> <small><i>TP</i></small>          |  **{self.conf_mat_tr_fn}** <br> <small><i>FN</i></small>               |  **** <br> <small><i>Recall</i></small>                  |
                         | **Predicted Negative** |   **{self.conf_mat_tr_fp}** <br> <small><i>FP</i></small>          |  **{self.conf_mat_tr_tn}** <br> <small><i>TN</i></small>               |  **** <br> <small><i>False Positive Rate</i></small>|
-                        |                        |   **** <br>  <small><i>Precision</i></small>   | **** <br> <small><i>False Omission Rate</i></small>     |  **%** <br> <small><i>Accuracy</i></small>              |
+                        |                        |   **** <br>  <small><i>Precision</i></small>   | **** <br> <small><i>False Omission Rate</i></small>     |  **%** <br> <small><i>Acc</i></small>              |
 
                         ### Validation:
 
@@ -2385,7 +2784,7 @@ class ActiveLearningModel:
                         |:----:|:----:|:----:|:----:|
                         | **Predicted Positive** |   **{self.conf_mat_val_tp}** <br> <small><i>TP</i></small>          |  **{self.conf_mat_val_fn}** <br> <small><i>FN</i></small>               |  **** <br> <small><i>Recall</i></small>                  |
                         | **Predicted Negative** |   **{self.conf_mat_val_fp}** <br> <small><i>FP</i></small>          |  **{self.conf_mat_val_tn}** <br> <small><i>TN</i></small>               |  **** <br> <small><i>False Positive Rate</i></small>|
-                        |                        |   **** <br>  <small><i>Precision</i></small>   | **** <br> <small><i>False Omission Rate</i></small>     |  **%** <br> <small><i>Accuracy</i></small>              |
+                        |                        |   **** <br>  <small><i>Precision</i></small>   | **** <br> <small><i>False Omission Rate</i></small>     |  **%** <br> <small><i>Acc</i></small>              |
                         
                     """)
                 )
@@ -2421,8 +2820,7 @@ class ActiveLearningModel:
                         sizing_mode="stretch_width",
                         margin=(0, 0, 0, 0),
                     ),
-                    pn.Row(self._return_to_train_view_button, max_height=20),
-                    min_height=400,
+                    pn.Row(self._return_to_train_view_button),
                 )
             else:
                 return self._show_caution_message()
@@ -2449,15 +2847,12 @@ class ActiveLearningModel:
 
             If you do continue to train after viewing these results you risk invalidating the generalisability of your classifier by removing the unbias nature of your test set.
             """,
-                min_height=200,
             ),
             pn.Row(
                 self._return_to_train_view_button,
                 self._view_test_results_button,
-                max_height=30,
             ),
             self._stop_caution_show_checkbox,
-            min_height=400,
         )
 
     def _request_test_results_cb(self, event):
@@ -2500,17 +2895,19 @@ class ActiveLearningModel:
                     pn.Row(
                         self.classifier_dropdown,
                         self.query_strategy_dropdown,
-                        max_height=55,
                     ),
                     self.starting_num_points,
-                    max_height=110,
+
                 ),
                 pn.Column(
                     self.add_classifier_button,
                     self.remove_classifier_button,
                     self.start_training_button,
+
                 ),
-                pn.Column(self.classifier_table, max_height=125),
+                pn.Column(self.classifier_table,
+                          ),
+            
             )
         else:
 
@@ -2530,7 +2927,7 @@ class ActiveLearningModel:
         if self._training:
 
             query_idx = self.query_index
-            queried_id = self.id_pool.iloc[query_idx][config.settings["id_col"]].copy()
+            queried_id = self.id_pool.iloc[query_idx][config.settings["id_col"]]
 
             if self.src.data[config.settings["id_col"]] == list(queried_id):
                 self._queried_is_selected = True
@@ -2595,9 +2992,7 @@ class ActiveLearningModel:
                             self.request_test_results_button,
                             width_policy="max",
                             max_height=30,
-                            max_width=2000,
                         ),
-                        max_height=100,
                         margin=(5,5,5,5)
                     )
 
@@ -2631,10 +3026,7 @@ class ActiveLearningModel:
                             self.checkpoint_button,
                             self.request_test_results_button,
                             width_policy="max",
-                            max_height=30,
-                            max_width=2000,
                         ),
-                        max_height=100,
                         margin=(5,5,5,5)
                     )
             self.panel_row[0][3] = buttons_row
