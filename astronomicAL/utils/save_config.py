@@ -6,25 +6,39 @@ import json
 import numpy as np
 
 save_layout_js_cb = """
-function FindReact(dom, traverseUp = 0) {
-const key = Object.keys(dom).find(key=>key.startsWith("__reactInternalInstance$"));
-const domFiber = dom[key];
-if (domFiber == null) return null;
 
-// react 16+
-const GetCompFiber = fiber=>{
-//return fiber._debugOwner; // this also works, but is __DEV__ only
-let parentFiber = fiber.return;
-while (typeof parentFiber.type == "string") {
-parentFiber = parentFiber.return;
-}
-return parentFiber;
-};
-let compFiber = GetCompFiber(domFiber);
-for (let i = 0; i < traverseUp; i++) {
-compFiber = GetCompFiber(compFiber);
-}
-return compFiber.stateNode;
+console.log("JS CALLBACK")
+function FindReact(dom, traverseUp = 0) {
+    const key = Object.keys(dom).find(key=>{
+        return key.startsWith("__reactFiber$") // react 17+
+            || key.startsWith("__reactInternalInstance$"); // react <17
+    });
+    const domFiber = dom[key];
+    if (domFiber == null) return null;
+
+    // react <16
+    if (domFiber._currentElement) {
+        let compFiber = domFiber._currentElement._owner;
+        for (let i = 0; i < traverseUp; i++) {
+            compFiber = compFiber._currentElement._owner;
+        }
+        return compFiber._instance;
+    }
+
+    // react 16+
+    const GetCompFiber = fiber=>{
+        //return fiber._debugOwner; // this also works, but is __DEV__ only
+        let parentFiber = fiber.return;
+        while (typeof parentFiber.type == "string") {
+            parentFiber = parentFiber.return;
+        }
+        return parentFiber;
+    };
+    let compFiber = GetCompFiber(domFiber);
+    for (let i = 0; i < traverseUp; i++) {
+        compFiber = GetCompFiber(compFiber);
+    }
+    return compFiber.stateNode;
 }
 var react_layout = document.getElementById("responsive-grid")
 const someElement = react_layout.children[0];
@@ -66,11 +80,12 @@ def save_config_file_cb(attr, old, new, trigger_text, autosave):
 
 
 def save_config_file(layout_from_js, trigger_text, autosave=False, test=False):
-
+    print("SAVE CONFIG FILE")
     if layout_from_js == "":
         return
 
     layout = json.loads(layout_from_js)
+    print("layout: ",layout)
     trigger_text.value = ""
     for i in layout:
         curr_contents = config.dashboards[i].contents
@@ -111,18 +126,21 @@ def save_config_file(layout_from_js, trigger_text, autosave=False, test=False):
 
     export_config["classifiers"] = config.settings["classifiers"]
 
+    print(export_config)
+
     if autosave:
         print("AUTOSAVING...")
         with open("configs/autosave.json", "w") as fp:
-            json.dump(export_config, fp, cls=NumpyEncoder)
+            json.dump(export_config, fp, cls=NumpyEncoder,indent=2)
     elif test:
         with open(f"configs/config_export.json", "w") as fp:
-            json.dump(export_config, fp, cls=NumpyEncoder)
+            json.dump(export_config, fp, cls=NumpyEncoder,indent=2)
     else:
         now = datetime.now()
+        print(now)
         dt_string = now.strftime("%Y%m%d_%H:%M:%S")
         with open(f"configs/config_{dt_string}.json", "w") as fp:
-            json.dump(export_config, fp, cls=NumpyEncoder)
+            json.dump(export_config, fp, cls=NumpyEncoder,indent=2)
 
         print(f"Final Export Config Settings: {export_config}")
         print(f"Config File saved to: configs/config_{dt_string}.json")
