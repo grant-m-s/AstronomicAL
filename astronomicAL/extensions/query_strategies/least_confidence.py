@@ -4,11 +4,11 @@ import pdb
 import torch
 
 class LeastConfidence(Strategy):
-    def __init__(self, X, Y,  X_te, Y_te, idxs_lb, net, handler, args):
-        super(LeastConfidence, self).__init__(X, Y, X_te, Y_te,  idxs_lb, net, handler, args)
+    def __init__(self, X, Y,  X_te, Y_te, idxs_lb, net, handler, args, image_col, label_col):
+        super(LeastConfidence, self).__init__(X, Y, X_te, Y_te,  idxs_lb, net, handler, args, image_col, label_col)
 
     def query(self, n, quest=None):
-        probs = self.predict_prob(self.X, np.asarray(self.Y))
+        probs = self.predict_prob(self.X)
         print("probs: ", probs.shape)
         U = probs.max(1)[0]
         print("U: ", U.shape)
@@ -34,6 +34,7 @@ class LeastConfidence(Strategy):
             # assert False
             return idxs, idxs_unlabeled[U[idxs_unlabeled].sort()[1][:n]]
         else:
+            print("not QUEST")
             print("U[idxs_unlabeled]: ", U[idxs_unlabeled].shape)
             print("U[idxs_unlabeled].sort()[1]: ", U[idxs_unlabeled].sort()[1].shape)
             print(n)
@@ -61,7 +62,7 @@ class LeastConfidence(Strategy):
         print(self.X.shape)
         print(self.Y.shape)
 
-        probs = self.predict_prob(self.X, np.asarray(self.Y))
+        probs = self.predict_prob(self.X)
 
 
         # probs = probs_all[~self.idxs_lb]

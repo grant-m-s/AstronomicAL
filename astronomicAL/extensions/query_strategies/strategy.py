@@ -16,11 +16,14 @@ from tqdm import tqdm
 from .util import AugMixDataset
 from sklearn.metrics import pairwise_distances, f1_score
 class Strategy:
-    def __init__(self, X, Y, X_te, Y_te, idxs_lb, net, handler, args):
+    def __init__(self, X, Y, X_te, Y_te, idxs_lb, net, handler, args, image_col, label_col):
         self.X = X  # vector
         self.Y = Y
         self.X_te = X_te
         self.Y_te = Y_te
+        self.image_col = image_col
+        self.label_col = label_col
+
 
         self.idxs_lb = idxs_lb # bool type
         self.handler = handler
@@ -28,7 +31,7 @@ class Strategy:
 
         print(self.args)
         self.n_pool = len(idxs_lb)
-        self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        self.device = 'cpu'
 
         self.net = net.to(self.device)
         self.clf = deepcopy(net.to(self.device))
@@ -58,20 +61,31 @@ class Strategy:
 
         accFinal = 0.
         train_loss = 0.
-        for batch_idx, (x, y, idxs) in enumerate(loader_tr):
-            x, y = x.to(self.device), y.to(self.device) 
+        for batch_idx, batch in enumerate(loader_tr):
+            idx = batch['idx']
+            print("y: ",batch['Y'])
+
+            x, y = batch['X'].to(self.device), batch['Y'].type(torch.LongTensor).to(self.device) 
+            print("x: ",x)
+            print("y: ",y)
+
+
             nan_mask = torch.isnan(x)
             if nan_mask.any():
                 raise RuntimeError(f"Found NAN in input indices: ", nan_mask.nonzero())
 
             # exit()
             optimizer.zero_grad()
+            print("\n\n\n\n devices \n --------")
+            print(x.is_cuda)
+            self.clf = self.clf.to("cpu")
 
             out, e1 = self.clf(x)
             nan_mask_out = torch.isnan(y)
             if nan_mask_out.any():
                 raise RuntimeError(f"Found NAN in output indices: ", nan_mask.nonzero())
-                
+            print("------- Strategy")
+            print("cross entropy: ",out, y)
             loss = F.cross_entropy(out, y)
 
             train_loss += loss.item()
@@ -87,7 +101,7 @@ class Strategy:
             # if batch_idx % 10 == 0:
             #     print ("[Batch={:03d}] [Loss={:.2f}]".format(batch_idx, loss))
 
-        return accFinal / len(loader_tr.dataset.X), train_loss
+        return accFinal / len(loader_tr.dataset.df), train_loss
 
     
     def train(self, alpha=0.1, n_epoch=10, qs_dict=None, orig=None):
@@ -97,12 +111,12 @@ class Strategy:
         # self.clf = nn.parallel.DistributedDataParallel(self.clf,
                                                         # find_unused_parameters=True,
                                                         # )
-        self.clf = nn.DataParallel(self.clf).to(self.device)
+        self.clf = nn.DataParallel(self.clf).to("cpu")
         parameters = self.clf.parameters()
-        optimizer = optim.SGD(parameters, lr = self.args['lr'], weight_decay=5e-4, momentum=self.args['momentum'])
+        self.optimizer = optim.SGD(parameters, lr = self.args['lr'], weight_decay=5e-4, momentum=self.args['momentum'])
+        optimizer = self.optimizer
 
         idxs_train = np.arange(self.n_pool)[self.idxs_lb]
-        
 
         # epoch_time = AverageMeter()
         # recorder = RecorderMeter(n_epoch)
@@ -116,8 +130,7 @@ class Strategy:
         if idxs_train.shape[0] != 0:
             transform = self.args["transform_tr"]
 
-            train_data = self.handler(self.X[idxs_train], 
-                                torch.Tensor(self.Y[idxs_train]).long() if type(self.Y) is np.ndarray else  torch.Tensor(self.Y.numpy()[idxs_train]).long(), 
+            train_data = self.handler(self.X.iloc[idxs_train], self.image_col, self.label_col,
                                     transform=transform)
 
             loader_tr = DataLoader(train_data, 
@@ -127,7 +140,16 @@ class Strategy:
                                     worker_init_fn=self.seed_worker,
                                     generator=self.g,
                                     **self.args["loader_tr_args"])
+            # print("just before epoch loop")
+            # print(epoch)
+            # print(n_epoch)
+            # print(range(n_epoch))
+            # print(tqdm(range(n_epoch)))
+            print("epochs")
             for epoch in tqdm(range(n_epoch)):
+                # print(epoch)
+                # print(n_epoch)
+
                 if epoch - last_update > 150:
                     print("stopping early at epoch ", epoch)
                     break
@@ -142,9 +164,9 @@ class Strategy:
                 train_acc, train_los = self._train(epoch, loader_tr, optimizer)
 
                 if "candels" in self.args['dataset']:
-                    preds = self.get_prediction(self.X_te, self.Y_te)
+                    preds = self.get_prediction(self.X_te[:int(0.02*len(self.X_te))], self.Y_te[:int(0.02*len(self.X_te))])
 
-                    test_f1 = f1_score(self.Y_te.cpu().numpy(), preds.cpu().numpy())
+                    test_f1 = f1_score(self.Y_te[:int(0.02*len(self.X_te))].values, preds.cpu().numpy())
                     if test_f1 > best_test_f1:
                         best_test_f1 = test_f1
                         total_1s = np.sum(preds.cpu().numpy())
@@ -153,7 +175,9 @@ class Strategy:
                         last_update = epoch
                         self.save_model(qs_dict=qs_dict, orig=orig)
                 else:
-                    test_acc = self.predict(self.X_te, self.Y_te)
+                    preds = self.predict(self.X_te, self.Y_te)
+
+                    test_acc = f1_score(self.Y_te.cpu().numpy(), preds.cpu().numpy())
 
                     if test_acc > best_test_acc:
                         best_test_acc = test_acc
@@ -171,10 +195,13 @@ class Strategy:
         # best_test_acc = recorder.max_accuracy(istrain=False)
         return best_test_acc                
 
+    def fit(self, alpha=0.1, n_epoch=10, qs_dict=None, orig=None):
+        return self.train(alpha=alpha, n_epoch=n_epoch, qs_dict=qs_dict, orig=orig)
 
-    def predict(self, X):
+
+    def predict(self, X, Y=None):
         transform=self.args["transform_te"]
-        loader_te = DataLoader(self.handler(X,Y=torch.zeros((len(X),1)), transform=transform), pin_memory=True, 
+        loader_te = DataLoader(self.handler(X, self.image_col, self.label_col, transform=transform), pin_memory=True, 
                         shuffle=False, **self.args["loader_te_args"])
         P = torch.zeros(len(X)).long().to(self.device)
         
@@ -183,10 +210,12 @@ class Strategy:
         total = 0
         correct = 0
         with torch.no_grad():
-            for (inputs,labels, idx) in loader_te:
-                inputs = inputs.cuda()
+            for batch in loader_te:
+                inputs = batch['X']
+                idx = batch['idx']
+                inputs = inputs.to(self.device)
 
-                scores, _ =self.clf(inputs)
+                scores, _ = self.clf(inputs)
 
                 pred = scores.max(1)[1]     
                 P[idx] = pred
@@ -194,8 +223,10 @@ class Strategy:
         return P
 
     def get_prediction(self, X, Y):
+        print("get prediction")
         transform=self.args["transform_te"]
-        loader_te = DataLoader(self.handler(X, Y, transform=transform), pin_memory=True, 
+        loader_te = DataLoader(self.handler(X, self.image_col, self.label_col,
+                        transform=transform), pin_memory=True, 
                         shuffle=False, **self.args["loader_te_args"])
 
         P = torch.zeros(len(X)).long().to(self.device)
@@ -203,40 +234,45 @@ class Strategy:
         self.clf.eval()
 
         with torch.no_grad():
-            for x, y, idxs in loader_te:
-                x, y = x.to(self.device), y.to(self.device) 
+            for batch in tqdm(loader_te):
+
+                x, y, idxs = batch['X'].to(self.device), batch['Y'].to(self.device) , batch['idx']
                 out, e1 = self.clf(x)
                 pred = out.max(1)[1]     
                 P[idxs] = pred
    
         return P
 
-    def predict_prob(self, X, Y):
+    def predict_prob(self, X):
         transform = self.args["transform_te"]
-        loader_te = DataLoader(self.handler(X, Y, 
+        loader_te = DataLoader(self.handler(X, self.image_col, self.label_col,
                         transform=transform), shuffle=False, pin_memory=True, **self.args["loader_te_args"])
 
         self.clf.eval()
 
-        probs = torch.zeros([len(Y), self.args["n_class"]])
+        probs = torch.zeros([len(X), self.args["n_class"]])
         print(probs.shape)
+
+        print("loader_te: ", loader_te)
         with torch.no_grad():
-            for x, y, idxs in loader_te:
-                x, y = x.to(self.device), y.to(self.device)
+            for batch in tqdm(loader_te):
+                x, y = batch['X'].to(self.device), batch['Y'].to(self.device)
+                idxs = batch['idx']
                 out, e1 = self.clf(x)
                 prob = F.softmax(out, dim=1)
                 probs[idxs] = prob.cpu().data
         
         return probs
 
-    def predict_prob_dropout(self, X, Y, n_drop):
+    def predict_prob_dropout(self, X, n_drop):
         transform = self.args['transform_te']
-        loader_te = DataLoader(self.handler(X, Y, transform=transform), pin_memory=True,
+        loader_te = DataLoader(self.handler(X, self.image_col,self.label_col,
+                        transform=transform), pin_memory=True,
                             shuffle=False, **self.args['loader_te_args'])
 
         self.clf.train()
 
-        probs = torch.zeros([len(Y), len(np.unique(Y))])
+        probs = torch.zeros([len(X), len(np.unique())])
         with torch.no_grad():
             for i in range(n_drop):
                 print('n_drop {}/{}'.format(i+1, n_drop))
@@ -249,9 +285,10 @@ class Strategy:
         
         return probs
 
-    def predict_prob_dropout_split(self, X, Y, n_drop):
+    def predict_prob_dropout_split(self, X, n_drop):
         transform = self.args['transform_te']
-        loader_te = DataLoader(self.handler(X, Y, transform=transform), pin_memory=True,
+        loader_te = DataLoader(self.handler(X, self.image_col,self.label_col,
+                        transform=transform), pin_memory=True,
                             shuffle=False, **self.args['loader_te_args'])
 
         self.clf.train()
@@ -272,10 +309,11 @@ class Strategy:
 
         return loss
 
-    def get_embedding(self, X, Y, return_probs=False):
+    def get_embedding(self, X, return_probs=False):
         """ get last layer embedding from current model"""
         transform = self.args['transform_te']
-        loader_te = DataLoader(self.handler(X, Y, transform=transform), pin_memory=True,
+        loader_te = DataLoader(self.handler(X, self.image_col,self.label_col,
+                        transform=transform), pin_memory=True,
                             shuffle=False, **self.args['loader_te_args'])
 
         self.clf.eval()
@@ -299,7 +337,7 @@ class Strategy:
             return embedding, probs
 
 
-    def get_grad_embedding(self, X, Y):
+    def get_grad_embedding(self, X):
         """ gradient embedding (assumes cross-entropy loss) of the last layer"""
         transform = self.args['transform_te'] 
 
@@ -310,7 +348,8 @@ class Strategy:
         model.eval()
         nLab = len(np.unique(Y))
         embedding = np.zeros([len(Y), embDim * nLab])
-        loader_te = DataLoader(self.handler(X, Y, transform=transform), pin_memory=True,
+        loader_te = DataLoader(self.handler(X, self.image_col,self.label_col,
+                        transform=transform), pin_memory=True,
                             shuffle=False, **self.args['loader_te_args'])
         with torch.no_grad():
             for x, y, idxs in loader_te:
@@ -344,7 +383,14 @@ class Strategy:
                 path = path + f"_{orig}"
         
         else:
-            path = f"{qs_dict['Dataset']}/{qs_dict['Embedding']}/{self.args['nQuery']}_{self.args['nStart']}_{len(self.X[self.idxs_lb])}_{self.args['seed']}"
+            # print(qs_dict['Embedding'])
+            # print(self.args['nQuery'])
+            # print(self.args['nStart'])
+            # print(len(self.X[self.idxs_lb]))
+            # print(len(self.X[self.idxs_lb]))
+
+
+            path = f"{len(self.X[self.idxs_lb])}_{self.args['seed']}.pth"
         
         print("saving to: ", path)
         torch.save(self.clf.state_dict(),"models/"+path)

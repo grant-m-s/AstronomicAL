@@ -916,7 +916,7 @@ class QUEST:
 
         return new_regions, np.asarray(new_vertices)
 
-    def combine_data(self,strategy, device="cuda", update=False, uncertainty=None):
+    def combine_data(self,strategy, device="cpu", update=False, uncertainty=None):
         print("combine data...")
 
         if uncertainty is not None:

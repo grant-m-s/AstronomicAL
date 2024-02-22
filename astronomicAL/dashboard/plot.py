@@ -209,13 +209,14 @@ class PlotDashboard(param.Parameterized):
         print(color_key)
         print("\n\n\n\n\n")
 
-        # {'0': '#ff7f0e', '1': '#2ca02c', '2': '#d62728', '-1': '#1f77b4'}
+        color_key = {'0': '#ff7f0e', '1': '#2ca02c', '2': '#d62728', '-1': '#1f77b4'}
         # assert False
         plot = (
             dynspread(
                 datashade(
                     p,
-                    color_key=color_key,
+                    # TODO ::
+                    # color_key=color_key,
                     aggregator=ds.count_cat('labels_str'),
                 ).opts(
                     xlim=(min_x, max_x),

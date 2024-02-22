@@ -430,29 +430,33 @@ class SelectedSourceDashboard:
 
             extra_data_df = pd.DataFrame(extra_data_list, columns=["Column", "Value"])
             extra_data_pn = pn.widgets.DataFrame(
-                extra_data_df, show_index=False, autosize_mode="fit_viewport"
+                extra_data_df, show_index=False, min_width=200,max_width=200,sizing_mode="fixed"
             )
             self.row[0] = pn.Card(
                 pn.Column(
                     pn.Row(
                         pn.Column(
-                            button_row,
+                            pn.Row(button_row,max_height=15,sizing_mode="fixed"),
                             pn.Row(
                                 pn.Row(self.optical_image),
-                                self.radio_image,
+                                self.radio_image, max_width=500, sizing_mode="fixed"
                             ),
                         ),
-                        pn.Row(extra_data_pn, max_height=250, max_width=300),
+                        pn.Row(extra_data_pn, max_height=250, max_width=250,sizing_mode="fixed"),
+                        max_width=800,sizing_mode="fixed"
                     ),
                     self._create_image_tab(),
-                ),
+                ), max_width=800, max_height=700, sizing_mode="fixed",
                 collapsible=False,
                 header=pn.Row(self.close_button, self.deselect_buttton, max_width=300),
+                
             )
+
 
             if not self._image_updated:
                 self._image_updated = True
                 Process(target=self._update_default_images).start()
+            self._update_default_images()
 
         else:
             self.row[0] = pn.Card(

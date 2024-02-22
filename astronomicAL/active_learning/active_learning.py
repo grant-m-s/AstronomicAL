@@ -1,5 +1,5 @@
 from astronomicAL.extensions import models, query_strategies, feature_generation
-from astronomicAL.settings.dataset import get_dataset, get_handler, get_wa_handler, get_net_args
+from astronomicAL.settings.dataset import get_dataset, get_handler, get_wa_handler, get_net_args, ImageDataset
 from astronomicAL.utils.optimise import optimise
 from astronomicAL.utils import save_config
 from bokeh.models import (
@@ -40,7 +40,10 @@ import pandas as pd
 import panel as pn
 import json
 import sys
+import random
 import time
+import torch
+
 
 pn.extension('mathjax')
 
@@ -256,17 +259,18 @@ class ActiveLearningModel:
                     self.retrain = True
 
         if len(config.ml_data.keys()) == 0:
-            print("preprocessing...")
+            print("preprocessing... 0 keys")
             self._preprocess_data()
 
             self.x_train_without_unknowns = config.ml_data["x_train_without_unknowns"]
 
         elif len(config.ml_data["x_train_with_unknowns"].columns) == 0:
-            print("preprocessing...")
+            print("preprocessing... no columns")
             self._preprocess_data()
 
             self.x_train_without_unknowns = config.ml_data["x_train_without_unknowns"]
         else:
+            print("else preprocessing...")
 
             self.x_train_without_unknowns = config.ml_data["x_train_without_unknowns"]
 
@@ -333,24 +337,28 @@ class ActiveLearningModel:
         )
 
     def _initialise_placeholders(self):
+        
+        if not config.settings["image_train"]:
+            if (
+                not config.settings["default_vars"][0]
+                in config.ml_data["x_train_without_unknowns"].keys()
+            ):
+                config.settings["default_vars"] = (
+                    config.settings["features_for_training"][0],
+                    config.settings["default_vars"][1],
+                )
 
-        if (
-            not config.settings["default_vars"][0]
-            in config.ml_data["x_train_without_unknowns"].keys()
-        ):
-            config.settings["default_vars"] = (
-                config.settings["features_for_training"][0],
-                config.settings["default_vars"][1],
-            )
-
-        if (
-            not config.settings["default_vars"][1]
-            in config.ml_data["x_train_without_unknowns"].keys()
-        ):
-            config.settings["default_vars"] = (
-                config.settings["default_vars"][0],
-                config.settings["features_for_training"][1],
-            )
+            if (
+                not config.settings["default_vars"][1]
+                in config.ml_data["x_train_without_unknowns"].keys()
+            ):
+                config.settings["default_vars"] = (
+                    config.settings["default_vars"][0],
+                    config.settings["features_for_training"][1],
+                )
+        # else:
+        #     print(config.ml_data["x_train_without_unknowns"])
+        #     assert False
 
         self._model_output_data_tr = {
             f'{config.settings["default_vars"][0]}': [],
@@ -443,13 +451,16 @@ class ActiveLearningModel:
         self.classifier_dropdown = pn.widgets.Select(
             name="Classifier",
             options=list(models.get_classifiers().keys()),
+            max_height=100,max_width=120,sizing_mode="fixed"
         )
         self.query_strategy_dropdown = pn.widgets.Select(
             name="Query Strategy",
             options=list(query_strategies.get_strategy_dict().keys()),
+            max_height=100,max_width=120,sizing_mode="fixed"
         )
         self.starting_num_points = pn.widgets.IntInput(
-            name="How many initial points?", value=5, step=1, start=3
+            name="How many initial points?", value=5, step=1, start=3,
+            max_height=100,max_width=120,sizing_mode="fixed"
         )
 
         self.classifier_table_source = ColumnDataSource(dict(classifier=[], query=[]))
@@ -461,6 +472,9 @@ class ActiveLearningModel:
         self.classifier_table = DataTable(
             source=self.classifier_table_source,
             columns=table_column,
+            max_width=400,
+            min_width=400,
+            max_height=200,
         )
 
         if "classifiers" in config.settings.keys():
@@ -487,14 +501,30 @@ class ActiveLearningModel:
                     "query": list_c2,
                 }
 
-        self.add_classifier_button = pn.widgets.Button(name=">>", max_height=30)
-        self.remove_classifier_button = pn.widgets.Button(name="<<", max_height=30)
+        self.add_classifier_button = pn.widgets.Button(
+            name=">>",
+            max_height=30,
+            min_width=100,
+            max_width=100,
+            sizing_mode="fixed"
+            )
+        self.remove_classifier_button = pn.widgets.Button(
+            name="<<",
+            max_height=30,
+            min_width=100,
+            max_width=100,
+            sizing_mode="fixed"
+        )
 
         self.add_classifier_button.on_click(self._add_classifier_cb)
         self.remove_classifier_button.on_click(self._remove_classifier_cb)
 
         self.start_training_button = pn.widgets.Button(
-            name="Start Training", max_height=30
+            name="Start Training",
+            max_height=30,
+            min_width=100,
+            max_width=100,
+            sizing_mode="fixed"
         )
         self.start_training_button.on_click(self._start_training_cb)
 
@@ -592,8 +622,17 @@ class ActiveLearningModel:
         self.conf_mat_test_tp = "TP"
 
     def _preprocess_data(self):
+        
+        if not config.settings["image_train"]:
+            self.df, self.all_al_data = self.generate_features(self.df)
+        
+        else:
+            self.all_al_data = self.df
+            self.image_dataset = ImageDataset(self.df, config.settings["image_col"],config.settings["label_col"])
 
-        self.df, self.all_al_data = self.generate_features(self.df)
+            # for i in range(10):
+            #     self.image_dataset.__getitem__(i)
+            
 
         x, y = self.split_x_y_ids(self.all_al_data)
         
@@ -849,23 +888,27 @@ class ActiveLearningModel:
                         dump(self.scaler, f"{scaler_dir}.joblib")
 
         else:
-            model = self.learner.estimator
-            if checkpoint:
-                now = datetime.now()
-                dt_string = now.strftime("%Y%m%d_%H:%M:%S")
-                dump(model, f"{filename}-{iteration}-{val_f1}-{dt_string}.joblib")
-                scaler_dir = f"{filename}-{iteration}-{val_f1}-{dt_string}-SCALER"
-                if not os.path.isfile(f"{scaler_dir}.joblib") and (
-                    config.settings["scale_data"]
-                ):
-                    dump(self.scaler, f"{scaler_dir}.joblib")
+            if not config.settings["image_train"]:
+                model = self.learner.estimator
+                if checkpoint:
+                    now = datetime.now()
+                    dt_string = now.strftime("%Y%m%d_%H:%M:%S")
+                    dump(model, f"{filename}-{iteration}-{val_f1}-{dt_string}.joblib")
+                    scaler_dir = f"{filename}-{iteration}-{val_f1}-{dt_string}-SCALER"
+                    if not os.path.isfile(f"{scaler_dir}.joblib") and (
+                        config.settings["scale_data"]
+                    ):
+                        dump(self.scaler, f"{scaler_dir}.joblib")
+                else:
+                    dump(model, f"{filename}.joblib")
+                    scaler_dir = f"{filename}-SCALER"
+                    if not os.path.isfile(f"{scaler_dir}.joblib") and (
+                        config.settings["scale_data"]
+                    ):
+                        dump(self.scaler, f"{scaler_dir}.joblib")
+
             else:
-                dump(model, f"{filename}.joblib")
-                scaler_dir = f"{filename}-SCALER"
-                if not os.path.isfile(f"{scaler_dir}.joblib") and (
-                    config.settings["scale_data"]
-                ):
-                    dump(self.scaler, f"{scaler_dir}.joblib")
+                self.learner.save_model()
 
     def _checkpoint_cb(self, event):
 
@@ -891,9 +934,12 @@ class ActiveLearningModel:
 
         data = self.df
 
-        queried_id = self.id_pool.iloc[query_idx][config.settings["id_col"]]
+        queried_id = self.reduced_tr.iloc[query_idx][config.settings["id_col"]]
+        print()
+        # queried_id = self.X[self.X[config.settings["id_col"]] == query_idx]
 
-        act_label = self.y_pool[query_idx]
+
+        act_label = self.reduced_tr.iloc[query_idx][config.settings["label_col"]]
 
         selected_source = self.df[
             self.df[config.settings["id_col"]] == queried_id
@@ -905,12 +951,16 @@ class ActiveLearningModel:
 
         selected_dict[config.settings["id_col"]] = [queried_id]
 
+        print("selected_dict: ", selected_dict)
+
         try:
             self.src.data = selected_dict
         except ValueError:
             print(
                 "Please make sure that your data does not contain any Inf or NaN values."
             )
+
+
 
         plot_idx = [
             list(config.ml_data["x_train_without_unknowns"].columns).index(
@@ -920,16 +970,32 @@ class ActiveLearningModel:
                 config.settings["default_vars"][1]
             ),
         ]
-        print(query_instance.shape)
+
+        print("qi shape: ", query_instance.shape)
+        print("qi: \n",query_instance)
+        print("qi eq: ",query_instance[config.settings["id_col"]])
+
+        q_full = self.df.loc[self.df[config.settings["id_col"]] == query_instance[config.settings["id_col"]]]
+
+        print("q_full: \n",q_full)
+
+        print("q_full col: \n", q_full[config.settings["default_vars"][0]])
+
+
         q = {
-            f'{config.settings["default_vars"][0]}': [query_instance[plot_idx[0]]],
-            f'{config.settings["default_vars"][1]}': [query_instance[plot_idx[1]]],
+            f'{config.settings["default_vars"][0]}': [q_full[config.settings["default_vars"][0]].values[0]],
+            f'{config.settings["default_vars"][1]}': [q_full[config.settings["default_vars"][1]].values[0]],
         }
 
-        print(q)
+        print("q: ", q)
 
+        print("qp.data before: ", self.queried_points.data)
 
         self.queried_points.data = q
+
+        print("qp.data after: ", self.queried_points.data)
+
+        print("show_queried_point complete")
 
     def iterate_AL(self):
         """Iterate through one iteration of active learning.
@@ -941,21 +1007,39 @@ class ActiveLearningModel:
         """
 
         # self.assign_label = False
+        
+        print("\n\n\n\n\n\n\n\n\nIterate AL")
+        if not config.settings["image_col"]:
+            self.remove_from_pool()
 
-        self.remove_from_pool()
+            self.curr_num_points = self.x_al_train.shape[0]
 
-        self.curr_num_points = self.x_al_train.shape[0]
+        else:
+            self.curr_num_points = len(self.X_pool[config.settings["id_col"]].values[self.idxs_lb])
+            print("num of points: ", self.curr_num_points)
 
         print("fitting...")
-        self.learner.fit(self.x_al_train, self.y_al_train)
+        # self.learner.fit(self.x_al_train, self.y_al_train)
+        self.learner.fit(n_epoch=1)
+
+        print("fitted")
+
 
         self.save_model(checkpoint=False)
 
+        print("\nsaved model\n")
+
         self._update_predictions()
 
+        print("\nupdated preds\n")
+
         self.query_new_point()
+    
+        print("\nqueried new point\n")
 
         self.show_queried_point()
+
+        print("\nshown_queried_point\n")
 
         self.assign_label_button.name = "Assign"
 
@@ -970,19 +1054,32 @@ class ActiveLearningModel:
         """
         self.query_index = self.learner.query(1)
 
-        self.query_instance = self.x_pool[self.query_index]
+        if not config.settings["image_train"]:
+            self.query_instance = self.x_pool[self.query_index]
+
+        else:
+            self.query_instance = self.X_pool.iloc[self.query_index]
 
     def _assign_label_cb(self, event):
 
         selected_label = self.assign_label_group.value
 
         query = self.query_instance
+
+        print("query instance: ", query)
         query_idx = self.query_index
 
+        print("query idx: ", query_idx)
+
+        print("---- AL.py")
+
+        print(self.X_pool.iloc[query_idx])
+
+        print(list(self.X_pool.iloc[query_idx].values)[0])
         if not selected_label == "Unsure":
 
             self.full_labelled_data["id"].append(
-                list(self.id_pool.iloc[query_idx].values)[0][0]
+                list(self.X_pool.iloc[query_idx].values)[0]
             )
             self.full_labelled_data["y"].append(
                 config.settings["strings_to_labels"][selected_label]
@@ -1004,15 +1101,51 @@ class ActiveLearningModel:
 
             selected_label = np.array([selected_label])
 
-            new_train = np.vstack((self.x_al_train, query))
+            self.idxs_lb[query_idx] = True
+            # try:
+            #     print(self.Y_pool[query_idx])
+            # except:
+            print("------- CHECK CORRECT -------")
+            print(query_idx)
+            print(self.Y_pool)
+            print(self.Y_pool.index)
 
-            new_label = np.concatenate((self.y_al_train, selected_label))
-            new_id = pd.concat( [self.id_al_train, self.id_pool.iloc[query_idx]], ignore_index=True)
+            new_idx = list(self.X_pool[config.settings["id_col"]].values).index(self.query_instance[config.settings["id_col"]])
+
+            print("new_idx: ", new_idx)
+
+            assert len(self.X_pool) == len(self.Y_pool)
+
+            # print(f"{query_idx} is at index: {list(self.Y_pool.index).index(query_idx)}")
+
+            print(self.Y_pool.iloc[new_idx])
+
+            if len(selected_label) > 1:
+                self.Y_pool.iloc[new_idx] = selected_label
+            elif len(selected_label) == 1:
+                self.Y_pool.iloc[new_idx] = selected_label[0]
+            else:
+                assert False, "nothing selected!"
+            
+            print(self.Y_pool.iloc[new_idx])
+
+            # assert False
+            # self.Y_pool[query_idx] = selected_label
+            # print(self.Y_pool[query_idx])
+
+            self.update_image_dfs()
+
+            # new_train = np.vstack((self.x_al_train, query))
+
+            # new_label = np.concatenate((self.y_al_train, selected_label))
+            # new_id = pd.concat( [self.id_al_train, self.id_pool.iloc[query_idx]], ignore_index=True)
+
+
             # new_id = self.id_al_train.append(self.id_pool.iloc[query_idx])
 
-            self.x_al_train = new_train
-            self.y_al_train = new_label
-            self.id_al_train = new_id
+            # self.x_al_train = new_train
+            # self.y_al_train = new_label
+            # self.id_al_train = new_id
 
         else:
             print("unsure was assigned")
@@ -1037,12 +1170,17 @@ class ActiveLearningModel:
             self.assign_label_button.disabled = False
             self.panel()
 
+        # config.settings["classifiers"][f"{self._label}"][
+        #     "id"
+        # ] = self.full_labelled_data["id"]
+        # config.settings["classifiers"][f"{self._label}"]["y"] = self.full_labelled_data[
+        #     "y"
+        # ]
+
         config.settings["classifiers"][f"{self._label}"][
             "id"
-        ] = self.full_labelled_data["id"]
-        config.settings["classifiers"][f"{self._label}"]["y"] = self.full_labelled_data[
-            "y"
-        ]
+        ] = self.X_pool[config.settings["id_col"]].values[self.idxs_lb]
+        config.settings["classifiers"][f"{self._label}"]["y"] = self.Y_pool.values[self.idxs_lb]
 
         assert self.x_al_train.shape[0] == len(
             self.y_al_train
@@ -1120,11 +1258,19 @@ class ActiveLearningModel:
 
         self.setup_learners()
 
-        print(self.x_pool)
+        print(self.X_pool)
 
         self.query_index = self.learner.query(1)
 
-        self.query_instance = self.x_pool[self.query_index]
+        print(self.query_index)
+
+        print("selfqi")
+
+        self.query_instance = self.X_pool.iloc[self.query_index]
+
+
+        print(self.query_instance)
+
 
         self.show_queried_point()
 
@@ -1201,6 +1347,7 @@ class ActiveLearningModel:
         assert (
             df_data_y_ids.shape[0] == df_data_x.shape[0]
         ), f"df_data_y_ids has different number of rows than df_data_x, {df_data_y_ids.shape[0]} != {df_data_x.shape[0]}"
+        
 
         return df_data_x, df_data_y_ids
 
@@ -1561,170 +1708,200 @@ class ActiveLearningModel:
 
     def _update_predictions(self):
 
-        proba = self.learner.predict_prob(self.other_data_X_pool, Y=self.other_data_Y_pool).cpu().numpy()
+        # all_pool = ImageDataset(self.X_pool,config.settings["image_col"],config.settings["label_col"])
+
+        print(self.X_pool.iloc[self.idxs_lb])
+        print(len(self.X_pool.iloc[self.idxs_lb]))
+
+        print("predict_proba\n\n\n")
+        proba = self.learner.predict_prob(self.reduced_tr.iloc[self.idxs_lb]).cpu().numpy()
 
         print(proba)
 
+        # assert False
+
         tr_pred = np.argmax(proba, axis=1).reshape((-1, 1))
 
-        temp = self.other_data_Y_pool.cpu().numpy().reshape((-1, 1))
+        temp = self.Y_pool.values[~self.idxs_lb]
+        print("temp")
         is_correct = tr_pred == temp
+        print("is correct")
 
-        default_x = (
-            config.ml_data["x_train_without_unknowns"][
-                config.settings["default_vars"][0]
-            ]
-            .to_numpy()
-            .reshape((-1, 1))
-        )
-        default_y = (
-            config.ml_data["x_train_without_unknowns"][
-                config.settings["default_vars"][1]
-            ]
-            .to_numpy()
-            .reshape((-1, 1))
-        )
+        if config.settings["image_train"]:
+            # default_x = (
+            #     config.ml_data["x_train_without_unknowns"][
+            #         config.settings["default_vars"][0]
+            #     ]
+            #     .to_numpy()
+            #     .reshape((-1, 1))
+            # )
+            # default_y = (
+            #     config.ml_data["x_train_without_unknowns"][
+            #         config.settings["default_vars"][1]
+            #     ]
+            #     .to_numpy()
+            #     .reshape((-1, 1))
+            # )
 
-        print(config.settings["default_vars"][0])
-        print(default_x.shape)
-        print(default_y.shape)
+            # print(config.settings["default_vars"][0])
+            # print(default_x.shape)
+            # print(default_y.shape)
 
-        print(is_correct.shape)
+            # print(is_correct.shape)
 
-        corr_data = {
-            f'{config.settings["default_vars"][0]}': default_x[is_correct],
-            f'{config.settings["default_vars"][1]}': default_y[is_correct],
-        }
-        incorr_data = {
-            f'{config.settings["default_vars"][0]}': default_x[~is_correct],
-            f'{config.settings["default_vars"][1]}': default_y[~is_correct],
-        }
+            # corr_data = {
+            #     f'{config.settings["default_vars"][0]}': default_x[is_correct],
+            #     f'{config.settings["default_vars"][1]}': default_y[is_correct],
+            # }
+            # incorr_data = {
+            #     f'{config.settings["default_vars"][0]}': default_x[~is_correct],
+            #     f'{config.settings["default_vars"][1]}': default_y[~is_correct],
+            # }
 
-        self.corr_train.data = corr_data
-        self.incorr_train.data = incorr_data
+            # self.corr_train.data = corr_data
+            # self.incorr_train.data = incorr_data
+            print("-----\n")
 
-        curr_tr_acc = accuracy_score(self.other_data_Y_pool, tr_pred)
-        curr_tr_f1 = f1_score(self.other_data_Y_pool, tr_pred)
-        curr_tr_prec = precision_score(self.other_data_Y_pool, tr_pred)
-        curr_tr_rec = recall_score(self.other_data_Y_pool, tr_pred)
+            print("training Y values:\n")
+            print(self.Y_pool.values[self.idxs_lb])
+            print("\n-----")
 
-        self._train_scores = {
-            "acc": "%.3f" % round(curr_tr_acc, 3),
-            "prec": "%.3f" % round(curr_tr_prec, 3),
-            "rec": "%.3f" % round(curr_tr_rec, 3),
-            "f1": "%.3f" % round(curr_tr_f1, 3),
-        }
+            curr_tr_acc = accuracy_score(self.Y_pool.values[self.idxs_lb], tr_pred)
+            curr_tr_f1 = f1_score(self.Y_pool.values[self.idxs_lb], tr_pred)
+            curr_tr_prec = precision_score(self.Y_pool.values[self.idxs_lb], tr_pred)
+            curr_tr_rec = recall_score(self.Y_pool.values[self.idxs_lb], tr_pred)
 
-        print(self._train_scores)
+            self._train_scores = {
+                "acc": "%.3f" % round(curr_tr_acc, 3),
+                "prec": "%.3f" % round(curr_tr_prec, 3),
+                "rec": "%.3f" % round(curr_tr_rec, 3),
+                "f1": "%.3f" % round(curr_tr_f1, 3),
+            }
 
-        self._accuracy_list["train"]["score"].append(curr_tr_acc)
-        self._f1_list["train"]["score"].append(curr_tr_f1)
-        self._precision_list["train"]["score"].append(curr_tr_prec)
-        self._recall_list["train"]["score"].append(curr_tr_rec)
+            print(self._train_scores)
 
-        print("done list")
+            self._accuracy_list["train"]["score"].append(curr_tr_acc)
+            self._f1_list["train"]["score"].append(curr_tr_f1)
+            self._precision_list["train"]["score"].append(curr_tr_prec)
+            self._recall_list["train"]["score"].append(curr_tr_rec)
 
-        t_conf = confusion_matrix(self.other_data_Y_pool, tr_pred)
+            print("done list")
+
+            t_conf = confusion_matrix(self.Y_pool.values[self.idxs_lb], tr_pred)
 
         # val_pred = self.learner.predict(config.ml_data["x_val"]).reshape((-1, 1))
 
-        val_pred = self.learner.predict(self.other_data_X_val).cpu().numpy().reshape((-1, 1))
+        print("about to val_pred")
 
-        temp = self.other_data_Y_val.cpu().numpy().reshape((-1, 1))
+        val_pred = self.learner.predict(self.reduced_val).cpu().numpy().reshape((-1, 1))
 
+        temp = self.Y_val.values
 
         print("v_pred: ", val_pred.shape)
         print("temp: ", temp.shape)
 
+        if config.settings["image_train"]:
+            is_correct = val_pred == temp
 
-        is_correct = val_pred == temp
+            print("is_correct: ", is_correct.shape)
 
-        print("is_correct: ", is_correct.shape)
+            # default_x = (
+            #     config.ml_data["x_val"][config.settings["default_vars"][0]]
+            #     .to_numpy()
+            #     .reshape((-1, 1))
+            # )
+            # default_y = (
+            #     config.ml_data["x_val"][config.settings["default_vars"][1]]
+            #     .to_numpy()
+            #     .reshape((-1, 1))
+            # )
 
-        default_x = (
-            config.ml_data["x_val"][config.settings["default_vars"][0]]
-            .to_numpy()
-            .reshape((-1, 1))
-        )
-        default_y = (
-            config.ml_data["x_val"][config.settings["default_vars"][1]]
-            .to_numpy()
-            .reshape((-1, 1))
-        )
+            # print(default_x.shape)
+            # print(is_correct.shape)
 
-        print(default_x.shape)
-        print(is_correct.shape)
+            # corr_data = {
+            #     f'{config.settings["default_vars"][0]}': default_x[is_correct],
+            #     f'{config.settings["default_vars"][1]}': default_y[is_correct],
+            # }
+            # incorr_data = {
+            #     f'{config.settings["default_vars"][0]}': default_x[~is_correct],
+            #     f'{config.settings["default_vars"][1]}': default_y[~is_correct],
+            # }
 
-        corr_data = {
-            f'{config.settings["default_vars"][0]}': default_x[is_correct],
-            f'{config.settings["default_vars"][1]}': default_y[is_correct],
-        }
-        incorr_data = {
-            f'{config.settings["default_vars"][0]}': default_x[~is_correct],
-            f'{config.settings["default_vars"][1]}': default_y[~is_correct],
-        }
+            # self.corr_val.data = corr_data
+            # self.incorr_val.data = incorr_data
 
-        self.corr_val.data = corr_data
-        self.incorr_val.data = incorr_data
+            curr_val_acc = accuracy_score(self.Y_val.values, val_pred)
+            curr_val_f1 = f1_score(self.Y_val.values, val_pred)
+            curr_val_prec = precision_score(self.Y_val.values, val_pred)
+            curr_val_rec = recall_score(self.Y_val.values, val_pred)
 
-        curr_val_acc = accuracy_score(self.other_data_Y_val, val_pred)
-        curr_val_f1 = f1_score(self.other_data_Y_val, val_pred)
-        curr_val_prec = precision_score(self.other_data_Y_val, val_pred)
-        curr_val_rec = recall_score(self.other_data_Y_val, val_pred)
+            self._val_scores = {
+                "acc": "%.3f" % round(curr_val_acc, 3),
+                "prec": "%.3f" % round(curr_val_prec, 3),
+                "rec": "%.3f" % round(curr_val_rec, 3),
+                "f1": "%.3f" % round(curr_val_f1, 3),
+            }
 
-        self._val_scores = {
-            "acc": "%.3f" % round(curr_val_acc, 3),
-            "prec": "%.3f" % round(curr_val_prec, 3),
-            "rec": "%.3f" % round(curr_val_rec, 3),
-            "f1": "%.3f" % round(curr_val_f1, 3),
-        }
+            self._accuracy_list["val"]["score"].append(curr_val_acc)
+            self._f1_list["val"]["score"].append(curr_val_f1)
+            self._precision_list["val"]["score"].append(curr_val_prec)
+            self._recall_list["val"]["score"].append(curr_val_rec)
 
-        self._accuracy_list["val"]["score"].append(curr_val_acc)
-        self._f1_list["val"]["score"].append(curr_val_f1)
-        self._precision_list["val"]["score"].append(curr_val_prec)
-        self._recall_list["val"]["score"].append(curr_val_rec)
+            v_conf = confusion_matrix(self.Y_val.values, val_pred)
+            # TODO:: reintro est
+                # test_pred = self.learner.predict(self.other_data_X_te).cpu().numpy().reshape((-1, 1))
 
-        v_conf = confusion_matrix(self.other_data_Y_val, val_pred)
+                # temp = self.other_data_Y_te.cpu().numpy().reshape((-1, 1))
 
-        test_pred = self.learner.predict(self.other_data_X_te).cpu().numpy().reshape((-1, 1))
+                # curr_test_acc = accuracy_score(self.other_data_Y_te, test_pred)
+                # curr_test_f1 = f1_score(self.other_data_Y_te, test_pred)
+                # curr_test_prec = precision_score(self.other_data_Y_te, test_pred)
+                # curr_test_rec = recall_score(self.other_data_Y_te, test_pred)
 
-        temp = self.other_data_Y_te.cpu().numpy().reshape((-1, 1))
+                # self._test_scores = {
+                #     "acc": "%.3f" % round(curr_test_acc, 3),
+                #     "prec": "%.3f" % round(curr_test_prec, 3),
+                #     "rec": "%.3f" % round(curr_test_rec, 3),
+                #     "f1": "%.3f" % round(curr_test_f1, 3),
+                # }
 
-        curr_test_acc = accuracy_score(self.other_data_Y_te, test_pred)
-        curr_test_f1 = f1_score(self.other_data_Y_te, test_pred)
-        curr_test_prec = precision_score(self.other_data_Y_te, test_pred)
-        curr_test_rec = recall_score(self.other_data_Y_te, test_pred)
+                # test_conf = confusion_matrix(self.other_data_Y_te, test_pred)
 
-        self._test_scores = {
-            "acc": "%.3f" % round(curr_test_acc, 3),
-            "prec": "%.3f" % round(curr_test_prec, 3),
-            "rec": "%.3f" % round(curr_test_rec, 3),
-            "f1": "%.3f" % round(curr_test_f1, 3),
-        }
+            self.num_points_list.append(self.curr_num_points)
 
-        test_conf = confusion_matrix(self.other_data_Y_te, test_pred)
+            self._accuracy_list["train"]["num_points"] = self.num_points_list
+            self._f1_list["train"]["num_points"] = self.num_points_list
+            self._precision_list["train"]["num_points"] = self.num_points_list
+            self._recall_list["train"]["num_points"] = self.num_points_list
+            self._accuracy_list["val"]["num_points"] = self.num_points_list
+            self._f1_list["val"]["num_points"] = self.num_points_list
+            self._precision_list["val"]["num_points"] = self.num_points_list
+            self._recall_list["val"]["num_points"] = self.num_points_list
 
-        self.num_points_list.append(self.curr_num_points)
 
-        self._accuracy_list["train"]["num_points"] = self.num_points_list
-        self._f1_list["train"]["num_points"] = self.num_points_list
-        self._precision_list["train"]["num_points"] = self.num_points_list
-        self._recall_list["train"]["num_points"] = self.num_points_list
-        self._accuracy_list["val"]["num_points"] = self.num_points_list
-        self._f1_list["val"]["num_points"] = self.num_points_list
-        self._precision_list["val"]["num_points"] = self.num_points_list
-        self._recall_list["val"]["num_points"] = self.num_points_list
+            print("t_conf: \n", t_conf)
+            print("v_conf: \n", v_conf)
 
-        self.conf_mat_tr_tn = str(t_conf[0][0])
-        self.conf_mat_tr_fp = str(t_conf[0][1])
-        self.conf_mat_tr_fn = str(t_conf[1][0])
-        self.conf_mat_tr_tp = str(t_conf[1][1])
 
-        self.conf_mat_val_tn = str(v_conf[0][0])
-        self.conf_mat_val_fp = str(v_conf[0][1])
-        self.conf_mat_val_fn = str(v_conf[1][0])
-        self.conf_mat_val_tp = str(v_conf[1][1])
 
+
+            self.conf_mat_tr_tn = str(t_conf[0][0])
+            self.conf_mat_tr_fp = str(t_conf[0][1])
+            self.conf_mat_tr_fn = str(t_conf[1][0])
+            self.conf_mat_tr_tp = str(t_conf[1][1])
+            if len(v_conf[0]) > 1:
+
+                self.conf_mat_val_tn = str(v_conf[0][0])
+                self.conf_mat_val_fp = str(v_conf[0][1])
+                self.conf_mat_val_fn = str(v_conf[1][0])
+                self.conf_mat_val_tp = str(v_conf[1][1])
+            else:
+
+                self.conf_mat_val_tn = str("N/A")
+                self.conf_mat_val_fp = str("N/A")
+                self.conf_mat_val_fn = str("N/A")
+                self.conf_mat_val_tp = str("N/A")
         try:
             self.conf_mat_test_tn = str(test_conf[0][0])
             self.conf_mat_test_fp = str(test_conf[0][1])
@@ -1741,31 +1918,67 @@ class ActiveLearningModel:
             print(
                 "Please return to Labelling Mode and add some of the missing labels to your test set."
             )
+
         proba = 1 - np.max(proba, axis=1)
 
-        x_axis = config.ml_data["x_train_without_unknowns"][
-            config.settings["default_vars"][0]
-        ].to_numpy()
-        y_axis = config.ml_data["x_train_without_unknowns"][
-            config.settings["default_vars"][1]
-        ].to_numpy()
+        # TODO::
+        # x_axis = config.ml_data["x_train_without_unknowns"][
+        #     config.settings["default_vars"][0]
+        # ].to_numpy()
+        # y_axis = config.ml_data["x_train_without_unknowns"][
+        #     config.settings["default_vars"][1]
+        # ].to_numpy()
 
-        self._model_output_data_tr[config.settings["default_vars"][0]] = x_axis
-        self._model_output_data_tr[config.settings["default_vars"][1]] = y_axis
-        self._model_output_data_tr["pred"] = tr_pred.flatten()
-        self._model_output_data_tr[
-            "y"
-        ] = self.y_train_without_unknowns.to_numpy().flatten()
-        self._model_output_data_tr["metric"] = proba
+        # self._model_output_data_tr[config.settings["default_vars"][0]] = x_axis
+        # self._model_output_data_tr[config.settings["default_vars"][1]] = y_axis
+        # self._model_output_data_tr["pred"] = tr_pred.flatten()
+        # self._model_output_data_tr[
+        #     "y"
+        # ] = self.y_train_without_unknowns.to_numpy().flatten()
+        # self._model_output_data_tr["metric"] = proba
 
-        x_axis = config.ml_data["x_val"][config.settings["default_vars"][0]].to_numpy()
-        y_axis = config.ml_data["x_val"][config.settings["default_vars"][1]].to_numpy()
+        # x_axis = config.ml_data["x_val"][config.settings["default_vars"][0]].to_numpy()
+        # y_axis = config.ml_data["x_val"][config.settings["default_vars"][1]].to_numpy()
 
-        self._model_output_data_val[config.settings["default_vars"][0]] = x_axis
-        self._model_output_data_val[config.settings["default_vars"][1]] = y_axis
-        self._model_output_data_val["pred"] = val_pred.flatten()
-        self._model_output_data_val["y"] = self.y_val.to_numpy().flatten()
+        # self._model_output_data_val[config.settings["default_vars"][0]] = x_axis
+        # self._model_output_data_val[config.settings["default_vars"][1]] = y_axis
+        # self._model_output_data_val["pred"] = val_pred.flatten()
+        # self._model_output_data_val["y"] = self.y_val.to_numpy().flatten()
 
+    def update_image_dfs(self):
+        self.x_al_train = self.X_pool.iloc[self.idxs_lb]
+        self.y_al_train = self.Y_pool.values[self.idxs_lb]
+        print("update image df: ", self.y_al_train)
+        self.id_al_train = self.X_pool[config.settings["id_col"]].iloc[self.idxs_lb]
+        self.reduced_train = self.reduced_tr.iloc[self.idxs_lb]
+
+    def image_data_setup(self):
+        
+        needed_cols = [config.settings["id_col"],config.settings["image_col"],config.settings["label_col"]]
+        print("needed cols: ", needed_cols)
+
+        reduced_df = self.df[needed_cols]
+
+        idxs = list(reduced_df.index)
+
+        random.shuffle(idxs)
+
+        split = int(0.8*len(idxs))
+
+        self.reduced_tr = reduced_df.iloc[idxs[:split]]
+        self.reduced_val = reduced_df.iloc[idxs[split:]]
+
+        Y_tr = self.reduced_tr[config.settings["label_col"]]
+        Y_val = self.reduced_val[config.settings["label_col"]]
+
+        X_tr = self.reduced_tr[[config.settings["id_col"],config.settings["image_col"]]]
+        X_val = self.reduced_val[[config.settings["id_col"],config.settings["image_col"]]]
+
+        print("Train Size: ", len(X_tr))
+        print("Test Size: ", len(X_val))
+        
+        return X_tr, Y_tr, X_val, Y_val
+    
     def create_pool(self, preselected=None):
         """Create the pool used for query points during active learning.
         The training set will be split into the pool and the classifier's
@@ -1783,7 +1996,7 @@ class ActiveLearningModel:
 
         if preselected is None:
 
-            if config.settings["other_data_name"] is None:
+            if not config.settings["image_train"]:
                 initial_points = int(self.starting_num_points.value)
 
                 if initial_points >= len(config.ml_data["x_train_without_unknowns"].index):
@@ -1801,6 +2014,8 @@ class ActiveLearningModel:
                 self.id_train = config.ml_data["id_train_with_unknowns"].copy()
 
                 id_pool = self.id_train.to_numpy()
+
+                print("id_pool: ",id_pool)
 
                 train_idx = list(
                     np.random.choice(
@@ -1869,179 +2084,65 @@ class ActiveLearningModel:
 
             else:
 
-                X_tr, Y_tr, X_te, Y_te = get_dataset("CIFAR10", "data")
+                self.X_pool, self.Y_pool, self.X_val, self.Y_val = self.image_data_setup()
 
-                split = int(len(X_tr)*0.75)
+                n_pool = len(self.Y_pool)
 
-                X_val = X_tr[split:]
-                Y_val = Y_tr[split:]
-
-                val_min = min(len(X_val),len(config.ml_data["x_val"]))
-
-                X_val = X_tr[:val_min]
-                Y_val = Y_tr[:val_min]
-
-                config.ml_data["x_val"] = config.ml_data["x_val"][:val_min]
-                config.ml_data["y_val"] = config.ml_data["y_val"][:val_min]
-
-                X_tr = X_tr[:split]
-                Y_tr = Y_tr[:split]
-
-                dim = np.shape(X_tr)[1:]
-                handler = get_handler("cifar10")
-
-                test_min = min(len(X_te),len(config.ml_data["x_test"]))
-
-                X_te = X_te[:test_min]
-                Y_te = Y_te[:test_min]
-
-
-                config.ml_data["x_test"] = config.ml_data["x_test"][:test_min]
-                config.ml_data["y_test"] = config.ml_data["y_test"][:test_min]
-
-
-
-                ##TODO:: REMOVE THIS
-
-                X_pool = config.ml_data["x_train_with_unknowns"].to_numpy()
-                y_pool = self.y_train_with_unknowns.to_numpy().ravel()
-
-                min_val = min(len(X_tr), len(X_pool))
-
-                print("\n\n min_val: ",min_val," \n\n")
-
-                X_pool = config.ml_data["x_train_with_unknowns"].to_numpy()[:min_val]
-                y_pool = self.y_train_with_unknowns.to_numpy().ravel()[:min_val]
-
-                X_tr = X_tr[:min_val]
-                Y_tr = Y_tr[:min_val]
-
-                ids = config.ml_data["id_train_with_unknowns"].copy()[:min_val]
-
-                assert len(X_pool) == len(X_tr)
-
-                ###########################
-
-
-
-                n_pool = len(Y_tr)
-
-                n_test = len(Y_te)
+                n_test = len(self.Y_val)
 
                 NUM_INIT_LB = int(self.starting_num_points.value)
 
-                if NUM_INIT_LB >= len(X_pool):
+                if NUM_INIT_LB >= len(self.X_pool):
                     self.starting_num_points.value = len(
-                        X_pool
+                        self.X_pool
                     )
 
-                    NUM_INIT_LB = len(X_pool)
+                    NUM_INIT_LB = len(self.X_pool)
 
                 print("Starting points:", NUM_INIT_LB)
 
-                idxs_lb = np.zeros(n_pool, dtype=bool)
-                print(idxs_lb)
+                self.idxs_lb = np.zeros(n_pool, dtype=bool)
+                print(self.idxs_lb)
                 idxs_tmp = np.arange(n_pool)
                 print(idxs_tmp)
 
                 np.random.shuffle(idxs_tmp)
 
-                idxs_lb[idxs_tmp[:NUM_INIT_LB-2]] = True
+                self.idxs_lb[idxs_tmp[:NUM_INIT_LB-2]] = True
 
-                not_used = np.arange(len(idxs_lb))
+                not_used = np.arange(len(self.idxs_lb))
 
-                not_used = not_used[~idxs_lb]
+                not_used = not_used[~self.idxs_lb]
 
                 np.random.shuffle(not_used)
 
+                print(self.Y_pool)
+
+
                 for i in not_used:
-                    if Y_tr[i] == 0:
-                        idxs_lb[i] = True
+                    if self.Y_pool.values[i] == 0:
+                        self.idxs_lb[i] = True
                         break
                 for i in not_used:
-                    if Y_tr[i] == 1:
-                        idxs_lb[i] = True
+                    if self.Y_pool.values[i] == 1:
+                        self.idxs_lb[i] = True
                         break
 
+                print(self.X_pool[config.settings["id_col"]].values[self.idxs_lb])
                 print()
-                
-                # initial_points = int(self.starting_num_points.value)
 
-                self.id_train = ids.copy()
+                self.update_image_dfs()
 
-                self.other_data_X_tr = X_tr[idxs_lb]
-                self.other_data_Y_tr = Y_tr[idxs_lb]
+                # print("x: ", len(self.x_al_train))
+                # print("y: ", len(self.y_al_train))
+                # print("ids: ", len(self.id_al_train))
 
-                is_label = self.other_data_Y_tr == self._label
-                isnt_label = self.other_data_Y_tr != self._label
-
-                self.other_data_Y_tr[is_label] = 1
-                self.other_data_Y_tr[isnt_label] = 0
-
-                self.other_data_X_pool = X_tr
-                self.other_data_Y_pool = Y_tr
-
-                is_label = self.other_data_Y_pool == self._label
-                isnt_label = self.other_data_Y_pool != self._label
-
-                self.other_data_Y_pool[is_label] = 1
-                self.other_data_Y_pool[isnt_label] = 0
-
-                self.other_data_X_val = X_val
-                self.other_data_Y_val = Y_val
-
-                is_label = self.other_data_Y_val == self._label
-                isnt_label = self.other_data_Y_val != self._label
-
-                self.other_data_Y_val[is_label] = 1
-                self.other_data_Y_val[isnt_label] = 0
-
-                self.other_data_X_te = X_te
-                self.other_data_Y_te = Y_te
-
-                is_label = self.other_data_Y_te == self._label
-                isnt_label = self.other_data_Y_te != self._label
-
-                self.other_data_Y_te[is_label] = 1
-                self.other_data_Y_te[isnt_label] = 0
-
-                self.idxs_lb = idxs_lb
-
-                # id_pool = self.id_train.to_numpy()
-
-                # train_idx = list(
-                #     np.random.choice(
-                #         range(len(config.ml_data["x_train_without_unknowns"])),
-                #         size=initial_points - 2,
-                #         replace=False,
-                #     )
-                # )
-
-                # c0 = train_idx[0]
-                # c1 = train_idx[1]
-
-                # while c0 in train_idx:
-                #     c0 = np.random.choice(np.where(y_tr == 0)[0])
-                # while c1 in train_idx:
-                #     c1 = np.random.choice(np.where(y_tr == 1)[0])
-
-                # train_idx = train_idx + [c0, c1]
-
-                # print(train_idx)
-
-                self.x_al_train = X_pool[idxs_lb]
-                print(self.x_al_train)
-                self.y_al_train = self.y_train_without_unknowns.iloc[
-                    idxs_lb
-                ].values.ravel()
-                self.id_al_train = self.id_train.iloc[idxs_lb]
-                print(self.id_al_train)
 
                 # assert False
 
-                self.x_pool = np.delete(X_pool, idxs_lb, axis=0)
-                self.y_pool = np.delete(y_pool, idxs_lb)
-                self.id_pool = self.id_train.drop(self.id_train.index[idxs_lb])
+                # self.X_pool = np.delete(X_pool, idxs_lb, axis=0)
+                # self.Y_pool = np.delete(y_pool, idxs_lb)
+                # self.id_pool = self.id_train.drop(self.id_train.index[idxs_lb])
 
                 print("\n========== SIZES ==========\n")
 
@@ -2053,18 +2154,15 @@ class ActiveLearningModel:
                 print(self.x_al_train.shape)
 
                 print("pools")
-                print(len(self.x_pool))
-                print(len(self.y_pool))
-                print(len(self.id_pool))
-
+                print(len(self.X_pool.iloc[~self.idxs_lb]))
+                # print(len(self.y_pool))
+                # print(len(self.id_pool))
 
                 print("========================")
 
 
-                config.settings["classifiers"][f"{self._label}"]["id"] = self.id_al_train[
-                    config.settings["id_col"]
-                ].values.tolist()
-                self.full_labelled_data["id"] = self.id_al_train[
+                config.settings["classifiers"][f"{self._label}"]["id"] = self.id_al_train.values.tolist()
+                self.full_labelled_data["id"] = self.X_pool[
                     config.settings["id_col"]
                 ].values.tolist()
 
@@ -2080,17 +2178,19 @@ class ActiveLearningModel:
 
                 config.settings["classifiers"][f"{self._label}"][
                     "y"
-                ] = self.y_train_with_unknowns.iloc[idxs_lb]
+                ] = self.Y_pool.values[self.idxs_lb]
 
-                flat_list = [
-                    item
-                    for sublist in self.y_train_with_unknowns.iloc[
-                        idxs_lb
-                    ].values.tolist()
-                    for item in sublist
-                ]
+                # flat_list = [
+                #     item
+                #     for sublist in self.Y_pool.iloc[
+                #         self.idxs_lb
+                #     ].values.tolist()
+                #     for item in sublist
+                # ]
 
-                self.full_labelled_data["y"] = flat_list                
+
+
+                # self.full_labelled_data["y"] = flat_list                
 
         else:
 
@@ -2199,18 +2299,6 @@ class ActiveLearningModel:
             if "sklearn" in str(type(classifier_dict[table["classifier"][0]])):
                 print(type(classifier_dict[table["classifier"][0]]))
 
-                qs_dict = {"Dataset":"test_dataset", "QS":table["query"][0],"Embedding":"UMAP", "method":"Default", "sub":"Top-N", "Tessellations":100}
-                path = f"{qs_dict['Dataset']}/{qs_dict['Embedding']}/{qs_dict['Tessellations']}/{100}/"
-                folders = ["models","metrics","plots"]
-                print(qs_dict)
-
-                for f in folders:
-                    try:
-                        os.makedirs(f+"/"+path)
-                    except:
-                        continue
-                    print(qs_dict)
-
                 learner = ActiveLearner(
                     estimator=clone(classifier_dict[table["classifier"][0]]),
                     query_strategy=qs_dict[table["query"][0]],
@@ -2267,6 +2355,8 @@ class ActiveLearningModel:
                     print(qs_dict)
 
                     net = models.__dict__[table["classifier"][0]](n_class=2, channels=3)
+
+
                     # try:
                     # except:
                     #     print(sorted(name for name in models.__dict__
@@ -2275,9 +2365,9 @@ class ActiveLearningModel:
                     #     print(table["query"][0])
                     print(net)
 
-                    handler = get_handler("cifar10")
+                    handler = ImageDataset
                     
-                    args = get_net_args("testing")
+                    args = get_net_args("candels")
 
                     if args is None:
                         args =  {
@@ -2293,8 +2383,19 @@ class ActiveLearningModel:
                         }
                     
                     args["seed"] = 0
+                    args['lr'] = 0.1
+                    args['momentum'] = 0.9
+                    args['gammas'] = [0.1, 0.1]
+                    args['schedule'] = [80, 120]
+                    args["optimizer"] = 'SGD'
+                    args["dataset"] = 'candels'
 
-                    strategy = query_strategies.__dict__[table["query"][0]](self.other_data_X_pool, self.other_data_Y_pool, self.other_data_X_val, self.other_data_Y_val, self.idxs_lb, net, handler, args)
+
+                    # def __init__(self, X, Y, X_te, Y_te, idxs_lb, net, handler, args)
+
+                    strategy = query_strategies.__dict__[table["query"][0]](self.reduced_tr, self.Y_pool, self.reduced_val, self.Y_val, self.idxs_lb, net, handler, args, config.settings["image_col"], config.settings["label_col"])
+
+
 
                     # learner = ActiveLearner(
                     #     estimator=copy.deepcopy(classifier_dict[table["classifier"][0]]),
@@ -2305,9 +2406,12 @@ class ActiveLearningModel:
 
 
                     # print(learner)
+                else:
+                    assert False, f"The classifier f{a} does not seem to be SKLearn or Torch. No implementation found."
 
 
             self.learner = strategy
+
 
         else:
             learners = []
@@ -2343,7 +2447,11 @@ class ActiveLearningModel:
 
             self.learner = Committee(learner_list=learners)
 
-        self._update_predictions()
+        
+        self.learner.fit(n_epoch=1)
+
+        # self._update_predictions()
+      
 
     # TODO :: Add bool to see if user wants this step
     def generate_features(self, df):
@@ -2439,60 +2547,58 @@ class ActiveLearningModel:
 
         df = df[df["acc"].isin(self._train_tab_colour_switch.active)]
 
-        p = hv.Points(
-            df,
-            [config.settings["default_vars"][0], config.settings["default_vars"][1]],
-        ).opts(toolbar=None, default_tools=[])
-
-        if hasattr(self, "x_al_train"):
-            x_al_train = pd.DataFrame(
-                self.x_al_train, columns=config.ml_data["x_train_with_unknowns"].columns
-            )
-
+        if not config.settings["image_train"]:
+            if hasattr(self, "x_al_train"):
+                x_al_train = pd.DataFrame(
+                    self.x_al_train, columns=config.ml_data["x_train_with_unknowns"].columns
+                )
         else:
+            try:
+                
+                subset = self.df[self.df[config.settings["id_col"]].isin(self.reduced_tr[config.settings["id_col"]].iloc[self.idxs_lb])]
 
-            x_al_train = self._empty_data()
+                print("subset: \n", subset)
 
-        x_al_train_plot = hv.Scatter(
-            x_al_train,
-            config.settings["default_vars"][0],
-            config.settings["default_vars"][1],
-            label="Trained On",
-            # sizing_mode="stretch_width",
-        ).opts(
-            fill_color="black",
-            marker="circle",
-            size=10,
-            toolbar=None,
-            default_tools=[],
-            show_legend=True,
-        )
+                x_al_train = pd.DataFrame(
+                    subset, columns=subset.columns
+                )
+
+                print("train on for main plot: ", x_al_train)
+
+            except:
+
+                print("\n\n\n\nplot didnt work\n\n\n\n\n")
+
+                # if hasattr(self, "x_al_train"):
+
+                # print(self.reduced_tr.iloc[self.idxs_lb])
+                # print(self.reduced_tr.columns)
+
+                x_al_train = self._empty_data()
+
+                # assert False
+
+        # print("hasattr queryinst: ", self.query_instance)
 
         if hasattr(self, "query_instance"):
-
-            query_point = pd.DataFrame(
-                self.query_instance.reshape((1,-1)),
-                columns=config.ml_data["x_train_with_unknowns"].columns,
-            )
+            try:
+                query_point = pd.DataFrame(
+                    self.query_instance.reshape((1,-1)),
+                    columns=config.ml_data["x_train_with_unknowns"].columns,
+                )
+            except:
+                query_point = self.query_instance
 
         else:
 
             query_point = self._empty_data()
 
-        query_point_plot = hv.Scatter(
-            query_point,
-            config.settings["default_vars"][0],
-            config.settings["default_vars"][1],
-            label="Queried"
-            # sizing_mode="stretch_width",
-        ).opts(
-            fill_color="yellow",
-            marker="circle",
-            size=10,
-            toolbar=None,
-            default_tools=[],
-            show_legend=True,
-        )
+        print("query point: ", query_point)
+
+        if config.settings["id_col"] in list(query_point.keys()):
+            print("qp id: ",query_point[config.settings["id_col"]])
+
+            query_point = self.df[self.df[config.settings["id_col"]] == query_point[config.settings["id_col"]]]
 
         if len(x_al_train[config.settings["default_vars"][0]]) > 0:
 
@@ -2531,6 +2637,8 @@ class ActiveLearningModel:
             )
 
             min_y = np.min([self._min_y, min_y_temp])
+
+            print(f"mins: [{min_x},{min_y}],maxs: [{max_x},{max_y}]")
         else:
             max_x, min_x, max_y, min_y = (
                 self._max_x,
@@ -2539,36 +2647,97 @@ class ActiveLearningModel:
                 self._min_y,
             )
 
-        plot = dynspread(
-            datashade(
-                p,
-                aggregator=ds.max("acc"),
-                cmap="RdYlGn",
-                # normalization="linear",
-                # clims=(-0.2, 1.2),
-            ).opts(
-                xlim=(min_x, max_x),
-                ylim=(min_y, max_y),
-                responsive=True,
-                shared_axes=False,
-                toolbar=None,
-                default_tools=[],
-            ),
-            threshold=0.75,
-            how="saturate",
+        p = hv.Points(
+            df,
+            [config.settings["default_vars"][0], config.settings["default_vars"][1]],
+        ).opts(
+            xlim=(min_x, max_x),
+            ylim=(min_y, max_y),
+            toolbar=None, default_tools=[])
+
+        x_al_train_plot = hv.Scatter(
+            x_al_train,
+            config.settings["default_vars"][0],
+            config.settings["default_vars"][1],
+            label="Trained On",
+            # sizing_mode="stretch_width",
+        ).opts(
+            xlim=(min_x, max_x),
+            ylim=(min_y, max_y),
+            fill_color="black",
+            marker="circle",
+            size=10,
+            toolbar=None,
+            default_tools=[],
+            show_legend=True,
         )
 
+        query_point_plot = hv.Scatter(
+            query_point,
+            config.settings["default_vars"][0],
+            config.settings["default_vars"][1],
+            label="Queried"
+            # sizing_mode="stretch_width",
+        ).opts(
+            xlim=(min_x, max_x),
+            ylim=(min_y, max_y),
+            fill_color="yellow",
+            marker="circle",
+            size=10,
+            toolbar=None,
+            default_tools=[],
+            show_legend=True,
+        )
+
+
+        plot = p
+        # plot = dynspread(
+        #     datashade(
+        #         p,
+        #         # TODO:: 
+        #         aggregator=ds.max("acc"),
+        #         cmap="RdYlGn",
+
+        #         # TODO
+        #         # cmap="RdYlGn",
+        #         # aggregator=ds.max("acc"),
+
+
+        #         normalization="linear",
+        #         # clims=(-0.2, 1.2),
+        #     ).opts(
+        #         xlim=(min_x, max_x),
+        #         ylim=(min_y, max_y),
+        #         responsive=True,
+        #         shared_axes=False,
+        #         toolbar=None,
+        #         default_tools=[],
+        #     ),
+        #     threshold=0.75,
+        #     how="saturate",
+        # )
+
         full_plot = (plot * x_al_train_plot * query_point_plot).opts(
-            toolbar=None, default_tools=[]
-        )  # * color_points
+            xlim=(min_x, max_x), ylim=(min_y, max_y), toolbar=None, default_tools=[]
+        )#  * color_points
 
         plot_col = pn.Column(
             pn.Row(
                 self._train_tab_colour_switch,
-                sizing_mode="stretch_width",
+                min_width=450,max_width=450,
+                min_height=30,max_height=30,
             ),
-            pn.Row(full_plot, sizing_mode="stretch_both"),
-            sizing_mode="stretch_both",
+            pn.Row(
+                full_plot,
+                min_width=450,
+                max_width=450,
+                min_height=400,
+                max_height=400,
+            ),
+            min_width=450,
+            max_width=450,
+            min_height=450,
+            max_height=450,
             name="Training Set",
         )
         return plot_col
@@ -2596,34 +2765,53 @@ class ActiveLearningModel:
             [config.settings["default_vars"][0], config.settings["default_vars"][1]],
         ).opts(toolbar=None, default_tools=[])
 
-        plot = dynspread(
-            datashade(
-                p,
-                aggregator=ds.max("acc"),
-                cmap="RdYlGn",
-                # normalization="linear",
-                # clims=(-0.2, 1.2),
-            ).opts(
-                xlim=(min_x, max_x),
-                ylim=(min_y, max_y),
-                responsive=True,
-                shared_axes=False,
-                toolbar=None,
-                default_tools=[],
-            ),
-            threshold=0.75,
-            how="saturate",
-        )
+        # plot = dynspread(
+        #     datashade(
+        #         p,
+        #         # TODO::
+        #         # aggregator=ds.max("acc"),
+        #         # cmap="RdYlGn",
+
+                
+        #         # cmap="RdYlGn_r",
+        #         aggregator=ds.max("acc"),
+
+        #         # normalization="linear",
+        #         # clims=(-0.2, 1.2),
+        #     ).opts(
+        #         xlim=(min_x, max_x),
+        #         ylim=(min_y, max_y),
+        #         responsive=True,
+        #         shared_axes=False,
+        #         toolbar=None,
+        #         default_tools=[],
+        #     ),
+        #     threshold=0.75,
+        #     how="saturate",
+        # )
+
+        plot = p
 
         full_plot = plot.opts(toolbar=None, default_tools=[])
+
 
         plot_col = pn.Column(
             pn.Row(
                 self._val_tab_colour_switch,
-                sizing_mode="stretch_width",
+                min_width=450,max_width=450,
+                min_height=30,max_height=30,
             ),
-            pn.Row(full_plot, sizing_mode="stretch_both"),
-            sizing_mode="stretch_both",
+            pn.Row(
+                full_plot,
+                min_width=450,
+                max_width=450,
+                min_height=400,
+                max_height=400,
+            ),
+            min_width=450,
+            max_width=450,
+            min_height=450,
+            max_height=450,
             name="Validation Set",
         )
         return plot_col
@@ -2650,28 +2838,38 @@ class ActiveLearningModel:
             df, [config.settings["default_vars"][0], config.settings["default_vars"][1]]
         ).opts(toolbar=None, default_tools=[])
 
-        plot = dynspread(
-            datashade(
-                p,
-                cmap="RdYlGn_r",
-                aggregator=ds.max("metric"),
-                # normalization="linear",
-                # clims=(0, 0.5),
-            ).opts(
-                xlim=(self._min_x, self._max_x),
-                ylim=(self._min_y, self._max_y),
-                shared_axes=False,
-                responsive=True,
-            ),
-            threshold=0.75,
-            how="saturate",
-        )
+        # plot = dynspread(
+        #     datashade(
+        #         p,
+        #         # TODO
+        #         # cmap="RdYlGn_r",
+        #         aggregator=ds.max("metric"),
 
-        return plot.opts(toolbar=None, default_tools=[])
+        #         # normalization="linear",
+        #         # clims=(0, 0.5),
+        #     ).opts(
+        #         xlim=(self._min_x, self._max_x),
+        #         ylim=(self._min_y, self._max_y),
+        #         shared_axes=False,
+        #         responsive=True,
+        #     ),
+        #     threshold=0.75,
+        #     how="saturate",
+        # )
+        plot = p
+
+        return pn.Row(
+            plot.opts(toolbar=None, default_tools=[]),
+            min_width=450,
+            max_width=450,
+            min_height=400,
+            max_height=400,
+        )
 
     def _scores_tab(self):
 
-        return (
+        return pn.Row(
+            (
             hv.Path(
                 self._accuracy_list["train"], ["num_points", "score"], label="Acc"
             ).options(show_legend=True)
@@ -2686,7 +2884,12 @@ class ActiveLearningModel:
             * hv.Path(
                 self._f1_list["train"], ["num_points", "score"], label="F1"
             ).options(show_legend=True)
-        ).opts(legend_position="bottom_right", toolbar=None, default_tools=[])
+        ).opts(legend_position="bottom_right", toolbar=None, default_tools=[]),
+        min_width=450,
+        max_width=450,
+        min_height=450,
+        max_height=450,
+        )
 
     def _add_conf_matrices(self):
         if not self._show_test_results:
@@ -2767,27 +2970,60 @@ class ActiveLearningModel:
                     """)
                 )
             except:
-                return pn.Column(
+                print("Markdown broke")
+                is_string = False
+                try:
+                    int(self.conf_mat_tr_tp)
+                except:
+                    is_string = True
+
+                if is_string:
+                    grid = pn.Column(
                     pn.pane.Markdown(
                         fr"""
                         ### Training:
 
                         |                        | **Actual Positive**             | **Actual Negative** |               |
                         |:----:|:----:|:----:|:----:|
-                        | **Predicted Positive** |   **{self.conf_mat_tr_tp}** <br> <small><i>TP</i></small>          |  **{self.conf_mat_tr_fn}** <br> <small><i>FN</i></small>               |  **** <br> <small><i>Recall</i></small>                  |
-                        | **Predicted Negative** |   **{self.conf_mat_tr_fp}** <br> <small><i>FP</i></small>          |  **{self.conf_mat_tr_tn}** <br> <small><i>TN</i></small>               |  **** <br> <small><i>False Positive Rate</i></small>|
-                        |                        |   **** <br>  <small><i>Precision</i></small>   | **** <br> <small><i>False Omission Rate</i></small>     |  **%** <br> <small><i>Acc</i></small>              |
+                        | **Predicted Positive** |   **{self.conf_mat_tr_tp}** <br> <small><i>TP</i></small>          |  **{self.conf_mat_tr_fp}** <br> <small><i>FP</i></small>               |  **** <br> <small><i>Precision</i></small>                  |
+                        | **Predicted Negative** |   **{self.conf_mat_tr_fn}** <br> <small><i>FN</i></small>          |  **{self.conf_mat_tr_tn}** <br> <small><i>TN</i></small>               |  **** <br> <small><i>False Ommission Rate</i></small>|
+                        |                        |   **** <br>  <small><i>Recall</i></small>   | **** <br> <small><i>False Positive Rate</i></small>     |  **%** <br> <small><i>Acc</i></small>              |
 
                         ### Validation:
 
                         |                        | **Actual Positive**             | **Actual Negative** |               |
                         |:----:|:----:|:----:|:----:|
-                        | **Predicted Positive** |   **{self.conf_mat_val_tp}** <br> <small><i>TP</i></small>          |  **{self.conf_mat_val_fn}** <br> <small><i>FN</i></small>               |  **** <br> <small><i>Recall</i></small>                  |
-                        | **Predicted Negative** |   **{self.conf_mat_val_fp}** <br> <small><i>FP</i></small>          |  **{self.conf_mat_val_tn}** <br> <small><i>TN</i></small>               |  **** <br> <small><i>False Positive Rate</i></small>|
-                        |                        |   **** <br>  <small><i>Precision</i></small>   | **** <br> <small><i>False Omission Rate</i></small>     |  **%** <br> <small><i>Acc</i></small>              |
+                        | **Predicted Positive** |   **{self.conf_mat_val_tp}** <br> <small><i>TP</i></small>          |  **{self.conf_mat_val_fp}** <br> <small><i>FP</i></small>               |  **** <br> <small><i>Precision</i></small>                  |
+                        | **Predicted Negative** |   **{self.conf_mat_val_fn}** <br> <small><i>FN</i></small>          |  **{self.conf_mat_val_tn}** <br> <small><i>TN</i></small>               |  **** <br> <small><i>False Ommission Rate</i></small>|
+                        |                        |   **** <br>  <small><i>Recall</i></small>   | **** <br> <small><i>False Positive Rate</i></small>     |  **%** <br> <small><i>Acc</i></small>              |
                         
                     """)
                 )
+                
+                else:
+                    grid = pn.Column(
+                    pn.pane.Markdown(
+                        fr"""
+                        ### Training:
+
+                        |                        | **Actual Positive**             | **Actual Negative** |               |
+                        |:----:|:----:|:----:|:----:|
+                        | **Predicted Positive** |   **{self.conf_mat_tr_tp}** <br> <small><i>TP</i></small>          |  **{self.conf_mat_tr_fp}** <br> <small><i>FP</i></small>               |  **{self._train_scores['prec']}** <br> <small><i>Precision</i></small>                  |
+                        | **Predicted Negative** |   **{self.conf_mat_tr_fn}** <br> <small><i>FN</i></small>          |  **{self.conf_mat_tr_tn}** <br> <small><i>TN</i></small>               |  **** <br> <small><i>False Ommission Rate</i></small>|
+                        |                        |   **{self._train_scores['rec']}** <br>  <small><i>Recall</i></small>   | **** <br> <small><i>False Positive Rate</i></small>     | <div><div style='float:left;width:47%;margin-right: 1px;'>**{self._train_scores['acc']}%** <br> <small><i>Acc</i></small> </div> <div style='float:left;width:47%; border-left: 1px solid; margin-left: 1px;'>**{self._train_scores['f1']}** <br> <small><i>F1</i></small></div></div>              |
+
+                        ### Validation:
+
+                        |                        | **Actual Positive**             | **Actual Negative** |               |
+                        |:----:|:----:|:----:|:----:|
+                        | **Predicted Positive** |   **{self.conf_mat_val_tp}** <br> <small><i>TP</i></small>          |  **{self.conf_mat_val_fp}** <br> <small><i>FP</i></small>               |  **{self._val_scores['prec']}** <br> <small><i>Precision</i></small>                  |
+                        | **Predicted Negative** |   **{self.conf_mat_val_fn}** <br> <small><i>FN</i></small>          |  **{self.conf_mat_val_tn}** <br> <small><i>TN</i></small>               |  **** <br> <small><i>False Ommission Rate</i></small>|
+                        |                        |   **{self._val_scores['rec']}** <br>  <small><i>Recall</i></small>   | **** <br> <small><i>False Positive Rate</i></small>     | <div><div style='float:left;width:47%;margin-right: 1px;'>**{self._val_scores['acc']}%** <br> <small><i>Acc</i></small> </div> <div style='float:left;width:47%; border-left: 1px solid; margin-left: 1px;'>**{self._val_scores['f1']}** <br> <small><i>F1</i></small></div></div>              |
+                        
+                    """)
+                )
+
+                return grid
         else:
             if (not self._show_caution) or (self._seen_caution):
                 return pn.Column(
@@ -2895,18 +3131,31 @@ class ActiveLearningModel:
                     pn.Row(
                         self.classifier_dropdown,
                         self.query_strategy_dropdown,
+                        max_height=150,
+                        sizing_mode="fixed"
                     ),
                     self.starting_num_points,
-
+                    max_width=300,
+                    sizing_mode="fixed"
                 ),
                 pn.Column(
                     self.add_classifier_button,
                     self.remove_classifier_button,
                     self.start_training_button,
-
+                    max_width=105,
+                    min_width=105,
+                    sizing_mode="fixed",
                 ),
-                pn.Column(self.classifier_table,
-                          ),
+                pn.Column(
+                    self.classifier_table,
+                    max_width=400,
+                    min_width=400,
+
+                    min_height=120,
+                    max_height=120,
+                    sizing_mode="fixed"),
+
+                max_height=200,
             
             )
         else:
@@ -2925,11 +3174,19 @@ class ActiveLearningModel:
 
     def _panel_cb(self, attr, old, new):
         if self._training:
-
+            # print("current queried: ", queried_id)
+            
             query_idx = self.query_index
-            queried_id = self.id_pool.iloc[query_idx][config.settings["id_col"]]
+            # queried_id = self.id_pool.iloc[query_idx][config.settings["id_col"]]
+            queried_id = self.reduced_tr.iloc[query_idx][config.settings["id_col"]]
 
-            if self.src.data[config.settings["id_col"]] == list(queried_id):
+
+            if not isinstance(queried_id, list):
+                queried_id = [queried_id]
+
+            print("updated queried: ", queried_id)
+
+            if self.src.data[config.settings["id_col"]] == queried_id:
                 self._queried_is_selected = True
             else:
                 self._queried_is_selected = False
@@ -2999,8 +3256,23 @@ class ActiveLearningModel:
             self.panel_row[0] = pn.Column(
                 pn.Row(self.setup_row, max_height=25),
                 pn.Row(
-                    self.tabs_view,
-                    self._add_conf_matrices(),
+                    pn.Row(
+                        self.tabs_view,
+                        max_width=450,
+                        min_width=450,
+                        max_height=450,
+                        min_height=450
+                    ),
+                    pn.Row(
+                        self._add_conf_matrices(),
+                        max_height=500,
+                        min_height=500,
+                        max_width=500,
+                        min_width=500
+                    ),
+                    max_height=500,
+                    min_height=500,
+                    sizing_mode="fixed"
                 ),
                 pn.Row(max_height=20),
                 buttons_row,

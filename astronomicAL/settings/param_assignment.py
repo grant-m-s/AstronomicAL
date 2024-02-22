@@ -1,4 +1,4 @@
-from bokeh.models import ColumnDataSource
+from bokeh.models import ColumnDataSource, CheckboxGroup
 
 import astronomicAL.config as config
 import panel as pn
@@ -82,6 +82,14 @@ class ParameterAssignment(param.Parameterized):
             max_width=700,
         )
 
+        self.image_train = pn.widgets.Checkbox(
+                name="Are you training on images?")
+
+        config.settings["image_train"] = False
+
+        self.image_train.param.watch(self._image_train_cb, 'value')
+
+
     def update_data(self, dataframe=None):
         """Update the local copy of the data and update widgets accordingly.
 
@@ -115,6 +123,13 @@ class ParameterAssignment(param.Parameterized):
 
             self.extra_info_selector.options = cols
             self.extra_images_selector.options = cols
+
+
+
+    def _image_train_cb(self, event):
+        print(self.image_train.value)
+        config.settings["image_train"] = self.image_train.value
+        print(config.settings)
 
     @param.depends("label_column", watch=True)
     def _update_labels_cb(self):
@@ -324,10 +339,12 @@ class ParameterAssignment(param.Parameterized):
         if self.completed:
             self.column[0] = pn.pane.Str("Settings Saved.")
         else:
+            
             layout = pn.Column(
                 pn.Row(
-                    pn.Row(self.param.id_column, max_width=150),
-                    pn.Row(self.param.label_column, max_width=150),
+                    pn.Row(self.param.id_column,self.param.label_column,
+                           self.image_train,
+                           max_width=500,max_height=100, sizing_mode="fixed"),
                     max_width=600,
                 )
             )
@@ -362,6 +379,7 @@ class ParameterAssignment(param.Parameterized):
                         max_height=20,
                     )
                 )
+                layout.append(pn.Spacer(height=30))
                 layout.append(
                     pn.layout.Tabs(
                         (

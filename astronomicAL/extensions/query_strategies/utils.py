@@ -9,10 +9,10 @@ import numpy as np
 def adjust_learning_rate(optimizer, epoch, gammas, schedule, args):
     """Sets the learning rate to the initial LR decayed by 10 every 30 epochs"""
     "Add by YU"
-    lr = args.lr
-    mu = args.momentum
+    lr = args["lr"]
+    mu = args["momentum"]
 
-    if args.optimizer != "YF":
+    if args["optimizer"] != "YF":
         assert len(gammas) == len(
             schedule), "length of gammas and schedule should be equal"
         for (gamma, step) in zip(gammas, schedule):
@@ -23,7 +23,7 @@ def adjust_learning_rate(optimizer, epoch, gammas, schedule, args):
         for param_group in optimizer.param_groups:
             param_group['lr'] = lr
 
-    elif args.optimizer == "YF":
+    elif args["optimizer"] == "YF":
         lr = optimizer._lr
         mu = optimizer._mu
 

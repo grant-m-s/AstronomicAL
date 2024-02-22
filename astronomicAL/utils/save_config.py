@@ -106,6 +106,8 @@ def save_config_file(layout_from_js, trigger_text, autosave=False, test=False):
     export_config["id_col"] = config.settings["id_col"]
     export_config["label_col"] = config.settings["label_col"]
     export_config["default_vars"] = config.settings["default_vars"]
+    export_config["image_train"] = config.settings["image_train"]
+    export_config["image_col"] = config.settings["image_col"] if config.settings["image_train"] else None
     export_config["labels"] = config.settings["labels"]
     export_config["label_colours"] = config.settings["label_colours"]
     export_config["labels_to_strings"] = config.settings["labels_to_strings"]
@@ -131,16 +133,16 @@ def save_config_file(layout_from_js, trigger_text, autosave=False, test=False):
     if autosave:
         print("AUTOSAVING...")
         with open("configs/autosave.json", "w") as fp:
-            json.dump(export_config, fp, cls=NumpyEncoder,indent=2)
+            json.dump(export_config, fp, cls=NumpyEncoder)
     elif test:
         with open(f"configs/config_export.json", "w") as fp:
-            json.dump(export_config, fp, cls=NumpyEncoder,indent=2)
+            json.dump(export_config, fp, cls=NumpyEncoder)
     else:
         now = datetime.now()
         print(now)
         dt_string = now.strftime("%Y%m%d_%H:%M:%S")
         with open(f"configs/config_{dt_string}.json", "w") as fp:
-            json.dump(export_config, fp, cls=NumpyEncoder,indent=2)
+            json.dump(export_config, fp, cls=NumpyEncoder)
 
         print(f"Final Export Config Settings: {export_config}")
         print(f"Config File saved to: configs/config_{dt_string}.json")

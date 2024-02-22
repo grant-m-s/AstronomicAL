@@ -1,6 +1,7 @@
 import numpy as np
 import pdb
 import torch
+from imageio.v3 import imread
 from torchvision import datasets
 from torch.utils.data import Dataset
 from PIL import Image
@@ -132,14 +133,16 @@ def get_net_args(dataset):
                     'size': 64,
                     'transform_tr': transforms.Compose([
                                     # transforms.RandomCrop(size = 32, padding=4),
+                                    transforms.CenterCrop(size = 128),
                                     transforms.RandomHorizontalFlip(),
-                                    transforms.ToTensor(), 
-                                    transforms.Normalize((0.17279421), (0.00056456117))]),
+                                    transforms.ToTensor()]),
+                                    # transforms.Normalize((0.17279421), (0.00056456117))]),
                     'transform_te': transforms.Compose([transforms.ToTensor(), 
-                                    transforms.Normalize((0.17279421), (0.00056456117))]),
-                    'loader_tr_args':{'batch_size':1024, 'num_workers': 4},
-                    'loader_te_args':{'batch_size': 1024, 'num_workers': 8},
-                    'normalize':{'mean': (0.17279421), 'std': (0.00056456117)},
+                                    transforms.CenterCrop(size = 128)]),
+                                    # transforms.Normalize((0.17279421), (0.00056456117))]),
+                    'loader_tr_args':{'batch_size':256, 'num_workers': 4},
+                    'loader_te_args':{'batch_size': 256, 'num_workers': 4},
+                    # 'normalize':{'mean': (0.17279421), 'std': (0.00056456117)},
                     }
             }
     
@@ -643,3 +646,44 @@ class Wa_datahandler3(Dataset):
 
         return index,x_1,y_1,x_2,y_2
 
+
+class ImageDataset(Dataset):
+
+    def __init__(self, df, image_col, label_col, transform=None):
+        """
+        Args:
+            csv_file (string): Path to the csv file with annotations.
+            root_dir (string): Directory with all the images.
+            transform (callable, optional): Optional transform to be applied
+                on a sample.
+        """
+        self.transform = transform
+        self.image_col = image_col
+        self.label_col = label_col
+        self.df = df
+
+    def __len__(self):
+        return len(self.df)
+
+    def __getitem__(self, idx):
+
+        X = imread(self.df[self.image_col].values[idx], plugin="pillow")
+
+        if type(X) is np.ndarray:
+            X = Image.fromarray(X)
+
+        if self.transform:
+            X = self.transform(X)
+        Y = self.df[self.label_col].values[idx]
+    
+
+        sample = {'X':X,
+                  'Y':Y,
+                  'idx':idx}
+        
+        return sample
+
+
+
+        return 
+        

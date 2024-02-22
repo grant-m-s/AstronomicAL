@@ -127,7 +127,11 @@ class DataSelection(param.Parameterized):
 
     def _get_data_files(self):
         files = glob.glob("data/*.*")
-        return files
+        files_ = []
+        for f in files:
+            if not ".py" in f[-3:]:
+                files_.append(f)
+        return files_
 
     def _get_config_files(self):
         files = glob.glob("configs/*.json")

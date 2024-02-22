@@ -43,6 +43,7 @@ def get_save_layout_button(enable_button, from_main):
 
 
 def _save_layout_button_rename():
+    print("\n\n\nsave clicked")
     get_save_layout_button(settings["confirmed"], True).disabled = True
     get_save_layout_button(
         settings["confirmed"], True

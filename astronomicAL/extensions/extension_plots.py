@@ -37,6 +37,13 @@ def get_plot_dict():
             ],
         ),
         "SED Plot": SEDPlot(sed_plot, []),
+        "QUEST Embed": CustomPlot(
+            QUEST_plot,
+            [
+                "QUEST_x",
+                "QUEST_y",
+            ],
+        ),
     }
 
     return plot_dict
@@ -427,6 +434,24 @@ def mateos_2012_wedge(data, selected=None):
 
     return plot
 
+def QUEST_plot(data, selected=None):
+    print("create first plot of wedge...")
+
+    plot = create_plot(
+        data,
+        config.settings["QUEST_x"],
+        config.settings["QUEST_y"],
+        plot_type="scatter",
+        legend=True,
+        selected=selected,
+        legend_position="bottom_right",
+    )
+
+    plot = plot
+
+    plot.opts(legend_position="bottom_left")
+
+    return plot
 
 class SEDPlot(CustomPlot):
     def __init__(self, plot_fn, extra_features):
