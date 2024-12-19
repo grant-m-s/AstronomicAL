@@ -1,4 +1,4 @@
-numpy==1.21
+numpy==1.22
 bokeh==2.2.3
 panel==0.10.3
 astropy==4.1
