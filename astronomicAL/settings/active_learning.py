@@ -127,7 +127,7 @@ class ActiveLearningSettings(param.Parameterized):
             options=[],
             width=500,
             max_width=500,
-            sizing_mode="fixed",
+            # sizing_mode="fixed",
         )
 
         self.feature_selector._buttons[True].on_click(self._verify_valid_selection_cb)
@@ -179,7 +179,7 @@ class ActiveLearningSettings(param.Parameterized):
         )
 
         self._exclude_labels_tooltip = pn.pane.HTML(
-            "<span data-toggle='tooltip' title='If enabled, this will remove the unused labels from train, val and test sets. All other plots remain unaffected.' style='border-radius: 15px;padding: 5px; background: #5e5e5e; ' >❔</span> ",
+            "<span data-toggle='tooltip' title='If enabled, this will remove the unused labels from train, val and test sets. All other plots remain unaffected.' styles='border-radius: 15px;padding: 5px; background: #5e5e5e; ' >❔</span> ",
             max_width=5,
         )
 
@@ -188,7 +188,7 @@ class ActiveLearningSettings(param.Parameterized):
         )
 
         self._scale_features_tooltip = pn.pane.HTML(
-            "<span data-toggle='tooltip' title='If enabled, this can improve the performance of your model, however will require you to scale all new data with the produced scaler. This scaler will be saved in your model directory.' style='border-radius: 15px;padding: 5px; background: #5e5e5e; ' >❔</span> ",
+            "<span data-toggle='tooltip' title='If enabled, this can improve the performance of your model, however will require you to scale all new data with the produced scaler. This scaler will be saved in your model directory.' styles='border-radius: 15px;padding: 5px; background: #5e5e5e; ' >❔</span> ",
             max_width=5,
         )
 
@@ -227,12 +227,12 @@ class ActiveLearningSettings(param.Parameterized):
             value=True,
         )
         self._exclude_unknown_labels_tooltip = pn.pane.HTML(
-            "<span data-toggle='tooltip' title='If enabled, this will remove the unknown labels from train, val and test sets. By not removing unknown labels you will have more data, however your accuracy metrics will be affected.' style='border-radius: 15px;padding: 5px; background: #5e5e5e; ' >❔</span> ",
+            "<span data-toggle='tooltip' title='If enabled, this will remove the unknown labels from train, val and test sets. By not removing unknown labels you will have more data, however your accuracy metrics will be affected.' styles='border-radius: 15px;padding: 5px; background: #5e5e5e; ' >❔</span> ",
             max_width=5,
         )
 
         self._memory_opt_tooltip = pn.pane.HTML(
-            "<span data-toggle='tooltip' title='These are the axes that will be displayed in the Active Learning panel. This does not restrict the axes in any of the other plots.' style='border-radius: 15px;padding: 5px; background: #5e5e5e; ' >❔</span> ",
+            "<span data-toggle='tooltip' title='These are the axes that will be displayed in the Active Learning panel. This does not restrict the axes in any of the other plots.' styles='border-radius: 15px;padding: 5px; background: #5e5e5e; ' >❔</span> ",
             max_width=5,
         )
 

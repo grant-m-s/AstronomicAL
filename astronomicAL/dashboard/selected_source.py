@@ -424,14 +424,19 @@ class SelectedSourceDashboard:
                 ["Source ID", self.src.data[config.settings["id_col"]][0]]
             ]
 
+            extra_data_string = "" 
             for i, col in enumerate(config.settings["extra_info_cols"]):
 
-                extra_data_list.append([col, self.src.data[f"{col}"][0]])
+                extra_data_string += f"{col}: {self.src.data[f'{col}'][0]} \n"
 
-            extra_data_df = pd.DataFrame(extra_data_list, columns=["Column", "Value"])
-            extra_data_pn = pn.widgets.DataFrame(
-                extra_data_df, show_index=False, autosize_mode="fit_viewport"
-            )
+                # extra_data_list.append([col, self.src.data[f"{col}"][0]])
+
+            # extra_data_df = pd.DataFrame(extra_data_list, columns=["Column", "Value"])
+            # extra_data_pn = pn.widgets.DataFrame(
+            #     extra_data_df, show_index=False, autosize_mode="fit_viewport"
+            # )
+
+            extra_data_pn = extra_data_string
             self.row[0] = pn.Card(
                 pn.Column(
                     pn.Row(
@@ -442,10 +447,9 @@ class SelectedSourceDashboard:
                                 self.radio_image,
                             ),
                         ),
-                        pn.Row(extra_data_pn, max_height=250, max_width=300),
+                        pn.Row(extra_data_pn), max_height=250, max_width=300),
                     ),
                     self._create_image_tab(),
-                ),
                 collapsible=False,
                 header=pn.Row(self.close_button, self.deselect_buttton, max_width=300),
             )

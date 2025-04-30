@@ -161,4 +161,6 @@ class Dashboard(param.Parameterized):
                 collapsible=False,
             )
 
+        print("self.row dashboard:", self.row)
+
         return self.row

@@ -43,6 +43,7 @@ class ActiveLearningDashboard:
         # CHANGED :: Add to AL settings
         for label in config.settings["labels_to_train"]:
             raw_label = config.settings["strings_to_labels"][label]
+            print("AL Dashboard:", label, raw_label)
             self.active_learning.append(
                 ActiveLearningModel(df=self.df, src=self.src, label=label)
             )
