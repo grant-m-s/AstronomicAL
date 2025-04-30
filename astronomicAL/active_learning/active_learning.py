@@ -553,7 +553,7 @@ class ActiveLearningModel:
             active=[0, 1],
             max_height=35,
             height=35,
-            sizing_mode="fixed",
+            # sizing_mode="fixed",
         )
 
         self._train_tab_colour_switch.on_change("active", self._update_tab_plots_cb)
@@ -563,7 +563,7 @@ class ActiveLearningModel:
             active=[0, 1],
             max_height=35,
             height=35,
-            sizing_mode="fixed",
+            # sizing_mode="fixed",
         )
         self._val_tab_colour_switch.on_change("active", self._update_tab_plots_cb)
 
@@ -2286,12 +2286,12 @@ class ActiveLearningModel:
             return pn.Column(
                 pn.pane.Markdown(
                     "**Training Set:**",
-                    sizing_mode="fixed",
+                    # sizing_mode="fixed",
                     margin=(0, 0, 0, 0),
                 ),
                 pn.pane.Markdown(
                     f"Acc: {self._train_scores['acc']}, Prec: {self._train_scores['prec']}, Rec: {self._train_scores['rec']}, F1: {self._train_scores['f1']}",
-                    sizing_mode="fixed",
+                    # sizing_mode="fixed",
                 ),
                 pn.Row(
                     pn.Column(
@@ -2314,7 +2314,7 @@ class ActiveLearningModel:
                 pn.pane.Markdown("**Validation Set:**", sizing_mode="fixed"),
                 pn.pane.Markdown(
                     f"Acc: {self._val_scores['acc']}, Prec: {self._val_scores['prec']}, Rec: {self._val_scores['rec']}, F1: {self._val_scores['f1']}",
-                    sizing_mode="fixed",
+                    # sizing_mode="fixed",
                 ),
                 pn.Row(
                     pn.Column(
@@ -2340,7 +2340,7 @@ class ActiveLearningModel:
                     pn.pane.Markdown("Test Set:", sizing_mode="fixed"),
                     pn.pane.Markdown(
                         f"Acc: {self._test_scores['acc']}, Prec: {self._test_scores['prec']}, Rec: {self._test_scores['rec']}, F1: {self._test_scores['f1']}",
-                        sizing_mode="fixed",
+                        # sizing_mode="fixed",
                     ),
                     pn.Row(
                         pn.Column(
@@ -2506,13 +2506,13 @@ class ActiveLearningModel:
         if self._queried_is_selected:
             selected_message = pn.pane.Markdown(
                 "**The queried source is currently selected**",
-                style={"color": "#558855"},
+                styles={"color": "#558855"},
                 max_width=250,
             )
         else:
             selected_message = pn.pane.Markdown(
                 "**The queried source is not currently selected**",
-                style={"color": "#ff5555"},
+                styles={"color": "#ff5555"},
                 max_width=250,
             )
 

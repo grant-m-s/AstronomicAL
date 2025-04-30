@@ -83,7 +83,7 @@ class DataSelection(param.Parameterized):
             name="Optimise for memory?", value=True
         )
         self._memory_opt_tooltip = pn.pane.HTML(
-            "<span data-toggle='tooltip' title='(up to 0.5x memory consumption, however initial loading of data can take up to 10x longer).' style='border-radius: 15px;padding: 5px; background: #5e5e5e; ' >❔</span> ",
+            "<span data-toggle='tooltip' title='(up to 0.5x memory consumption, however initial loading of data can take up to 10x longer).' styles='border-radius: 15px;padding: 5px; background: #5e5e5e; ' >❔</span> ",
             max_width=5,
         )
 
@@ -236,7 +236,7 @@ class DataSelection(param.Parameterized):
 
         if ext == "fits":
             for col, dtype in df.dtypes.items():
-                if dtype == np.object:  # Only process byte object columns.
+                if dtype == object:  # Only process byte object columns.
                     df[col] = df[col].apply(lambda x: x.decode("utf-8"))
 
         df = self.add_ra_dec_col(df)

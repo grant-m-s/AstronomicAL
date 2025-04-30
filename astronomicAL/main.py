@@ -78,23 +78,26 @@ react = pn.template.ReactTemplate(title="astronomicAL")
 pn.config.sizing_mode = "stretch_both"
 
 if os.path.isfile(config.layout_file):
+    print("loading from file...")
     react = load_config.create_layout_from_file(react)
+    print("loaded from file...")
+
 else:
     react = load_config.create_default_layout(react)
 
-export_fits_file_button = pn.widgets.Button(
-    name="Export Labelled Data to Fits File", disabled=False
-)
+# export_fits_file_button = pn.widgets.Button(
+#     name="Export Labelled Data to Fits File", disabled=False
+# )
 
-export_fits_file_button.on_click(export_fits_file_cb)
+# export_fits_file_button.on_click(export_fits_file_cb)
 
 
-react.header.append(
-    pn.Row(
-        config.get_save_layout_button(config.settings["confirmed"], True),
-        export_fits_file_button,
-    )
-)
+# react.header.append(
+#     pn.Row(
+#         config.get_save_layout_button(config.settings["confirmed"], True),
+#         export_fits_file_button,
+#     )
+# )
 
 react.servable()
 

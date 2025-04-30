@@ -239,6 +239,7 @@ def create_layout_from_file(react):
     curr_layout = curr_config_file["layout"]
 
     for p in curr_layout:
+        print("curr_layout: ", p)
         start_row = curr_layout[p]["y"]
         end_row = curr_layout[p]["y"] + curr_layout[p]["h"]
         start_col = curr_layout[p]["x"]

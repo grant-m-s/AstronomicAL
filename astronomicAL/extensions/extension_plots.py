@@ -153,14 +153,14 @@ def create_plot(
     if colours:
         color_key = config.settings["label_colours"]
 
-        color_points = hv.NdOverlay(
-            {
-                config.settings["labels_to_strings"][f"{n}"]: hv.Points(
-                    [0, 0], label=config.settings["labels_to_strings"][f"{n}"]
-                ).opts(style=dict(color=color_key[n], size=0))
-                for n in color_key
-            }
-        )
+        # color_points = hv.NdOverlay(
+        #     {
+        #         config.settings["labels_to_strings"][f"{n}"]: hv.Points(
+        #             [0, 0], label=config.settings["labels_to_strings"][f"{n}"]
+        #         ).opts(style=dict(color=color_key[n], size=0))
+        #         for n in color_key
+        #     }
+        # )
 
     if smaller_axes_limits:
 
@@ -238,7 +238,7 @@ def create_plot(
         plot = plot * selected_plot
 
     if legend and colours:
-        plot = plot * color_points
+        plot = plot #* color_points
 
     if legend_position is not None:
         plot = plot.opts(legend_position=legend_position)

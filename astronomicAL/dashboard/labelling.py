@@ -1,7 +1,8 @@
+import panel as pn
+pn.extension('tabulator')
 import astronomicAL.config as config
 from astronomicAL.dashboard.plot import PlotDashboard
 from astronomicAL.active_learning.active_learning import ActiveLearningModel
-import panel as pn
 import numpy as np
 import datashader as ds
 import holoviews as hv
@@ -12,7 +13,6 @@ import os
 import json
 
 from functools import partial
-
 
 from holoviews.operation.datashader import (
     datashade,
@@ -316,14 +316,14 @@ class LabellingDashboard(param.Parameterized):
 
         color_key = config.settings["label_colours"]
 
-        color_points = hv.NdOverlay(
-            {
-                config.settings["labels_to_strings"][f"{n}"]: hv.Points(
-                    [0, 0], label=config.settings["labels_to_strings"][f"{n}"]
-                ).opts(style=dict(color=color_key[n], size=0))
-                for n in color_key
-            }
-        )
+        # color_points = hv.NdOverlay(
+        #     {
+        #         config.settings["labels_to_strings"][f"{n}"]: hv.Points(
+        #             [0, 0], label=config.settings["labels_to_strings"][f"{n}"]
+        #         ).opts(style=dict(color=color_key[n], size=0))
+        #         for n in color_key
+        #     }
+        # )
 
         max_x = np.max(self.df[x_var])
         min_x = np.min(self.df[x_var])
@@ -387,13 +387,14 @@ class LabellingDashboard(param.Parameterized):
             threshold=0.7,
             how="saturate",
         )
-        plot = (all_points * sample_region_plot * selected_plot * color_points).opts(
+        plot = (all_points * sample_region_plot * selected_plot).opts(
             shared_axes=False,
         )
 
         return plot
 
     def _assign_label_cb(self, event):
+        print("_assign_label_cb")
 
         selected_label = self.assign_label_group.value
         id = self.src.data[config.settings["id_col"]][0]
@@ -506,6 +507,7 @@ class LabellingDashboard(param.Parameterized):
         self.new_labelled_button.disabled = False
 
     def _panel_cb(self, attr, old, new):
+        print("_panel_cb callback")
         self.panel()
 
     def _apply_format(self, plot, element):
@@ -526,7 +528,12 @@ class LabellingDashboard(param.Parameterized):
 
         """
 
-        df_pane = hv.Table(self.region_criteria_df).opts(hooks=[self._apply_format])
+        col_names = self.region_criteria_df.columns.tolist()
+
+
+        pn.extension('tabulator')
+
+        df_pane = pn.widgets.Tabulator(self.region_criteria_df, widths={col_names[0]:80,col_names[1]:50,col_names[2]:50})
 
         buttons_row = pn.Row(
             self.assign_label_group,
@@ -543,14 +550,18 @@ class LabellingDashboard(param.Parameterized):
 
         index = self.get_current_index_in_labelled_data()
 
+        print("current index: ", index, type(index))
+
         self._reset_index_buttons()
 
         if (index == 0) or (total == 0):
             self.first_labelled_button.disabled = True
             self.prev_labelled_button.disabled = True
-
-        if index >= (total - 1):
-            self.next_labelled_button.disabled = True
+        if type(index) == int:
+            if index >= (total - 1):
+                self.next_labelled_button.disabled = True
+        else:
+            print("\n\ncurrent index is not int: ", index, type(index), "\n\n")
 
         if len(self.sample_region) == 0:
             self.new_labelled_button.disabled = True
@@ -616,6 +627,8 @@ class LabellingDashboard(param.Parameterized):
 
         self.assign_label_button.disabled = False
 
+        print("row before", self.row[0])
+
         self.row[0] = pn.Card(
             pn.Row(
                 plot,
@@ -624,14 +637,17 @@ class LabellingDashboard(param.Parameterized):
             ),
             buttons_row,
             header=pn.Row(
-                pn.Spacer(width=25, sizing_mode="fixed"),
+                pn.Spacer(width=25,
+                        #    sizing_mode="fixed"
+                           ),
                 pn.Row(self.param.X_variable, max_width=100),
                 pn.Row(self.param.Y_variable, max_width=100),
                 max_width=100,
-                sizing_mode="fixed",
+                # sizing_mode="fixed",
             ),
             collapsible=False,
             sizing_mode="stretch_both",
         )
+        print(self.row)
 
         return self.row

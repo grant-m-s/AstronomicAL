@@ -153,14 +153,14 @@ class PlotDashboard(param.Parameterized):
 
         color_key = config.settings["label_colours"]
 
-        color_points = hv.NdOverlay(
-            {
-                config.settings["labels_to_strings"][f"{n}"]: hv.Points(
-                    [0, 0], label=config.settings["labels_to_strings"][f"{n}"]
-                ).opts(style=dict(color=color_key[n], size=0))
-                for n in color_key
-            }
-        )
+        # color_points = hv.NdOverlay(
+        #     {
+        #         config.settings["labels_to_strings"][f"{n}"]: hv.Points(
+        #             [0, 0], label=config.settings["labels_to_strings"][f"{n}"]
+        #         ).opts(style=dict(color=color_key[n], size=0))
+        #         for n in color_key
+        #     }
+        # )
 
         max_x = np.max(self.df[x_var])
         min_x = np.min(self.df[x_var])
@@ -203,7 +203,7 @@ class PlotDashboard(param.Parameterized):
                 how="saturate",
             )
             * selected_plot
-            * color_points
+            # * color_points
         ).opts(legend_position="bottom_right", shared_axes=False)
         return plot
 
@@ -221,12 +221,14 @@ class PlotDashboard(param.Parameterized):
         self.row[0] = pn.Card(
             pn.Row(self.plot, sizing_mode="stretch_both"),
             header=pn.Row(
-                pn.Spacer(width=25, sizing_mode="fixed"),
+                pn.Spacer(width=25,
+                        #    sizing_mode="fixed"
+                           ),
                 self.close_button,
                 pn.Row(self.param.X_variable, max_width=100),
                 pn.Row(self.param.Y_variable, max_width=100),
                 max_width=400,
-                sizing_mode="fixed",
+                # sizing_mode="fixed",
             ),
             collapsible=False,
             sizing_mode="stretch_both",
