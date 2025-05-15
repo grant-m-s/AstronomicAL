@@ -1,7 +1,7 @@
 from astronomicAL.dashboard.active_learning import ActiveLearningDashboard
 from astronomicAL.dashboard.labelling import LabellingDashboard
 from astronomicAL.dashboard.menu import MenuDashboard
-from astronomicAL.dashboard.plot import PlotDashboard
+from astronomicAL.dashboard.plot import PlotDashboard, HistoDashboard
 from astronomicAL.dashboard.selected_source import SelectedSourceDashboard
 from astronomicAL.dashboard.settings_dashboard import SettingsDashboard
 from astronomicAL.extensions import extension_plots
@@ -106,6 +106,13 @@ class Dashboard(param.Parameterized):
                 print("Please Complete Settings before accessing this view.")
                 return
             self.panel_contents = PlotDashboard(self.src, self._close_button)
+        
+        elif self.contents == "Histogram Plot":
+            if not config.settings["confirmed"]:
+                self.contents = "Menu"
+                print("Please Complete Settings before accessing this view.")
+                return
+            self.panel_contents = HistoDashboard(self.src, self._close_button)
 
         elif self.contents == "Labelling":
 

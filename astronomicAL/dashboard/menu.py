@@ -28,6 +28,7 @@ class MenuDashboard:
 
         plot_options = [
             "Basic Plot",
+            "Histogram Plot",
             "Selected Source Info",
         ] + list(extension_plots.get_plot_dict().keys())
 
