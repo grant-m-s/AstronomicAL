@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 import panel as pn
 import param
+from matplotlib.figure import Figure
 
 
 class PlotDashboard(param.Parameterized):
@@ -235,3 +236,252 @@ class PlotDashboard(param.Parameterized):
         )
 
         return self.row
+    
+#######################################
+
+class HistoDashboard(param.Parameterized):
+    """A Dashboard used for rendering histograms of the data.
+
+    Parameters
+    ----------
+    src : ColumnDataSource
+        The shared data source which holds the current selected source.
+
+    Attributes
+    ----------
+    X_variable : param.Selector
+        A Dropdown list of columns the user can use for the x-axis of the plot.
+    row : Panel Row
+        The panel is housed in a row which can then be rendered by the
+        parent Dashboard.
+    df : DataFrame
+        The shared dataframe which holds all the data.
+
+    """
+
+    X_variable = param.Selector(
+        objects=["0"], default="0", doc= "Selection box for the X axis of the plot.")
+
+
+    def __init__(self, src, close_button):
+        super(HistoDashboard, self).__init__()
+
+        self.row = pn.Row(pn.pane.Str("loading"))
+        self.src = src
+        self._initialize_widgets()
+        self.src.on_change("data", self._panel_cb)
+        self.df = config.main_df
+        self.close_button = close_button
+        self.update_variable_lists()
+
+    def _update_variable_lists_cb(self, attr, old, new):
+        self.update_variable_lists()
+
+    def update_df(self):
+        self.df = config.main_df
+
+    def update_variable_lists(self):
+        """Update the list of options used inside `X_variable`.
+
+        This method retrieves an up-to-date list of columns inside `df` and
+        assigns them to both Selector objects.
+
+        Returns
+        -------
+        None
+
+        """
+
+        self.update_df()
+
+        cols = list(self.df.columns)
+
+        if config.settings["id_col"] in cols:
+            cols.remove(config.settings["id_col"])
+
+        self.param.X_variable.objects = cols
+        self.param.X_variable.default = config.settings["default_vars"][0]
+        self.X_variable = config.settings["default_vars"][0]
+
+
+    def _panel_cb(self, attr, old, new):
+        cols = list(self.df.columns)
+
+        if config.settings["id_col"] in cols:
+            cols.remove(config.settings["id_col"])
+
+        for i in config.dashboards.keys():
+            if config.dashboards[i].contents == "Histogram Plot":   ####add somewhere
+                curr_x = config.dashboards[i].panel_contents.X_variable
+                if curr_x == self.X_variable:
+                    try:
+                        config.dashboards[i].panel_contents.X_variable = curr_x
+                        config.dashboards[i].panel_contents.panel()
+                    except:
+                        config.dashboards[i].set_contents = "Menu"
+
+                    break
+
+        self.panel()
+
+    def _initialize_widgets(self):
+        self.log_xscale = pn.widgets.Checkbox(name = "x Log")
+        self.log_yscale = pn.widgets.Checkbox(name = "y Log")
+        self.density = pn.widgets.Checkbox(name = "Density")
+        self.cumulative = pn.widgets.Checkbox(name = "Cumulative")
+        self.Nbins_slider = pn.widgets.IntSlider(name='N bins', start=2, end=1000, step=1, value=10, value_throttled = 10)
+
+        self.log_xscale.param.watch(self._update_plot,  "value")
+        self.log_yscale.param.watch(self._update_plot,  "value")
+        self.cumulative.param.watch(self._update_plot,  "value")
+        #self.Nbins_slider.param.watch(self._update_plot, "value")
+        self.Nbins_slider.param.watch(self._update_plot, "value_throttled")
+        self.density.param.watch(self._update_plot,  "value")
+    
+
+    @param.depends("X_variable")
+    def plot(self, x_var=None):
+        """Create a basic scatter plot of the data with the selected axis.
+
+        The data is represented as a Holoviews Datashader object allowing for
+        large numbers of points to be rendered at once. Plotted using a Bokeh
+        renderer, the user has full manuverabilty of the data in the plot.
+
+        Returns
+        -------
+        plot : Holoviews Object
+            A Holoviews plot
+
+        """
+        if x_var is None:
+            x_var_name = self.X_variable
+            x_var = self.df[self.X_variable].to_numpy()
+        
+        x_var = x_var[np.isfinite(x_var)]
+        if self.log_xscale.value:
+            x_var = np.log10(x_var)
+            x_var = x_var[np.isfinite(x_var)]
+
+        stats, edges  =  np.histogram(x_var, bins = self.Nbins_slider.value)
+        if self.cumulative.value:
+            stats = np.cumsum(stats)
+        if self.log_yscale.value: ylim = (1,None) 
+        else: ylim = (0,None)
+        plot = hv.Histogram((edges, stats)).opts(color = "blue", logy = self.log_yscale.value, line_color="blue", ylim = ylim)
+
+        cols = list(self.df.columns)
+
+        if len(self.src.data[cols[0]]) == 1:
+            selected = pd.DataFrame(self.src.data, columns=cols, index=[0])
+            selected_plot = hv.VLine(selected[x_var_name].iloc[0]).opts(
+            color="black",
+            line_dash = "dashed",
+            line_width = 1,
+            ylim = ylim
+            )
+            plot = (plot* selected_plot)
+        
+        plot = plot.opts(
+        xlabel=x_var_name,
+        ylabel="# Sources",
+        hooks=[tools])
+
+        return plot
+    
+    @staticmethod
+    def get_histogram(ax, x_var, bins = 10, log_x = False, log_y = False, density = False, cumulative = False,
+                      **kwargs):
+        if log_x:
+            x = np.log10(x_var)
+            x = x[np.isfinite(x)]
+        else:
+            x = x_var[np.isfinite(x_var)]
+        if density: 
+            weights = np.ones(len(x))/len(x)
+            ax.set_ylabel(r"\% of sources")
+        else:
+            weights = None
+            ax.set_ylabel("# of sources")
+        
+        ax.hist(x, bins = bins, log = log_y, 
+                cumulative = cumulative, weights = weights,
+                **kwargs);  
+  
+    @param.depends("X_variable")
+    def plot_mplt(self, x_var=None):
+        """Create a basic scatter plot of the data with the selected axis.
+
+        The data is represented as a Holoviews Datashader object allowing for
+        large numbers of points to be rendered at once. Plotted using a Bokeh
+        renderer, the user has full manuverabilty of the data in the plot.
+
+        Returns
+        -------
+        plot : Matplotlib plot
+
+        """
+        if x_var is None:
+            x_var_name = self.X_variable
+            x_var = self.df[self.X_variable].to_numpy()
+        
+        x_var = x_var[np.isfinite(x_var)]
+        if self.log_xscale.value:
+            x_var = np.log10(x_var)
+            x_var = x_var[np.isfinite(x_var)]
+
+        
+        fig = Figure()
+        ax = fig.subplots()
+        self.get_histogram(ax, x_var, bins = self.Nbins_slider.value, 
+                           log_x = self.log_xscale.value, log_y = self.log_yscale.value,
+                           cumulative = self.cumulative.value, density=self.density.value,
+                           **{"color" : "blue", "edgecolor" : "blue"}
+                        )
+                           
+        cols = list(self.df.columns)
+
+        if len(self.src.data[cols[0]]) == 1:
+            selected = pd.DataFrame(self.src.data, columns=cols, index=[0])
+            ax.axvline(selected[x_var_name].iloc[0], c = "k", ls = ':', lw =1)
+    
+        return fig
+
+
+    
+    def _update_plot(self, event):
+        self.panel()
+
+    def panel(self):
+        """Render the current view.
+
+        Returns
+        -------
+        row : Panel Row
+            The panel is housed in a row which can then be rendered by the
+            parent Dashboard.
+
+        """
+
+        self.row[0] = pn.Card(pn.Column(pn.WidgetBox(pn.Row(self.log_xscale, self.log_yscale, self.density, self.cumulative),
+                           self.Nbins_slider,min_width = 100, min_height = 33, max_width = 300, max_height = 100),
+                           pn.Row(self.plot_mplt), sizing_mode="scale_both"),
+            header=pn.Row(
+                pn.Spacer(width=25,
+                        #    sizing_mode="fixed"
+                           ),
+                self.close_button,
+                pn.Row(self.param.X_variable, max_width=100),
+                max_width=400,
+                # sizing_mode="fixed",
+            ),
+            collapsible=False,
+            sizing_mode="stretch_both",
+        )
+
+        return self.row
+
+
+def tools(plot, element):
+    plot.handles['plot'].toolbar.active_drag = None
+    plot.handles['plot'].toolbar.active_scroll = None
+

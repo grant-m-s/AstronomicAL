@@ -16,6 +16,12 @@ import json
 import os
 import param
 
+import matplotlib.pyplot as plt
+from matplotlib.figure import Figure
+import concurrent.futures 
+from astronomicAL.extensions.astro_data_utility import DESISpectraClass, EuclidCutoutsClass
+from astronomicAL.extensions.astro_data_utility import VLASS_cutout, LoTSS_cutout
+
 
 def get_plot_dict():
 
@@ -33,31 +39,45 @@ def get_plot_dict():
             ],
         ),
         "SED Plot": SEDPlot(sed_plot, []),
+
+        "Euclid Cutout" : CustomPlot(euclid_cutout_plot, []),
+
+        "Desi Spectrum" : CustomPlot(DESI_spectrum_plot, ["DESI_TargetID"], use_coordinates = True),
+
+        "SDSS Spectrum" : CustomPlot(SDSS_spectrum_plot, ["SDSS_TargetID"], use_coordinates = True),
+
+        "VLA-VLASS Cutout" : CustomPlot(vlass_cutout_plot, []),
+
+        "LOFAR-LoTSS Cutout" : CustomPlot(lotss_cutout_plot, [])
     }
 
     return plot_dict
 
 
 class CustomPlot:
-    def __init__(self, plot_fn, extra_features):
+    def __init__(self, plot_fn, extra_features, use_coordinates = False):
+
+        """use_coordinates allows to have None as a column input and et data from 
+          coordinates via query, used for desi/sdss spectra"""
 
         self.plot_fn = plot_fn
         self.extra_features = extra_features
         self.row = pn.Row("Loading...")
+        self.use_coordinates = use_coordinates
 
     def create_settings(self, unknown_cols):
         self.waiting = True
+        main_columns = list(config.main_df.columns)
         settings_column = pn.Column()
         for i, col in enumerate(unknown_cols):
 
             if i % 3 == 0:
                 settings_row = pn.Row()
-
-            settings_row.append(
-                pn.widgets.Select(
-                    name=col, options=list(config.main_df.columns), max_height=120
-                )
-            )
+            
+            options = ["Query from RA&Dec"] + main_columns if self.use_coordinates else main_columns
+            select_widget = pn.widgets.Select(name=col, options=options, max_height=120)
+            settings_row.append(select_widget)
+           
 
             if (i % 3 == 2) or (i == len(unknown_cols) - 1):
                 settings_column.append(settings_row)
@@ -75,10 +95,11 @@ class CustomPlot:
 
     def plot(self, submit_button):
         self.submit_button = submit_button
-
+        
         current_cols = config.main_df.columns
-
+        
         unknown_cols = []
+        
         for col in self.extra_features:
             if col not in list(config.settings.keys()):
                 if col not in current_cols:
@@ -318,7 +339,6 @@ def bpt_plot(data, selected=None):
         ("SII", plot_SII.opts(legend_position="bottom_right", shared_axes=False)),
         ("OI", plot_OI.opts(legend_position="bottom_right", shared_axes=False)),
     )
-
     return tabs
 
 
@@ -648,3 +668,364 @@ def sed_plot(data, selected=None):
         )
 
     return plot
+
+
+################## Ivano
+
+def get_selected_source(data, selected):
+        if selected is None:
+            return None
+        cols = list(data.columns)
+        
+        if not len(selected.data[cols[0]]) == 1:
+            return None 
+        
+        return pd.DataFrame(selected.data, columns=cols, index=[0])
+
+
+def check_required_column(df, column):
+    return column in list(df.columns)
+
+
+def empty_panel(message = "Loading error"):
+    return pn.MarkDown(message)
+  
+
+def get_ra_dec(selected_source):
+    if check_required_column(selected_source, "ra_dec"):
+        ra_dec = selected_source["ra_dec"][0]
+        ra = float(ra_dec[: ra_dec.index(",")])
+        dec = float(ra_dec[ra_dec.index(",") + 1 :])
+    else:
+        print("No ra and dec available for this source")
+        ra, dec = None, None
+    return ra, dec
+
+
+def DESI_spectrum_plot(data, selected = None):
+    selected_source = get_selected_source(data=data, selected = selected)
+    ra, dec = get_ra_dec(selected_source)
+    
+
+    if config.settings["DESI_TargetID"] in selected_source.columns:
+        specId = int(selected_source[config.settings["DESI_TargetID"]].iloc[0])
+        
+    else:
+         specId = None
+         if ra is None or dec is None:
+            return empty_panel(message = "Missing Ra and Dec")
+         
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        future = executor.submit(run_desi, ra=ra, dec=dec, datasets = ["DESI-DR1", "DESI-EDR"],
+                                specId = specId, max_separation = 0.5)
+    desi_object = future.result()
+    if desi_object is not None:
+        _add_coordinates_to_data(data, desi_object.spectrum.ra, desi_object.spectrum.dec,
+                                                   column_name = "DESI_target")
+        is_star = desi_object.spectrum.spectype == "STAR"
+        plot = get_desi_figure(desi_object, plot_emlines = ~is_star, plot_abslines=is_star)
+        #plot = get_desi_figure_hv(desi_object, plot_emlines = ~is_star, plot_abslines=is_star)
+        return plot
+    else:
+        return None
+
+def SDSS_spectrum_plot(data, selected = None):
+    """Same as DESI but restricting to SDSS/BOSS"""
+    selected_source = get_selected_source(data=data, selected = selected)
+    ra, dec = get_ra_dec(selected_source)
+    
+    if config.settings["SDSS_TargetID"] in selected_source.columns:
+        specId = int(selected_source[config.settings["SDSS_TargetID"]].iloc[0])
+
+    else:
+         specId = None
+         if ra is None or dec is None:
+            return empty_panel(message = "Missing Ra and Dec")
+
+
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        future = executor.submit(run_desi, ra=ra, dec=dec, datasets = ["BOSS-DR16", "SDSS-DR16"],
+                                specId = None, max_separation = 0.5)
+    sdss_object = future.result()
+    if sdss_object is not None:
+        _add_coordinates_to_data(data, sdss_object.spectrum.ra, sdss_object.spectrum.dec,
+                                                   column_name = "SDSS_target")
+        is_star = sdss_object.spectrum.spectype == "STAR"
+        plot = get_desi_figure(sdss_object, plot_emlines = ~is_star, plot_abslines=is_star)
+        #plot = get_desi_figure_hv(sdss_object, plot_emlines = ~is_star, plot_abslines=is_star)
+        return plot
+    else:
+        return None
+
+def run_desi(ra, dec, datasets = ["DESI-DR1", "DESI-EDR", "BOSS-DR16", "SDSS-DR16"],
+            specId = None, max_separation = 0.5):
+    desi_object = DESISpectraClass(ra, dec, datasets = datasets ,specId = specId, max_separation = max_separation)
+    desi_object.get_spectrum()
+    if desi_object.spectrum is not None:
+        desi_object.get_smoothed_spectrum(kernel = "Box1dkernel", window = 10)
+        return desi_object
+    return None
+
+def get_desi_figure(desi_object, plot_emlines= True, plot_abslines = True):
+     desi_fig = Figure(figsize = (15,5))
+     desi_ax =  desi_fig.add_subplot(1,1,1)
+     desi_object.plot_spectrum(desi_ax, plot_model = True, plot_emlines = plot_emlines, plot_abslines = plot_abslines)
+     
+     desi_ax.text(0, 1.02, f"Dataset = {desi_object.spectrum.data_release}", fontsize = 15, transform = desi_ax.transAxes)
+     desi_ax.text(0.33, 1.02, f"SpecType = {desi_object.spectrum.spectype}", fontsize = 15, transform = desi_ax.transAxes)
+     desi_ax.text(0.66, 1.02, f"z = {np.round(desi_object.spectrum.redshift,4)}", fontsize = 15,transform = desi_ax.transAxes)
+     return desi_fig
+
+def get_desi_figure_hv(desi_object):
+    desi_fig = desi_object.plot_spectrum_hv(plot_model = True, plot_emlines = True)
+    return desi_fig
+
+def _add_coordinates_to_data(data, ra, dec, column_name):
+    ra_col_name = f"RA_{column_name}"
+    dec_col_name = f"Dec_{column_name}"
+    #if ra_col_name not in data.columns:
+    #    data[ra_col_name] = np.nan
+    #    data[dec_col_name] = np.nan
+    data[ra_col_name] = ra
+    data[dec_col_name] = dec
+    
+
+def euclid_cutout_plot(data, selected = None, radius =5):
+    selected_source = get_selected_source(data=data, selected = selected)
+    ra, dec = get_ra_dec(selected_source)
+    if ra is None or dec is None:
+        return empty_panel(message = "Missing Ra and Dec")
+    euclid_panel_manager = EuclidPanelManager(ra, dec, radius = radius, data = data)
+    return euclid_panel_manager.panel()
+
+
+class EuclidPanelManager:
+
+    """A class to be consistent with what I wrote in selected_source so 
+    that i can copy/paste that code"""
+    
+    def __init__(self, ra, dec, radius = 5, width = 300, data = None):
+        """radius in arcsec"""
+        self.ra = ra
+        self.dec = dec
+        self.radius = radius
+        self._initialise_radius_scaling_widgets(width = int(width))
+        self.data = data
+        self.euclid_pane = pn.pane.Matplotlib(dpi = 144,
+                                alt_text="Image Unavailable",
+                                sizing_mode="stretch_both",
+                                interactive = False,
+                                tight = True,
+                                width = int(width))
+        
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            future = executor.submit(self.run_init)
+        try:
+            future.result()  # eventually raise an exception???
+        except Exception as e:
+            print(f"Error occurred: {e}")
+
+        return None
+        
+
+    def _initialise_radius_scaling_widgets(self, width = 300):
+        self.radius_input = pn.widgets.FloatInput(name = "Radius [arcsec]", value = self.radius,
+                                                  step = 0.5, start = 1, end = 100, 
+                                                  sizing_mode="scale_width")
+        self.radius_input.param.watch(self._update_radius, "value")
+
+        
+        self.stretching_input = pn.widgets.Select(name = "Stretching function", 
+                                                options=  ['Linear', 'Sqrt', 'Log', 'Asinh', 'PowerLaw'],
+                                                sizing_mode = "scale_width")
+        
+        self.stretching_input.param.watch(self._update_stretching, "value")
+
+        
+        self.contrast_scaler = pn.widgets.RangeSlider(name = "Image scaling", 
+                                                    start = 0, end = 1,value = (0,1), step = 0.004, 
+                                                    sizing_mode = "scale_both")
+        
+        self.contrast_scaler.param.watch(self._update_intensity_scaling, "value")  
+
+        self.overplot_coords = pn.widgets.Checkbox(name = "Spectrum Coordinates")
+        self.overplot_coords.param.watch(self._add_coordinates, "value") 
+
+     
+    def _update_radius(self, event):
+        self.radius = event.new
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            future = executor.submit(self.run_radius)
+        try:
+            future.result()  # This would raise the exception
+        except Exception as e:
+            print(f"Error occurred: {e}")
+        #self.add_desi_coordinates()
+        self._update_image()
+
+    @staticmethod
+    def change_intensity_range(image, low, high):
+        image = np.clip(image, low, high)
+        image = (image-low)/(high-low)
+        return np.clip(image, 0,1)
+
+    def _update_intensity_scaling(self, event):
+        low, high = event.new
+        scaled_image = self.change_intensity_range(self.euclid_object.reprojected_data["stacked"], 
+                                                   low, high)
+        self.euclid_image.set_data(scaled_image)
+        self.euclid_fig.canvas.draw()
+        self._update_image()
+    
+    def _update_stretching(self, event):
+        stretch = event.new
+        self.euclid_object.stack_cutouts(stretch = stretch)
+        self.euclid_image.set_data(self.euclid_object.reprojected_data["stacked"])
+        self.euclid_fig.canvas.draw()
+        self._update_image()
+
+    def _update_image(self): 
+        try:
+             self.euclid_pane.object = self.euclid_fig
+        except Exception as e:         #too generic
+            print("Euclid image unavailable")
+            print(e)
+    
+    def _add_coordinates(self, event, column_names = ["DESI_target", "SDSS_target"], colors = ["red", "blue"]):
+        #TODO add color/marker information to differentiate surveys/spectra
+        #event.new = self.overplot_coords.value
+        if event.new and (self.data is not None) and hasattr(self, "ax"):
+            for i, column_name in enumerate(column_names):
+                ra_col_name = f"RA_{column_name}"
+                dec_col_name = f"Dec_{column_name}"
+                if (ra_col_name in self.data.columns) and (dec_col_name in self.data.columns):
+                    ra, dec = self.data[ra_col_name].iloc[0],  self.data[dec_col_name].iloc[0]
+                    self.euclid_object._add_overplot_coordinates(ra, dec)
+                    self.overplot_coordinates(overplot = event)
+        elif not event.new:
+            self.overplot_coordinates(overplot = event.new)
+        return None
+
+    def get_euclid_object(self):
+        self.euclid_object = EuclidCutoutsClass(self.ra, self.dec, 
+                            euclid_filters= ["VIS", "NIR_Y", "NIR_H"])
+        
+        self.euclid_object.get_cone(verbose = True)
+        return None
+    
+    def get_euclid_cutout(self, stretch = "Linear", verbose = True):
+        if not hasattr(self, "euclid_object"):
+            self.get_euclid_object()
+        if len(self.euclid_object.cone_results) > 2:
+            self.euclid_object.get_cutouts(radius = self.radius, verbose = verbose)
+            self.euclid_object.read_cutouts()
+            self.euclid_object.reproject_cutouts(reference = "VIS")
+            self.euclid_object.stack_cutouts(stretch = stretch)
+        else:
+            print("No sources in Euclid dataset with those coordinates")
+            return None 
+        
+    def overplot_coordinates(self, overplot = False):
+
+        if overplot:
+            image_height, image_width = self.euclid_image.get_size()
+            self.overplotted_coordinates = []
+            for x, y in self.euclid_object.overplot_coordinates["stacked"]:
+                if (0 <= x < image_width) and (0 <= y < image_height):
+                    sc = self.ax.scatter(x, y, c="r", marker = "+", s = 400)
+                    self.overplotted_coordinates.append(sc)
+        else:
+            if isinstance(self.overplotted_coordinates, list):
+                for sc in self.overplotted_coordinates:
+                    sc.remove()
+                self.overplotted_coordinates =[]
+        self._update_image()
+
+        
+    def get_plot_scale(self):
+        bar_length_arcsecond = self.bar_length_pixels * self.euclid_object.arcsec_per_pix["stacked"]
+        return bar_length_arcsecond
+
+    
+    def get_euclid_figure(self, show_scale = True, figsize = (5,5)):
+        
+        if hasattr(self, "euclid_image"):
+            self.euclid_image.remove()
+            self.euclid_image = self.ax.imshow(self.euclid_object.reprojected_data["stacked"], origin = "lower")
+
+
+        self.euclid_fig = Figure(figsize=figsize)
+        self.ax = self.euclid_fig.add_subplot(1,1,1)
+        self.ax.set_axis_off()
+        self.euclid_image = self.ax.imshow(self.euclid_object.reprojected_data["stacked"], origin = "lower")
+        
+        if show_scale:
+            image_height, image_width = self.euclid_image.get_size()
+            self.bar_length_pixels = image_width * 0.2  #always show a bar 1/5 of the plot 
+            x0, y0 = 0.1*image_width, 0.1*image_height
+            x1 = x0 + self.bar_length_pixels
+            self.ax.plot([x0, x1], [y0, y0], color='red', lw=3)
+            self.scale_text =  self.ax.text((x0 + x1) / 2, y0 + y0/2, f'{self.get_plot_scale():.1f}"',
+                                        color='red', ha='center', va='bottom', fontsize=14, fontweight='bold')
+        return None
+
+    def run_init(self):
+        """Wrapper for multithreading in __init__"""
+        self.get_euclid_object()
+        self.get_euclid_cutout()
+        self.get_euclid_figure()
+        self.overplot_coords.value = False
+    
+    def run_radius(self):
+        """Wrapper for multithreading in __update__radius"""
+        self.get_euclid_cutout()
+        self.contrast_scaler.value = (0,1)
+        self.get_euclid_figure()
+        
+    def panel(self):
+            self.panel_column = pn.Column(self.euclid_pane,
+                                          pn.WidgetBox(pn.Row(self.radius_input, self.stretching_input),
+                                                     self.contrast_scaler,
+                                                     self.overplot_coords)
+                                          )
+            self._update_image()
+            return self.panel_column
+
+
+def vlass_cutout_plot(data, selected): 
+    selected_source = get_selected_source(data=data, selected = selected)
+    ra, dec = get_ra_dec(selected_source)
+    if ra is None or dec is None:
+        return empty_panel(message = "Missing Ra and Dec")
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        future = executor.submit(VLASS_cutout, ra=ra, dec=dec, radius=10, verbose = True)
+        vlass_image = future.result()
+    if vlass_image is not None:
+        fig = Figure(figsize=(5,5))
+        ax = fig.add_subplot(1,1,1)
+        ax.set_axis_off()
+        ax.imshow(vlass_image, origin = "lower")
+        return pn.pane.Matplotlib(fig)
+    else:
+        return empty_panel(message = "Missing VLASS image")
+    
+
+def lotss_cutout_plot(data, selected): 
+    selected_source = get_selected_source(data=data, selected = selected)
+    ra, dec = get_ra_dec(selected_source)
+    if ra is None or dec is None:
+        return empty_panel(message = "Missing Ra and Dec")
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        future = executor.submit(LoTSS_cutout, ra=ra, dec=dec, radius=10)
+        lotss_image = future.result()
+    if lotss_image is not None:
+        fig = Figure(figsize=(5,5))
+        ax = fig.add_subplot(1,1,1)
+        ax.set_axis_off()
+        ax.imshow(lotss_image, origin = "lower")
+        return pn.pane.Matplotlib(fig)
+    else:
+        return empty_panel(message = "Missing LoTSS image")
+
+
+

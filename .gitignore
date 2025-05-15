@@ -1,5 +1,5 @@
 # astronomicAL specific
-data
+data/cutouts
 models
 
 # Byte-compiled / optimized / DLL files
