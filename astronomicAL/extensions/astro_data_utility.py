@@ -222,7 +222,7 @@ class DESISpectraClass:
     #actually queries also BOSS and SDSS DR16
     def __init__(self, ra, dec, max_separation = 1, 
                  datasets = ["DESI-DR1", "DESI-EDR", "BOSS-DR16", "SDSS-DR16"],
-                 specId = None):
+                 specId = None, check_coverage = True):
         self.ra = ra
         self.dec = dec
         self.max_separation = max_separation/3600 #arcsec--> degreee
@@ -233,10 +233,11 @@ class DESISpectraClass:
         self.datasets = datasets
         
         self.has_coverage = False
-        if ("DESI-DR1" in self.datasets) | ("DESI-EDR" in self.datasets):
-            self.has_coverage = self.has_coverage | check_isin_survey(self.ra, self.dec, survey = "DESI")
-        if ("BOSS-DR16" in self.datasets) | ("SDSS-DR16" in self.datasets):
-            self.has_coverage = self.has_coverage | check_isin_survey(self.ra, self.dec, survey = "SDSS")
+        if check_coverage:
+            if ("DESI-DR1" in self.datasets) | ("DESI-EDR" in self.datasets):
+                self.has_coverage = self.has_coverage | check_isin_survey(self.ra, self.dec, survey = "DESI")
+            if ("BOSS-DR16" in self.datasets) | ("SDSS-DR16" in self.datasets):
+                self.has_coverage = self.has_coverage | check_isin_survey(self.ra, self.dec, survey = "SDSS")
         
         self.specId = specId
         
@@ -246,7 +247,7 @@ class DESISpectraClass:
         """To update class without recalling the SparcClient"""
         self.ra = ra
         self.dec = dec
-        self.spectrum = None
+        self.spectra = None
         return None
     
     def get_spectrum(self):
@@ -277,6 +278,7 @@ class DESISpectraClass:
         
         tic = time.perf_counter()
         self.table_results = qc.query(sql=query, fmt='pandas')
+        self.table_results = self.table_results.drop_duplicates(subset = "specid")
         self.available_spectra = len(self.table_results)
         toc = time.perf_counter()
         if verbose:
@@ -298,13 +300,14 @@ class DESISpectraClass:
                    'wavelength', 'model', 'spectype', "ra", "dec"]
         
         if self.available_spectra >= 1:
-            sparcl_id = self.get_info_spectra()
+            sparcl_id = list(self.table_results["sparcl_id"])
 
             tic = time.perf_counter()
             self.spectrum_query = self.client.retrieve(uuid_list = sparcl_id, dataset_list = self.datasets,
                                               include = include)
             if self.spectrum_query.info["status"]["success"]:
-                self.spectrum = self.spectrum_query.records[0]
+                self.spectrum_query = self.spectrum_query.reorder(sparcl_id)
+                self.spectra = self.spectrum_query.records
             else:
                 print("Something went wrong")
             toc = time.perf_counter()
@@ -322,7 +325,7 @@ class DESISpectraClass:
             self.spectrum_query = self.client.retrieve_by_specid([self.specId], include = include,
                                              dataset_list = self.datasets)
             if self.spectrum_query.info["status"]["success"]:
-                self.spectrum = self.spectrum_query.records[0]
+                self.spectra = self.spectrum_query.records
             else:
                 print("Something went wrong")
             toc = time.perf_counter()
@@ -334,7 +337,7 @@ class DESISpectraClass:
     
     def get_coordinates_spectrum(self):
         """For cutout plottings"""
-        if self.spectrum is not None:
+        if self.spectra is not None:
             self.coordinates_spectrum = SkyCoord(self.spectrum.ra, self.spectrum.dec, units = "deg",
                                                  frame = "icrs" )
     
@@ -346,7 +349,9 @@ class DESISpectraClass:
             kernel = kernel_dict[kernel.casefold()]()
         else:
             kernel = kernel(window)
-        self.smoothed_flux = convolve(self.spectrum.flux, kernel)
+        
+        self.smoothed_fluxes  = [convolve(spectrum.flux, kernel) for spectrum in self.spectra]
+        
         return None 
     
     def get_emline_table(self, primary = True, extra_path = "data"):
@@ -366,8 +371,14 @@ class DESISpectraClass:
         if primary:
             self.absline_table = self.absline_table[self.emline_table["primary"]==1]
 
+
+
     def plot_spectrum(self, ax, plot_model = True, plot_emlines = True, plot_abslines = True):
         
+        self.spectrum = self.spectra[0]
+        self.smoothed_flux = self.smoothed_fluxes[0]
+
+
         wavlen = self.spectrum.wavelength
         redshift = self.spectrum.redshift
 
