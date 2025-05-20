@@ -60,9 +60,13 @@ class EuclidCutoutsClass:
         obs_id = line["tile_index"]
         return file_path, instrument, obs_id
     
-    def get_band_cutout(self, band):
+    def get_band_cutout(self, band, fname = None):
         file_path, instrument, obs_id = self.get_info_cutout(self.cone_results, band)
-        output_file = os.path.join(self.save_dir, f"{obs_id}_{band}.fits")  #This is not unique, cutous might be overwritten
+        if fname is None:
+            fname = f"{obs_id}_{band}"
+        else:
+            fname = f"{fname}_{band}" #need a different fname in each of the bands
+        output_file = os.path.join(self.save_dir, f"{fname}.fits")  #This is not unique, cutous might be overwritten
         return Euclid.get_cutout(file_path=file_path, instrument=instrument, id=obs_id, 
                                 coordinate=self.coordinates, radius = self.cutout_radius, output_file=output_file)[0]
 
@@ -75,7 +79,7 @@ class EuclidCutoutsClass:
         tic = time.perf_counter()
         with concurrent.futures.ThreadPoolExecutor() as executor:
             futures = { 
-                 executor.submit(self.get_band_cutout, band) : band
+                 executor.submit(self.get_band_cutout, band, fname = "tmp") : band
                  for band in self.euclid_filters
             }
         for future in concurrent.futures.as_completed(futures):
@@ -155,14 +159,12 @@ class EuclidCutoutsClass:
         """
         if not hasattr(self, "overplot_coordinates"):
             self.overplot_coordinates = {f : [] for  f in self.wcs.keys()}
-
         if isinstance(ra, (float, int)):
             ra = [ra]
             dec = [dec]
-        
         coords = SkyCoord(ra=ra, dec=dec, unit="deg", frame="icrs")
         x_pix, y_pix = self.wcs[filtro].world_to_pixel(coords)
-        self.overplot_coordinates[filtro].extend(zip(x_pix, y_pix))
+        self.overplot_coordinates[filtro] = list(zip(x_pix, y_pix))
         return None
         
 
@@ -219,6 +221,12 @@ class EuclidCutoutsClass:
 
 
 class DESISpectraClass:
+    """
+    This class handles the queries of spectra from DESI and SDSS/BOSS.
+    Query by sparclid and by specId are formally the same. In this class the first it is used to query all
+    spectra within the max_separation distance (by providing multiple sparclid). specID instead is passed as a unique 
+    int value and returns a single spectrum.
+    """
     #actually queries also BOSS and SDSS DR16
     def __init__(self, ra, dec, max_separation = 1, 
                  datasets = ["DESI-DR1", "DESI-EDR", "BOSS-DR16", "SDSS-DR16"],
@@ -248,10 +256,12 @@ class DESISpectraClass:
         self.ra = ra
         self.dec = dec
         self.spectra = None
+        self.available_spectra = 0
         return None
     
-    def get_spectrum(self):
+    def get_spectra(self):
         """Call all methods to get a spectrum"""
+        self.spectra = None
         if self.specId is not None:
             self.query_spectra_specid(verbose = True)
         else:
@@ -325,7 +335,8 @@ class DESISpectraClass:
             self.spectrum_query = self.client.retrieve_by_specid([self.specId], include = include,
                                              dataset_list = self.datasets)
             if self.spectrum_query.info["status"]["success"]:
-                self.spectra = self.spectrum_query.records
+                self.spectra = [self.spectrum_query.records[0]] #Same spectrum could be in both DESI DR1 and DESI EDR 
+                self.available_spectra = 1
             else:
                 print("Something went wrong")
             toc = time.perf_counter()
@@ -335,13 +346,15 @@ class DESISpectraClass:
              print("No target specId provided ")
         return None
     
-    def get_coordinates_spectrum(self):
+    def get_coordinates(self):
         """For cutout plottings"""
         if self.spectra is not None:
-            self.coordinates_spectrum = SkyCoord(self.spectrum.ra, self.spectrum.dec, units = "deg",
-                                                 frame = "icrs" )
-    
-    def get_smoothed_spectrum(self, kernel = "Box1DKernel", window = 10):
+            ra = [spectrum.ra for spectrum in self.spectra]
+            dec = [spectrum.dec for spectrum in self.spectra]
+            return ra, dec
+        return np.nan, np.nan
+
+    def get_smoothed_spectra(self, kernel = "Box1DKernel", window = 10):
 
         if isinstance(kernel, str):
             kernel_dict = {"box1dkernel" : lambda : Box1DKernel(window),
@@ -370,24 +383,34 @@ class DESISpectraClass:
         self.absline_table = pd.read_csv(path)
         if primary:
             self.absline_table = self.absline_table[self.emline_table["primary"]==1]
+    
+    
 
-
-
-    def plot_spectrum(self, ax, plot_model = True, plot_emlines = True, plot_abslines = True):
+    def plot_spectrum(self,  ax, idx = 0, plot_model = True, 
+                      plot_emlines = True, annotate_emlines = True,  
+                      plot_abslines = True, annotate_abslines = True,
+                      set_ylabel = True, model_kwargs = {"lw" : 2, "color" : "r"}):
         
-        self.spectrum = self.spectra[0]
-        self.smoothed_flux = self.smoothed_fluxes[0]
+        """This only plots one spectrum. Ideally all plotting routines should be outside of this 
+           class. However having on plot routine is useful for managing em/abs lines and the different 
+           spectra to plot
+        """
+        
+        assert idx < self.available_spectra, "Index larger than number of available spectra"
+        
+        wavlen = self.spectra[idx].wavelength
+        flux = self.spectra[idx].flux
+        model = self.spectra[idx].model
+        smoothed = self.smoothed_fluxes[idx]
+        redshift = self.spectra[idx].redshift
+        
 
-
-        wavlen = self.spectrum.wavelength
-        redshift = self.spectrum.redshift
-
-        ax.plot(wavlen, self.spectrum.flux, c = 'grey', lw = 0.1)
-        ax.plot(wavlen, self.smoothed_flux, c = 'k', lw = 1)
+        ax.plot(wavlen, flux, c = 'grey', lw = 0.1)
+        ax.plot(wavlen, smoothed, c = 'k', lw = 1)
         if plot_model:
-            ax.plot(wavlen, self.spectrum.model, c= "r", lw = 2)
+            ax.plot(wavlen, model, **model_kwargs)
         
-        ymin, ymax = np.min(self.smoothed_flux),  np.max(self.smoothed_flux)*1.5
+        ymin, ymax = np.min(smoothed),  np.max(smoothed)*1.5
         #sometimes ymin is < 0 so by dividing we are cutting out part of the spectrum
         ymin = ymin/3 if ymin >=0 else ymin*1.5
         xmin, xmax = np.min(wavlen), np.max(wavlen) 
@@ -406,7 +429,8 @@ class DESISpectraClass:
                 elif obs_wav < xmin:
                     continue
                 ax.axvline(obs_wav, c = 'r', lw = 0.5, ls = ':')
-                ax.text(obs_wav, 0.8, name, rotation = 90, transform = transform, fontsize = 13)
+                if annotate_emlines:
+                    ax.text(obs_wav, 0.8, name, rotation = 90, transform = transform, fontsize = 10)
         
         if plot_abslines:
             if not hasattr(self, "absline_table"):
@@ -417,16 +441,18 @@ class DESISpectraClass:
                 if (obs_wav > xmax) or (obs_wav < xmin):
                     continue
                 ax.axvline(obs_wav, c = 'b', lw = 0.5, ls = ':')
-                ax.text(obs_wav, 0.2, name, rotation = 90, transform = transform, fontsize = 13)
+                if annotate_abslines:
+                    ax.text(obs_wav, 0.2, name, rotation = 90, transform = transform, fontsize = 10)
         
         
         ax.set_xlabel(r'$\lambda_{obs}~[\AA]$', fontsize = 15)
-        ax.set_ylabel(r'$F_{\lambda}~[10^{-17}~ergs~s^{-1}~cm^{-2}~{\AA}^{-1}]$', fontsize =15)
+        if set_ylabel:
+            ax.set_ylabel(r'$F_{\lambda}~[10^{-17}~ergs~s^{-1}~cm^{-2}~{\AA}^{-1}]$', fontsize =12)
     
     
 
     def plot_spectrum_hv(self, plot_model = True, plot_emlines=True, plot_abslines=True):
-
+        """To be rewritten for working with multiple spectra"""
         wavlen = self.spectrum.wavelength
         redshift = self.spectrum.redshift
 
@@ -542,20 +568,18 @@ def check_isin_survey(ra, dec, survey, path = "data/mocs"):
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+def get_ra_dec_DESI():
+    """"
+    Utility function to get ra and dec for a source with DESI spectra.
+    Only useful for testing the routines
+    """
+    client = SparclClient()
+    outs = ['sparcl_id', 'ra', 'dec']
+    cons = {'data_release': ['DESI-DR1']}
+    found = client.find(outfields=outs, constraints=cons)
+    ra = found.records[0]["ra"]
+    dec = found.records[0]["dec"]
+    return ra, dec
 
 
 

@@ -48,7 +48,9 @@ def get_plot_dict():
 
         "VLA-VLASS Cutout" : CustomPlot(vlass_cutout_plot, []),
 
-        "LOFAR-LoTSS Cutout" : CustomPlot(lotss_cutout_plot, [])
+        "LOFAR-LoTSS Cutout" : CustomPlot(lotss_cutout_plot, []),
+
+        "Stored Image"  : CustomPlot(local_stored_plot, ["Local_image_path"])
     }
 
     return plot_dict
@@ -716,14 +718,13 @@ def DESI_spectrum_plot(data, selected = None):
             return empty_panel(message = "Missing Ra and Dec")
          
     with concurrent.futures.ThreadPoolExecutor() as executor:
-        future = executor.submit(run_desi, ra=ra, dec=dec, datasets = ["DESI-DR1", "DESI-EDR"],
-                                specId = specId, max_separation = 0.5)
+        future = executor.submit(run_desi, ra=ra, dec=dec, datasets = ["DESI-DR1"],
+                                specId = specId, max_separation = 90)
     desi_object = future.result()
     if desi_object is not None:
-        _add_coordinates_to_data(data, desi_object.spectrum.ra, desi_object.spectrum.dec,
-                                                   column_name = "DESI_target")
-        is_star = desi_object.spectrum.spectype == "STAR"
-        plot = get_desi_figure(desi_object, plot_emlines = ~is_star, plot_abslines=is_star)
+        _add_coordinates_to_data(data, *desi_object.get_coordinates(), column_name = "DESI_target")
+        is_star = (desi_object.available_spectra ==1) and (desi_object.spectra[0].spectype == "STAR")
+        plot = get_desi_figure(desi_object, plot_emlines = (not is_star), plot_abslines = is_star)
         #plot = get_desi_figure_hv(desi_object, plot_emlines = ~is_star, plot_abslines=is_star)
         return plot
     else:
@@ -741,53 +742,82 @@ def SDSS_spectrum_plot(data, selected = None):
          specId = None
          if ra is None or dec is None:
             return empty_panel(message = "Missing Ra and Dec")
-
-
+    
     with concurrent.futures.ThreadPoolExecutor() as executor:
         future = executor.submit(run_desi, ra=ra, dec=dec, datasets = ["BOSS-DR16", "SDSS-DR16"],
-                                specId = None, max_separation = 0.5)
+                                specId = specId, max_separation = 0.5)
     sdss_object = future.result()
     if sdss_object is not None:
-        _add_coordinates_to_data(data, sdss_object.spectrum.ra, sdss_object.spectrum.dec,
-                                                   column_name = "SDSS_target")
-        is_star = sdss_object.spectrum.spectype == "STAR"
-        plot = get_desi_figure(sdss_object, plot_emlines = ~is_star, plot_abslines=is_star)
+        _add_coordinates_to_data(data, *sdss_object.get_coordinates(),column_name = "SDSS_target")
+        is_star = (sdss_object.available_spectra ==1) and (sdss_object.spectra[0].spectype == "STAR")
+        #absorption lines are shown if only 1 spectrum is available and it is a star
+        plot = get_desi_figure(sdss_object, plot_emlines = (not is_star), plot_abslines=is_star, 
+                               model_color = "blue")
         #plot = get_desi_figure_hv(sdss_object, plot_emlines = ~is_star, plot_abslines=is_star)
         return plot
     else:
         return None
 
 def run_desi(ra, dec, datasets = ["DESI-DR1", "DESI-EDR", "BOSS-DR16", "SDSS-DR16"],
-            specId = None, max_separation = 0.5):
+            specId = None, max_separation = 90):
     desi_object = DESISpectraClass(ra, dec, datasets = datasets ,specId = specId, max_separation = max_separation)
-    desi_object.get_spectrum()
-    if desi_object.spectrum is not None:
-        desi_object.get_smoothed_spectrum(kernel = "Box1dkernel", window = 10)
+    desi_object.get_spectra()
+    if desi_object.spectra is not None:
+        desi_object.get_smoothed_spectra(kernel = "Box1dkernel", window = 10)
         return desi_object
     return None
 
 def get_desi_figure(desi_object, plot_emlines= True, plot_abslines = True):
-     desi_fig = Figure(figsize = (15,5))
-     desi_ax =  desi_fig.add_subplot(1,1,1)
-     desi_object.plot_spectrum(desi_ax, plot_model = True, plot_emlines = plot_emlines, plot_abslines = plot_abslines)
      
-     desi_ax.text(0, 1.02, f"Dataset = {desi_object.spectrum.data_release}", fontsize = 15, transform = desi_ax.transAxes)
-     desi_ax.text(0.33, 1.02, f"SpecType = {desi_object.spectrum.spectype}", fontsize = 15, transform = desi_ax.transAxes)
-     desi_ax.text(0.66, 1.02, f"z = {np.round(desi_object.spectrum.redshift,4)}", fontsize = 15,transform = desi_ax.transAxes)
-     return desi_fig
+    N = desi_object.available_spectra
+    ax_height = 3 if N <= 3 else 2  #if too many spectra, make the subplots smaller
+    colors = plt.get_cmap("gist_rainbow", N)
+    if N > 4:
+        ncols = 2                           #### two columns layout if many spectra
+        nrows = np.ceil(N/2).astype(int)   
+    else:
+        ncols = 1
+        nrows = N
+
+
+    desi_fig = Figure(figsize = (7.5 * ncols, ax_height * nrows))
+    for i in range(N):
+        row = i // ncols
+        col = i % ncols
+        ax_idx = row * ncols + col + 1  
+        ax = desi_fig.add_subplot(nrows, ncols, ax_idx)
+        desi_object.plot_spectrum(ax, idx=i, plot_emlines = plot_emlines, plot_abslines = plot_abslines, 
+                                  annotate_emlines = True, annotate_abslines = True,
+                                  set_ylabel= (N==1), model_kwargs = {"lw" : 2, "color" : colors(i)})
+        if row < nrows - 1:
+            ax.tick_params(labelbottom=False)
+        if ncols == 2 and col == 1:
+            ax.tick_params(labelleft=False)
+
+    if N == 1:
+        #TODO: include information also for multiple spectra
+        ax.text(0, 1.02, f"Dataset = {desi_object.spectra[0].data_release}", fontsize = 11, transform = ax.transAxes)
+        ax.text(0.33, 1.02, f"SpecType = {desi_object.spectra[0].spectype}", fontsize = 11, transform = ax.transAxes)
+        ax.text(0.66, 1.02, f"z = {np.round(desi_object.spectra[0].redshift,4)}", fontsize = 11,transform = ax.transAxes)
+    
+    elif N > 1:
+        desi_fig.subplots_adjust(hspace=0, wspace = 0.01)
+        desi_fig.text(0.04, 0.5, r'$F_{\lambda}~[10^{-17}~ergs~s^{-1}~cm^{-2}~{\AA}^{-1}]$', fontsize =15, 
+                      va='center', rotation='vertical');
+    return desi_fig
 
 def get_desi_figure_hv(desi_object):
     desi_fig = desi_object.plot_spectrum_hv(plot_model = True, plot_emlines = True)
     return desi_fig
 
 def _add_coordinates_to_data(data, ra, dec, column_name):
+    """
+    ra and dec are lists
+    """
     ra_col_name = f"RA_{column_name}"
     dec_col_name = f"Dec_{column_name}"
-    #if ra_col_name not in data.columns:
-    #    data[ra_col_name] = np.nan
-    #    data[dec_col_name] = np.nan
-    data[ra_col_name] = ra
-    data[dec_col_name] = dec
+    data[ra_col_name] = [ra]*len(data)
+    data[dec_col_name] = [dec]*len(data)
     
 
 def euclid_cutout_plot(data, selected = None, radius =5):
@@ -848,8 +878,8 @@ class EuclidPanelManager:
         
         self.contrast_scaler.param.watch(self._update_intensity_scaling, "value")  
 
-        self.overplot_coords = pn.widgets.Checkbox(name = "Spectrum Coordinates")
-        self.overplot_coords.param.watch(self._add_coordinates, "value") 
+        self.overplot_coords_widget = pn.widgets.Checkbox(name = "Spectrum Coordinates")
+        self.overplot_coords_widget.param.watch(self._add_coordinates, "value") 
 
      
     def _update_radius(self, event):
@@ -908,7 +938,8 @@ class EuclidPanelManager:
 
     def get_euclid_object(self):
         self.euclid_object = EuclidCutoutsClass(self.ra, self.dec, 
-                            euclid_filters= ["VIS", "NIR_Y", "NIR_H"])
+                            euclid_filters= ["VIS", "NIR_Y", "NIR_H"],
+                            )
         
         self.euclid_object.get_cone(verbose = True)
         return None
@@ -930,9 +961,11 @@ class EuclidPanelManager:
         if overplot:
             image_height, image_width = self.euclid_image.get_size()
             self.overplotted_coordinates = []
-            for x, y in self.euclid_object.overplot_coordinates["stacked"]:
+            N = len(self.euclid_object.overplot_coordinates["stacked"])
+            colors = plt.get_cmap("gist_rainbow", N)
+            for i, (x, y) in enumerate(self.euclid_object.overplot_coordinates["stacked"]):
                 if (0 <= x < image_width) and (0 <= y < image_height):
-                    sc = self.ax.scatter(x, y, c="r", marker = "+", s = 400)
+                    sc = self.ax.scatter(x, y, color = colors(i), marker = "+", s = 300)
                     self.overplotted_coordinates.append(sc)
         else:
             if isinstance(self.overplotted_coordinates, list):
@@ -974,19 +1007,20 @@ class EuclidPanelManager:
         self.get_euclid_object()
         self.get_euclid_cutout()
         self.get_euclid_figure()
-        self.overplot_coords.value = False
+        self.overplot_coords_widget.value = False
     
     def run_radius(self):
         """Wrapper for multithreading in __update__radius"""
         self.get_euclid_cutout()
         self.contrast_scaler.value = (0,1)
+        self.overplot_coords_widget.value = False
         self.get_euclid_figure()
         
     def panel(self):
             self.panel_column = pn.Column(self.euclid_pane,
                                           pn.WidgetBox(pn.Row(self.radius_input, self.stretching_input),
                                                      self.contrast_scaler,
-                                                     self.overplot_coords)
+                                                     self.overplot_coords_widget)
                                           )
             self._update_image()
             return self.panel_column
@@ -1028,4 +1062,11 @@ def lotss_cutout_plot(data, selected):
         return empty_panel(message = "Missing LoTSS image")
 
 
-
+def local_stored_plot(data, selected):
+    selected_source = get_selected_source(data=data, selected = selected)
+    path = int(selected_source[config.settings["Local_image_path"]].iloc[0])
+    try:
+        return pn.pane.Image(path, width = 500)
+    except Exception as e:
+        print(e)
+        return empty_panel()
