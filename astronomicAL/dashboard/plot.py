@@ -311,7 +311,7 @@ class HistoDashboard(param.Parameterized):
             cols.remove(config.settings["id_col"])
 
         for i in config.dashboards.keys():
-            if config.dashboards[i].contents == "Histogram Plot":   ####add somewhere
+            if config.dashboards[i].contents == "Histogram Plot":   
                 curr_x = config.dashboards[i].panel_contents.X_variable
                 if curr_x == self.X_variable:
                     try:
@@ -389,32 +389,69 @@ class HistoDashboard(param.Parameterized):
         return plot
     
     @staticmethod
-    def get_histogram(ax, x_var, bins = 10, log_x = False, log_y = False, density = False, cumulative = False,
+    def get_histogram(ax, x_var, Nbins = 10, log_x = False, log_y = False, density = False, cumulative = False,
                       **kwargs):
-        if log_x:
-            x = np.log10(x_var)
-            x = x[np.isfinite(x)]
-        else:
-            x = x_var[np.isfinite(x_var)]
+        
+        x = x_var[np.isfinite(x_var)]
         if density: 
             weights = np.ones(len(x))/len(x)
-            ax.set_ylabel(r"\% of sources")
+            ax.set_ylabel(r"% of sources")
         else:
             weights = None
             ax.set_ylabel("# of sources")
         
-        ax.hist(x, bins = bins, log = log_y, 
+        
+        if log_x:
+            xmin, xmax = np.min(x), np.max(x)
+
+            if xmin > 0: # both positive
+                bins  = np.geomspace(xmin , xmax, Nbins) if xmin != xmax else Nbins
+                ax.hist(x, bins = bins, log = log_y, 
+                        cumulative = cumulative, weights = weights,
+                        **kwargs);  
+                ax.set_xscale("log")
+           
+            elif xmax < 0:  #both  negative
+                bins = -np.geomspace(-xmax, -xmin, Nbins) if xmin != xmax else Nbins
+                ax.hist(x, bins = bins[::-1], log = log_y, 
+                        cumulative = cumulative, weights = weights,
+                        **kwargs);  
+                ax.set_xscale("symlog",  linthresh = np.abs(xmax), linscale = 0.15)
+            
+            elif xmin * xmax < 0:    #x has positive and negative values
+                x_thresh = np.min(np.abs(x[x != 0]))
+                bins_positive = np.geomspace(x_thresh, xmax, int(Nbins/2))  #for the moment same number of bins for positive 
+                bins_negative = np.geomspace(x_thresh, -xmin, int(Nbins/2))  #and negative values
+                bins = np.concatenate([-bins_negative[::-1], bins_positive])
+                ax.hist(x, bins = bins, log = log_y, 
+                        cumulative = cumulative, weights = weights,
+                        **kwargs);  
+                ax.set_xscale("symlog", linthresh=x_thresh, linscale = 0.15 )
+
+            elif xmin * xmax == 0:   #at least one of the two is 0
+                try:
+                    x_thresh = np.min(np.abs(x[x != 0]))
+                    bins_positive = np.geomspace(x_thresh, xmax, int(Nbins/2))  if xmax > 0 else np.array([0, x_thresh])
+                    bins_negative = np.geomspace(x_thresh, -xmin, int(Nbins/2)) if xmin < 0 else np.array([0, x_thresh])
+                    bins = np.concatenate([-bins_negative[::-1], bins_positive])
+                    ax.hist(x, bins = bins, log = log_y, 
+                       cumulative = cumulative, weights = weights,
+                       **kwargs);  
+                    ax.set_xscale("symlog", linthresh=x_thresh, linscale = 0.15 )
+                except ValueError:  #all values are 0 so x[x != 0] is an empty array
+                    ax.hist(x, bins = Nbins, log = log_y, 
+                       cumulative = cumulative, weights = weights,
+                       **kwargs); 
+
+        else: 
+            ax.hist(x, bins = Nbins, log = log_y, 
                 cumulative = cumulative, weights = weights,
                 **kwargs);  
   
     @param.depends("X_variable")
     def plot_mplt(self, x_var=None):
-        """Create a basic scatter plot of the data with the selected axis.
-
-        The data is represented as a Holoviews Datashader object allowing for
-        large numbers of points to be rendered at once. Plotted using a Bokeh
-        renderer, the user has full manuverabilty of the data in the plot.
-
+        """Create a basic histogram plot of the data with the selected axis.
+        
         Returns
         -------
         plot : Matplotlib plot
@@ -424,15 +461,12 @@ class HistoDashboard(param.Parameterized):
             x_var_name = self.X_variable
             x_var = self.df[self.X_variable].to_numpy()
         
-        x_var = x_var[np.isfinite(x_var)]
-        if self.log_xscale.value:
-            x_var = np.log10(x_var)
-            x_var = x_var[np.isfinite(x_var)]
+    
 
         
         fig = Figure()
         ax = fig.subplots()
-        self.get_histogram(ax, x_var, bins = self.Nbins_slider.value, 
+        self.get_histogram(ax, x_var, Nbins = self.Nbins_slider.value, 
                            log_x = self.log_xscale.value, log_y = self.log_yscale.value,
                            cumulative = self.cumulative.value, density=self.density.value,
                            **{"color" : "blue", "edgecolor" : "blue"}
@@ -463,7 +497,7 @@ class HistoDashboard(param.Parameterized):
         """
 
         self.row[0] = pn.Card(pn.Column(pn.WidgetBox(pn.Row(self.log_xscale, self.log_yscale, self.density, self.cumulative),
-                           self.Nbins_slider,min_width = 100, min_height = 33, max_width = 300, max_height = 100),
+                           self.Nbins_slider, width = 300, height = 100,),
                            pn.Row(self.plot_mplt), sizing_mode="scale_both"),
             header=pn.Row(
                 pn.Spacer(width=25,
@@ -484,4 +518,3 @@ class HistoDashboard(param.Parameterized):
 def tools(plot, element):
     plot.handles['plot'].toolbar.active_drag = None
     plot.handles['plot'].toolbar.active_scroll = None
-
