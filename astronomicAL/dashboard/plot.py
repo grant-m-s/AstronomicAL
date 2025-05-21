@@ -330,13 +330,17 @@ class HistoDashboard(param.Parameterized):
         self.density = pn.widgets.Checkbox(name = "Density")
         self.cumulative = pn.widgets.Checkbox(name = "Cumulative")
         self.Nbins_slider = pn.widgets.IntSlider(name='N bins', start=2, end=1000, step=1, value=10, value_throttled = 10)
-
+        self.label_selector = pn.widgets.MultiChoice(name='Label to Plot', value=['All'],
+                                                       options = ["All"] + list(config.settings["strings_to_labels"].keys()),
+                                                       height = 300)
+        self.strings_to_plot = ["All"]
         self.log_xscale.param.watch(self._update_plot,  "value")
         self.log_yscale.param.watch(self._update_plot,  "value")
         self.cumulative.param.watch(self._update_plot,  "value")
         #self.Nbins_slider.param.watch(self._update_plot, "value")
         self.Nbins_slider.param.watch(self._update_plot, "value_throttled")
         self.density.param.watch(self._update_plot,  "value")
+        self.label_selector.param.watch(self._update_label, "value")
     
 
     @param.depends("X_variable")
@@ -449,7 +453,7 @@ class HistoDashboard(param.Parameterized):
                 **kwargs);  
   
     @param.depends("X_variable")
-    def plot_mplt(self, x_var=None):
+    def plot_mplt(self, x_var=None, strings_to_plot = ["All"]):
         """Create a basic histogram plot of the data with the selected axis.
         
         Returns
@@ -461,27 +465,51 @@ class HistoDashboard(param.Parameterized):
             x_var_name = self.X_variable
             x_var = self.df[self.X_variable].to_numpy()
         
-    
-
+        if bool(strings_to_plot) and ("All" not in strings_to_plot or len(strings_to_plot)>1):
+           #not sure we need this if statement
+           labels = self.df[config.settings["label_col"]]
+           labels_to_plot = [config.settings["strings_to_labels"][i] for i in strings_to_plot if i != "All"]
+        
+        else:
+            labels_to_plot = []
         
         fig = Figure()
         ax = fig.subplots()
-        self.get_histogram(ax, x_var, Nbins = self.Nbins_slider.value, 
+        
+        if "All" in strings_to_plot:
+            self.get_histogram(ax, x_var, Nbins = self.Nbins_slider.value, 
                            log_x = self.log_xscale.value, log_y = self.log_yscale.value,
                            cumulative = self.cumulative.value, density=self.density.value,
-                           **{"color" : "blue", "edgecolor" : "blue"}
-                        )
+                           **{"color" : "blue", "edgecolor" : "blue", "label" : "All"})
+            
+        for i, label_to_plot in enumerate(labels_to_plot):
+            self.get_histogram(ax, x_var[labels == label_to_plot], Nbins = self.Nbins_slider.value, 
+                            log_x = self.log_xscale.value, log_y = self.log_yscale.value,
+                            cumulative = self.cumulative.value, density=self.density.value,
+                            **{"color" : config.settings["label_colours"][label_to_plot],
+                               "edgecolor" : config.settings["label_colours"][label_to_plot],
+                               "lw" : 2, "alpha" : 0.7, 
+                               "label" : config.settings["labels_to_strings"][str(label_to_plot)],
+                               "histtype" : "stepfilled" if i < 2 else "step"} ### maybe avoids confusion
+                            )
+                              
+            
                            
         cols = list(self.df.columns)
 
         if len(self.src.data[cols[0]]) == 1:
             selected = pd.DataFrame(self.src.data, columns=cols, index=[0])
             ax.axvline(selected[x_var_name].iloc[0], c = "k", ls = ':', lw =1)
+        
+        ax.legend()
     
         return fig
-
-
     
+    def _update_label(self, event):
+        self.strings_to_plot = event.new
+        self.panel()
+        
+
     def _update_plot(self, event):
         self.panel()
 
@@ -497,8 +525,9 @@ class HistoDashboard(param.Parameterized):
         """
 
         self.row[0] = pn.Card(pn.Column(pn.WidgetBox(pn.Row(self.log_xscale, self.log_yscale, self.density, self.cumulative),
-                           self.Nbins_slider, width = 300, height = 100,),
-                           pn.Row(self.plot_mplt), sizing_mode="scale_both"),
+                           pn.Row(self.Nbins_slider, self.label_selector), width = 500, height = 150,),
+                           pn.Row(self.plot_mplt(strings_to_plot=self.strings_to_plot)), 
+                           sizing_mode="scale_both"),
             header=pn.Row(
                 pn.Spacer(width=25,
                         #    sizing_mode="fixed"
