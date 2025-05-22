@@ -19,6 +19,7 @@ import param
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
 import concurrent.futures 
+import astronomicAL.extensions.extension_plots_shared as shared
 from astronomicAL.extensions.astro_data_utility import DESISpectraClass, EuclidCutoutsClass
 from astronomicAL.extensions.astro_data_utility import VLASS_cutout, LoTSS_cutout
 
@@ -42,9 +43,15 @@ def get_plot_dict():
 
         "Euclid Cutout" : CustomPlot(euclid_cutout_plot, []),
 
-        "Desi Spectrum" : CustomPlot(DESI_spectrum_plot, ["DESI_TargetID"], use_coordinates = True),
+        "DESI Spectra from Coords" : CustomPlot(spectrum_plot, [], dataset="DESI", from_specid=False),
 
-        "SDSS Spectrum" : CustomPlot(SDSS_spectrum_plot, ["SDSS_TargetID"], use_coordinates = True),
+        "DESI Spectrum from ID" : CustomPlot(spectrum_plot, ["DESI_TargetID"], dataset="DESI", from_specid=True),
+
+        "Debug" : CustomPlot(debug_shared_dataframe, []),
+
+        "SDSS Spectra from Coords" : CustomPlot(spectrum_plot, [], dataset="SDSS", from_specid=False),
+
+        "SDSS Spectrum from ID" : CustomPlot(spectrum_plot, ["SDSS_TargetID"], dataset="SDSS", from_specid=True),
 
         "VLA-VLASS Cutout" : CustomPlot(vlass_cutout_plot, []),
 
@@ -57,15 +64,13 @@ def get_plot_dict():
 
 
 class CustomPlot:
-    def __init__(self, plot_fn, extra_features, use_coordinates = False):
-
-        """use_coordinates allows to have None as a column input and et data from 
-          coordinates via query, used for desi/sdss spectra"""
+    def __init__(self, plot_fn, extra_features, *plot_fn_args, **plot_fn_kwargs):
 
         self.plot_fn = plot_fn
         self.extra_features = extra_features
         self.row = pn.Row("Loading...")
-        self.use_coordinates = use_coordinates
+        self.plot_fn_args = plot_fn_args
+        self.plot_fn_kwargs = plot_fn_kwargs
 
     def create_settings(self, unknown_cols):
         self.waiting = True
@@ -76,7 +81,7 @@ class CustomPlot:
             if i % 3 == 0:
                 settings_row = pn.Row()
             
-            options = ["Query from RA&Dec"] + main_columns if self.use_coordinates else main_columns
+            options = main_columns
             select_widget = pn.widgets.Select(name=col, options=options, max_height=120)
             settings_row.append(select_widget)
            
@@ -112,7 +117,7 @@ class CustomPlot:
             self.col_selection = self.create_settings(unknown_cols)
             return self.render
         else:
-            return self.plot_fn
+            return lambda *args, **kwargs: self.plot_fn(*args, *self.plot_fn_args, **kwargs, **self.plot_fn_kwargs)
 
 
 def create_plot(
@@ -704,25 +709,41 @@ def get_ra_dec(selected_source):
     return ra, dec
 
 
-def DESI_spectrum_plot(data, selected = None):
-    selected_source = get_selected_source(data=data, selected = selected)
-    ra, dec = get_ra_dec(selected_source)
-    
 
-    if config.settings["DESI_TargetID"] in selected_source.columns:
-        specId = int(selected_source[config.settings["DESI_TargetID"]].iloc[0])
-        
+
+def spectrum_plot(data, selected = None, dataset = "DESI", from_specid = False):
+    selected_source = get_selected_source(data=data, selected = selected)
+    
+    if from_specid:
+        if config.settings[f"{dataset}_TargetID"] in selected_source.columns:
+            specId = int(selected_source[config.settings[f"{dataset}_TargetID"]].iloc[0])
+            ra, dec = None, None
+        else:
+            print("Missing column with target ID")
+            return empty_panel(message = "Missing Target ID")
     else:
-         specId = None
-         if ra is None or dec is None:
+        ra, dec = get_ra_dec(selected_source)
+        if (ra is None) or (dec is None):
             return empty_panel(message = "Missing Ra and Dec")
-         
+        specId = None 
+    
+    if dataset == "DESI":
+        datasets = ["DESI-DR1"]
+    elif dataset == "SDSS":
+        datasets = ["BOSS-DR16", "SDSS-DR16"]
+    else:
+        datasets = None
+    
     with concurrent.futures.ThreadPoolExecutor() as executor:
-        future = executor.submit(run_desi, ra=ra, dec=dec, datasets = ["DESI-DR1"],
-                                specId = specId, max_separation = 90)
-    desi_object = future.result()
+        future = executor.submit(run_desi, ra = ra, dec = dec, datasets = datasets,
+                                 specId = specId, 
+                                 max_separation = shared.shared_data.get("Euclid_radius", 0.5),
+                                 client = shared.shared_data.get("Sparcl_client", None))
+        
+    desi_object = future.result()   ###everything is named desi but works also for SDSS
+    
     if desi_object is not None:
-        _add_coordinates_to_data(data, *desi_object.get_coordinates(), column_name = "DESI_target")
+        _add_coordinates_to_shared(*desi_object.get_coordinates(), key_name = dataset)
         is_star = (desi_object.available_spectra ==1) and (desi_object.spectra[0].spectype == "STAR")
         plot = get_desi_figure(desi_object, plot_emlines = (not is_star), plot_abslines = is_star)
         #plot = get_desi_figure_hv(desi_object, plot_emlines = ~is_star, plot_abslines=is_star)
@@ -730,38 +751,15 @@ def DESI_spectrum_plot(data, selected = None):
     else:
         return None
 
-def SDSS_spectrum_plot(data, selected = None):
-    """Same as DESI but restricting to SDSS/BOSS"""
-    selected_source = get_selected_source(data=data, selected = selected)
-    ra, dec = get_ra_dec(selected_source)
-    
-    if config.settings["SDSS_TargetID"] in selected_source.columns:
-        specId = int(selected_source[config.settings["SDSS_TargetID"]].iloc[0])
-
-    else:
-         specId = None
-         if ra is None or dec is None:
-            return empty_panel(message = "Missing Ra and Dec")
-    
-    with concurrent.futures.ThreadPoolExecutor() as executor:
-        future = executor.submit(run_desi, ra=ra, dec=dec, datasets = ["BOSS-DR16", "SDSS-DR16"],
-                                specId = specId, max_separation = 0.5)
-    sdss_object = future.result()
-    if sdss_object is not None:
-        _add_coordinates_to_data(data, *sdss_object.get_coordinates(),column_name = "SDSS_target")
-        is_star = (sdss_object.available_spectra ==1) and (sdss_object.spectra[0].spectype == "STAR")
-        #absorption lines are shown if only 1 spectrum is available and it is a star
-        plot = get_desi_figure(sdss_object, plot_emlines = (not is_star), plot_abslines=is_star, 
-                               model_color = "blue")
-        #plot = get_desi_figure_hv(sdss_object, plot_emlines = ~is_star, plot_abslines=is_star)
-        return plot
-    else:
-        return None
 
 def run_desi(ra, dec, datasets = ["DESI-DR1", "DESI-EDR", "BOSS-DR16", "SDSS-DR16"],
-            specId = None, max_separation = 90):
-    desi_object = DESISpectraClass(ra, dec, datasets = datasets ,specId = specId, max_separation = max_separation)
+            specId = None, max_separation = 0.5, 
+            client = None):
+    desi_object = DESISpectraClass(ra, dec, datasets = datasets ,
+                                   specId = specId, max_separation = max_separation,
+                                   client = client)
     desi_object.get_spectra()
+    
     if desi_object.spectra is not None:
         desi_object.get_smoothed_spectra(kernel = "Box1dkernel", window = 10)
         return desi_object
@@ -810,15 +808,13 @@ def get_desi_figure_hv(desi_object):
     desi_fig = desi_object.plot_spectrum_hv(plot_model = True, plot_emlines = True)
     return desi_fig
 
-def _add_coordinates_to_data(data, ra, dec, column_name):
+def _add_coordinates_to_shared(ra, dec, key_name):
     """
     ra and dec are lists
     """
-    ra_col_name = f"RA_{column_name}"
-    dec_col_name = f"Dec_{column_name}"
-    data[ra_col_name] = [ra]*len(data)
-    data[dec_col_name] = [dec]*len(data)
-    
+    shared.shared_data[f"{key_name}_ra"] = ra
+    shared.shared_data[f"{key_name}_dec"] = dec
+
 
 def euclid_cutout_plot(data, selected = None, radius =5):
     selected_source = get_selected_source(data=data, selected = selected)
@@ -839,6 +835,7 @@ class EuclidPanelManager:
         self.ra = ra
         self.dec = dec
         self.radius = radius
+        shared.shared_data["Euclid_radius"] = self.radius
         self._initialise_radius_scaling_widgets(width = int(width))
         self.data = data
         self.euclid_pane = pn.pane.Matplotlib(dpi = 144,
@@ -859,6 +856,7 @@ class EuclidPanelManager:
         
 
     def _initialise_radius_scaling_widgets(self, width = 300):
+        
         self.radius_input = pn.widgets.FloatInput(name = "Radius [arcsec]", value = self.radius,
                                                   step = 0.5, start = 1, end = 100, 
                                                   sizing_mode="scale_width")
@@ -884,6 +882,7 @@ class EuclidPanelManager:
      
     def _update_radius(self, event):
         self.radius = event.new
+        shared.shared_data["Euclid_radius"] = self.radius
         with concurrent.futures.ThreadPoolExecutor() as executor:
             future = executor.submit(self.run_radius)
         try:
@@ -921,7 +920,7 @@ class EuclidPanelManager:
             print("Euclid image unavailable")
             print(e)
     
-    def _add_coordinates(self, event, column_names = ["DESI_target", "SDSS_target"], colors = ["red", "blue"]):
+    def _add_coordinates_old(self, event, column_names = ["DESI_target", "SDSS_target"], colors = ["red", "blue"]):
         #TODO add color/marker information to differentiate surveys/spectra
         #event.new = self.overplot_coords.value
         if event.new and (self.data is not None) and hasattr(self, "ax"):
@@ -935,25 +934,50 @@ class EuclidPanelManager:
         elif not event.new:
             self.overplot_coordinates(overplot = event.new)
         return None
+    
+    def _add_coordinates(self, event):
+        #event.new = self.overplot_coords.value
+        if event.new and hasattr(self, "ax"):
+            ra, dec = [], []
+            
+            if shared.shared_data.get("DESI_ra"):
+                ra += list(shared.shared_data.get("DESI_ra"))
+                dec += list(shared.shared_data.get("DESI_dec"))
+ 
+            if shared.shared_data.get("SDSS_ra"): 
+                ra += list(shared.shared_data.get("SDSS_ra")) 
+                dec += list(shared.shared_data.get("SDSS_dec"))
+              
+            self.euclid_object._add_overplot_coordinates(ra, dec)
+            self.overplot_coordinates(overplot = event)
+        
+        elif not event.new:
+            self.overplot_coordinates(overplot = event.new)
+        return None
+
+
 
     def get_euclid_object(self):
+        
         self.euclid_object = EuclidCutoutsClass(self.ra, self.dec, 
-                            euclid_filters= ["VIS", "NIR_Y", "NIR_H"],
-                            )
+                            euclid_filters= ["VIS", "NIR_Y", "NIR_H"])
         
         self.euclid_object.get_cone(verbose = True)
+        
         return None
     
     def get_euclid_cutout(self, stretch = "Linear", verbose = True):
+        
         if not hasattr(self, "euclid_object"):
             self.get_euclid_object()
+        
         if len(self.euclid_object.cone_results) > 2:
             self.euclid_object.get_cutouts(radius = self.radius, verbose = verbose)
             self.euclid_object.read_cutouts()
             self.euclid_object.reproject_cutouts(reference = "VIS")
             self.euclid_object.stack_cutouts(stretch = stretch)
         else:
-            print("No sources in Euclid dataset with those coordinates")
+            print(f"No sources in Euclid dataset with {self.ra}, {self.dec} coordinates")
             return None 
         
     def overplot_coordinates(self, overplot = False):
@@ -1001,7 +1025,7 @@ class EuclidPanelManager:
             self.scale_text =  self.ax.text((x0 + x1) / 2, y0 + y0/2, f'{self.get_plot_scale():.1f}"',
                                         color='red', ha='center', va='bottom', fontsize=14, fontweight='bold')
         return None
-
+    
     def run_init(self):
         """Wrapper for multithreading in __init__"""
         self.get_euclid_object()
@@ -1061,7 +1085,6 @@ def lotss_cutout_plot(data, selected):
     else:
         return empty_panel(message = "Missing LoTSS image")
 
-
 def local_stored_plot(data, selected):
     selected_source = get_selected_source(data=data, selected = selected)
     path = int(selected_source[config.settings["Local_image_path"]].iloc[0])
@@ -1070,3 +1093,10 @@ def local_stored_plot(data, selected):
     except Exception as e:
         print(e)
         return empty_panel()
+    
+def debug_shared_dataframe(data, selected):
+    debug_dict = dict(shared.shared_data)
+    if debug_dict.get("Sparcl_client"):
+        del  debug_dict["Sparcl_client"]  ###cannot be rendered into a df
+    df = pd.DataFrame.from_dict(debug_dict, orient = "index")
+    return pn.widgets.DataFrame(df)

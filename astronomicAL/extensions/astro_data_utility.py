@@ -17,7 +17,8 @@ from astropy.coordinates import SkyCoord
 from astropy.convolution import convolve, Gaussian1DKernel, Box1DKernel
 import mocpy
 
-from sparcl.client import SparclClient  
+from sparcl.client import SparclClient 
+import astronomicAL.extensions.extension_plots_shared as shared 
 from dl import queryClient as qc
 
 import matplotlib.transforms as transforms
@@ -33,16 +34,18 @@ class EuclidCutoutsClass:
     def __init__(self, ra, dec, 
                  euclid_filters = ["VIS", "NIR_Y", "NIR_J", "NIR_H"],
                  save_dir = "data/cutouts", check_coverage = True):
+        
         self.coordinates = SkyCoord(ra, dec, unit = "degree", frame = "icrs")   
         self.euclid_filters = euclid_filters
         self.save_dir = save_dir
+        
         if check_coverage:
             self.has_coverage = check_isin_survey(ra, dec, survey= "Euclid")
         if not os.path.isdir(self.save_dir):
             os.makedirs(self.save_dir)
         return None
     
-    def get_cone(self, initial_radius = 0.3*u.degree, async_job=True, verbose = True):
+    def get_cone(self, initial_radius = 0.5*u.degree, async_job=True, verbose = True):
         tic = time.perf_counter()
         job = Euclid.cone_search(self.coordinates, initial_radius, table_name="sedm.mosaic_product", ra_column_name="ra",
                                       dec_column_name="dec", columns="*", async_job= async_job)
@@ -230,7 +233,8 @@ class DESISpectraClass:
     #actually queries also BOSS and SDSS DR16
     def __init__(self, ra, dec, max_separation = 1, 
                  datasets = ["DESI-DR1", "DESI-EDR", "BOSS-DR16", "SDSS-DR16"],
-                 specId = None, check_coverage = True):
+                 specId = None, check_coverage = True,
+                 client = None):
         self.ra = ra
         self.dec = dec
         self.max_separation = max_separation/3600 #arcsec--> degreee
@@ -249,7 +253,11 @@ class DESISpectraClass:
         
         self.specId = specId
         
-        self.client = SparclClient()
+        if client is None:
+            shared.shared_data["Sparcl_client"] = SparclClient()
+            self.client = shared.shared_data.get("Sparcl_client")
+        else:
+            self.client = client
 
     def set_ra_dec(self, ra, dec):
         """To update class without recalling the SparcClient"""
