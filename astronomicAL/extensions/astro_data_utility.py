@@ -154,22 +154,41 @@ class EuclidCutoutsClass:
         self.reprojected_data |= {"stacked" : np.dstack(norm_images)}
         return None
     
-    def _add_overplot_coordinates(self, ra, dec, filtro="stacked"):
-        """Convert RA/Dec to pixel coordinates and store them.
+    def _add_overplot_coordinates(self, ra, dec, filtro = "stacked", dataset = "default"):
+        """
+        Convert RA/Dec to pixel coordinates and store them.
         Parameters:
         ra, dec: float or list of floats
-        filtro: WCS key (default is "stacked")
+        filtro : str, WCS key (default is "stacked")
+        dataset : str, allows to store independently coordinates from different datasets
         """
         if not hasattr(self, "overplot_coordinates"):
-            self.overplot_coordinates = {f : [] for  f in self.wcs.keys()}
+            self.overplot_coordinates = {f : {} for  f in self.wcs.keys()}
         if isinstance(ra, (float, int)):
             ra = [ra]
             dec = [dec]
         coords = SkyCoord(ra=ra, dec=dec, unit="deg", frame="icrs")
         x_pix, y_pix = self.wcs[filtro].world_to_pixel(coords)
-        self.overplot_coordinates[filtro] = list(zip(x_pix, y_pix))
-        return None
         
+        self.overplot_coordinates[filtro][dataset] = list(zip(x_pix, y_pix))
+        
+        return None
+    
+    def get_final_cutout(self, radius, stretch =  "Linear", reference = "VIS", verbose = False) :
+        """
+        This method just calls all the other methods to obtain a color cutout which can be 
+        rendered in the Euclid Cutout extension plot panel
+        """
+        if not hasattr(self, "cone_results"):
+            self.get_cone(verbose = verbose)
+        
+        if len(self.cone_results) > 2:
+            self.get_cutouts(radius = radius, verbose = verbose)
+            self.read_cutouts()
+            self.reproject_cutouts(reference = reference)
+            self.stack_cutouts(stretch = stretch)
+        else:
+            print(f"No sources in Euclid dataset with {self.coordinates} coordinates")
 
 
     @staticmethod
@@ -281,7 +300,7 @@ class DESISpectraClass:
         """Astro Data Lab does not accept Circle or Point functions,
           referred to https://datalab.noirlab.edu/help/index.php?qa=366&qa_1=dont-adql-functions-like-point-circle-work-query-interface
           for cone search.
-          LIMIT = 100 just for avoiding strange results"""
+          LIMIT = 100 just to avoid strange results"""
         
         datasets_str = ', '.join(f"'{ds}'" for ds in self.datasets)
 
