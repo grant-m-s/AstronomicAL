@@ -856,9 +856,8 @@ class EuclidPanelManager:
 
         self.euclid_pane = pn.pane.Matplotlib(dpi = 144,
                                 alt_text="Image Unavailable",
-                                sizing_mode="stretch_both",
+                                sizing_mode="stretch_height",
                                 interactive = False,
-                                tight = True,
                                 width = int(width))
         
         with concurrent.futures.ThreadPoolExecutor() as executor:
@@ -872,7 +871,7 @@ class EuclidPanelManager:
         shared.subscribe("DESI_coordinates", lambda coords : self._add_coordinates(coords, "DESI"))
         shared.subscribe("SDSS_coordinates", lambda coords : self._add_coordinates(coords, "SDSS"))
         
-        return None
+        # return None
 
     def _initialise_radius_scaling_widgets(self, width = 300):
         
@@ -896,7 +895,7 @@ class EuclidPanelManager:
         self.contrast_scaler.param.watch(self._update_intensity_scaling, "value")  
 
         self.overplot_coords_widget = pn.widgets.Checkbox(name = "Spectrum Coordinates")
-        self.overplot_coords_widget.param.watch(self._show_overplot_coordinates, "value") 
+        self.overplot_coords_widget.param.watch(self._overplot_coordinates_callback, "value")
 
      
     def _update_radius(self, event):
@@ -946,43 +945,62 @@ class EuclidPanelManager:
            coordinates : dict : {"ra" : [...], "dec" : [...]} 
            dataset : string, key of the dictionary storing the coordinates
         """
+
         if not coordinates or "ra" not in coordinates or "dec" not in coordinates:
             print("Wrong passed coordinates")
-            return None
+
         ra, dec  = coordinates["ra"], coordinates["dec"]
         self.euclid_object._add_overplot_coordinates(ra, dec, dataset = dataset)
-        return None
+        self.overplot_coords_widget.name = "Spectrum Coordinates"
+        if self.overplot_coords_widget.value:
+            self._show_overplot_coordinates()
     
-    def _show_overplot_coordinates(self, event):
+    def _show_overplot_coordinates(self):
+
+        image_height, image_width = self.euclid_image.get_size()
+        self.overplotted_coordinates = []
+        self.ax.cla()
+        self.euclid_fig.clf()
+        self.euclid_image = None
+
+        self.ax = self.euclid_fig.add_subplot(1,1,1)
+        self.ax.set_axis_off()
+        self._update_image()
         
-        if event.new:
-            if not hasattr(self.euclid_object, "overplot_coordinates"):
-                print("No spectrum coordinates available")
-                event.obj.value = False  
-                return None
-            
-            image_height, image_width = self.euclid_image.get_size()
-            self.overplotted_coordinates = []
+        if "stacked" in list(self.euclid_object.overplot_coordinates.keys()):
+
+            self.euclid_image = self.ax.imshow(self.euclid_object.reprojected_data["stacked"], origin = "lower")
+            self.overplot_coords_widget.name = "Spectrum Coordinates"
+
             for dataset in self.euclid_object.overplot_coordinates["stacked"]:
+
                 N = len(self.euclid_object.overplot_coordinates["stacked"][dataset])
                 colors = plt.get_cmap("gist_rainbow", N)
                 marker = "+" if dataset == "DESI" else "*" #TODO improve
-                for i, (x, y) in enumerate(self.euclid_object.overplot_coordinates["stacked"][dataset]):
-                        if (0 <= x < image_width) and (0 <= y < image_height):
-                            sc = self.ax.scatter(x, y, color = colors(i), s = 300,
-                                                 marker = marker)
-                            self.overplotted_coordinates.append(sc)
-        else:
-            if not hasattr(self, "overplotted_coordinates"):
-                #This is used when the checkbox is True but without provided coordinates. 
-                #checkbox.value is then set as False so it triggers again the callback and it goes through
-                #this
+                if self.overplot_coords_widget.value:
+                    for i, (x, y) in enumerate(self.euclid_object.overplot_coordinates["stacked"][dataset]):
+                            if (0 <= x < image_width) and (0 <= y < image_height):
+                                self.ax.scatter(x, y, color = colors(i), s = 300,
+                                                        marker = marker)
+
+    def _overplot_coordinates_callback(self, event):
+
+        if event.new:
+            if not hasattr(self.euclid_object, "overplot_coordinates"):
+                print("No spectrum coordinates available")
+                event.obj.name = "Spectrum Coordinates [Not Currently Avaliable]"
                 return None
             
+            event.obj.name = "Spectrum Coordinates"
+            self._show_overplot_coordinates()
+
+        elif not event.new:
+
             if isinstance(self.overplotted_coordinates, list):
                 for sc in self.overplotted_coordinates:
                     sc.remove()
-                self.overplotted_coordinates =[]
+                self.overplotted_coordinates = []
+            self._show_overplot_coordinates()
         self._update_image()
 
         
@@ -1011,7 +1029,9 @@ class EuclidPanelManager:
             self.ax.plot([x0, x1], [y0, y0], color='red', lw=3)
             self.scale_text =  self.ax.text((x0 + x1) / 2, y0 + y0/2, f'{self.get_plot_scale():.1f}"',
                                         color='red', ha='center', va='bottom', fontsize=14, fontweight='bold')
-        return None
+            
+        if self.overplot_coords_widget.value:
+            self._show_overplot_coordinates()
     
     def run_euclid(self, initialize = False):
         """Wrapper for multithreading"""
