@@ -900,6 +900,7 @@ class EuclidPanelManager:
      
     def _update_radius(self, event):
         self.radius = event.new
+        shared.publish("Euclid_radius", self.radius)
         
         with concurrent.futures.ThreadPoolExecutor() as executor:
             future = executor.submit(self.run_euclid, initialize = False)
@@ -907,7 +908,7 @@ class EuclidPanelManager:
             future.result()  # This would raise the exception
         except Exception as e:
             print(f"Error occurred: {e}")
-        shared.publish("Euclid_radius", self.radius)
+        
         self._update_image()
 
     @staticmethod
@@ -967,18 +968,17 @@ class EuclidPanelManager:
         self.ax.set_axis_off()
         self._update_image()
         
-        if "stacked" in list(self.euclid_object.overplot_coordinates.keys()):
-
+        if hasattr(self.euclid_object, "overplot_coordinates"):
             self.euclid_image = self.ax.imshow(self.euclid_object.reprojected_data["stacked"], origin = "lower")
             self.overplot_coords_widget.name = "Spectrum Coordinates"
 
-            for dataset in self.euclid_object.overplot_coordinates["stacked"]:
+            for dataset in self.euclid_object.overplot_coordinates:
 
-                N = len(self.euclid_object.overplot_coordinates["stacked"][dataset])
+                N = len(self.euclid_object.overplot_coordinates[dataset]["ra"])
                 colors = plt.get_cmap("gist_rainbow", N)
                 marker = "+" if dataset == "DESI" else "*" #TODO improve
                 if self.overplot_coords_widget.value:
-                    for i, (x, y) in enumerate(self.euclid_object.overplot_coordinates["stacked"][dataset]):
+                    for i, (x, y) in enumerate(self.euclid_object._convert_overplot_coordinates(dataset = dataset, filtro = "stacked")):
                             if (0 <= x < image_width) and (0 <= y < image_height):
                                 self.ax.scatter(x, y, color = colors(i), s = 300,
                                                         marker = marker)
