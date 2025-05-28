@@ -5,7 +5,9 @@ models
 
 #Added by Ivano
 .venv*/
-*test.ipynb 
+*test.ipynb
+*.py.bak
+*.bak 
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

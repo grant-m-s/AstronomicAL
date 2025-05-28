@@ -43,7 +43,6 @@ class EuclidCutoutsClass:
             self.has_coverage = check_isin_survey(ra, dec, survey= "Euclid")
         if not os.path.isdir(self.save_dir):
             os.makedirs(self.save_dir)
-        return None
     
     def get_cone(self, initial_radius = 0.5*u.degree, async_job=True, verbose = True):
         tic = time.perf_counter()
@@ -53,7 +52,7 @@ class EuclidCutoutsClass:
         toc = time.perf_counter()
         if verbose:
             print(f"Cone search required {toc-tic} seconds")
-        return None
+        
     
     @staticmethod
     def get_info_cutout(cone_results, filter_name):
@@ -93,7 +92,7 @@ class EuclidCutoutsClass:
         toc = time.perf_counter()
         if verbose:
                 print(f"Retrieving all cutouts requiered {toc-tic} seconds")
-        return None 
+        
     
 
     def read_cutouts(self):
@@ -105,7 +104,7 @@ class EuclidCutoutsClass:
                 self.data |= {band : hdul[0].data}         #probably doesn't work in 3.8--> use .update
                 self.wcs  |= {band : WCS(hdul[0].header)}  #Required for stacking images}  
                 self.arcsec_per_pix  |= {band : np.abs(hdul[0].header["CD1_1"]*3600)}  
-        return None 
+    
     
     
     def reproject_cutouts(self, reference = "VIS"):
@@ -125,7 +124,7 @@ class EuclidCutoutsClass:
             reprojected, _ = reproject_interp((self.data[band], self.wcs[band]), ref_wcs, shape_out=ref_shape)
             self.reprojected_data |= {band : reprojected}
         
-        return None
+
     
     @staticmethod
     def transform_image(image, 
@@ -152,28 +151,40 @@ class EuclidCutoutsClass:
         norm_images = [self.transform_image(self.reprojected_data[band], stretch = stretch, interval = interval)
                    for band in [r_img, g_img, b_img]]
         self.reprojected_data |= {"stacked" : np.dstack(norm_images)}
-        return None
+ 
     
-    def _add_overplot_coordinates(self, ra, dec, filtro = "stacked", dataset = "default"):
+    def _add_overplot_coordinates(self, ra, dec, dataset = "default"):
         """
-        Convert RA/Dec to pixel coordinates and store them.
+        Creates a dictionary to store coordinates from different dataset which can
+        be then overplotted n the cutout.
         Parameters:
-        ra, dec: float or list of floats
-        filtro : str, WCS key (default is "stacked")
+        ra, dec: float or list of floats, icrs coordinates
         dataset : str, allows to store independently coordinates from different datasets
         """
         if not hasattr(self, "overplot_coordinates"):
-            self.overplot_coordinates = {f : {} for  f in self.wcs.keys()}
-        if isinstance(ra, (float, int)):
-            ra = [ra]
-            dec = [dec]
-        coords = SkyCoord(ra=ra, dec=dec, unit="deg", frame="icrs")
-        x_pix, y_pix = self.wcs[filtro].world_to_pixel(coords)
+            self.overplot_coordinates = {}
+        self.overplot_coordinates[dataset] = {"ra" : ra, "dec" : dec}
+
         
-        self.overplot_coordinates[filtro][dataset] = list(zip(x_pix, y_pix))
-        
-        return None
     
+    def _convert_overplot_coordinates(self, filtro = "stacked", dataset = "default"):
+        """
+        Converts the stored coordinates into pixel coordinates for a given filter.
+        Returnz a list of (x,y) poais of pixel coordinates
+        Parameters:
+        filtro : str, WCS key (default is "stacked")
+        dataset : str, datasets coordinates to be transformed into pixels
+        """
+        if hasattr(self, "overplot_coordinates"):
+            coords = SkyCoord(ra = self.overplot_coordinates[dataset]["ra"],
+                             dec = self.overplot_coordinates[dataset]["dec"],
+                            unit="deg", frame="icrs")
+            x_pix, y_pix = self.wcs[filtro].world_to_pixel(coords)
+            return list(zip(x_pix, y_pix))
+        
+        print("No stored coordinates")
+        return []
+        
     def get_final_cutout(self, radius, stretch =  "Linear", reference = "VIS", verbose = False) :
         """
         This method just calls all the other methods to obtain a color cutout which can be 
@@ -237,8 +248,7 @@ class EuclidCutoutsClass:
         
         if verbose:
             print(f"Scaling cutouts required {toc-tic} seconds")
-        return None
-    
+   
 
 
 
@@ -284,7 +294,7 @@ class DESISpectraClass:
         self.dec = dec
         self.spectra = None
         self.available_spectra = 0
-        return None
+
     
     def get_spectra(self):
         """Call all methods to get a spectrum"""
@@ -294,7 +304,7 @@ class DESISpectraClass:
         else:
             self.query_main_table(verbose = True)
             self.query_spectra_sparclid(verbose = True)
-        return None
+
 
     def query_main_table(self, verbose = False):
         """Astro Data Lab does not accept Circle or Point functions,
@@ -320,7 +330,7 @@ class DESISpectraClass:
         toc = time.perf_counter()
         if verbose:
             print(f"Querying Noirlab table required {toc-tic} seconds")
-        return None
+
     
   
     def get_info_spectra(self):
@@ -352,7 +362,7 @@ class DESISpectraClass:
                 print(f"Retrieving spectrum required {toc-tic} seconds")
         else:
             print("No available spectra")
-        return None
+
     
     def query_spectra_specid(self, verbose = False):
         include = ['sparcl_id', 'specid', 'data_release', 'redshift', 'flux',
@@ -371,7 +381,7 @@ class DESISpectraClass:
                 print(f"Retrieving spectrum required {toc-tic} seconds")
         else:
              print("No target specId provided ")
-        return None
+        
     
     def get_coordinates(self):
         """For cutout plottings"""
@@ -392,7 +402,7 @@ class DESISpectraClass:
         
         self.smoothed_fluxes  = [convolve(spectrum.flux, kernel) for spectrum in self.spectra]
         
-        return None 
+
     
     def get_emline_table(self, primary = True, extra_path = "data"):
         """Emission lines for galaxies/AGN. 
