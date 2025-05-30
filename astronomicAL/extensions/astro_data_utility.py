@@ -33,16 +33,14 @@ class EuclidCutoutsClass:
     
     def __init__(self, ra, dec, 
                  euclid_filters = ["VIS", "NIR_Y", "NIR_J", "NIR_H"],
-                 save_dir = "data/cutouts", check_coverage = True):
+                 save_dir = "data/cutouts"):
         
         self.coordinates = SkyCoord(ra, dec, unit = "degree", frame = "icrs")   
         self.euclid_filters = euclid_filters
         self.save_dir = save_dir
-        
-        if check_coverage:
-            self.has_coverage = check_isin_survey(ra, dec, survey= "Euclid")
         if not os.path.isdir(self.save_dir):
             os.makedirs(self.save_dir)
+
     
     def get_cone(self, initial_radius = 0.5*u.degree, async_job=True, verbose = True):
         tic = time.perf_counter()
@@ -93,8 +91,6 @@ class EuclidCutoutsClass:
         if verbose:
                 print(f"Retrieving all cutouts requiered {toc-tic} seconds")
         
-    
-
     def read_cutouts(self):
         self.data = {}
         self.wcs = {}
@@ -200,7 +196,12 @@ class EuclidCutoutsClass:
             self.stack_cutouts(stretch = stretch)
         else:
             print(f"No sources in Euclid dataset with {self.coordinates} coordinates")
+    
 
+    def check_coverage(self, path = "data/mocs"):
+        self.has_coverage = check_isin_survey(ra = self.coordinates.ra.value,
+                                              dec = self.coordinates.dec.value,
+                                            survey = "Euclid",  path = path)
 
     @staticmethod
     def zoom_image(image, scale, same_shape = True, zooming_order = 1):
@@ -262,8 +263,8 @@ class DESISpectraClass:
     #actually queries also BOSS and SDSS DR16
     def __init__(self, ra, dec, max_separation = 1, 
                  datasets = ["DESI-DR1", "DESI-EDR", "BOSS-DR16", "SDSS-DR16"],
-                 specId = None, check_coverage = True,
-                 client = None):
+                 specId = None, client = None):
+        
         self.ra = ra
         self.dec = dec
         self.max_separation = max_separation/3600 #arcsec--> degreee
@@ -272,13 +273,6 @@ class DESISpectraClass:
         if isinstance(datasets, str): 
             datasets = [datasets]
         self.datasets = datasets
-        
-        self.has_coverage = False
-        if check_coverage:
-            if ("DESI-DR1" in self.datasets) | ("DESI-EDR" in self.datasets):
-                self.has_coverage = self.has_coverage | check_isin_survey(self.ra, self.dec, survey = "DESI")
-            if ("BOSS-DR16" in self.datasets) | ("SDSS-DR16" in self.datasets):
-                self.has_coverage = self.has_coverage | check_isin_survey(self.ra, self.dec, survey = "SDSS")
         
         self.specId = specId
         
@@ -295,7 +289,6 @@ class DESISpectraClass:
         self.spectra = None
         self.available_spectra = 0
 
-    
     def get_spectra(self):
         """Call all methods to get a spectrum"""
         self.spectra = None
@@ -420,6 +413,14 @@ class DESISpectraClass:
         self.absline_table = pd.read_csv(path)
         if primary:
             self.absline_table = self.absline_table[self.emline_table["primary"]==1]
+
+    
+    def check_coverage(self, path = "data/mocs"):
+        self.has_coverage = False
+        if ("DESI-DR1" in self.datasets) | ("DESI-EDR" in self.datasets):
+            self.has_coverage = self.has_coverage | check_isin_survey(self.ra, self.dec, survey = "DESI", path = path)
+        if ("BOSS-DR16" in self.datasets) | ("SDSS-DR16" in self.datasets):
+            self.has_coverage = self.has_coverage | check_isin_survey(self.ra, self.dec, survey = "SDSS", path = path)
     
     
 
@@ -544,9 +545,12 @@ class DESISpectraClass:
         return spectrum_overlay
 
 
-def LoTSS_cutout(ra, dec, radius = 10):
+def LoTSS_cutout(ra, dec, radius = 10, check_coverage = True):
     """radius in arcsec"""
-    has_coverage = check_isin_survey(ra, dec, survey = "LoTSS")
+    if check_coverage:
+        has_coverage = check_isin_survey(ra, dec, survey = "LoTSS")
+    else: 
+        has_coverage = True
     if has_coverage:
         coordinates = SkyCoord(ra*u.deg, dec*u.deg, frame = "icrs")
         stringa = coordinates.to_string(style = "hmsdms").replace("h",":").replace("d",":").replace("m",":").replace("s","")
@@ -564,8 +568,11 @@ def LoTSS_cutout(ra, dec, radius = 10):
    
 
 
-def VLASS_cutout(ra, dec, radius = 10, verbose = False):
-    has_coverage = check_isin_survey(ra, dec, survey = "VLASS")
+def VLASS_cutout(ra, dec, radius = 10, verbose = False, check_coverage = True):
+    if check_coverage:
+        has_coverage = check_isin_survey(ra, dec, survey = "VLASS")
+    else: 
+        has_coverage = True
     if has_coverage:
         cadc = Cadc()
         coordinates = SkyCoord(ra*u.deg, dec*u.deg, frame = "icrs")
@@ -618,13 +625,7 @@ def get_ra_dec_DESI():
     dec = found.records[0]["dec"]
     return ra, dec
 
-
-
 #########previous stuff 
-
-
-
-
 
 
 class radio_cutouts_class:

@@ -743,8 +743,9 @@ def spectrum_plot(data, selected = None, dataset = "DESI", from_specid = False):
     
         with concurrent.futures.ThreadPoolExecutor() as executor:
             future = executor.submit(run_desi, ra = ra, dec = dec, datasets = datasets,
-                                     specId = specId, check_coverage = not from_specid,
+                                     specId = specId,
                                      max_separation = new_radius,
+                                     check_coverage = not specId,
                                      client = shared.shared_data.get("Sparcl_client", None))
         
         desi_object = future.result()   ###everything is named desi but works also for SDSS
@@ -772,7 +773,6 @@ def run_desi(ra, dec, datasets = ["DESI-DR1", "DESI-EDR", "BOSS-DR16", "SDSS-DR1
  
     desi_object = DESISpectraClass(ra, dec, datasets = datasets ,
                                    specId = specId, max_separation = max_separation,
-                                   check_coverage=check_coverage,
                                    client = client)
     desi_object.get_spectra()
   
@@ -989,6 +989,7 @@ class EuclidPanelManager:
             if not hasattr(self.euclid_object, "overplot_coordinates"):
                 print("No spectrum coordinates available")
                 event.obj.name = "Spectrum Coordinates [Not Currently Avaliable]"
+                self.overplotted_coordinates = []
                 return None
             
             event.obj.name = "Spectrum Coordinates"
