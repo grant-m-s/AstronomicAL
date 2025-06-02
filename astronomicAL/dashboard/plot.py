@@ -112,6 +112,7 @@ class PlotDashboard(param.Parameterized):
 
         self.panel()
 
+
     @param.depends("X_variable", "Y_variable")
     def plot(self, x_var=None, y_var=None):
         """Create a basic scatter plot of the data with the selected axis.
@@ -135,8 +136,8 @@ class PlotDashboard(param.Parameterized):
 
         p = hv.Points(
             self.df,
-            [x_var, y_var],
-        ).opts(active_tools=["pan", "wheel_zoom"])
+            [x_var, y_var], 
+        ).opts()
 
         cols = list(self.df.columns)
 
@@ -149,7 +150,7 @@ class PlotDashboard(param.Parameterized):
             fill_color="black",
             marker="circle",
             size=10,
-            active_tools=["pan", "wheel_zoom"],
+            #active_tools=["pan", "wheel_zoom"],
         )
 
         color_key = config.settings["label_colours"]
@@ -197,16 +198,23 @@ class PlotDashboard(param.Parameterized):
                 ).opts(
                     xlim=(min_x, max_x),
                     ylim=(min_y, max_y),
-                    responsive=True,
-                    shared_axes=False,
+                    #responsive=True,
+                    #shared_axes=False,
+                    framewise=False,          
+                    axiswise=False, 
+                    default_tools = [],     
+                    tools = [],
                 ),
                 threshold=0.75,
                 how="saturate",
             )
             * selected_plot
             # * color_points
-        ).opts(legend_position="bottom_right", shared_axes=False)
+        ).opts(legend_position="bottom_right", 
+               #shared_axes=False
+               )
         return plot
+    
 
     def panel(self):
         """Render the current view.
