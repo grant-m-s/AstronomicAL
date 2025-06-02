@@ -293,13 +293,15 @@ class LabellingDashboard(param.Parameterized):
         p = hv.Points(
             self.df,
             [x_var, y_var],
-        ).opts(active_tools=["pan", "wheel_zoom"])
-
+        ).opts(
+            #active_tools=["pan", "wheel_zoom"])
+        )
         sample_region = hv.Points(
             self.sample_region,
             [x_var, y_var],
-        ).opts(active_tools=["pan", "wheel_zoom"])
-
+        ).opts(
+            #active_tools=["pan", "wheel_zoom"])
+        )
         cols = list(self.df.columns)
 
         if len(self.src.data[cols[0]]) == 1:
@@ -311,7 +313,7 @@ class LabellingDashboard(param.Parameterized):
             fill_color="black",
             marker="circle",
             size=10,
-            active_tools=["pan", "wheel_zoom"],
+            #active_tools=["pan", "wheel_zoom"],
         )
 
         color_key = config.settings["label_colours"]
@@ -363,9 +365,11 @@ class LabellingDashboard(param.Parameterized):
             ).opts(
                 xlim=(min_x, max_x),
                 ylim=(min_y, max_y),
-                responsive=True,
+                #responsive=True,
                 alpha=0.5,
-                shared_axes=False,
+                #shared_axes=False,
+                framewise=False,        
+                axiswise=False,         
             ),
             threshold=0.3,
             how="over",
@@ -381,14 +385,16 @@ class LabellingDashboard(param.Parameterized):
             ).opts(
                 xlim=(min_x, max_x),
                 ylim=(min_y, max_y),
-                responsive=True,
-                shared_axes=False,
+                #responsive=True,
+                #shared_axes=False,
+                framewise=False,        
+                axiswise=False, 
             ),
             threshold=0.7,
             how="saturate",
         )
         plot = (all_points * sample_region_plot * selected_plot).opts(
-            shared_axes=False,
+            #shared_axes=False,
         )
 
         return plot

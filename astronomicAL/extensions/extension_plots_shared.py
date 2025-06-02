@@ -13,16 +13,43 @@ shared_data = {"is_global": True}
 
 subscribers = {}
 
+panel_subscriptions = {}
+
 def subscribe(key, callback):
     if key not in subscribers:
         subscribers[key] = []
     subscribers[key].append(callback)
- 
+
+def subscribe_with_panel_id(panel_id, key, callback):
+    """Subscribe with panel tracking for cleanup"""
+    subscribe(key, callback)
+    if panel_id not in panel_subscriptions:
+        panel_subscriptions[panel_id] = []
+    panel_subscriptions[panel_id].append((key, callback))
+
+def unsubscribe(key, callback):
+    """Remove a callback from the subscribers for a given key"""
+    if key in subscribers and callback in subscribers[key]:
+        subscribers[key].remove(callback)
+        if not subscribers[key]:
+            del subscribers[key]
+
+def cleanup_panel_subscriptions(panel_id):
+    """Clean up all subscriptions for a specific panel"""
+    if panel_id in panel_subscriptions:
+        for key, callback in panel_subscriptions[panel_id]:
+            unsubscribe(key, callback)
+        del panel_subscriptions[panel_id]
 
 def publish(key, value):
     shared_data[key] = value
-    for callback in subscribers.get(key, []):
-        callback(value)
+    if key in subscribers:
+        for callback in subscribers[key]:
+            try:
+                callback(value)
+            except Exception as e:
+                print(f"Error in callback for {key}: {e}")
+
 
   
 

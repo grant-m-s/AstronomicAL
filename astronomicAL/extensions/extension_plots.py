@@ -1,4 +1,5 @@
 from datetime import datetime
+import uuid
 from holoviews.operation.datashader import (
     datashade,
     dynspread,
@@ -27,6 +28,16 @@ from astronomicAL.extensions.astro_data_utility import VLASS_cutout, LoTSS_cutou
 def get_plot_dict():
 
     plot_dict = {
+        "Euclid Cutout" : CustomPlot(euclid_cutout_plot, []),
+
+        "DESI Spectra from Coords" : CustomPlot(spectrum_plot, [], dataset="DESI", from_specid=False),
+
+        "DESI Spectrum from ID" : CustomPlot(spectrum_plot, ["DESI_TargetID"], dataset="DESI", from_specid=True),
+
+        "SDSS Spectra from Coords" : CustomPlot(spectrum_plot, [], dataset="SDSS", from_specid=False),
+
+        "SDSS Spectrum from ID" : CustomPlot(spectrum_plot, ["SDSS_TargetID"], dataset="SDSS", from_specid=True),
+
         "Mateos 2012 Wedge": CustomPlot(
             mateos_2012_wedge, ["Log10(W3_Flux/W2_Flux)", "Log10(W2_Flux/W1_Flux)"]
         ),
@@ -41,16 +52,6 @@ def get_plot_dict():
         ),
         "SED Plot": SEDPlot(sed_plot, []),
 
-        "Euclid Cutout" : CustomPlot(euclid_cutout_plot, []),
-
-        "DESI Spectra from Coords" : CustomPlot(spectrum_plot, [], dataset="DESI", from_specid=False),
-
-        "DESI Spectrum from ID" : CustomPlot(spectrum_plot, ["DESI_TargetID"], dataset="DESI", from_specid=True),
-
-        "SDSS Spectra from Coords" : CustomPlot(spectrum_plot, [], dataset="SDSS", from_specid=False),
-
-        "SDSS Spectrum from ID" : CustomPlot(spectrum_plot, ["SDSS_TargetID"], dataset="SDSS", from_specid=True),
-
         "VLA-VLASS Cutout" : CustomPlot(vlass_cutout_plot, []),
 
         "LOFAR-LoTSS Cutout" : CustomPlot(lotss_cutout_plot, []),
@@ -62,14 +63,16 @@ def get_plot_dict():
 
 
 class CustomPlot:
-    def __init__(self, plot_fn, extra_features, *plot_fn_args, **plot_fn_kwargs):
+    def __init__(self, plot_fn, extra_features, **plot_fn_kwargs):
 
         self.plot_fn = plot_fn
         self.extra_features = extra_features
         self.row = pn.Row("Loading...")
-        self.plot_fn_args = plot_fn_args
         self.plot_fn_kwargs = plot_fn_kwargs
+        self.panel_id = str(uuid.uuid4()) 
+        self._is_rendered = False
 
+    
     def create_settings(self, unknown_cols):
         self.waiting = True
         main_columns = list(config.main_df.columns)
@@ -114,9 +117,23 @@ class CustomPlot:
         if len(unknown_cols) > 0:
             self.col_selection = self.create_settings(unknown_cols)
             return self.render
+        
         else:
-            return lambda *args, **kwargs: self.plot_fn(*args, *self.plot_fn_args, **kwargs, **self.plot_fn_kwargs)
-
+        #This is something I don't understand. #please review it carefully 
+            def plot_with_instance(*args, **kwargs):
+                if not self._is_rendered:
+                    self._is_rendered = True
+                    return self.plot_fn(*args, plot_instance = self, **kwargs, **self.plot_fn_kwargs)
+                else:
+                    return self.plot_fn(*args, **kwargs, **self.plot_fn_kwargs)
+        
+        return plot_with_instance
+    
+    def cleanup_subscriptions(self):
+        """Removes subscriptions to the shared dictionary"""
+        shared.cleanup_panel_subscriptions(self.panel_id)
+        self._is_rendered = False
+        print(f"CustomPlot {self.panel_id} fully cleaned up")
 
 def create_plot(
     data,
@@ -272,7 +289,7 @@ def create_plot(
     return plot
 
 
-def bpt_plot(data, selected=None):
+def bpt_plot(data, selected=None, plot_instance=None):
 
     plot_NII = create_plot(
         data,
@@ -347,7 +364,7 @@ def bpt_plot(data, selected=None):
     return tabs
 
 
-def mateos_2012_wedge(data, selected=None):
+def mateos_2012_wedge(data, selected=None, plot_instance=None):
 
     plot = create_plot(
         data,
@@ -709,15 +726,12 @@ def get_ra_dec(selected_source):
 
 
 
-def spectrum_plot(data, selected = None, dataset = "DESI", from_specid = False):
+def spectrum_plot(data, selected = None, dataset = "DESI", from_specid = False, plot_instance = None):
 
     container = pn.Column()
 
     def update_plot(new_radius):
         selected_source = get_selected_source(data=data, selected = selected)
-        
-        if True:
-            container.objects = [pn.pane.Markdown(f"{new_radius}")]
 
         if from_specid:
             if config.settings[f"{dataset}_TargetID"] in selected_source.columns:
@@ -759,13 +773,15 @@ def spectrum_plot(data, selected = None, dataset = "DESI", from_specid = False):
         else:
             container.objects = [pn.pane.Markdown("No spectrum found.")]
         
-    update_plot(shared.shared_data.get("Euclid_radius", 0.5))
+    initial_radius = shared.shared_data.get("Euclid_radius", 0.5)
+    update_plot(initial_radius)
         
-    if not from_specid:
-            shared.subscribe("Euclid_radius", update_plot)
-
+    if not from_specid and plot_instance:
+        shared.subscribe_with_panel_id(plot_instance.panel_id, "Euclid_radius", update_plot)
+    elif not from_specid:
+        shared.subscribe("Euclid_radius", update_plot)
     return container
-
+   
 
 def run_desi(ra, dec, datasets = ["DESI-DR1", "DESI-EDR", "BOSS-DR16", "SDSS-DR16"],
             specId = None, max_separation = 0.5, check_coverage = True,
@@ -832,12 +848,20 @@ def _add_coordinates_to_shared(ra, dec, key_name):
     return 
 
 
-def euclid_cutout_plot(data, selected = None, radius =5):
+def euclid_cutout_plot(data, selected = None, plot_instance = None):
     selected_source = get_selected_source(data=data, selected = selected)
     ra, dec = get_ra_dec(selected_source)
     if ra is None or dec is None:
         return empty_panel(message = "Missing Ra and Dec")
-    euclid_panel_manager = EuclidPanelManager(ra, dec, radius = radius)
+    
+    initial_radius = shared.shared_data.get("Euclid_radius", 5.0)
+    
+    panel_id = plot_instance.panel_id if plot_instance else None
+    
+    euclid_panel_manager = EuclidPanelManager(ra, dec, radius = initial_radius, panel_id = panel_id)
+    if plot_instance:
+        plot_instance.euclid_panel_manager = euclid_panel_manager
+
     return euclid_panel_manager.panel()
 
 
@@ -846,14 +870,15 @@ class EuclidPanelManager:
     """A class that handles the retrieve of Euclid cutouts and its manipulation with 
     the widgets"""
     
-    def __init__(self, ra, dec, radius = 5, width = 300):
+    def __init__(self, ra, dec, radius = 5, width = 300, panel_id = None):
         """radius in arcsec"""
         self.ra = ra
         self.dec = dec
         self.radius = radius
-        self._initialise_radius_scaling_widgets(width = int(width))
+        self.panel_id = panel_id
         
-
+        
+        self._initialise_radius_scaling_widgets(width = int(width))
         self.euclid_pane = pn.pane.Matplotlib(dpi = 144,
                                 alt_text="Image Unavailable",
                                 sizing_mode="stretch_height",
@@ -866,12 +891,17 @@ class EuclidPanelManager:
             future.result()  # eventually raise an exception???
         except Exception as e:
             print(f"Error occurred: {e}")
-        shared.publish("Euclid_radius", self.radius)
-        ### Coordinates are stored in different dictionaries named after the survey
-        shared.subscribe("DESI_coordinates", lambda coords : self._add_coordinates(coords, "DESI"))
-        shared.subscribe("SDSS_coordinates", lambda coords : self._add_coordinates(coords, "SDSS"))
         
-        # return None
+        shared.publish("Euclid_radius", self.radius)
+        if self.panel_id:
+            desi_callback = lambda coords: self._add_coordinates(coords, "DESI")
+            sdss_callback = lambda coords: self._add_coordinates(coords, "SDSS")
+            shared.subscribe_with_panel_id(self.panel_id, "DESI_coordinates", desi_callback)
+            shared.subscribe_with_panel_id(self.panel_id, "SDSS_coordinates", sdss_callback)
+        else:
+            shared.subscribe("DESI_coordinates", lambda coords: self._add_coordinates(coords, "DESI"))
+            shared.subscribe("SDSS_coordinates", lambda coords: self._add_coordinates(coords, "SDSS"))
+
 
     def _initialise_radius_scaling_widgets(self, width = 300):
         

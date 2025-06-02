@@ -48,15 +48,17 @@ class Dashboard(param.Parameterized):
         self.src.on_change("data", self._update_extension_plots_cb)
         self.row = pn.Row(pn.pane.Str("loading"))
         self.df = config.main_df
+        self.current_extension_plot = None
 
         self._close_button = pn.widgets.Button(name="Close", max_width=100)
         self._close_button.on_click(self._close_button_cb)
 
         self._submit_button = pn.widgets.Button(name="Submit Column Names")
         self._submit_button.on_click(self._submit_button_cb)
-
+     
         self.contents = contents
-
+        
+ 
     def _submit_button_cb(self, event):
         self._submit_button.name = "Loading Plot..."
         self._submit_button.disabled = True
@@ -73,6 +75,7 @@ class Dashboard(param.Parameterized):
         self._update_contents()
 
     def _close_button_cb(self, event):
+        self._cleanup_current_extension_plot()
         self.contents = "Menu"
 
     def _update_extension_plots_cb(self, attr, old, new):
@@ -82,9 +85,18 @@ class Dashboard(param.Parameterized):
                 config.main_df, self.src
             )
             self.panel()
+    
+    def _cleanup_current_extension_plot(self):
+        """Clean up subscriptions from the current extension plot before switching"""
+        if self.current_extension_plot and hasattr(self.current_extension_plot, 'cleanup_subscriptions'):
+            self.current_extension_plot.cleanup_subscriptions()
+        self.current_extension_plot = None
+
 
     @param.depends("contents", watch=True)
     def _update_contents(self):
+
+        self._cleanup_current_extension_plot()
 
         if self.contents == "Settings":
 
@@ -127,6 +139,7 @@ class Dashboard(param.Parameterized):
             self.panel_contents = SelectedSourceDashboard(self.src, self._close_button)
         else:
             self.plot_dict = extension_plots.get_plot_dict()
+            self.current_extension_plot = self.plot_dict[self.contents]
             self.panel_contents = self.plot_dict[self.contents].plot(
                 self._submit_button
             )(config.main_df, self.src)
