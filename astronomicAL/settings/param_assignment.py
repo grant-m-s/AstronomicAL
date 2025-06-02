@@ -321,6 +321,7 @@ class ParameterAssignment(param.Parameterized):
             settings Dashboard.
 
         """
+
         if self.completed:
             self.column[0] = pn.pane.Str("Settings Saved.")
         else:
