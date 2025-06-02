@@ -218,6 +218,7 @@ class SettingsDashboard:
         pipeline_list = list(self.pipeline._stages)
 
         next_stage = pipeline_list[self._pipeline_stage + 1]
+
         self.pipeline[next_stage].update_data(dataframe=self.df)
 
         self._pipeline_stage += 1
