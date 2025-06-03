@@ -10,9 +10,11 @@ import panel as pn
 import pandas as pd
 import time
 
-pn.extension()
+pn.extension()   
 hv.extension("bokeh")
 hv.renderer("bokeh").webgl = True
+
+
 
 
 def export_fits_file_cb(event):
