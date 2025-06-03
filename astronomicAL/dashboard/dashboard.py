@@ -49,13 +49,14 @@ class Dashboard(param.Parameterized):
         self.row = pn.Row(pn.pane.Str("loading"))
         self.df = config.main_df
         self.current_extension_plot = None
-
+        
         self._close_button = pn.widgets.Button(name="Close", max_width=100)
         self._close_button.on_click(self._close_button_cb)
 
         self._submit_button = pn.widgets.Button(name="Submit Column Names")
         self._submit_button.on_click(self._submit_button_cb)
-     
+        
+        self.plot_dict = extension_plots.get_plot_dict()
         self.contents = contents
         
  
@@ -79,15 +80,18 @@ class Dashboard(param.Parameterized):
         self.contents = "Menu"
 
     def _update_extension_plots_cb(self, attr, old, new):
-        plot_dict = extension_plots.get_plot_dict()
-        if self.contents in list(plot_dict.keys()):
-            self.panel_contents = plot_dict[self.contents].plot(self._submit_button)(
+        if self.contents in list(self.plot_dict.keys()):
+            self.current_extension_plot = self.plot_dict[self.contents]
+            
+            if hasattr(self.current_extension_plot, 'cleanup_subscriptions'):
+                self.current_extension_plot.cleanup_subscriptions()
+            
+            self.panel_contents = self.plot_dict[self.contents].plot(self._submit_button)(
                 config.main_df, self.src
             )
             self.panel()
     
     def _cleanup_current_extension_plot(self):
-        """Clean up subscriptions from the current extension plot before switching"""
         if self.current_extension_plot and hasattr(self.current_extension_plot, 'cleanup_subscriptions'):
             self.current_extension_plot.cleanup_subscriptions()
         self.current_extension_plot = None
@@ -138,7 +142,6 @@ class Dashboard(param.Parameterized):
                 return
             self.panel_contents = SelectedSourceDashboard(self.src, self._close_button)
         else:
-            self.plot_dict = extension_plots.get_plot_dict()
             self.current_extension_plot = self.plot_dict[self.contents]
             self.panel_contents = self.plot_dict[self.contents].plot(
                 self._submit_button
@@ -184,3 +187,17 @@ class Dashboard(param.Parameterized):
         print("self.row dashboard:", self.row)
 
         return self.row
+    
+
+    #def cleanup_all_extension_plots(self):
+    #    """Clean up all extension plots when dashboard is destroyed"""
+    #    for plot_name, plot_obj in self.plot_dict.items():
+    #        if hasattr(plot_obj, 'cleanup_subscriptions'):
+    #            plot_obj.cleanup_subscriptions()
+    #    self.plot_dict.clear()
+#
+    #
+    #def __del__(self):
+    #    """Cleanup when dashboard is destroyed"""
+    #    if hasattr(self, 'plot_dict'):
+    #        self.cleanup_all_extension_plots()

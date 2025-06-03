@@ -1,7 +1,10 @@
-#### Dictionary with all data sharee between the extensions plots
-
+#### Dictionary with all data sharee between the extensions plots and publish/subscribe architecture
+import astronomicAL.config as config
 
 shared_data = {"is_global": True}
+
+radius = getattr(config, 'Euclid_radius', 5.0)  
+shared_data["Euclid_radius"] = radius
 
 
 # List of keys defined for the global shared_data dictionary
@@ -21,7 +24,7 @@ def subscribe(key, callback):
     subscribers[key].append(callback)
 
 def subscribe_with_panel_id(panel_id, key, callback):
-    """Subscribe with panel tracking for cleanup"""
+    #Subscribe with panel tracking
     subscribe(key, callback)
     if panel_id not in panel_subscriptions:
         panel_subscriptions[panel_id] = []
@@ -35,7 +38,7 @@ def unsubscribe(key, callback):
             del subscribers[key]
 
 def cleanup_panel_subscriptions(panel_id):
-    """Clean up all subscriptions for a specific panel"""
+    """Remove all subscriptions for a specific panel ID"""
     if panel_id in panel_subscriptions:
         for key, callback in panel_subscriptions[panel_id]:
             unsubscribe(key, callback)
@@ -44,13 +47,24 @@ def cleanup_panel_subscriptions(panel_id):
 def publish(key, value):
     shared_data[key] = value
     if key in subscribers:
-        for callback in subscribers[key]:
+        for i, callback in enumerate(subscribers[key]):
+            panel_id = get_panel_id(callback)
             try:
+                print(f"Calling {i} callback function for {panel_id} due to a change in {key}")
                 callback(value)
             except Exception as e:
                 print(f"Error in callback for {key}: {e}")
 
 
-  
+def get_panel_id(target_callback):
+    """for debug resons, given a callback returns the panel_id associated
+      with that callback."""
+    for panel_id, subscriptions in panel_subscriptions.items():
+        for key, callback in subscriptions:
+            if callback == target_callback:
+                return panel_id
+    return "Could not find the panel id"
+    
+
 
 #Trigger function = c = self.src.data.copy() ----> self.src.data = c

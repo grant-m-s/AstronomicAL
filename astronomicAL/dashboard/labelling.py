@@ -18,6 +18,29 @@ from holoviews.operation.datashader import (
     datashade,
     dynspread,
 )
+hv.extension('bokeh', logo=False)
+
+
+#This serves to avoid the rangeupdate error which occurs every time the selected source
+#changes. The problem is probably arising from datashade + dynspread but i could not solve it if not
+#by directly removing the calls to datashade. I just copied this
+#snippet of code and it should be deleted and the problem fixed, but for the moment it is useful 
+#as it avoids having the terminal filled with error messages
+import holoviews.plotting.bokeh.callbacks
+original_initialize = holoviews.plotting.bokeh.callbacks.Callback.initialize
+
+def safe_initialize(self, plot_id=None):
+    try:
+        return original_initialize(self, plot_id)
+    except KeyError as e:
+        if 'rangesupdate' in str(e):
+            print(f"Warning: Skipping unsupported event: {e}")
+            return
+        else:
+            raise e
+
+holoviews.plotting.bokeh.callbacks.Callback.initialize = safe_initialize
+
 
 
 class LabellingDashboard(param.Parameterized):
@@ -398,7 +421,8 @@ class LabellingDashboard(param.Parameterized):
         )
 
         return plot
-
+    
+    
     def _assign_label_cb(self, event):
         print("_assign_label_cb")
 
@@ -654,6 +678,4 @@ class LabellingDashboard(param.Parameterized):
             collapsible=False,
             sizing_mode="stretch_both",
         )
-        print(self.row)
-
         return self.row
