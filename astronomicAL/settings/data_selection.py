@@ -265,21 +265,17 @@ class DataSelection(param.Parameterized):
     def add_ra_dec_col(self, df):
 
         new_df = df
-        has_loc = True
-        ra = None
-        dec = None
-        for col in list(new_df.columns):
-            if col.upper() == "RA":
-                ra = col
-            if col.upper() == "DEC":
-                dec = col
 
-        if (ra is None) or (dec is None):
-            has_loc = False
+        #we should add this option at some point in the config/settings pipeline
+        ra_col_name = config.settings.get("ra_col_name", "RA")
+        dec_col_name = config.settings.get("dec_col_name", "RA")
 
+        has_loc = (ra_col_name in list(new_df.columns)) and (dec_col_name in list(new_df.columns))
+ 
         if has_loc:
-
-            new_df["ra_dec"] = df[ra].astype(str) + "," + df[dec].astype(str)
+           new_df["ra_dec"] = df[ra_col_name].astype(str) + "," + df[dec_col_name].astype(str)
+        else:
+            print("Columns selected as Ra and Dec are not in the table")
 
         return new_df
 

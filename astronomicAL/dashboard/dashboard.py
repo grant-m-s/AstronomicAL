@@ -82,10 +82,6 @@ class Dashboard(param.Parameterized):
     def _update_extension_plots_cb(self, attr, old, new):
         if self.contents in list(self.plot_dict.keys()):
             self.current_extension_plot = self.plot_dict[self.contents]
-            
-            if hasattr(self.current_extension_plot, 'cleanup_subscriptions'):
-                self.current_extension_plot.cleanup_subscriptions()
-            
             self.panel_contents = self.plot_dict[self.contents].plot(self._submit_button)(
                 config.main_df, self.src
             )
@@ -99,8 +95,6 @@ class Dashboard(param.Parameterized):
 
     @param.depends("contents", watch=True)
     def _update_contents(self):
-
-        self._cleanup_current_extension_plot()
 
         if self.contents == "Settings":
 
@@ -188,16 +182,3 @@ class Dashboard(param.Parameterized):
 
         return self.row
     
-
-    #def cleanup_all_extension_plots(self):
-    #    """Clean up all extension plots when dashboard is destroyed"""
-    #    for plot_name, plot_obj in self.plot_dict.items():
-    #        if hasattr(plot_obj, 'cleanup_subscriptions'):
-    #            plot_obj.cleanup_subscriptions()
-    #    self.plot_dict.clear()
-#
-    #
-    #def __del__(self):
-    #    """Cleanup when dashboard is destroyed"""
-    #    if hasattr(self, 'plot_dict'):
-    #        self.cleanup_all_extension_plots()

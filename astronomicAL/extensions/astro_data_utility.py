@@ -19,7 +19,7 @@ import mocpy
 
 from sparcl.client import SparclClient 
 import astronomicAL.extensions.extension_plots_shared as shared 
-from dl import queryClient as qc
+#from dl import queryClient as qc
 
 import matplotlib.transforms as transforms
 import holoviews as hv
@@ -34,7 +34,6 @@ class EuclidCutoutsClass:
     def __init__(self, ra, dec, 
                  euclid_filters = ["VIS", "NIR_Y", "NIR_J", "NIR_H"],
                  save_dir = "data/cutouts"):
-        
         self.coordinates = SkyCoord(ra, dec, unit = "degree", frame = "icrs")   
         self.euclid_filters = euclid_filters
         self.save_dir = save_dir
@@ -42,7 +41,7 @@ class EuclidCutoutsClass:
             os.makedirs(self.save_dir)
 
     
-    def get_cone(self, initial_radius = 0.5*u.degree, async_job=True, verbose = True):
+    def get_cone(self, initial_radius = 0.5*u.degree, async_job= False, verbose = True):
         tic = time.perf_counter()
         job = Euclid.cone_search(self.coordinates, initial_radius, table_name="sedm.mosaic_product", ra_column_name="ra",
                                       dec_column_name="dec", columns="*", async_job= async_job)
@@ -187,7 +186,8 @@ class EuclidCutoutsClass:
         rendered in the Euclid Cutout extension plot panel
         """
         if not hasattr(self, "cone_results"):
-            self.get_cone(verbose = verbose)
+            self.get_cone(verbose = verbose, async_job= False)
+        
         
         if len(self.cone_results) > 2:
             self.get_cutouts(radius = radius, verbose = verbose)
@@ -202,6 +202,15 @@ class EuclidCutoutsClass:
         self.has_coverage = check_isin_survey(ra = self.coordinates.ra.value,
                                               dec = self.coordinates.dec.value,
                                             survey = "Euclid",  path = path)
+        
+    def clean_space(self):
+        """free quota of queries to Euclid Science Archibe by removing asinchronous jobs 
+         It takes a couple of minutes"""
+        joblist = Euclid.list_async_jobs()
+        to_remove = [j.jobid for j in joblist]
+        Euclid.remove_jobs(to_remove)
+
+
 
     @staticmethod
     def zoom_image(image, scale, same_shape = True, zooming_order = 1):
@@ -286,6 +295,7 @@ class DESISpectraClass:
         """To update class without recalling the SparcClient"""
         self.ra = ra
         self.dec = dec
+        self.coordinates = SkyCoord(ra = self.ra, dec = self.dec, unit = "deg", frame = "icrs")
         self.spectra = None
         self.available_spectra = 0
 
@@ -299,32 +309,57 @@ class DESISpectraClass:
             self.query_spectra_sparclid(verbose = True)
 
 
-    def query_main_table(self, verbose = False):
-        """Astro Data Lab does not accept Circle or Point functions,
-          referred to https://datalab.noirlab.edu/help/index.php?qa=366&qa_1=dont-adql-functions-like-point-circle-work-query-interface
-          for cone search.
-          LIMIT = 100 just to avoid strange results"""
-        
-        datasets_str = ', '.join(f"'{ds}'" for ds in self.datasets)
+    #def query_main_table(self, verbose = False):
+    #    """Astro Data Lab does not accept Circle or Point functions,
+    #      referred to https://datalab.noirlab.edu/help/index.php?qa=366&qa_1=dont-adql-functions-like-point-circle-work-query-interface
+    #      for cone search.
+    #      LIMIT = 100 just to avoid strange results"""
+    #    
+    #    datasets_str = ', '.join(f"'{ds}'" for ds in self.datasets)
+    #
+    #    query = f"""SELECT sparcl_id, specid, ra, dec, redshift, spectype, 
+    #             data_release, redshift_err, specprimary, redshift_warning,
+    #             3600.0 * q3c_dist(ra, dec, {self.ra}, {self.dec}) AS separation_arcsec
+    #             FROM sparcl.main
+    #             WHERE Q3C_RADIAL_QUERY(ra, dec, {self.ra},{self.dec}, {self.max_separation})
+    #             AND data_release IN ({datasets_str})
+    #             ORDER BY separation_arcsec ASC
+    #             LIMIT 100"""
+    #    
+    #    tic = time.perf_counter()
+    #    self.table_results = qc.query(sql=query, fmt='pandas')
+    #    self.table_results = self.table_results.drop_duplicates(subset = "specid")
+    #    self.available_spectra = len(self.table_results)
+    #    toc = time.perf_counter()
+    #    if verbose:
+    #        print(f"Querying Noirlab table required {toc-tic} seconds")
 
-        query = f"""SELECT sparcl_id, specid, ra, dec, redshift, spectype, 
-                 data_release, redshift_err, specprimary, redshift_warning,
-                 3600.0 * q3c_dist(ra, dec, {self.ra}, {self.dec}) AS separation_arcsec
-                 FROM sparcl.main
-                 WHERE Q3C_RADIAL_QUERY(ra, dec, {self.ra},{self.dec}, {self.max_separation})
-                 AND data_release IN ({datasets_str})
-                 ORDER BY separation_arcsec ASC
-                 LIMIT 100"""
+    def query_main_table(self, verbose = False):
+        """Query using SparcClient. It does not accept circular queries, so we first perform a box search within
+        [ra-radius, ra+radius]* [dec-radius, dec+radius] and then we keep only sources effectively within the cone"""
         
+        constraints  = {"ra" : [self.ra-self.max_separation, self.ra+self.max_separation],
+                       "dec" : [self.dec - self.max_separation, self.dec+self.max_separation],
+                       "data_release": self.datasets,
+                       "specprimary" : [1]}
+        outfields = ['sparcl_id','specid', 'ra', 'dec', "data_release"]
+
+        self.coordinates = SkyCoord(ra = self.ra, dec = self.dec, unit = "deg", frame = "icrs")
+
         tic = time.perf_counter()
-        self.table_results = qc.query(sql=query, fmt='pandas')
+        found = self.client.find(outfields = outfields, constraints = constraints, limit = 200)
+        self.table_results = pd.DataFrame.from_records(found.records)
         self.table_results = self.table_results.drop_duplicates(subset = "specid")
+        
+        if len(self.table_results) > 1:
+            self.table_results["separation"] = self.coordinates.separation(
+                          SkyCoord(self.table_results["ra"], self.table_results["dec"], unit = "deg")).value
+            self.table_results = self.table_results[self.table_results["separation"]<= self.max_separation].sort_values("separation")
+
         self.available_spectra = len(self.table_results)
         toc = time.perf_counter()
         if verbose:
-            print(f"Querying Noirlab table required {toc-tic} seconds")
-
-    
+            print(f"Querying table with Sparclient required {toc-tic} seconds")
   
     def get_info_spectra(self):
         for dataset in self.datasets:
@@ -359,7 +394,7 @@ class DESISpectraClass:
     
     def query_spectra_specid(self, verbose = False):
         include = ['sparcl_id', 'specid', 'data_release', 'redshift', 'flux',
-                             'wavelength', 'model', 'spectype', "ra", "dec"]
+                            'wavelength', 'model', 'spectype', "ra", "dec"]
         tic = time.perf_counter()
         if self.specId is not None:
             self.spectrum_query = self.client.retrieve_by_specid([self.specId], include = include,
@@ -624,6 +659,12 @@ def get_ra_dec_DESI():
     ra = found.records[0]["ra"]
     dec = found.records[0]["dec"]
     return ra, dec
+
+
+def get_ra_dec_Euclid():
+    ra = 265.94946 
+    dec = 65.83025    
+    return ra, dec       
 
 #########previous stuff 
 
