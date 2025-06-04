@@ -8,6 +8,7 @@ models
 *test.ipynb
 *.py.bak
 *.bak 
+*Euclid_and_Desi_reduced.fits
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

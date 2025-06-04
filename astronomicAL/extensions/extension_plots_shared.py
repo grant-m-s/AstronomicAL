@@ -3,7 +3,7 @@ import astronomicAL.config as config
 
 shared_data = {"is_global": True}
 
-radius = getattr(config, 'Euclid_radius', 5.0)  
+radius = config.settings.get('Euclid_radius', 5.0)  
 shared_data["Euclid_radius"] = radius
 
 
@@ -50,7 +50,7 @@ def publish(key, value):
         for i, callback in enumerate(subscribers[key]):
             panel_id = get_panel_id(callback)
             try:
-                print(f"Calling {i} callback function for {panel_id} due to a change in {key}")
+                print(f"Calling N {i+1} callback function for {panel_id} due to a change in {key}")
                 callback(value)
             except Exception as e:
                 print(f"Error in callback for {key}: {e}")

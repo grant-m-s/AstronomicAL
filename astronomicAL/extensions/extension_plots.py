@@ -74,7 +74,6 @@ class CustomPlot:
         self.row = pn.Row("Loading...")
         self.plot_fn_kwargs = plot_fn_kwargs
         self.panel_id = str(uuid.uuid4()) 
-        self._is_rendered = False
 
     
     def create_settings(self, unknown_cols):
@@ -123,31 +122,20 @@ class CustomPlot:
             return self.render
         
         else:
-        #This is something I don't understand. please review it carefully 
             def plot_with_instance(*args, **kwargs):
-                if not self._is_rendered:
-                    self._is_rendered = True
-                    return self.plot_fn(*args, plot_instance = self, **kwargs, **self.plot_fn_kwargs)
-                else:
-                    return self.plot_fn(*args, **kwargs, **self.plot_fn_kwargs)
-        
-        return plot_with_instance
+                return self.plot_fn(*args, plot_instance = self, **kwargs, **self.plot_fn_kwargs)
+            
+            return plot_with_instance
     
     def cleanup_subscriptions(self):
         """Removes subscriptions to the shared dictionary"""
         if self.panel_id in shared.panel_subscriptions:
             shared.cleanup_panel_subscriptions(self.panel_id)
-            print(f"CustomPlot {self.panel_id} fully cleaned up")
+            print(f"CustomPlot {self.panel_id} removed from subscriptions")
 
         self._cleanup_all_subscribers()
-        self._is_rendered = False
-        print(f"DEBUG: Cleanup complete for panel {self.panel_id}")  
-    
 
-    #This is something I don't fully understand. It is an extra function
-    #to remove subscriptions to the shared data. But at least in the debug test 
-    #I have done it seems to never be anything because all the subscription have already been
-    #removed
+
     def _cleanup_all_subscribers(self):
         """remove all callbacks for this panel from all subscriber lists"""
         panels_found = []
@@ -747,7 +735,7 @@ def check_required_column(df, column):
 
 
 def empty_panel(message = "Loading error"):
-    return pn.pane.MarkDown(message)
+    return pn.pane.Markdown(message)
   
 
 def get_ra_dec(selected_source):
@@ -767,12 +755,6 @@ def spectrum_plot(data, selected = None, dataset = "DESI", from_specid = False, 
 
     container = pn.Column()
 
-    if plot_instance and hasattr(plot_instance, 'panel_id'):
-    #This serves to remove subscriptions when a source chanhges
-        if plot_instance.panel_id in shared.panel_subscriptions:
-            print(f"DEBUG: Cleaning existing subscriptions for DESI panel {plot_instance.panel_id}")
-            shared.cleanup_panel_subscriptions(plot_instance.panel_id)
-    
     def update_plot(new_radius):
         selected_source = get_selected_source(data=data, selected = selected)
 
@@ -819,10 +801,10 @@ def spectrum_plot(data, selected = None, dataset = "DESI", from_specid = False, 
     initial_radius = shared.shared_data.get("Euclid_radius", 0.5)
     update_plot(initial_radius)
         
-    if not from_specid and plot_instance:
-        shared.subscribe_with_panel_id(plot_instance.panel_id, "Euclid_radius", update_plot)
-    elif not from_specid:
-        shared.subscribe("Euclid_radius", update_plot)
+    if not from_specid:
+        if plot_instance and hasattr(plot_instance, 'panel_id'):
+            if not plot_instance.panel_id in shared.panel_subscriptions:
+               shared.subscribe_with_panel_id(plot_instance.panel_id, "Euclid_radius", update_plot)
     return container
    
 
@@ -893,12 +875,6 @@ def _add_coordinates_to_shared(ra, dec, key_name):
 
 def euclid_cutout_plot(data, selected = None, plot_instance = None):
     
-    if plot_instance and hasattr(plot_instance, 'panel_id'):
-    #This serves to remove subscriptions when a source chanhges
-        if plot_instance.panel_id in shared.panel_subscriptions:
-            print(f"DEBUG: Cleaning existing subscriptions for Euclid panel {plot_instance.panel_id}")
-            shared.cleanup_panel_subscriptions(plot_instance.panel_id)
-    
     selected_source = get_selected_source(data=data, selected = selected)
     ra, dec = get_ra_dec(selected_source)
     if ra is None or dec is None:
@@ -906,11 +882,11 @@ def euclid_cutout_plot(data, selected = None, plot_instance = None):
     
     initial_radius = shared.shared_data.get("Euclid_radius", 5.0)
     
-    panel_id = plot_instance.panel_id if plot_instance else None
+    euclid_panel_manager = EuclidPanelManager(ra, dec, radius = initial_radius)
     
-    euclid_panel_manager = EuclidPanelManager(ra, dec, radius = initial_radius, panel_id = panel_id)
-    if plot_instance:
-        plot_instance.euclid_panel_manager = euclid_panel_manager
+    if plot_instance and hasattr(plot_instance, 'panel_id'):
+        if not plot_instance.panel_id in shared.panel_subscriptions:
+            euclid_panel_manager._subscribe_to_shared(plot_instance.panel_id)
 
     return euclid_panel_manager.panel()
 
@@ -920,13 +896,11 @@ class EuclidPanelManager:
     """A class that handles the retrieve of Euclid cutouts and its manipulation with 
     the widgets"""
     
-    def __init__(self, ra, dec, radius = 5, width = 300, panel_id = None):
+    def __init__(self, ra, dec, radius = 5, width = 300):
         """radius in arcsec"""
         self.ra = ra
         self.dec = dec
         self.radius = radius
-        self.panel_id = panel_id
-        
         
         self._initialise_radius_scaling_widgets(width = int(width))
         self.euclid_pane = pn.pane.Matplotlib(dpi = 144,
@@ -942,15 +916,6 @@ class EuclidPanelManager:
         except Exception as e:
             print(f"Error occurred: {e}")
         
-        if self.panel_id:
-            desi_callback = lambda coords: self._add_coordinates(coords, "DESI")
-            sdss_callback = lambda coords: self._add_coordinates(coords, "SDSS")
-            shared.subscribe_with_panel_id(self.panel_id, "DESI_coordinates", desi_callback)
-            shared.subscribe_with_panel_id(self.panel_id, "SDSS_coordinates", sdss_callback)
-        else:
-            shared.subscribe("DESI_coordinates", lambda coords: self._add_coordinates(coords, "DESI"))
-            shared.subscribe("SDSS_coordinates", lambda coords: self._add_coordinates(coords, "SDSS"))
-
 
     def _initialise_radius_scaling_widgets(self, width = 300):
         
@@ -1075,13 +1040,15 @@ class EuclidPanelManager:
             self._show_overplot_coordinates()
 
         elif not event.new:
-
-            if isinstance(self.overplotted_coordinates, list):
-                for sc in self.overplotted_coordinates:
-                    sc.remove()
-                self.overplotted_coordinates = []
-            self._show_overplot_coordinates()
-        self._update_image()
+            if hasattr(self.euclid_object, "overplot_coordinates"):
+                if isinstance(self.overplotted_coordinates, list):
+                    for sc in self.overplotted_coordinates:
+                        sc.remove()
+                    self.overplotted_coordinates = []
+                self._show_overplot_coordinates()
+        
+        if hasattr(self.euclid_object, "overplot_coordinates"):
+            self._update_image()
 
         
     def get_plot_scale(self):
@@ -1103,7 +1070,7 @@ class EuclidPanelManager:
         
         if show_scale:
             image_height, image_width = self.euclid_image.get_size()
-            self.bar_length_pixels = image_width * 0.2  #always show a bar 1/5 of the plot 
+            self.bar_length_pixels = image_width * 0.2  #always shows a bar 1/5 of the plot 
             x0, y0 = 0.1*image_width, 0.1*image_height
             x1 = x0 + self.bar_length_pixels
             self.ax.plot([x0, x1], [y0, y0], color='red', lw=3)
@@ -1128,9 +1095,24 @@ class EuclidPanelManager:
         
         self.overplot_coords_widget.value = False
         self.get_euclid_figure()                                                                        
-        self.get_euclid_figure()
+ 
 
+    
+    def _subscribe_to_shared(self, panel_id):
+        """It manages all the subscriptions to the shared dictionary. not very flexible but it works"""
+        desi_callback = lambda coords: self._add_coordinates(coords, "DESI")
+        sdss_callback = lambda coords: self._add_coordinates(coords, "SDSS")
+        shared.subscribe_with_panel_id(panel_id, "DESI_coordinates", desi_callback)
+        shared.subscribe_with_panel_id(panel_id, "SDSS_coordinates", sdss_callback)
         
+        #If DESI/SDSS panel are already initialized, i need to pass the coordinates directly
+        if shared.shared_data.get("DESI_coordinates"):
+            self._add_coordinates(shared.shared_data.get("DESI_coordinates"), "DESI")
+        if shared.shared_data.get("SDSS_coordinates"):
+            self._add_coordinates(shared.shared_data.get("SDSS_coordinates"), "SDSS")
+        
+
+    
     def panel(self):
             self.panel_column = pn.Column(self.euclid_pane,
                                           pn.WidgetBox(pn.Row(self.radius_input, self.stretching_input),
@@ -1193,13 +1175,13 @@ def debug_plot_publisher(data, selected = None, plot_instance = None):
     print(f"DEBUG: debug_plot_publisher called with plot_instance: {plot_instance}")
     print(f"DEBUG: plot_instance has panel_id: {hasattr(plot_instance, 'panel_id') if plot_instance else False}")
     
-    if plot_instance and hasattr(plot_instance, 'panel_id'):
-        print(f"DEBUG: Panel ID: {plot_instance.panel_id}")
-        print(f"DEBUG: Panel in subscriptions: {plot_instance.panel_id in shared.panel_subscriptions}")
-        
-        if plot_instance.panel_id in shared.panel_subscriptions:
-            print(f"DEBUG: Cleaning existing subscriptions for debug_plot_publisher {plot_instance.panel_id}")
-            shared.cleanup_panel_subscriptions(plot_instance.panel_id)
+    #if plot_instance and hasattr(plot_instance, 'panel_id'):
+    #    print(f"DEBUG: Panel ID: {plot_instance.panel_id}")
+    #    print(f"DEBUG: Panel in subscriptions: {plot_instance.panel_id in shared.panel_subscriptions}")
+    #    
+    #    if plot_instance.panel_id in shared.panel_subscriptions:
+    #        print(f"DEBUG: Cleaning existing subscriptions for debug_plot_publisher {plot_instance.panel_id}")
+    #        shared.cleanup_panel_subscriptions(plot_instance.panel_id)
     
         
     input_widget = pn.widgets.IntInput(name='Debug input', value=5, step=1, start=0, end=2000)
@@ -1210,16 +1192,27 @@ def debug_plot_publisher(data, selected = None, plot_instance = None):
     
     input_widget.param.watch(input_widget_cb, "value_throttled")
     container.objects = [input_widget]
+    
+    if plot_instance and hasattr(plot_instance, 'panel_id'):
+        if not plot_instance.panel_id in shared.panel_subscriptions:
+            shared.subscribe_with_panel_id(plot_instance.panel_id, "Definitely_Not_a_Key", lambda : print("Something has gone wrong"))
+        
     shared.publish("Debug_value", input_widget.value)
     return container
 
 
 def debug_plot_subscriber(data, selected = None, plot_instance = None):
     container = pn.Column()
-    if plot_instance and hasattr(plot_instance, 'panel_id'):
-        if plot_instance.panel_id in shared.panel_subscriptions:
-            print(f"DEBUG: Cleaning existing subscriptions for debug_plot1 {plot_instance.panel_id}")
-            shared.cleanup_panel_subscriptions(plot_instance.panel_id)
+    #if plot_instance and hasattr(plot_instance, 'panel_id'):
+    #    if plot_instance.panel_id in shared.panel_subscriptions:
+    #        print(f"DEBUG: Cleaning existing subscriptions for debug_plot subscribe {plot_instance.panel_id}")
+    #        shared.cleanup_panel_subscriptions(plot_instance.panel_id)
+    
+    if plot_instance:
+        print(f"I have a plot_instance named {plot_instance.panel_id}")
+    else:
+        print("I do NOT have a plot_instance")
+    
     
     def update_plot(value):
         text = f"## The value on the screen is {value}"
@@ -1227,12 +1220,11 @@ def debug_plot_subscriber(data, selected = None, plot_instance = None):
         
     initial_value = shared.shared_data.get("Debug_value", 1000)
     update_plot(initial_value)
-        
-    if plot_instance:
-        shared.subscribe_with_panel_id(plot_instance.panel_id, "Debug_value", update_plot)
-    else:
-        print("Subscribing without panel ID")
-        shared.subscribe("Debug_value", update_plot)
+    
+    if plot_instance and hasattr(plot_instance, 'panel_id'):
+        if not plot_instance.panel_id in shared.panel_subscriptions:
+            shared.subscribe_with_panel_id(plot_instance.panel_id, "Debug_value", update_plot)
+    
     return container
 
 

@@ -1,4 +1,4 @@
-astro-datalab
+#astro-datalab
 astropy==5.3.4
 astroquery==0.4.10
 bokeh==3.7.2
