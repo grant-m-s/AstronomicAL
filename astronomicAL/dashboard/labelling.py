@@ -225,9 +225,9 @@ class LabellingDashboard(param.Parameterized):
                     & (self.region_criteria_df["value"] == updated_df["value"][0])
                 ]
                 if len(exists) == 0:
-                    self.region_criteria_df = self.region_criteria_df.append(
-                        updated_df, ignore_index=True
-                    )
+                    self.region_criteria_df = pd.concat([self.region_criteria_df,updated_df], 
+                                                        ignore_index=True
+                                                        )
                 else:
                     return
 
