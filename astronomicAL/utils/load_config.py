@@ -133,6 +133,7 @@ def verify_import_config(curr_config_file):
                 "Menu",
                 "Active Learning",
                 "Basic Plot",
+                "Histogram Plot",
                 "Labelling",
                 "Selected Source Info",
             ] + plots
