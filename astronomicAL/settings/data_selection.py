@@ -267,8 +267,8 @@ class DataSelection(param.Parameterized):
         new_df = df
 
         #we should add this option at some point in the config/settings pipeline
-        ra_col_name = config.settings.get("ra_col_name", "RA")
-        dec_col_name = config.settings.get("dec_col_name", "RA")
+        ra_col_name = config.settings.get("ra_col_name", "ra")
+        dec_col_name = config.settings.get("dec_col_name", "dec")
 
         has_loc = (ra_col_name in list(new_df.columns)) and (dec_col_name in list(new_df.columns))
  
