@@ -18,7 +18,7 @@ from astropy.convolution import convolve, Gaussian1DKernel, Box1DKernel
 import mocpy
 
 from sparcl.client import SparclClient 
-import astronomicAL.extensions.extension_plots_shared as shared 
+from astronomicAL.extensions.shared_data import shared_data
 #from dl import queryClient as qc
 
 import matplotlib.transforms as transforms
@@ -179,6 +179,16 @@ class EuclidCutoutsClass:
         
         print("No stored coordinates")
         return []
+    
+
+    def world_2_pix(self, ra, dec, filtro = "stacked"):
+        """
+        Same as _convert_overplot_coordinates but for external coordinates
+        """
+        coords = SkyCoord(ra = ra, dec = dec, unit="deg", frame="icrs")
+        x_pix, y_pix = self.wcs[filtro].world_to_pixel(coords)
+        return list(zip(x_pix, y_pix))
+        
         
     def get_final_cutout(self, radius, stretch =  "Linear", reference = "VIS", verbose = False) :
         """
@@ -286,8 +296,9 @@ class DESISpectraClass:
         self.specId = specId
         
         if client is None:
-            shared.shared_data["Sparcl_client"] = SparclClient()
-            self.client = shared.shared_data.get("Sparcl_client")
+            shared_data.set_data("Sparcl_client", SparclClient())
+            print("Initialized SparcClient")
+            self.client = shared_data.get_data("Sparcl_client")
         else:
             self.client = client
 

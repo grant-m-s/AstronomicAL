@@ -77,6 +77,7 @@ class Dashboard(param.Parameterized):
 
     def _close_button_cb(self, event):
         self._cleanup_current_extension_plot()
+        print("I got this event")
         self.contents = "Menu"
 
     def _update_extension_plots_cb(self, attr, old, new):
@@ -88,8 +89,8 @@ class Dashboard(param.Parameterized):
             self.panel()
     
     def _cleanup_current_extension_plot(self):
-        if self.current_extension_plot and hasattr(self.current_extension_plot, 'cleanup_subscriptions'):
-            self.current_extension_plot.cleanup_subscriptions()
+        if self.current_extension_plot and hasattr(self.current_extension_plot, 'cleanup_shared_data'):
+            self.current_extension_plot.cleanup_shared_data()
         self.current_extension_plot = None
 
 
