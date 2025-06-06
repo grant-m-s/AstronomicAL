@@ -7,6 +7,7 @@ from holoviews.operation.datashader import (
 
 import datashader as ds
 import holoviews as hv
+from holoviews import opts
 from functools import partial
 
 import astronomicAL.config as config
@@ -733,7 +734,7 @@ def get_ra_dec(selected_source):
 def spectrum_plot(data, selected = None, plot_instance = None, dataset = "DESI", from_specid = False):
 
     if not hasattr(plot_instance, "container"):
-        plot_instance.container = pn.Column()
+        plot_instance.container = pn.Column(scroll = True)
 
     def update_plot(new_radius, panel_id = None):
     
@@ -773,9 +774,10 @@ def spectrum_plot(data, selected = None, plot_instance = None, dataset = "DESI",
         if desi_object is not None:
             _add_coordinates_to_shared(*desi_object.get_coordinates(), panel_id = panel_id,  key_name = dataset)
             is_star = (desi_object.available_spectra ==1) and (desi_object.spectra[0].spectype == "STAR")
-            plot = get_desi_figure(desi_object, plot_emlines = (not is_star), plot_abslines = is_star)
-            #plot = get_desi_figure_hv(desi_object, plot_emlines = ~is_star, plot_abslines=is_star)
-            plot_instance.container.objects = [plot]
+            #plot = get_desi_figure(desi_object, plot_emlines = (not is_star), plot_abslines = is_star)
+            plot = get_desi_figure_hv(desi_object, plot_emlines = (not is_star), plot_abslines=is_star)
+            plot_instance.container.objects = [plot] 
+
         else:
             plot_instance.container.objects = [pn.pane.Markdown("No spectrum found.")]
         
@@ -803,20 +805,33 @@ def run_desi(ra, dec, datasets = ["DESI-DR1", "DESI-EDR", "BOSS-DR16", "SDSS-DR1
         return desi_object
     return None
 
+def get_grid_shape(N):
+    """Returns the number of rows and column to add to the figure hosting
+    the spectra depending on the number N of spectra to be plotted"""
+    if N == 1:
+        return (1, 1)
+    elif N == 2:
+        return (1, 2)
+    elif N <= 10:
+        ncols = 2
+    else:
+        ncols = 3
+    nrows = np.ceil(N / ncols).astype(int)
+    return (nrows, ncols)
+
+
+
 def get_desi_figure(desi_object, plot_emlines= True, plot_abslines = True):
      
     N = desi_object.available_spectra
-    ax_height = 3 if N <= 3 else 2  #if too many spectra, make the subplots smaller
-    colors = plt.get_cmap("gist_rainbow", N)
-    if N > 4:
-        ncols = 2                           #### two columns layout if many spectra
-        nrows = np.ceil(N/2).astype(int)   
-    else:
-        ncols = 1
-        nrows = N
+    nrows, ncols = get_grid_shape(N)
 
+    fig_width = 6.5 * ncols
+    fig_height = 3 * nrows
 
-    desi_fig = Figure(figsize = (7.5 * ncols, ax_height * nrows))
+    colors = plt.get_cmap("gist_rainbow", max(N,2)) #one spectrum-->red
+ 
+    desi_fig = Figure(figsize = (fig_width, fig_height))
     for i in range(N):
         row = i // ncols
         col = i % ncols
@@ -842,8 +857,27 @@ def get_desi_figure(desi_object, plot_emlines= True, plot_abslines = True):
                       va='center', rotation='vertical');
     return desi_fig
 
-def get_desi_figure_hv(desi_object):
-    desi_fig = desi_object.plot_spectrum_hv(plot_model = True, plot_emlines = True)
+
+def get_desi_figure_hv(desi_object, plot_emlines= True, plot_abslines = True):
+    N = desi_object.available_spectra
+    nrows, ncols = N, 1
+    hv_plots = []
+    colors = plt.get_cmap("gist_rainbow", max(N,2))
+    for i in range(N):
+        plot = desi_object.plot_spectrum_hv(
+            idx=i,
+            show_xlabel = True,
+            show_ylabel = True,
+            plot_emlines = plot_emlines,
+            plot_abslines = plot_abslines,
+            width=950,
+            height=250 if N > 1 else 400,
+            model_kwargs = {"line_width" : 2, "color" : colors(i)}
+        )
+        hv_plots.append(plot)
+    desi_fig = hv.Layout(hv_plots).cols(ncols)
+    desi_fig = desi_fig.opts(
+              opts.Layout(shared_axes=False))
     return desi_fig
 
 def _add_coordinates_to_shared(ra, dec, panel_id, key_name):
@@ -872,11 +906,7 @@ def euclid_cutout_plot(data, selected = None, plot_instance = None):
                                                        panel_id = plot_instance.panel_id)
     
     plot_instance.euclid_panel_manager._subscribe_to_shared()
-    #if not shared_data.is_subscribed(plot_instance.panel_id, "DESI_coordinates"):
-    #        plot_instance.euclid_panel_manager._subscribe_to_shared()
-    #else:
-    #    shared_daat.replace_subscribe()
-    
+
     plot_instance.container.objects = [plot_instance.euclid_panel_manager.panel()]
 
     
@@ -888,20 +918,17 @@ class EuclidPanelManager:
     """A class that handles the retrieve of Euclid cutouts and its manipulation with 
     the widgets"""
     
-    def __init__(self, ra, dec, radius = 5, panel_id = None, width = 300):
+    def __init__(self, ra, dec, radius = 5, panel_id = None):
         """radius in arcsec"""
         self.ra = ra
         self.dec = dec
         self.radius = radius
         self.panel_id = panel_id 
+        self.overplotted_coordinates = []
+        self.euclid_pane = pn.pane.HoloViews(width=500, height=500)
         
-        self._initialise_radius_scaling_widgets(width = int(width))
-        self.euclid_pane = pn.pane.Matplotlib(dpi = 144,
-                                alt_text="Image Unavailable",
-                                sizing_mode="stretch_height",
-                                interactive = False,
-                                width = width)
-        
+        self._initialise_radius_scaling_widgets()
+
         with concurrent.futures.ThreadPoolExecutor() as executor:
             future = executor.submit(self.run_euclid, initialize = True)
         try:
@@ -909,7 +936,7 @@ class EuclidPanelManager:
         except Exception as e:
             print(f"Error occurred: {e}")
 
-    def _initialise_radius_scaling_widgets(self, width = 300):
+    def _initialise_radius_scaling_widgets(self):
         
         self.radius_input = pn.widgets.FloatInput(name = "Radius [arcsec]", value = self.radius,
                                                   step = 0.5, start = 1, end = 100, 
@@ -935,17 +962,18 @@ class EuclidPanelManager:
 
      
     def _update_radius(self, event):
-        self.radius = event.new
-        shared_data.publish(self.panel_id, "Euclid_radius", self.radius)
-        
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            future = executor.submit(self.run_euclid, initialize = False)
-        try:
-            future.result()  # This would raise the exception
-        except Exception as e:
-            print(f"Error occurred: {e}")
-        
-        self._update_image()
+        if event.new: #avoid passing None
+            self.radius = event.new
+            shared_data.publish(self.panel_id, "Euclid_radius", self.radius)
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future = executor.submit(self.run_euclid, initialize = False)
+            try:
+                future.result()  # This would raise the exception
+            except Exception as e:
+                print(f"Error occurred: {e}")
+            self._update_image()
+        else:
+            print("Input a valid value for radius")
 
     @staticmethod
     def change_intensity_range(image, low, high):
@@ -957,20 +985,21 @@ class EuclidPanelManager:
         low, high = event.new
         scaled_image = self.change_intensity_range(self.euclid_object.reprojected_data["stacked"], 
                                                    low, high)
-        self.euclid_image.set_data(scaled_image)
-        self.euclid_fig.canvas.draw()
+        
+        self.get_euclid_figure(scaled_image)
+
         self._update_image()
     
     def _update_stretching(self, event):
         stretch = event.new
         self.euclid_object.stack_cutouts(stretch = stretch)
-        self.euclid_image.set_data(self.euclid_object.reprojected_data["stacked"])
-        self.euclid_fig.canvas.draw()
+        self.get_euclid_figure(self.euclid_object.reprojected_data["stacked"])
         self._update_image()
 
+    
     def _update_image(self): 
         try:
-             self.euclid_pane.object = self.euclid_fig
+             self.euclid_pane.object = hv.Overlay(self.euclid_fig+ self.overplotted_coordinates)
         except Exception as e:         #too generic
             print("Euclid image unavailable")
             print(e)
@@ -985,49 +1014,35 @@ class EuclidPanelManager:
             print("Wrong passed coordinates")
             return
         ra, dec  = coordinates["ra"], coordinates["dec"]
-        print(f"Adding coordinates for {dataset}: RA={ra}, DEC={dec}")
         if not hasattr(self, "stored_spectrum_coordinates"):
             self.stored_spectrum_coordinates = {}
         self.stored_spectrum_coordinates[dataset] = {"ra" : ra, "dec" : dec}
 
-        print(f"Stored coordinates: {self.stored_spectrum_coordinates}")
-        
         self.overplot_coords_widget.name = "Spectrum Coordinates"
         if self.overplot_coords_widget.value:
             self._show_overplot_coordinates()
     
     def _show_overplot_coordinates(self):
 
-        image_height, image_width = self.euclid_image.get_size()
-        self.overplotted_coordinates = []
-        self.ax.cla()
-        self.euclid_fig.clf()
-        self.euclid_image = None
-
-        self.ax = self.euclid_fig.add_subplot(1,1,1)
-        self.ax.set_axis_off()
-        self._update_image()
-        
         if hasattr(self, "stored_spectrum_coordinates"):
-            self.euclid_image = self.ax.imshow(self.euclid_object.reprojected_data["stacked"], origin = "lower")
             self.overplot_coords_widget.name = "Spectrum Coordinates"
-
-            for dataset in self.stored_spectrum_coordinates:
-                print(f"Rendering coordinates for dataset: {dataset}")
-                N = len(self.stored_spectrum_coordinates[dataset]["ra"])
-                colors = plt.get_cmap("gist_rainbow", N)
-                marker = "+" if dataset == "DESI" else "*" #TODO improve
-                if self.overplot_coords_widget.value:
-                    for i, (x, y) in enumerate(self.euclid_object.world_2_pix(ra = self.stored_spectrum_coordinates[dataset]["ra"],
+            if self.overplot_coords_widget.value:
+                for dataset in self.stored_spectrum_coordinates:
+                    N = len(self.stored_spectrum_coordinates[dataset]["ra"])
+                    colors = plt.get_cmap("gist_rainbow", max(N,2))
+                    marker = "+" if dataset == "DESI" else "*" #TODO improve
+                    self.overplotted_coordinates = []
+                    for i, (x, y) in enumerate(self.euclid_object.world_2_pix(ra =  self.stored_spectrum_coordinates[dataset]["ra"],
                                                                               dec = self.stored_spectrum_coordinates[dataset]["dec"],
                                                                              filtro = "stacked" )):
-    
-                            if (0 <= x < image_width) and (0 <= y < image_height):
-                                self.ax.scatter(x, y, color = colors(i), s = 300,
-                                                        marker = marker)
+                        if (0 <= x < self.image_width) and (0 <= y < self.image_height):
+                            self.overplotted_coordinates.append(hv.Points([(x,y)]).opts(
+                                                               color = colors(i),
+                                                                 marker = marker, 
+                                                                 size = 20,
+                                                                 ))
 
     def _overplot_coordinates_callback(self, event):
-        print(f"Overplot widget state changed: {event.new}")
         if event.new:
             if not hasattr(self, "stored_spectrum_coordinates"):
                 print("No spectrum coordinates available")
@@ -1039,15 +1054,10 @@ class EuclidPanelManager:
             self._show_overplot_coordinates()
 
         elif not event.new:
-            if hasattr(self, "stored_spectrum_coordinates"):
-                if isinstance(self.overplotted_coordinates, list):
-                    for sc in self.overplotted_coordinates:
-                        sc.remove()
-                    self.overplotted_coordinates = []
-                self._show_overplot_coordinates()
+            self.overplotted_coordinates = []
+
+        self._update_image()
         
-        if hasattr(self, "stored_spectrum_coordinates"):
-            self._update_image()
 
         
     def get_plot_scale(self):
@@ -1055,29 +1065,37 @@ class EuclidPanelManager:
         return bar_length_arcsecond
 
     
-    def get_euclid_figure(self, show_scale = True, figsize = (5,5)):
+    def get_euclid_figure(self, data, show_scale = True):
         
-        if hasattr(self, "euclid_image"):
-            self.euclid_image.remove()
-            self.euclid_image = self.ax.imshow(self.euclid_object.reprojected_data["stacked"], origin = "lower")
+        self.image_height, self.image_width = data.shape[:2]
+        bounds = (0, 0, self.image_height, self.image_width)
 
+        image = hv.RGB(data[::-1,...], bounds=bounds).opts(
+                                    active_tools =[], toolbar=None,
+                                    padding = 0,
+                                    border = 0,
+                                    framewise = True,
+                                    xaxis=None, 
+                                    yaxis=None,
+                                    )
 
-        self.euclid_fig = Figure(figsize=figsize)
-        self.ax = self.euclid_fig.add_subplot(1,1,1)
-        self.ax.set_axis_off()
-        self.euclid_image = self.ax.imshow(self.euclid_object.reprojected_data["stacked"], origin = "lower")
+        self.euclid_fig = [image]
         
         if show_scale:
-            image_height, image_width = self.euclid_image.get_size()
-            self.bar_length_pixels = image_width * 0.2  #always shows a bar 1/5 of the plot 
-            x0, y0 = 0.1*image_width, 0.1*image_height
+            self.bar_length_pixels = self.image_width * 0.2  #always shows a bar 1/5 of the plot 
+            x0, y0 = 0.1*self.image_width, 0.1*self.image_height
             x1 = x0 + self.bar_length_pixels
-            self.ax.plot([x0, x1], [y0, y0], color='red', lw=3)
-            self.scale_text =  self.ax.text((x0 + x1) / 2, y0 + y0/2, f'{self.get_plot_scale():.1f}"',
-                                        color='red', ha='center', va='bottom', fontsize=14, fontweight='bold')
+            scale_bar = hv.Curve(([x0, x1], [y0, y0])).opts(color='red', line_width=3)
+            scale_text = hv.Text(x=(x0 + x1)/2, y=y0 + y0/2,
+                            text=f'{self.get_plot_scale():.1f}"').opts(
+                            text_color='red', text_align='center',
+                            text_baseline='bottom', fontsize=14
+                            )
+            self.euclid_fig.extend([scale_bar, scale_text])
             
         if self.overplot_coords_widget.value:
             self._show_overplot_coordinates()
+    
     
     def run_euclid(self, initialize = False):
         """Wrapper for multithreading"""
@@ -1093,15 +1111,13 @@ class EuclidPanelManager:
             self.contrast_scaler.value = (0,1)
         
         self.overplot_coords_widget.value = False
-        self.get_euclid_figure()                                                                        
+        self.get_euclid_figure(self.euclid_object.reprojected_data["stacked"])                                                                        
  
 
     def _subscribe_to_shared(self):
         """It manages all the subscriptions to the shared dictionary. not very flexible but it works"""
         desi_callback = lambda coords: self._add_coordinates(coords, "DESI")
         sdss_callback = lambda coords: self._add_coordinates(coords, "SDSS")
-        #shared_data.subscribe(self.panel_id, "DESI_coordinates", desi_callback)
-        #shared_data.subscribe(self.panel_id, "SDSS_coordinates", sdss_callback)
         shared_data.replace_subscribe(self.panel_id, "DESI_coordinates", desi_callback)
         shared_data.replace_subscribe(self.panel_id, "SDSS_coordinates", sdss_callback)
         
@@ -1110,15 +1126,21 @@ class EuclidPanelManager:
             self._add_coordinates(shared_data.get_data("DESI_coordinates"), "DESI")
         if shared_data.get_data("SDSS_coordinates"):
             self._add_coordinates(shared_data.get_data("SDSS_coordinates"), "SDSS")
-        
 
     
     def panel(self):
-            self.panel_column = pn.Column(self.euclid_pane,
-                                          pn.WidgetBox(pn.Row(self.radius_input, self.stretching_input),
-                                                     self.contrast_scaler,
-                                                     self.overplot_coords_widget)
-                                          )
+            self.panel_column = pn.Column(pn.Row(self.euclid_pane, pn.Column(self.stretching_input, self.radius_input,
+                                                                              self.overplot_coords_widget)),
+                      
+                                                  self.contrast_scaler,)
+     
+            
+
+            #self.panel_column = pn.Column(self.euclid_pane,
+            #                              pn.WidgetBox(pn.Row(self.radius_input, self.stretching_input),
+            #                                         self.contrast_scaler,
+            #                                         self.overplot_coords_widget)
+            #                              )
             self._update_image()
             return self.panel_column
 
@@ -1218,32 +1240,238 @@ def debug_plot_subscriber(data, selected = None, plot_instance = None):
 
 
 
-
-
-#container_ = pn.Column()
-#def debug_plot_subscriber(data, selected = None, plot_instance = None):
-#    global container_
+#class EuclidPanelManager_matplotlib:
 #
-#    def update_plot(value, panel_id = None):
-#        global container_
-#        text = f"## The value on the screen is {value}"
-#        text = text + f" and panel id = {panel_id}"
-#        print("we call the callback")
-#        container_.objects = [pn.pane.Markdown(text)]
-#        return container_
-#
-#        
-#        
-#    initial_value = shared_data.get_data("Debug_value", 1000)
-#    update_plot(initial_value, panel_id = plot_instance.panel_id)
+#    """A class that handles the retrieve of Euclid cutouts and its manipulation with 
+#    the widgets"""
 #    
+#    def __init__(self, ra, dec, radius = 5, panel_id = None, width = 300):
+#        """radius in arcsec"""
+#        self.ra = ra
+#        self.dec = dec
+#        self.radius = radius
+#        self.panel_id = panel_id 
+#        
+#        self._initialise_radius_scaling_widgets(width = int(width))
+#        self.euclid_pane = pn.pane.Matplotlib(dpi = 144,
+#                                alt_text="Image Unavailable",
+#                                sizing_mode="stretch_height",
+#                                interactive = False,
+#                                width = width)
+#        
+#        with concurrent.futures.ThreadPoolExecutor() as executor:
+#            future = executor.submit(self.run_euclid, initialize = True)
+#        try:
+#            future.result()  # eventually raise an exception???
+#        except Exception as e:
+#            print(f"Error occurred: {e}")
 #
-#    if not shared_data.is_subscribed(plot_instance.panel_id, "Debug_value"):
-#        print("Suscribing to Debug panel")
-#        # callback = partial(update_plot, panel_id = plot_instance.panel_id)
-#        shared_data.subscribe(plot_instance.panel_id, "Debug_value", partial(update_plot, panel_id = plot_instance.panel_id))
-#    return container_
-
-
-        
-    
+#    def _initialise_radius_scaling_widgets(self, width = 300):
+#        
+#        self.radius_input = pn.widgets.FloatInput(name = "Radius [arcsec]", value = self.radius,
+#                                                  step = 0.5, start = 1, end = 100, 
+#                                                  sizing_mode="scale_width")
+#        self.radius_input.param.watch(self._update_radius, "value")
+#
+#        
+#        self.stretching_input = pn.widgets.Select(name = "Stretching function", 
+#                                                options=  ['Linear', 'Sqrt', 'Log', 'Asinh', 'PowerLaw'],
+#                                                sizing_mode = "scale_width")
+#        
+#        self.stretching_input.param.watch(self._update_stretching, "value")
+#
+#        
+#        self.contrast_scaler = pn.widgets.RangeSlider(name = "Image scaling", 
+#                                                    start = 0, end = 1,value = (0,1), step = 0.004, 
+#                                                    sizing_mode = "scale_both")
+#        
+#        self.contrast_scaler.param.watch(self._update_intensity_scaling, "value")  
+#
+#        self.overplot_coords_widget = pn.widgets.Checkbox(name = "Spectrum Coordinates")
+#        self.overplot_coords_widget.param.watch(self._overplot_coordinates_callback, "value")
+#
+#     
+#    def _update_radius(self, event):
+#        if event.new: #avoid passing nan/None
+#            self.radius = event.new
+#            shared_data.publish(self.panel_id, "Euclid_radius", self.radius)
+#            with concurrent.futures.ThreadPoolExecutor() as executor:
+#                future = executor.submit(self.run_euclid, initialize = False)
+#            try:
+#                future.result()  # This would raise the exception
+#            except Exception as e:
+#                print(f"Error occurred: {e}")
+#            self._update_image()
+#        else:
+#            print("Input a valid value for radius")
+#
+#    @staticmethod
+#    def change_intensity_range(image, low, high):
+#        image = np.clip(image, low, high)
+#        image = (image-low)/(high-low)
+#        return np.clip(image, 0,1)
+#
+#    def _update_intensity_scaling(self, event):
+#        low, high = event.new
+#        scaled_image = self.change_intensity_range(self.euclid_object.reprojected_data["stacked"], 
+#                                                   low, high)
+#        self.euclid_image.set_data(scaled_image)
+#        self.euclid_fig.canvas.draw()
+#        self._update_image()
+#    
+#    def _update_stretching(self, event):
+#        stretch = event.new
+#        self.euclid_object.stack_cutouts(stretch = stretch)
+#        self.euclid_image.set_data(self.euclid_object.reprojected_data["stacked"])
+#        self.euclid_fig.canvas.draw()
+#        self._update_image()
+#
+#    def _update_image(self): 
+#        try:
+#             self.euclid_pane.object = self.euclid_fig
+#        except Exception as e:         #too generic
+#            print("Euclid image unavailable")
+#            print(e)
+#
+#    def _add_coordinates(self, coordinates, dataset):
+#        """Storing Coordinates from DESI/SDSS
+#           coordinates : dict : {"ra" : [...], "dec" : [...]} 
+#           dataset : string, key of the dictionary storing the coordinates
+#        """
+#
+#        if not coordinates or "ra" not in coordinates or "dec" not in coordinates:
+#            print("Wrong passed coordinates")
+#            return
+#        ra, dec  = coordinates["ra"], coordinates["dec"]
+#        if not hasattr(self, "stored_spectrum_coordinates"):
+#            self.stored_spectrum_coordinates = {}
+#        self.stored_spectrum_coordinates[dataset] = {"ra" : ra, "dec" : dec}
+#
+#        self.overplot_coords_widget.name = "Spectrum Coordinates"
+#        if self.overplot_coords_widget.value:
+#            self._show_overplot_coordinates()
+#    
+#    def _show_overplot_coordinates(self):
+#
+#        image_height, image_width = self.euclid_image.get_size()
+#        self.overplotted_coordinates = []
+#        self.ax.cla()
+#        self.euclid_fig.clf()
+#        self.euclid_image = None
+#
+#        self.ax = self.euclid_fig.add_subplot(1,1,1)
+#        self.ax.set_axis_off()
+#        self._update_image()
+#        
+#        if hasattr(self, "stored_spectrum_coordinates"):
+#            self.euclid_image = self.ax.imshow(self.euclid_object.reprojected_data["stacked"], origin = "lower")
+#            self.overplot_coords_widget.name = "Spectrum Coordinates"
+#
+#            for dataset in self.stored_spectrum_coordinates:
+#                N = len(self.stored_spectrum_coordinates[dataset]["ra"])
+#                colors = plt.get_cmap("gist_rainbow", max(N,2))
+#                marker = "+" if dataset == "DESI" else "*" #TODO improve
+#                if self.overplot_coords_widget.value:
+#                    for i, (x, y) in enumerate(self.euclid_object.world_2_pix(ra = self.stored_spectrum_coordinates[dataset]["ra"],
+#                                                                              dec = self.stored_spectrum_coordinates[dataset]["dec"],
+#                                                                             filtro = "stacked" )):
+#    
+#                            if (0 <= x < image_width) and (0 <= y < image_height):
+#                                self.ax.scatter(x, y, color = colors(i), s = 300,
+#                                                        marker = marker)
+#
+#    def _overplot_coordinates_callback(self, event):
+#        print(f"Overplot widget state changed: {event.new}")
+#        if event.new:
+#            if not hasattr(self, "stored_spectrum_coordinates"):
+#                print("No spectrum coordinates available")
+#                event.obj.name = "Spectrum Coordinates [Not Currently Avaliable]"
+#                self.overplotted_coordinates = []
+#                return None
+#            
+#            event.obj.name = "Spectrum Coordinates"
+#            self._show_overplot_coordinates()
+#
+#        elif not event.new:
+#            if hasattr(self, "stored_spectrum_coordinates"):
+#                if isinstance(self.overplotted_coordinates, list):
+#                    for sc in self.overplotted_coordinates:
+#                        sc.remove()
+#                    self.overplotted_coordinates = []
+#                self._show_overplot_coordinates()
+#        
+#        if hasattr(self, "stored_spectrum_coordinates"):
+#            self._update_image()
+#
+#        
+#    def get_plot_scale(self):
+#        bar_length_arcsecond = self.bar_length_pixels * self.euclid_object.arcsec_per_pix["stacked"]
+#        return bar_length_arcsecond
+#
+#    
+#    def get_euclid_figure(self, show_scale = True, figsize = (5,5)):
+#        
+#        if hasattr(self, "euclid_image"):
+#            self.euclid_image.remove()
+#            self.euclid_image = self.ax.imshow(self.euclid_object.reprojected_data["stacked"], origin = "lower")
+#
+#
+#        self.euclid_fig = Figure(figsize=figsize)
+#        self.ax = self.euclid_fig.add_subplot(1,1,1)
+#        self.ax.set_axis_off()
+#        self.euclid_image = self.ax.imshow(self.euclid_object.reprojected_data["stacked"], origin = "lower")
+#        
+#        if show_scale:
+#            image_height, image_width = self.euclid_image.get_size()
+#            self.bar_length_pixels = image_width * 0.2  #always shows a bar 1/5 of the plot 
+#            x0, y0 = 0.1*image_width, 0.1*image_height
+#            x1 = x0 + self.bar_length_pixels
+#            self.ax.plot([x0, x1], [y0, y0], color='red', lw=3)
+#            self.scale_text =  self.ax.text((x0 + x1) / 2, y0 + y0/2, f'{self.get_plot_scale():.1f}"',
+#                                        color='red', ha='center', va='bottom', fontsize=14, fontweight='bold')
+#            
+#        if self.overplot_coords_widget.value:
+#            self._show_overplot_coordinates()
+#    
+#    def run_euclid(self, initialize = False):
+#        """Wrapper for multithreading"""
+#        if initialize:
+#            self.euclid_object = EuclidCutoutsClass(self.ra, self.dec, 
+#                             euclid_filters= ["VIS", "NIR_Y", "NIR_H"])
+#        
+#        self.euclid_object.get_final_cutout(radius = self.radius, 
+#                                            stretch = "Linear", reference = "VIS", 
+#                                            verbose = True)
+#          
+#        if not initialize:
+#            self.contrast_scaler.value = (0,1)
+#        
+#        self.overplot_coords_widget.value = False
+#        self.get_euclid_figure()                                                                        
+# 
+#
+#    def _subscribe_to_shared(self):
+#        """It manages all the subscriptions to the shared dictionary. not very flexible but it works"""
+#        desi_callback = lambda coords: self._add_coordinates(coords, "DESI")
+#        sdss_callback = lambda coords: self._add_coordinates(coords, "SDSS")
+#        shared_data.replace_subscribe(self.panel_id, "DESI_coordinates", desi_callback)
+#        shared_data.replace_subscribe(self.panel_id, "SDSS_coordinates", sdss_callback)
+#        
+#        #If DESI/SDSS panel are already initialized, i need to pass the coordinates directly
+#        if shared_data.get_data("DESI_coordinates"):
+#            self._add_coordinates(shared_data.get_data("DESI_coordinates"), "DESI")
+#        if shared_data.get_data("SDSS_coordinates"):
+#            self._add_coordinates(shared_data.get_data("SDSS_coordinates"), "SDSS")
+#
+#    
+#    def panel(self):
+#            self.panel_column = pn.Column(self.euclid_pane,
+#                                          pn.WidgetBox(pn.Row(self.radius_input, self.stretching_input),
+#                                                     self.contrast_scaler,
+#                                                     self.overplot_coords_widget)
+#                                          )
+#            self._update_image()
+#            return self.panel_column
+#
+#        
+#    
