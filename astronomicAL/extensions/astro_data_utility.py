@@ -534,20 +534,32 @@ class DESISpectraClass:
             ax.set_ylabel(r'$F_{\lambda}~[10^{-17}~ergs~s^{-1}~cm^{-2}~{\AA}^{-1}]$', fontsize =12)
     
     
+    def plot_spectrum_hv(self, idx=0, plot_model=True,
+                         plot_emlines=True, annotate_emlines=True,
+                         plot_abslines=True, annotate_abslines=True,
+                         show_xlabel=True, show_ylabel=True,
+                         width=400, height=250, 
+                         model_kwargs = {"line_width" : 2, "color" : "red"}):
+        """Same as above but for holoviews"""
 
-    def plot_spectrum_hv(self, plot_model = True, plot_emlines=True, plot_abslines=True):
-        """To be rewritten for working with multiple spectra"""
-        wavlen = self.spectrum.wavelength
-        redshift = self.spectrum.redshift
+        assert idx < self.available_spectra, "Index larger than number of available spectra"
+        
+        wavlen = self.spectra[idx].wavelength
+        flux = self.spectra[idx].flux
+        model = self.spectra[idx].model
+        smoothed = self.smoothed_fluxes[idx]
+        redshift = self.spectra[idx].redshift
 
-        flux_curve = hv.Curve((wavlen, self.spectrum.flux)).opts(color='grey', line_width=0.1)
-        smoothed_curve = hv.Curve((wavlen, self.smoothed_flux)).opts(color='black', line_width=1)
+        flux_curve = hv.Curve((wavlen, flux)).opts(color='grey', line_width=0.1)
+        smoothed_curve = hv.Curve((wavlen, smoothed)).opts(color='black', line_width=1)
         
         overlays = [flux_curve, smoothed_curve]
+        
         if plot_model:
-            model_curve = hv.Curve((wavlen, self.spectrum.model)).opts(color='red', line_width=2)
+            model_curve = hv.Curve((wavlen, model)).opts(**model_kwargs)
             overlays.append(model_curve)
-        ymin, ymax = np.min(self.smoothed_flux), np.max(self.smoothed_flux)*1.5
+        
+        ymin, ymax = np.min(smoothed), np.max(smoothed)*1.5
         ymin = ymin / 3 if ymin >= 0 else ymin * 1.5
         xmin, xmax =  xmin, xmax = np.min(wavlen), np.max(wavlen)
         
@@ -556,13 +568,14 @@ class DESISpectraClass:
                 self.get_emline_table()
             for name, wav in zip(self.emline_table["Name"], self.emline_table["wave_vac"]):
                 obs_wav = wav * (redshift + 1)
-                if obs_wav > xmax:
+                if obs_wav > xmax: #emission lines are sorted
                     break
                 if obs_wav < xmin:
                     continue
-                line = hv.VLine(obs_wav).opts(color='red', line_width=0.5, line_dash='dotted')
-                label = hv.Text(obs_wav, ymax*0.8, name).opts(yrotation=90, text_font_size='13pt')
-                overlays.extend([line, label])
+                overlays.append(hv.VLine(obs_wav).opts(color='red', line_width=0.5, line_dash='dotted'))
+                if annotate_emlines:
+                    overlays.append(hv.Text(obs_wav, ymax * 0.8, str(name)).opts(
+                                      yrotation=90, text_font_size='8pt'))
         if plot_abslines:
             if not hasattr(self, "absline_table"):
                 self.get_absline_table()
@@ -570,26 +583,30 @@ class DESISpectraClass:
                 obs_wav = wav * (redshift + 1)
                 if (obs_wav > xmax) or (obs_wav < xmin):
                     continue
-                line = hv.VLine(obs_wav).opts(color='blue', line_width=0.5, line_dash='dotted')
-                label = hv.Text(obs_wav, ymax*0.2, name).opts(yrotation=90, text_font_size='13pt')
-                overlays.extend([line, label])
+                overlays.append(hv.VLine(obs_wav).opts(color='blue', line_width=0.5, line_dash='dotted'))
+                if annotate_abslines:
+                    overlays.append(hv.Text(obs_wav, ymax * 0.2, str(name)).opts(
+                                         yrotation=90, text_font_size='8pt'))
+        
+        xlabel = r'$$\lambda_{obs}~[Å]$$' if show_xlabel else ''
+        ylabel = r'$$F_{\lambda}~[10^{-17}~ergs~s^{-1}~cm^{-2}~{Å}^{-1}]$$' if show_ylabel else ''
 
         # Overlay all components
         spectrum_overlay = hv.Overlay(overlays).opts(
-            opts.Curve(tools=['hover'], width=900, height=400),
-            opts.Text(text_baseline='bottom'),
-            opts.Overlay(
-                 xaxis='bottom',
-                 yaxis='left',
-                 xlabel=r'$$\lambda_{obs}~[\AA\]$$',
-                 ylabel=r'$$F_{\lambda}~[10^{-17}~ergs~s^{-1}~cm^{-2}~{\AA\}^{-1}]$$',
-                 logx=True,
-                 xlim=(xmin, xmax*1.02),
-                 ylim=(ymin, ymax),
-                 )
-             )
+                opts.Overlay(
+                    width=width, 
+                    height=height,
+                    xlabel=xlabel,
+                    ylabel=ylabel,
+                    logx=True,
+                    xlim=(xmin, xmax * 1.02),
+                    ylim=(ymin, ymax),
+                    active_tools=[],
+                    show_legend=False
+                    )
+                )
         return spectrum_overlay
-
+    
 
 def LoTSS_cutout(ra, dec, radius = 10, check_coverage = True):
     """radius in arcsec"""
