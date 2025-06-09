@@ -1121,7 +1121,7 @@ class EuclidPanelManager:
         shared_data.replace_subscribe(self.panel_id, "DESI_coordinates", desi_callback)
         shared_data.replace_subscribe(self.panel_id, "SDSS_coordinates", sdss_callback)
         
-        #If DESI/SDSS panel are already initialized, i need to pass the coordinates directly
+        #If DESI/SDSS panel are already initialized, I need to pass the coordinates directly
         if shared_data.get_data("DESI_coordinates"):
             self._add_coordinates(shared_data.get_data("DESI_coordinates"), "DESI")
         if shared_data.get_data("SDSS_coordinates"):

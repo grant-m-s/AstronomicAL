@@ -339,16 +339,33 @@ class HistoDashboard(param.Parameterized):
         self.log_yscale = pn.widgets.Checkbox(name = "y Log")
         self.density = pn.widgets.Checkbox(name = "Density")
         self.cumulative = pn.widgets.Checkbox(name = "Cumulative")
-        self.Nbins_slider = pn.widgets.IntSlider(name='N bins', start=2, end=1000, step=1, value=10, value_throttled = 10)
+        self.Nbins_slider = pn.widgets.IntSlider(name='N bins', start=2, end=200, step=1, value=10, value_throttled = 10)
         self.label_selector = pn.widgets.MultiChoice(name='Label to Plot', value=['All'],
                                                        options = ["All"] + list(config.settings["strings_to_labels"].keys()),
-                                                       height = 300)
+                                                       )
         
         self.range_min = pn.widgets.FloatInput(value = None, start=-9e9, end=9e9, step = 1, 
-                              placeholder = "max value", name = "range min", width = 150)
+                              placeholder = "max value", name = "range min",)
         self.range_max = pn.widgets.FloatInput(value = None, start=-9e9, end=9e9, step = 1, 
-                              placeholder = "max value", name = "range max", width = 150)
+                              placeholder = "max value", name = "range max")
         
+
+        self.dropdown_content = pn.Column(self.log_xscale, 
+                                    self.log_yscale, 
+                                    self.density, 
+                                    self.cumulative, 
+                                    self.Nbins_slider,
+                                    pn.Row(self.range_min, self.range_max),
+                                    self.label_selector,
+                                    visible=False, 
+                                    height=0, #otherwise panel reserves vertical space to accomodate this
+                                    #sizing_mode="stretch_width", 
+                                    styles={'border': '1px solid lightgray', 'padding': '10px',
+                                            },)
+        
+        self.settings_button = pn.widgets.Button(name="Settings ▾", button_type="primary")
+
+        self.settings_button.on_click(self._toggle_dropdown)
         
 
         self.strings_to_plot = ["All"]
@@ -362,8 +379,12 @@ class HistoDashboard(param.Parameterized):
         self.range_max.param.watch(self._update_plot, "value")
         self.label_selector.param.watch(self._update_label, "value")
         
-
     
+    # Toggle visibility on click
+    def _toggle_dropdown(self, event):
+        is_open = self.dropdown_content.visible = not self.dropdown_content.visible
+        self.settings_button.name = "Settings ▾" if not is_open else "Settings ▴"
+        self.dropdown_content.height = None if is_open else 0
 
     @param.depends("X_variable")
     def plot(self, x_var=None):
@@ -548,21 +569,17 @@ class HistoDashboard(param.Parameterized):
         """
         self.plot_pane.object = self.plot_mplt()
 
-        self.row[0] = pn.Card(pn.Column(pn.WidgetBox(pn.Row(self.log_xscale, self.log_yscale, self.density, self.cumulative),
-                           pn.Row(self.range_min, self.range_max),
-                           pn.Row(self.Nbins_slider, self.label_selector), width = 500, height = 150,),
-                           self.plot_pane, 
+        self.row[0] = pn.Card(pn.Row(self.plot_pane, 
                            sizing_mode="scale_both"),
             header=pn.Row(
-                pn.Spacer(width=25,
-                        #    sizing_mode="fixed"
-                           ),
+                pn.Spacer(width=25,),
                 self.close_button,
                 pn.Row(self.param.X_variable, max_width=100),
+                pn.Column(self.settings_button, self.dropdown_content),
                 max_width=400,
                 # sizing_mode="fixed",
-            ),
-            collapsible=False,
+               ),
+                collapsible=False,
             sizing_mode="stretch_both",
         )
 
