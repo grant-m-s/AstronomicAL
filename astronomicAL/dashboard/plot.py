@@ -227,7 +227,7 @@ class PlotDashboard(param.Parameterized):
 
         """
 
-        self.row[0] = pn.Card(
+        return  pn.Card(
             pn.Row(self.plot, sizing_mode="stretch_both"),
             header=pn.Row(
                 pn.Spacer(width=25,
@@ -242,12 +242,10 @@ class PlotDashboard(param.Parameterized):
             collapsible=False,
             sizing_mode="stretch_both",
         )
-
-        return self.row
     
 #######################################
 
-class HistoDashboard(param.Parameterized):
+class HistoDashboard_not_parametrized(param.Parameterized):
     """A Dashboard used for rendering histograms of the data.
 
     Parameters
@@ -269,19 +267,18 @@ class HistoDashboard(param.Parameterized):
 
     X_variable = param.Selector(
         objects=["0"], default="0", doc= "Selection box for the X axis of the plot.")
-
-
+    
     def __init__(self, src, close_button):
-        super(HistoDashboard, self).__init__()
+        super(HistoDashboard_not_parametrized, self).__init__()
 
         self.row = pn.Row(pn.pane.Str("loading"))
         self.src = src
         self._initialize_widgets()
         self.src.on_change("data", self._panel_cb)
         self.df = config.main_df
-        self.plot_pane = pn.pane.Matplotlib(sizing_mode="stretch_both")
         self.close_button = close_button
         self.update_variable_lists()
+        self.counter = 0
         self.panel()
 
     def _update_variable_lists_cb(self, attr, old, new):
@@ -292,7 +289,6 @@ class HistoDashboard(param.Parameterized):
 
     def update_variable_lists(self):
         """Update the list of options used inside `X_variable`.
-
         This method retrieves an up-to-date list of columns inside `df` and
         assigns them to both Selector objects.
 
@@ -344,13 +340,13 @@ class HistoDashboard(param.Parameterized):
                                                        options = ["All"] + list(config.settings["strings_to_labels"].keys()),
                                                        )
         
-        self.range_min = pn.widgets.FloatInput(value = None, start=-9e9, end=9e9, step = 1, 
-                              placeholder = "max value", name = "range min",)
-        self.range_max = pn.widgets.FloatInput(value = None, start=-9e9, end=9e9, step = 1, 
-                              placeholder = "max value", name = "range max")
+        self.range_min = pn.widgets.FloatInput(value = None, start=-np.inf, end=np.inf, step = 1, 
+                              placeholder = "None", name = "range min",)
+        self.range_max = pn.widgets.FloatInput(value = None, start=-np.inf, end=np.inf, step = 1, 
+                              placeholder = "None", name = "range max")
         
 
-        self.dropdown_content = pn.Column(self.log_xscale, 
+        self.settings_panel = pn.Column(self.log_xscale, 
                                     self.log_yscale, 
                                     self.density, 
                                     self.cumulative, 
@@ -358,8 +354,6 @@ class HistoDashboard(param.Parameterized):
                                     pn.Row(self.range_min, self.range_max),
                                     self.label_selector,
                                     visible=False, 
-                                    height=0, #otherwise panel reserves vertical space to accomodate this
-                                    #sizing_mode="stretch_width", 
                                     styles={'border': '1px solid lightgray', 'padding': '10px',
                                             },)
         
@@ -372,7 +366,6 @@ class HistoDashboard(param.Parameterized):
         self.log_xscale.param.watch(self._update_plot,  "value")
         self.log_yscale.param.watch(self._update_plot,  "value")
         self.cumulative.param.watch(self._update_plot,  "value")
-        #self.Nbins_slider.param.watch(self._update_plot, "value")
         self.Nbins_slider.param.watch(self._update_plot, "value_throttled")
         self.density.param.watch(self._update_plot,  "value")
         self.range_min.param.watch(self._update_plot, "value")
@@ -380,123 +373,51 @@ class HistoDashboard(param.Parameterized):
         self.label_selector.param.watch(self._update_label, "value")
         
     
-    # Toggle visibility on click
     def _toggle_dropdown(self, event):
-        is_open = self.dropdown_content.visible = not self.dropdown_content.visible
-        self.settings_button.name = "Settings ▾" if not is_open else "Settings ▴"
-        self.dropdown_content.height = None if is_open else 0
+        self.settings_panel.visible = not self.settings_panel.visible
+        self.settings_button.name = "Settings ▴" if self.settings_panel.visible else "Settings ▾"
 
-    @param.depends("X_variable")
-    def plot(self, x_var=None):
 
-        if x_var is None:
-            x_var_name = self.X_variable
-            x_var = self.df[self.X_variable].to_numpy()
-        
-        x_var = x_var[np.isfinite(x_var)]
-        if self.log_xscale.value:
-            x_var = np.log10(x_var)
-            x_var = x_var[np.isfinite(x_var)]
-
-        stats, edges  =  np.histogram(x_var, bins = self.Nbins_slider.value)
-        if self.cumulative.value:
-            stats = np.cumsum(stats)
-        if self.log_yscale.value: ylim = (1,None) 
-        else: ylim = (0,None)
-        plot = hv.Histogram((edges, stats)).opts(color = "blue", logy = self.log_yscale.value, line_color="blue", ylim = ylim)
-
-        cols = list(self.df.columns)
-
-        if len(self.src.data[cols[0]]) == 1:
-            selected = pd.DataFrame(self.src.data, columns=cols, index=[0])
-            selected_plot = hv.VLine(selected[x_var_name].iloc[0]).opts(
-            color="black",
-            line_dash = "dashed",
-            line_width = 1,
-            ylim = ylim
-            )
-            plot = (plot* selected_plot)
-        
-        plot = plot.opts(
-        xlabel=x_var_name,
-        ylabel="# Sources",
-        hooks=[tools])
-
-        return plot
-    
     @staticmethod
-    def get_histogram(ax, x_var, Nbins = 10, log_x = False, log_y = False, density = False, cumulative = False, 
-                      range = (None, None), xlabel = "",
+    def get_histogram_hv(x_var, Nbins = 10, log_x = False, log_y = False, density = False, cumulative = False, 
+                      range = (None, None), label = "",
                       **kwargs):
         
         x = x_var[np.isfinite(x_var)]
-
-        ax.set_xlabel(xlabel)
-        
         xmin = np.min(x) if range[0] is None else range[0]
         xmax = np.max(x) if range[1] is None else range[1]
-        
-        
-        if density: 
-            weights = np.ones(len(x))/len(x)
-            ax.set_ylabel(r"% of sources")
-        else:
-            weights = None
-            ax.set_ylabel("# of sources")
-        
-        
+        ylim = (0.2,None) if log_y else (0,None)   #holoviews doesn't like no ylim passed with log yscale
+        weights = np.ones_like(x)/len(x) if density else None 
+            
         if log_x:
-
             if xmin > 0: # both positive
                 bins  = np.geomspace(xmin , xmax, Nbins) if xmin != xmax else Nbins
-                ax.hist(x, bins = bins, log = log_y, 
-                        cumulative = cumulative, weights = weights, range = (xmin, xmax),
-                        **kwargs);  
-                ax.set_xscale("log")
-           
-            elif xmax < 0:  #both  negative
-                bins = -np.geomspace(-xmax, -xmin, Nbins) if xmin != xmax else Nbins
-                ax.hist(x, bins = bins[::-1], log = log_y, 
-                        cumulative = cumulative, weights = weights, range = (xmin, xmax),
-                        **kwargs);  
-                ax.set_xscale("symlog",  linthresh = np.abs(xmax), linscale = 0.15)
+            else:
+                print("Negative values for log x scale not yet supported, removing values <=0")
+                xmin = np.min(x[x>0])
+                bins  = np.geomspace(xmin , xmax, Nbins) if xmin != xmax else Nbins
+            #TODO implement case where all values are negative
+        else:
+            bins = np.linspace(xmin , xmax, Nbins) if xmin != xmax else Nbins
             
-            elif xmin * xmax < 0:    #x has positive and negative values
-                x_thresh = np.min(np.abs(x[x != 0]))
-                bins_positive = np.geomspace(x_thresh, xmax, int(Nbins/2))  #for the moment same number of bins for positive 
-                bins_negative = np.geomspace(x_thresh, -xmin, int(Nbins/2))  #and negative values
-                bins = np.concatenate([-bins_negative[::-1], bins_positive])
-                ax.hist(x, bins = bins, log = log_y, 
-                        cumulative = cumulative, weights = weights, range = (xmin, xmax),
-                        **kwargs);  
-                ax.set_xscale("symlog", linthresh=x_thresh, linscale = 0.15 )
+        stats, edges = np.histogram(x, bins = bins, weights = weights)
+        if cumulative:
+            stats = np.cumsum(stats)
+        
+        histogram = hv.Histogram((stats, edges), label = label).opts(logy = log_y,
+                                                              logx = log_x,
+                                                              ylim = ylim,
+                                                              **kwargs)
+        return histogram
 
-            elif xmin * xmax == 0:   #at least one of the two is 0
-                try:
-                    x_thresh = np.min(np.abs(x[x != 0]))
-                    bins_positive = np.geomspace(x_thresh, xmax, int(Nbins/2))  if xmax > 0 else np.array([0, x_thresh])
-                    bins_negative = np.geomspace(x_thresh, -xmin, int(Nbins/2)) if xmin < 0 else np.array([0, x_thresh])
-                    bins = np.concatenate([-bins_negative[::-1], bins_positive])
-                    ax.hist(x, bins = bins, log = log_y, 
-                       cumulative = cumulative, weights = weights,
-                       **kwargs);  
-                    ax.set_xscale("symlog", linthresh=x_thresh, linscale = 0.15 )
-                except ValueError:  #all values are 0 so x[x != 0] is an empty array
-                    ax.hist(x, bins = Nbins, log = log_y, 
-                       cumulative = cumulative, weights = weights, range = (xmin, xmax),
-                       **kwargs); 
-
-        else: 
-            ax.hist(x, bins = Nbins, log = log_y, 
-                cumulative = cumulative, weights = weights, range = (xmin, xmax),
-                **kwargs);  
-  
+    
     @param.depends("X_variable")
-    def plot_mplt(self, x_var=None):
+    def plot_hv(self, x_var=None):
+        
         """Create a basic histogram plot of the data with the selected axis.
         Returns
         -------
-        plot : Matplotlib plot
+        plot : holoviews plot
 
         """
         if x_var is None:
@@ -512,50 +433,295 @@ class HistoDashboard(param.Parameterized):
         else:
             labels_to_plot = []
         
-        fig = Figure()
-        ax = fig.subplots()
-        
+        self.overlays = []
         
         if "All" in strings_to_plot:
-            self.get_histogram(ax, x_var, Nbins = self.Nbins_slider.value, 
-                           log_x = self.log_xscale.value, log_y = self.log_yscale.value,
-                           cumulative = self.cumulative.value, density=self.density.value,
-                           range = (self.range_min.value, self.range_max.value),
-                           xlabel = self.X_variable,
-                           **{"color" : "blue", "edgecolor" : "blue", "label" : "All", })
+            h = self.get_histogram_hv(x_var, Nbins = self.Nbins_slider.value, 
+                            log_x = self.log_xscale.value, log_y = self.log_yscale.value,
+                            cumulative = self.cumulative.value, density = self.density.value,
+                            range = (self.range_min.value, self.range_max.value),
+                            label = "All",
+                            **{"fill_color" : "blue", "line_color" : "blue"})
+            self.overlays.append(h)
             
         for i, label_to_plot in enumerate(labels_to_plot):
-            self.get_histogram(ax, x_var[labels == label_to_plot], Nbins = self.Nbins_slider.value, 
+            h = self.get_histogram_hv(x_var[labels == label_to_plot], Nbins = self.Nbins_slider.value, 
                             log_x = self.log_xscale.value, log_y = self.log_yscale.value,
                             cumulative = self.cumulative.value, density=self.density.value,
                             range = (self.range_min.value, self.range_max.value),
                             xlabel = self.X_variable,
-                            **{"color" : config.settings["label_colours"][label_to_plot],
-                               "edgecolor" : config.settings["label_colours"][label_to_plot],
-                               "lw" : 2, "alpha" : 0.7, 
-                               "label" : config.settings["labels_to_strings"][str(label_to_plot)],
-                               "histtype" : "stepfilled" if i < 2 else "step"} ### maybe avoids confusion
+                            label = config.settings["labels_to_strings"][str(label_to_plot)],
+                            **{"fill_color" : config.settings["label_colours"][label_to_plot] if i < 2 else "none",
+                               "line_color" : config.settings["label_colours"][label_to_plot],
+                               "line_width" : 1.5,
+                               "fill_alpha" : 0.7,
+                            }
                             )
+            self.overlays.append(h)
+            
                               
-                           
         cols = list(self.df.columns)
 
         if len(self.src.data[cols[0]]) == 1:
             selected = pd.DataFrame(self.src.data, columns=cols, index=[0])
-            ax.axvline(selected[x_var_name].iloc[0], c = "k", ls = ':', lw =1)
+            self.overlays.append(hv.VLine(selected[x_var_name].iloc[0]).opts(
+                                  color="black",
+                                  line_dash = "dashed",
+                                  line_width = 1,
+                                  )
+            )
+    
+        xlabel=x_var_name
+        ylabel= "% of Sources" if self.density.value else "# Sources" 
+        plot = hv.Overlay(self.overlays).opts(active_tools = [],
+                                              xlabel = xlabel,
+                                              ylabel = ylabel,
+                                              )
         
-        ax.legend()
-    
-        return fig
-    
+        self.counter +=1 
+        print(f"called plot function  {self.counter} times")
+        
+        return plot
+        
     def _update_label(self, event):
         self.strings_to_plot = event.new
-        #self.plot_pane.object = self.plot_mplt()
         self.panel()
         
-
     def _update_plot(self, event):
         self.panel()
+
+    def panel(self):
+        return  pn.Card(pn.Column(
+                            pn.Row(self.plot_hv, sizing_mode="scale_both"),
+                            self.settings_panel, scroll = True),
+                        header = pn.Row(
+                                    pn.Spacer(width=25),
+                                    self.close_button,
+                                    pn.Row(self.param.X_variable, max_width=100),
+                                    self.settings_button,
+                                ),
+                                collapsible=False,
+                                sizing_mode="stretch_both",
+                        )
+
+
+class HistoDashboard(param.Parameterized):
+    
+    X_variable = param.Selector(objects=["0"], default="0", doc="X axis variable")
+    log_xscale = param.Boolean(default=False, doc = None)
+    log_yscale = param.Boolean(default=False, doc = None)
+    density = param.Boolean(default=False, doc = None )
+    cumulative = param.Boolean(default=False, doc = None)
+    Nbins = param.Integer(default=10, bounds=(2, 200), doc = "Number of bins")
+    range_min = param.Number(default= -np.inf, bounds=(-np.inf, np.inf), doc= "Range min")
+    range_max = param.Number(default= np.inf, bounds=(-np.inf, np.inf), doc= "Range max")
+    label_selector = param.ListSelector(default=["All"], objects=["All"], doc="Labels to plot")
+   
+    def __init__(self, src, close_button):
+        super(HistoDashboard, self).__init__()
+
+        self.row = pn.Row(pn.pane.Str("loading"))
+        self.src = src
+        self.close_button = close_button
+        self.src.on_change("data", self._panel_cb)
+        self.df = config.main_df
+        self.update_variable_lists()
+        self.counter = 0
+        self.settings_button = pn.widgets.Button(name="Settings ▾", button_type="primary")
+        self.settings_panel = pn.Column(
+            pn.Param(
+                self,
+                parameters=[
+                    "log_xscale", "log_yscale", "density", "cumulative",
+                    "Nbins", "range_min", "range_max", "label_selector"
+                ],
+                widgets={
+                    "label_selector": {"width": 200, "height": 80, "size": 10},
+                    "range_min": {"type": pn.widgets.FloatInput, "placeholder": "None"},
+                    "range_max": {"type": pn.widgets.FloatInput, "placeholder": "None"},
+                    "Nbins": {"throttled": True},
+                    "label_selector": {"type": pn.widgets.MultiChoice}
+                },
+                show_name=False,
+                sizing_mode="stretch_width"
+            ),
+            visible=False,
+            margin=(10, 0, 0, 0)
+        )
+        self.settings_button.on_click(self._toggle_settings_panel)
+        self.panel()
+    
+    def _toggle_settings_panel(self, event):
+        self.settings_panel.visible = not self.settings_panel.visible
+        self.settings_button.name = "Settings ▴" if self.settings_panel.visible else "Settings ▾"
+
+    def _update_variable_lists_cb(self, attr, old, new):
+        self.update_variable_lists()
+
+    def update_df(self):
+        self.df = config.main_df
+
+    def update_variable_lists(self):
+        """Update the list of options used inside `X_variable and label selector`.
+        This method retrieves an up-to-date list of columns inside `df` and
+        assigns them to X-axis Selector object and label selector.
+
+        Returns
+        -------
+        None
+
+        """
+        self.update_df()
+        cols = list(self.df.columns)
+        if config.settings["id_col"] in cols:
+            cols.remove(config.settings["id_col"])
+
+        self.param.X_variable.objects = cols
+        self.param.X_variable.default = config.settings["default_vars"][0]
+        self.X_variable = config.settings["default_vars"][0]
+        self.param.label_selector.objects = ["All"] + list(config.settings["strings_to_labels"].keys())
+
+
+    def _panel_cb(self, attr, old, new):
+        cols = list(self.df.columns)
+
+        if config.settings["id_col"] in cols:
+            cols.remove(config.settings["id_col"])
+
+        for i in config.dashboards.keys():
+            if config.dashboards[i].contents == "Histogram Plot":   
+                curr_x = config.dashboards[i].panel_contents.X_variable
+                if curr_x == self.X_variable:
+                    try:
+                        config.dashboards[i].panel_contents.X_variable = curr_x
+                        config.dashboards[i].panel_contents.panel()
+                    except:
+                        config.dashboards[i].set_contents = "Menu"
+
+                    break
+
+        self.panel()
+
+    @staticmethod
+    def get_histogram_hv(x_var, Nbins = 10, log_x = False, log_y = False, density = False, cumulative = False, 
+                      range = (-np.inf, np.inf), label = "",
+                      **kwargs):
+        
+        x = x_var[np.isfinite(x_var)]
+        xmin = max(np.min(x),range[0])
+        xmax = min(np.max(x),range[1])
+        
+        #if range[1] < xmin or range[0] > xmax i get an error due to bins not increasing
+        if xmin > xmax:
+            print("Warning, Range max < than minimum value spanned by the data"
+                  "or Range min > than maximum value spanned by the data")
+            xmin = xmax
+
+        ylim = (0.2,None) if log_y else (0,None)   #holoviews doesn't like no ylim passed with log yscale
+        weights = np.ones_like(x)/len(x) if density else None 
+            
+        if log_x:
+            if xmin > 0: # both positive
+                bins  = np.geomspace(xmin , xmax, Nbins) if xmin != xmax else Nbins
+            else:
+                print("Negative values for log x scale not yet supported, removing values <=0")
+                xmin = np.min(x[x>0])
+                bins  = np.geomspace(xmin , xmax, Nbins) if xmin != xmax else Nbins
+            #TODO implement case where all values are negative
+        else:
+            bins = np.linspace(xmin , xmax, Nbins) if xmin != xmax else Nbins
+            
+        stats, edges = np.histogram(x, bins = bins, weights = weights)
+        if cumulative:
+            stats = np.cumsum(stats)
+        
+        histogram = hv.Histogram((stats, edges), label = label).opts(logy = log_y,
+                                                              logx = log_x,
+                                                              ylim = ylim,
+                                                              xlim = (xmin, xmax),
+                                                              active_tools = [],
+                                                              **kwargs)
+        
+        return histogram, xmin, xmax
+
+    
+    @param.depends(
+        "X_variable", "log_xscale", "log_yscale", "density", "cumulative",
+        "Nbins", "range_min", "range_max", "label_selector"
+    )
+    def plot_hv(self, x_var=None):
+        
+        """Create a basic histogram plot of the data with the selected axis.
+        Returns
+        -------
+        plot : holoviews plot
+
+        """
+        if x_var is None:
+            x_var_name = self.X_variable
+            x_var = self.df[self.X_variable].to_numpy()
+        
+        strings_to_plot = self.label_selector
+        
+        if bool(strings_to_plot) and ("All" not in strings_to_plot or len(strings_to_plot)>1):
+           labels = self.df[config.settings["label_col"]]
+           labels_to_plot = [config.settings["strings_to_labels"][i] for i in strings_to_plot if i != "All"]
+        
+        else:
+            labels_to_plot = []
+        
+        self.overlays = []
+        xmin, xmax = -np.inf, np.inf 
+        if "All" in strings_to_plot:
+            h, xmin_temp, xmax_temp = self.get_histogram_hv(x_var, Nbins = self.Nbins, 
+                            log_x = self.log_xscale, log_y = self.log_yscale,
+                            cumulative = self.cumulative, density = self.density,
+                            range = (self.range_min, self.range_max),
+                            label = "All",
+                            **{"fill_color" : "blue", "line_color" : "blue"})
+            self.overlays.append(h)
+            xmin = max(xmin, xmin_temp)
+            xmax = min(xmax, xmax_temp)
+            
+        for i, label_to_plot in enumerate(labels_to_plot):
+            h, xmin_temp, xmax_temp = self.get_histogram_hv(x_var[labels == label_to_plot], Nbins = self.Nbins, 
+                            log_x = self.log_xscale, log_y = self.log_yscale,
+                            cumulative = self.cumulative, density=self.density,
+                            range = (self.range_min, self.range_max),
+                            label = config.settings["labels_to_strings"][str(label_to_plot)],
+                            **{"fill_color" : config.settings["label_colours"][label_to_plot] if i < 2 else "none",
+                               "line_color" : config.settings["label_colours"][label_to_plot],
+                               "line_width" : 1.5,
+                               "fill_alpha" : 0.7,
+                            }
+                            )
+            self.overlays.append(h)
+            xmin = max(xmin, xmin_temp)
+            xmax = min(xmax, xmax_temp)
+            
+                              
+        cols = list(self.df.columns)
+
+        if len(self.src.data[cols[0]]) == 1:
+            selected = pd.DataFrame(self.src.data, columns=cols, index=[0])
+            self.overlays.append(hv.VLine(selected[x_var_name].iloc[0]).opts(
+                                  color="black",
+                                  line_dash = "dashed",
+                                  line_width = 1,
+                                  active_tools = [],
+                                  )
+            )
+    
+        xlabel=x_var_name
+        ylabel= "% of Sources" if self.density else "# Sources" 
+        plot = hv.Overlay(self.overlays).opts(active_tools = [],
+                                              xlabel = xlabel,
+                                              ylabel = ylabel,
+                                              xlim = (xmin, xmax),
+                                              )
+        self.counter +=1 
+        print(f"called plot function  {self.counter} times")
+        return plot
 
     def panel(self):
         """Render the current view.
@@ -565,27 +731,21 @@ class HistoDashboard(param.Parameterized):
         row : Panel Row
             The panel is housed in a row which can then be rendered by the
             parent Dashboard.
-
         """
-        self.plot_pane.object = self.plot_mplt()
+        
+        return pn.Card(
+                        pn.Column(
+                               pn.Row(self.plot_hv, sizing_mode="scale_both"),
+                               self.settings_panel, scroll = True),
+                        header= pn.Row(
+                                   pn.Spacer(width=25),
+                                   self.close_button,
+                                   pn.Row(self.param.X_variable, max_width=100),
+                                   self.settings_button,
+                                   ),
+                                collapsible=False,
+                                sizing_mode="stretch_both",
+                        )
 
-        self.row[0] = pn.Card(pn.Row(self.plot_pane, 
-                           sizing_mode="scale_both"),
-            header=pn.Row(
-                pn.Spacer(width=25,),
-                self.close_button,
-                pn.Row(self.param.X_variable, max_width=100),
-                pn.Column(self.settings_button, self.dropdown_content),
-                max_width=400,
-                # sizing_mode="fixed",
-               ),
-                collapsible=False,
-            sizing_mode="stretch_both",
-        )
+        
 
-        return self.row
-
-
-def tools(plot, element):
-    plot.handles['plot'].toolbar.active_drag = None
-    plot.handles['plot'].toolbar.active_scroll = None
