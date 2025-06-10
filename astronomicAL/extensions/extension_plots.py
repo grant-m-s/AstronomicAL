@@ -871,7 +871,7 @@ def get_desi_figure_hv(desi_object, plot_emlines= True, plot_abslines = True):
             plot_emlines = plot_emlines,
             plot_abslines = plot_abslines,
             width=950,
-            height=250 if N > 1 else 400,
+            height=250 if N > 1 else 300,
             model_kwargs = {"line_width" : 2, "color" : colors(i)}
         )
         hv_plots.append(plot)
@@ -925,7 +925,7 @@ class EuclidPanelManager:
         self.radius = radius
         self.panel_id = panel_id 
         self.overplotted_coordinates = []
-        self.euclid_pane = pn.pane.HoloViews(width=500, height=500)
+        self.euclid_pane = pn.pane.HoloViews(width=400, height=400)
         
         self._initialise_radius_scaling_widgets()
 
@@ -1129,18 +1129,13 @@ class EuclidPanelManager:
 
     
     def panel(self):
-            self.panel_column = pn.Column(pn.Row(self.euclid_pane, pn.Column(self.stretching_input, self.radius_input,
-                                                                              self.overplot_coords_widget)),
-                      
-                                                  self.contrast_scaler,)
-     
-            
-
-            #self.panel_column = pn.Column(self.euclid_pane,
-            #                              pn.WidgetBox(pn.Row(self.radius_input, self.stretching_input),
-            #                                         self.contrast_scaler,
-            #                                         self.overplot_coords_widget)
-            #                              )
+            self.panel_column = pn.Column(pn.Row(self.euclid_pane, 
+                                                pn.Column(self.stretching_input, 
+                                                        self.radius_input,
+                                                        self.contrast_scaler,
+                                                        self.overplot_coords_widget)
+                                                ),
+                                        )
             self._update_image()
             return self.panel_column
 
