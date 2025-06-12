@@ -22,6 +22,7 @@ from astronomicAL.extensions.shared_data import shared_data
 #from dl import queryClient as qc
 
 import matplotlib.transforms as transforms
+import matplotlib.pyplot as plt
 import holoviews as hv
 from holoviews import opts
 
@@ -271,8 +272,223 @@ class EuclidCutoutsClass:
    
 
 
+class BaseSpectraClass:
+    """Base class to store methods which are used both for Euclid and DESI/SDSS spectra"""
+    def __init__(self, ra, dec, max_separation = 1, sourceId = None):
+        self.ra = ra
+        self.dec = dec
+        self.max_separation = max_separation / 3600  # arcsec to deg
+        self.spectra = None
+        self.available_spectra = 0
+        self.sourceId = sourceId
+    
+    def get_coordinates(self):
+        if self.spectra is not None:
+            ra = [getattr(spectrum, "ra", np.nan) for spectrum in self.spectra]
+            dec = [getattr(spectrum, "dec", np.nan) for spectrum in self.spectra]
+            return ra, dec
+        return np.nan, np.nan
+    
+    def get_smoothed_spectra(self, kernel = "Box1DKernel", window = 10):
+        
+        if isinstance(kernel, str):
+            kernel_dict = {"box1dkernel" : lambda : Box1DKernel(window),
+                           "gaussian1dkernel" : lambda : Gaussian1DKernel(window)}
+            kernel = kernel_dict[kernel.casefold()]()
+        else:
+            kernel = kernel(window)
+        
+        self.smoothed_fluxes  = [convolve(spectrum.flux, kernel) for spectrum in self.spectra]
+    
+    def get_emline_table(self, primary = True, extra_path = "data"):
+        """Emission lines for galaxies/AGN. 
+           Table from  https://github.com/d-i-an-a/inspec-z
+           Lines flagged as primary are the ~20 strongest in QSO spectra
+           according to Vanden Berk+2001 """
+        path = os.path.join(extra_path, "utility_data/EmLines_air_vac.csv")
+        self.emline_table = pd.read_csv(path)
+        if primary:
+            self.emline_table = self.emline_table[self.emline_table["primary"]==1]
+        
+    def get_absline_table(self, primary = True, extra_path = "data"):
+        """Absorption lines for Stars """
+        path = os.path.join(extra_path, "utility_data/AbsLines_air_vac.csv")
+        self.absline_table = pd.read_csv(path)
+        if primary:
+            self.absline_table = self.absline_table[self.absline_table["primary"]==1]
 
-class DESISpectraClass:
+    
+    def plot_spectrum(self,  ax, idx = 0, plot_model = True, 
+                      plot_emlines = True, annotate_emlines = True,  
+                      plot_abslines = True, annotate_abslines = True,
+                      set_ylabel = True, model_kwargs = {"lw" : 2, "color" : "r"},
+                      smoothed_kwargs = {"lw" : 1, "color" : "k"}):
+        
+        """This only plots one spectrum. Ideally all plotting routines should be outside of this 
+           class. However having on plot routine is useful for managing em/abs lines and the different 
+           spectra to plot
+        """
+        
+        assert idx < self.available_spectra, "Index larger than number of available spectra"
+        
+        wavlen = self.spectra[idx].wavelength
+        flux = self.spectra[idx].flux
+        smoothed = self.smoothed_fluxes[idx]
+        redshift = self.spectra[idx].redshift
+        
+        ax.plot(wavlen, flux, c = 'grey', lw = 0.1)
+        ax.plot(wavlen, smoothed, **smoothed_kwargs)
+        
+        if plot_model:
+            ax.plot(wavlen, self.spectra[idx].model, **model_kwargs)
+        
+        ymin, ymax = np.min(smoothed),  np.max(smoothed)*1.5
+        #sometimes ymin is < 0 so by dividing we are cutting out part of the spectrum
+        ymin = ymin/3 if ymin >=0 else ymin*1.5
+        xmin, xmax = np.min(wavlen), np.max(wavlen) 
+        ax.set_ylim(ymin, ymax)
+        ax.set_xlim(xmin, xmax*1.02)
+        ax.set_xscale('log')
+    
+        if plot_emlines and np.isfinite(redshift):
+            if not hasattr(self, "emline_table"):
+                self.get_emline_table()
+            transform = transforms.blended_transform_factory(ax.transData, ax.transAxes)
+            for name, wav in zip(self.emline_table["Name"],self.emline_table["wave_vac"]):
+                obs_wav = wav*(redshift+1)
+                if obs_wav > xmax:
+                    break
+                elif obs_wav < xmin:
+                    continue
+                ax.axvline(obs_wav, c = 'r', lw = 0.5, ls = ':')
+                if annotate_emlines:
+                    ax.text(obs_wav, 0.8, name, rotation = 90, transform = transform, fontsize = 10)
+        
+        if plot_abslines and np.isfinite(redshift):
+            if not hasattr(self, "absline_table"):
+                self.get_absline_table()
+            transform = transforms.blended_transform_factory(ax.transData, ax.transAxes)
+            for name, wav in zip(self.absline_table["Name"],self.absline_table["wave_vac"]):
+                obs_wav = wav*(redshift+1)
+                if (obs_wav > xmax) or (obs_wav < xmin):
+                    continue
+                ax.axvline(obs_wav, c = 'b', lw = 0.5, ls = ':')
+                if annotate_abslines:
+                    ax.text(obs_wav, 0.2, name, rotation = 90, transform = transform, fontsize = 10)
+        
+        
+        ax.set_xlabel(r'$\lambda_{obs}~[\AA]$', fontsize = 15)
+        if set_ylabel:
+            ax.set_ylabel(r'$F_{\lambda}~[10^{-17}~ergs~s^{-1}~cm^{-2}~{\AA}^{-1}]$', fontsize =12)
+    
+    
+    def plot_spectrum_hv(self, idx=0, plot_model=True, 
+                         plot_lines = 'class',
+                         plot_emlines=True, annotate_emlines=True,
+                         plot_abslines=True, annotate_abslines=True,
+                         show_xlabel=True, show_ylabel=True,
+                         width=400, height=250, 
+                         model_kwargs = {"line_width" : 2, "color" : "red"},
+                         smoothed_kwargs = {"line_width" : 1, "color" : "black"}):
+        """Same as above but for holoviews
+           plot_lines = True, False, "class" overrides plot_emlines and plot_abslines
+        """
+
+        assert idx < self.available_spectra, "Index larger than number of available spectra"
+        
+        wavlen = self.spectra[idx].wavelength
+        flux = self.spectra[idx].flux
+        smoothed = self.smoothed_fluxes[idx]
+        redshift = self.spectra[idx].redshift
+
+        if plot_lines == "class":
+            is_extragal = self.spectra[idx].spectype == "GALAXY" or self.spectra[idx].spectype == "QSO"
+            plot_emlines = is_extragal and plot_abslines
+            plot_abslines = self.spectra[idx].spectype == "STAR" and plot_abslines
+        
+        elif not plot_lines:
+            plot_abslines = False
+            plot_emlines = False
+
+        flux_curve = hv.Curve((wavlen, flux)).opts(color='grey', line_width=0.1)
+        smoothed_curve = hv.Curve((wavlen, smoothed)).opts(**smoothed_kwargs)
+        
+        overlays = [flux_curve, smoothed_curve]
+        
+        if plot_model:
+            model = self.spectra[idx].model
+            model_curve = hv.Curve((wavlen, model)).opts(**model_kwargs)
+            overlays.append(model_curve)
+        
+        ymin, ymax = np.min(smoothed), np.max(smoothed)*1.5
+        ymin = ymin / 3 if ymin >= 0 else ymin * 1.5
+        xmin, xmax =  xmin, xmax = np.min(wavlen), np.max(wavlen)
+        
+        if plot_emlines and np.isfinite(redshift):
+            if not hasattr(self, "emline_table"):
+                self.get_emline_table()
+            for name, wav in zip(self.emline_table["Name"], self.emline_table["wave_vac"]):
+                obs_wav = wav * (redshift + 1)
+                if obs_wav > xmax: #emission lines are sorted
+                    break
+                if obs_wav < xmin:
+                    continue
+                overlays.append(hv.VLine(obs_wav).opts(color='red', line_width=0.5, line_dash='dotted'))
+                if annotate_emlines:
+                    overlays.append(hv.Text(obs_wav, ymax * 0.8, str(name)).opts(
+                                      yrotation=90, text_font_size='8pt'))
+        if plot_abslines and np.isfinite(redshift):
+            if not hasattr(self, "absline_table"):
+                self.get_absline_table()
+            for name, wav in zip(self.absline_table["Name"], self.absline_table["wave_vac"]):
+                obs_wav = wav * (redshift + 1)
+                if (obs_wav > xmax) or (obs_wav < xmin):
+                    continue
+                overlays.append(hv.VLine(obs_wav).opts(color='blue', line_width=0.5, line_dash='dotted'))
+                if annotate_abslines:
+                    overlays.append(hv.Text(obs_wav, ymax * 0.2, str(name)).opts(
+                                         yrotation=90, text_font_size='8pt'))
+        
+        xlabel = r'$$ \lambda_{obs} ~{Å} $$' if show_xlabel else ''
+        ylabel = r'$$ F_{\lambda}~[10^{-17}~ergs~s^{-1}~cm^{-2}~{Å}^{-1}] $$' if show_ylabel else ''
+
+        spectrum_overlay = hv.Overlay(overlays).opts(
+                opts.Overlay(
+                    width=width, 
+                    height=height,
+                    xlabel=xlabel,
+                    ylabel=ylabel,
+                    logx=True,
+                    xlim=(xmin, xmax * 1.02),
+                    ylim=(ymin, ymax),
+                    active_tools=[],
+                    show_legend=False
+                    )
+                )
+        return spectrum_overlay
+    
+    def plot_all_spectra_hv(self, plot_lines = "class",
+                            plot_model = True,  cmap = "gist_rainbow", **kwargs):
+        N = self.available_spectra
+        nrows, ncols = N, 1
+        hv_plots = []
+        colors = plt.get_cmap(cmap, max(N,2))
+        for idx in range(N):
+            
+            plot = self.plot_spectrum_hv(
+                        idx=idx,
+                        plot_lines = plot_lines,
+                        plot_model = plot_model,
+                        model_kwargs = {"line_width" : 2, "color" : colors(idx)},
+                        smoothed_kwargs = {"line_width" : 1 if plot_model else 2, "color" :  "black" if plot_model else colors(idx)},
+                        **kwargs
+                    )
+            hv_plots.append(plot)
+        full_plot  = hv.Layout(hv_plots).cols(ncols)
+        full_plot = full_plot.opts(opts.Layout(shared_axes=False))
+        return full_plot
+
+class DESISpectraClass(BaseSpectraClass):
     """
     This class handles the queries of spectra from DESI and SDSS/BOSS.
     Query by sparclid and by specId are formally the same. In this class the first it is used to query all
@@ -282,69 +498,28 @@ class DESISpectraClass:
     #actually queries also BOSS and SDSS DR16
     def __init__(self, ra, dec, max_separation = 1, 
                  datasets = ["DESI-DR1", "DESI-EDR", "BOSS-DR16", "SDSS-DR16"],
-                 specId = None, client = None):
-        
-        self.ra = ra
-        self.dec = dec
-        self.max_separation = max_separation/3600 #arcsec--> degreee
-        self.spectrum = None 
-        
+                 sourceId = None, client = None):
+        super().__init__(ra, dec, max_separation=max_separation, sourceId=sourceId)
         if isinstance(datasets, str): 
             datasets = [datasets]
         self.datasets = datasets
-        
-        self.specId = specId
-        
+
         if client is None:
-            shared_data.set_data("Sparcl_client", SparclClient())
+            shared_data.set_data("Sparcl_client", SparclClient(read_timeout=60))
             print("Initialized SparcClient")
             self.client = shared_data.get_data("Sparcl_client")
         else:
             self.client = client
-
-    def set_ra_dec(self, ra, dec):
-        """To update class without recalling the SparcClient"""
-        self.ra = ra
-        self.dec = dec
-        self.coordinates = SkyCoord(ra = self.ra, dec = self.dec, unit = "deg", frame = "icrs")
-        self.spectra = None
-        self.available_spectra = 0
-
+    
     def get_spectra(self):
-        """Call all methods to get a spectrum"""
-        self.spectra = None
-        if self.specId is not None:
+        """Call all methods to get spectra"""
+        if self.sourceId is not None:
             self.query_spectra_specid(verbose = True)
         else:
             self.query_main_table(verbose = True)
             self.query_spectra_sparclid(verbose = True)
 
-
-    #def query_main_table(self, verbose = False):
-    #    """Astro Data Lab does not accept Circle or Point functions,
-    #      referred to https://datalab.noirlab.edu/help/index.php?qa=366&qa_1=dont-adql-functions-like-point-circle-work-query-interface
-    #      for cone search.
-    #      LIMIT = 100 just to avoid strange results"""
-    #    
-    #    datasets_str = ', '.join(f"'{ds}'" for ds in self.datasets)
-    #
-    #    query = f"""SELECT sparcl_id, specid, ra, dec, redshift, spectype, 
-    #             data_release, redshift_err, specprimary, redshift_warning,
-    #             3600.0 * q3c_dist(ra, dec, {self.ra}, {self.dec}) AS separation_arcsec
-    #             FROM sparcl.main
-    #             WHERE Q3C_RADIAL_QUERY(ra, dec, {self.ra},{self.dec}, {self.max_separation})
-    #             AND data_release IN ({datasets_str})
-    #             ORDER BY separation_arcsec ASC
-    #             LIMIT 100"""
-    #    
-    #    tic = time.perf_counter()
-    #    self.table_results = qc.query(sql=query, fmt='pandas')
-    #    self.table_results = self.table_results.drop_duplicates(subset = "specid")
-    #    self.available_spectra = len(self.table_results)
-    #    toc = time.perf_counter()
-    #    if verbose:
-    #        print(f"Querying Noirlab table required {toc-tic} seconds")
-
+    
     def query_main_table(self, verbose = False):
         """Query using SparcClient. It does not accept circular queries, so we first perform a box search within
         [ra-radius, ra+radius]* [dec-radius, dec+radius] and then we keep only sources effectively within the cone"""
@@ -407,8 +582,8 @@ class DESISpectraClass:
         include = ['sparcl_id', 'specid', 'data_release', 'redshift', 'flux',
                             'wavelength', 'model', 'spectype', "ra", "dec"]
         tic = time.perf_counter()
-        if self.specId is not None:
-            self.spectrum_query = self.client.retrieve_by_specid([self.specId], include = include,
+        if self.sourceId is not None:
+            self.spectrum_query = self.client.retrieve_by_specid([self.sourceId], include = include,
                                              dataset_list = self.datasets)
             if self.spectrum_query.info["status"]["success"]:
                 self.spectra = [self.spectrum_query.records[0]] #Same spectrum could be in both DESI DR1 and DESI EDR 
@@ -417,50 +592,10 @@ class DESISpectraClass:
                 print("Something went wrong")
             toc = time.perf_counter()
             if verbose:
-                print(f"Retrieving spectrum required {toc-tic} seconds")
+                print(f"Retrieving DESI/SDSS spectra required {toc-tic} seconds")
         else:
              print("No target specId provided ")
-        
-    
-    def get_coordinates(self):
-        """For cutout plottings"""
-        if self.spectra is not None:
-            ra = [spectrum.ra for spectrum in self.spectra]
-            dec = [spectrum.dec for spectrum in self.spectra]
-            return ra, dec
-        return np.nan, np.nan
 
-    def get_smoothed_spectra(self, kernel = "Box1DKernel", window = 10):
-
-        if isinstance(kernel, str):
-            kernel_dict = {"box1dkernel" : lambda : Box1DKernel(window),
-                           "gaussian1dkernel" : lambda : Gaussian1DKernel(window)}
-            kernel = kernel_dict[kernel.casefold()]()
-        else:
-            kernel = kernel(window)
-        
-        self.smoothed_fluxes  = [convolve(spectrum.flux, kernel) for spectrum in self.spectra]
-        
-
-    
-    def get_emline_table(self, primary = True, extra_path = "data"):
-        """Emission lines for galaxies/AGN. 
-           Table from  https://github.com/d-i-an-a/inspec-z
-           Lines flagged as primary are the ~20 strongest in QSO spectra
-           according to Vanden Berk+2001 """
-        path = os.path.join(extra_path, "utility_data/EmLines_air_vac.csv")
-        self.emline_table = pd.read_csv(path)
-        if primary:
-            self.emline_table = self.emline_table[self.emline_table["primary"]==1]
-        
-    def get_absline_table(self, primary = True, extra_path = "data"):
-        """Absorption lines for Stars """
-        path = os.path.join(extra_path, "utility_data/AbsLines_air_vac.csv")
-        self.absline_table = pd.read_csv(path)
-        if primary:
-            self.absline_table = self.absline_table[self.emline_table["primary"]==1]
-
-    
     def check_coverage(self, path = "data/mocs"):
         self.has_coverage = False
         if ("DESI-DR1" in self.datasets) | ("DESI-EDR" in self.datasets):
@@ -469,144 +604,158 @@ class DESISpectraClass:
             self.has_coverage = self.has_coverage | check_isin_survey(self.ra, self.dec, survey = "SDSS", path = path)
     
     
+class SpectrumContainer:
+    """Utility class to store retrieved Euclid Spectra in a simial way to DESI ones"""
 
-    def plot_spectrum(self,  ax, idx = 0, plot_model = True, 
-                      plot_emlines = True, annotate_emlines = True,  
-                      plot_abslines = True, annotate_abslines = True,
-                      set_ylabel = True, model_kwargs = {"lw" : 2, "color" : "r"}):
-        
-        """This only plots one spectrum. Ideally all plotting routines should be outside of this 
-           class. However having on plot routine is useful for managing em/abs lines and the different 
-           spectra to plot
-        """
-        
-        assert idx < self.available_spectra, "Index larger than number of available spectra"
-        
-        wavlen = self.spectra[idx].wavelength
-        flux = self.spectra[idx].flux
-        model = self.spectra[idx].model
-        smoothed = self.smoothed_fluxes[idx]
-        redshift = self.spectra[idx].redshift
+    def __init__(self, wavelength, flux, sourceId, **kwargs):
+        self.wavelength = wavelength
+        self.flux = flux
+        self.sourceId = sourceId
+        self.allowed_attributes = ['model', "redshift", "ra", "dec", "spectype"]
+        for name, value in kwargs.items():
+            self.set_attribute(name, value)
+
+    def set_attribute(self, attribute_name, attribute_value):
+        if attribute_name in self.allowed_attributes:
+            setattr(self, attribute_name, attribute_value)
+        else:
+            raise AttributeError(f"{attribute_name} is not allowed to be added")
         
 
-        ax.plot(wavlen, flux, c = 'grey', lw = 0.1)
-        ax.plot(wavlen, smoothed, c = 'k', lw = 1)
-        if plot_model:
-            ax.plot(wavlen, model, **model_kwargs)
-        
-        ymin, ymax = np.min(smoothed),  np.max(smoothed)*1.5
-        #sometimes ymin is < 0 so by dividing we are cutting out part of the spectrum
-        ymin = ymin/3 if ymin >=0 else ymin*1.5
-        xmin, xmax = np.min(wavlen), np.max(wavlen) 
-        ax.set_ylim(ymin, ymax)
-        ax.set_xlim(xmin, xmax*1.02)
-        ax.set_xscale('log')
+class EuclidSpectraClass(BaseSpectraClass):
+
+    def __init__(self, ra, dec, max_separation =1, sourceId = None):
+        super().__init__(ra, dec, max_separation = max_separation, sourceId = sourceId)
+
     
-        if plot_emlines:
-            if not hasattr(self, "emline_table"):
-                self.get_emline_table()
-            transform = transforms.blended_transform_factory(ax.transData, ax.transAxes)
-            for name, wav in zip(self.emline_table["Name"],self.emline_table["wave_vac"]):
-                obs_wav = wav*(redshift+1)
-                if obs_wav > xmax:
-                    break
-                elif obs_wav < xmin:
-                    continue
-                ax.axvline(obs_wav, c = 'r', lw = 0.5, ls = ':')
-                if annotate_emlines:
-                    ax.text(obs_wav, 0.8, name, rotation = 90, transform = transform, fontsize = 10)
-        
-        if plot_abslines:
-            if not hasattr(self, "absline_table"):
-                self.get_absline_table()
-            transform = transforms.blended_transform_factory(ax.transData, ax.transAxes)
-            for name, wav in zip(self.absline_table["Name"],self.absline_table["wave_vac"]):
-                obs_wav = wav*(redshift+1)
-                if (obs_wav > xmax) or (obs_wav < xmin):
-                    continue
-                ax.axvline(obs_wav, c = 'b', lw = 0.5, ls = ':')
-                if annotate_abslines:
-                    ax.text(obs_wav, 0.2, name, rotation = 90, transform = transform, fontsize = 10)
-        
-        
-        ax.set_xlabel(r'$\lambda_{obs}~[\AA]$', fontsize = 15)
-        if set_ylabel:
-            ax.set_ylabel(r'$F_{\lambda}~[10^{-17}~ergs~s^{-1}~cm^{-2}~{\AA}^{-1}]$', fontsize =12)
-    
-    
-    def plot_spectrum_hv(self, idx=0, plot_model=True,
-                         plot_emlines=True, annotate_emlines=True,
-                         plot_abslines=True, annotate_abslines=True,
-                         show_xlabel=True, show_ylabel=True,
-                         width=400, height=250, 
-                         model_kwargs = {"line_width" : 2, "color" : "red"}):
-        """Same as above but for holoviews"""
+    def get_spectra(self):
+        """Call all methods to get spectra"""
+        if self.sourceId is not None:
+            self.query_spectra_sourceId(verbose=True)
+        else:
+            self.query_table(verbose = True)
+            if self.available_spectra > 0:
+                self.query_spectra_sourceId(verbose=True)
+                source_id = list(self.table_results["source_id"])
+                self.spectra = self._reorder_spectra(self.spectra, source_id)
+                self._add_info_spectra()
+            else:
+                print("No spectra available spectra")
 
-        assert idx < self.available_spectra, "Index larger than number of available spectra"
+    def query_table(self, verbose = False):
+        query = f"""SELECT TOP 400
+                        spec.file_name, spec.file_path, spec.source_id, spec.spectra_source_oid, spec.ra_obj, spec.dec_obj,
+                    DISTANCE(spec.ra_obj, spec.dec_obj, {self.ra}, {self.dec})*3600 AS separation
+                    FROM spectra_source AS spec
+                    WHERE DISTANCE(ra_obj, dec_obj, {self.ra}, {self.dec}) < {self.max_separation}
+                    ORDER BY separation
+                """
         
-        wavlen = self.spectra[idx].wavelength
-        flux = self.spectra[idx].flux
-        model = self.spectra[idx].model
-        smoothed = self.smoothed_fluxes[idx]
-        redshift = self.spectra[idx].redshift
+        #10 times slower query to get also spectro-z
+        #query_z = f"""SELECT TOP 400  
+        #        spec.file_name, spec.file_path, spec.source_id, spec.spectra_source_oid, spec.ra_obj, spec.dec_obj,
+        #    DISTANCE(spec.ra_obj, spec.dec_obj, {self.ra}, {self.dec})*3600 AS separation, 
+        #    class.spe_class, gal.spe_z AS gal_z
+        #    FROM spectra_source AS spec
+        #    LEFT JOIN catalogue.spectro_zcatalog_spe_classification AS class on spec.source_id = class.object_id
+        #    LEFT JOIN catalogue.spectro_zcatalog_spe_galaxy_candidates AS gal on spec.source_id = gal.object_id
+        #    WHERE DISTANCE(ra_obj, dec_obj, {self.ra}, {self.dec}) < {self.max_separation}
+        #    ORDER BY separation
+        #    """
+        #    #QSOs have bad spec-z
+        #    #LEFT JOIN catalogue.spectro_zcatalog_spe_qso_candidates AS qso on spec.source_id = qso.object_id
 
-        flux_curve = hv.Curve((wavlen, flux)).opts(color='grey', line_width=0.1)
-        smoothed_curve = hv.Curve((wavlen, smoothed)).opts(color='black', line_width=1)
+        tic = time.perf_counter()
+        job = Euclid.launch_job(query)
+        try:
+            self.table_results = job.get_results()
+            self.available_spectra = len(self.table_results)
+        except AttributeError:
+            print("Query returned None")
+            self.available_spectra = 0
         
-        overlays = [flux_curve, smoothed_curve]
-        
-        if plot_model:
-            model_curve = hv.Curve((wavlen, model)).opts(**model_kwargs)
-            overlays.append(model_curve)
-        
-        ymin, ymax = np.min(smoothed), np.max(smoothed)*1.5
-        ymin = ymin / 3 if ymin >= 0 else ymin * 1.5
-        xmin, xmax =  xmin, xmax = np.min(wavlen), np.max(wavlen)
-        
-        if plot_emlines:
-            if not hasattr(self, "emline_table"):
-                self.get_emline_table()
-            for name, wav in zip(self.emline_table["Name"], self.emline_table["wave_vac"]):
-                obs_wav = wav * (redshift + 1)
-                if obs_wav > xmax: #emission lines are sorted
-                    break
-                if obs_wav < xmin:
-                    continue
-                overlays.append(hv.VLine(obs_wav).opts(color='red', line_width=0.5, line_dash='dotted'))
-                if annotate_emlines:
-                    overlays.append(hv.Text(obs_wav, ymax * 0.8, str(name)).opts(
-                                      yrotation=90, text_font_size='8pt'))
-        if plot_abslines:
-            if not hasattr(self, "absline_table"):
-                self.get_absline_table()
-            for name, wav in zip(self.absline_table["Name"], self.absline_table["wave_vac"]):
-                obs_wav = wav * (redshift + 1)
-                if (obs_wav > xmax) or (obs_wav < xmin):
-                    continue
-                overlays.append(hv.VLine(obs_wav).opts(color='blue', line_width=0.5, line_dash='dotted'))
-                if annotate_abslines:
-                    overlays.append(hv.Text(obs_wav, ymax * 0.2, str(name)).opts(
-                                         yrotation=90, text_font_size='8pt'))
-        
-        xlabel = r'$$\lambda_{obs}~[Å]$$' if show_xlabel else ''
-        ylabel = r'$$F_{\lambda}~[10^{-17}~ergs~s^{-1}~cm^{-2}~{Å}^{-1}]$$' if show_ylabel else ''
-
-        # Overlay all components
-        spectrum_overlay = hv.Overlay(overlays).opts(
-                opts.Overlay(
-                    width=width, 
-                    height=height,
-                    xlabel=xlabel,
-                    ylabel=ylabel,
-                    logx=True,
-                    xlim=(xmin, xmax * 1.02),
-                    ylim=(ymin, ymax),
-                    active_tools=[],
-                    show_legend=False
-                    )
-                )
-        return spectrum_overlay
+        toc = time.perf_counter()
+        if verbose:
+            print(f"Querying Euclid spectra_source table required {toc-tic} seconds")
     
+    @staticmethod
+    def get_url(source_id, retrieval_type = "SPECTRA_RGS" ):
+        """retrieval_type : str either  'SPECTRA_RGS', 'SPECTRA_BGS' or 'ALL'
+        Type of spectrum to be retrieved, Red, or Blue grism, ALL returns a .zip file.
+        In Q1 only Red Grism Spectra are available"""
+        if not isinstance(source_id, list):
+            source_id =[source_id]
+        url = "https://eas.esac.esa.int/sas-dd/data?ID="
+        id_list = ",".join(f"sedm+{s_id}" for s_id in source_id)
+        url =  url + id_list + f"&RETRIEVAL_TYPE={retrieval_type}"
+        return url
+    
+    @staticmethod
+    def _reorder_spectra(spectra, source_id):
+        """Retrieved spectra are not in the same order as the queried main table, i.e. they are not ordered by separation"""
+        spectra_dict = {entry.sourceId : entry for entry in spectra}
+        ordered_spectra = [spectra_dict[s_id] for s_id in source_id if s_id in spectra_dict]
+        return ordered_spectra
+    
+
+    def _add_info_spectra(self):
+        """Spectra and main table must be ordered """
+        if len(self.spectra) == len(self.table_results):
+            for spectrum, ra, dec, s_id in zip(self.spectra,
+                                            self.table_results["ra_obj"], 
+                                            self.table_results["dec_obj"],
+                                            self.table_results["source_id"]):
+                if  spectrum.sourceId == s_id:
+                    spectrum.set_attribute("ra", ra)
+                    spectrum.set_attribute("dec", dec)
+                    spectrum.set_attribute("redshift", np.nan) #avoid issues with plot
+                    spectrum.set_attribute("spectype", "") #avoid issues with plot
+
+
+    def query_spectra_sourceId(self, verbose = False):
+         
+        source_id = list(self.table_results["source_id"])
+        url = self.get_url(source_id=source_id, retrieval_type= "SPECTRA_RGS")
+        tic = time.perf_counter()
+        r = requests.get(url)
+        if r.status_code == 200:
+            self.spectra = []
+            if r.headers.get("Content-Type","").endswith("fits"): ##in the future we might incur in .zip files
+                hdus = fits.open(BytesIO(r.content))
+                for hdu in hdus[1:]:  #first one is empty
+                    spectrum  = SpectrumContainer(wavelength = hdu.data['WAVELENGTH'],
+                                                  flux = hdu.data["SIGNAL"],
+                                                  sourceId = hdu.header["SOURC_ID"])
+                    self.spectra.append(spectrum)
+            else:
+                print("For the  moment only fits format are supported")
+        else:
+            print(f"Euclid spectra request failed with status code {r.status_code}")
+        toc = time.perf_counter()
+        if verbose:
+            print(f"Retrieving Euclid spectra required {toc-tic} seconds")
+    
+    def get_spectra(self):
+        """Call all methods to get spectra"""
+        self.spectra = None
+        if self.sourceId is not None:
+            self.query_spectra_sourceId(verbose=True)
+            for spectrum in self.spectra:
+                    spectrum.set_attribute("ra", np.nan)
+                    spectrum.set_attribute("dec", np.nan)
+                    spectrum.set_attribute("redshift", np.nan) 
+                    spectrum.set_attribute("spectype", "")
+            #Euclid Spectra fits file do not have position of the source
+        else:
+            self.query_table(verbose = True)
+            if self.available_spectra > 0:
+                self.query_spectra_sourceId(verbose=True)
+                source_id = list(self.table_results["source_id"])
+                self.spectra = self._reorder_spectra(self.spectra, source_id)
+                self._add_info_spectra()
+            else:
+                print("No spectra available spectra")
+ 
 
 def LoTSS_cutout(ra, dec, radius = 10, check_coverage = True):
     """radius in arcsec"""
@@ -680,7 +829,7 @@ def get_ra_dec_DESI():
     Utility function to get ra and dec for a source with DESI spectra.
     Only useful for testing the routines
     """
-    client = SparclClient()
+    client = SparclClient(read_timeout=60)
     outs = ['sparcl_id', 'ra', 'dec']
     cons = {'data_release': ['DESI-DR1']}
     found = client.find(outfields=outs, constraints=cons)
@@ -692,7 +841,8 @@ def get_ra_dec_DESI():
 def get_ra_dec_Euclid():
     ra = 265.94946 
     dec = 65.83025    
-    return ra, dec       
+    return ra, dec  
+
 
 #########previous stuff 
 
@@ -771,3 +921,27 @@ class sdss_cutouts_class:
             self.get_url()
             return None
          
+    #def query_main_table(self, verbose = False):
+    #    """Astro Data Lab does not accept Circle or Point functions,
+    #      referred to https://datalab.noirlab.edu/help/index.php?qa=366&qa_1=dont-adql-functions-like-point-circle-work-query-interface
+    #      for cone search.
+    #      LIMIT = 100 just to avoid strange results"""
+    #    
+    #    datasets_str = ', '.join(f"'{ds}'" for ds in self.datasets)
+    #
+    #    query = f"""SELECT sparcl_id, specid, ra, dec, redshift, spectype, 
+    #             data_release, redshift_err, specprimary, redshift_warning,
+    #             3600.0 * q3c_dist(ra, dec, {self.ra}, {self.dec}) AS separation_arcsec
+    #             FROM sparcl.main
+    #             WHERE Q3C_RADIAL_QUERY(ra, dec, {self.ra},{self.dec}, {self.max_separation})
+    #             AND data_release IN ({datasets_str})
+    #             ORDER BY separation_arcsec ASC
+    #             LIMIT 100"""
+    #    
+    #    tic = time.perf_counter()
+    #    self.table_results = qc.query(sql=query, fmt='pandas')
+    #    self.table_results = self.table_results.drop_duplicates(subset = "specid")
+    #    self.available_spectra = len(self.table_results)
+    #    toc = time.perf_counter()
+    #    if verbose:
+    #        print(f"Querying Noirlab table required {toc-tic} seconds")

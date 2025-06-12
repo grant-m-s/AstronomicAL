@@ -536,11 +536,10 @@ class HistoDashboard(param.Parameterized):
                     "Nbins", "range_min", "range_max", "label_selector"
                 ],
                 widgets={
-                    "label_selector": {"width": 200, "height": 80, "size": 10},
                     "range_min": {"type": pn.widgets.FloatInput, "placeholder": "None"},
                     "range_max": {"type": pn.widgets.FloatInput, "placeholder": "None"},
                     "Nbins": {"throttled": True},
-                    "label_selector": {"type": pn.widgets.MultiChoice}
+                    "label_selector": {"type": pn.widgets.MultiChoice, "width": 200, "height": 80}
                 },
                 show_name=False,
                 sizing_mode="stretch_width"
@@ -671,7 +670,7 @@ class HistoDashboard(param.Parameterized):
             labels_to_plot = []
         
         self.overlays = []
-        xmin, xmax = -np.inf, np.inf 
+        xmin, xmax = np.inf, -np.inf 
         if "All" in strings_to_plot:
             h, xmin_temp, xmax_temp = self.get_histogram_hv(x_var, Nbins = self.Nbins, 
                             log_x = self.log_xscale, log_y = self.log_yscale,
@@ -680,8 +679,8 @@ class HistoDashboard(param.Parameterized):
                             label = "All",
                             **{"fill_color" : "blue", "line_color" : "blue"})
             self.overlays.append(h)
-            xmin = max(xmin, xmin_temp)
-            xmax = min(xmax, xmax_temp)
+            xmin = min(xmin, xmin_temp)
+            xmax = max(xmax, xmax_temp)
             
         for i, label_to_plot in enumerate(labels_to_plot):
             h, xmin_temp, xmax_temp = self.get_histogram_hv(x_var[labels == label_to_plot], Nbins = self.Nbins, 
@@ -696,8 +695,8 @@ class HistoDashboard(param.Parameterized):
                             }
                             )
             self.overlays.append(h)
-            xmin = max(xmin, xmin_temp)
-            xmax = min(xmax, xmax_temp)
+            xmin = min(xmin, xmin_temp)
+            xmax = max(xmax, xmax_temp)
             
                               
         cols = list(self.df.columns)

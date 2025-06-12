@@ -5,7 +5,9 @@ import astronomicAL.config as config
 # Sparcl_client : object, The client to access NOIR-DataLab spectra
 # DESI_coordinates : dictionary {"ra" : [ra], "dec" : [dec]}, coordinates of DESI spectra retrieved
 # SDSS_coordinates : dictionary {"ra" : [ra], "dec" : [dec]}, coordinates of SDSS spectra retrieved
+# EuclidSpec : dictionary {"ra" : [ra], "dec" : [dec]}, coordinates of Euclid spectra retrieved
 # Euclid_radius : float, radius of the Euclid cutout
+
 
 
 
