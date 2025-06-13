@@ -77,7 +77,6 @@ class Dashboard(param.Parameterized):
 
     def _close_button_cb(self, event):
         self._cleanup_current_extension_plot()
-        print("I got this event")
         self.contents = "Menu"
 
     def _update_extension_plots_cb(self, attr, old, new):

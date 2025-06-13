@@ -737,9 +737,9 @@ def spectrum_plot(data, selected = None, plot_instance = None, dataset = "DESI",
     if not hasattr(plot_instance, "container"):
         plot_instance.container = pn.Column(scroll = True)
     
-    selected_source = get_selected_source(data=data, selected = selected)
-
     def update_plot(new_radius, panel_id = None):
+
+        selected_source = get_selected_source(data=data, selected = selected)
     
         if from_sourceId:
             if config.settings[f"{dataset}_TargetID"] in selected_source.columns:
@@ -956,13 +956,15 @@ class EuclidPanelManager:
             self.overplot_coords_widget.name = "Spectrum Coordinates"
             if self.overplot_coords_widget.value:
                 for dataset in self.stored_spectrum_coordinates:
+                    print(f"overplotting coordinates for {dataset}")
                     N = len(self.stored_spectrum_coordinates[dataset]["ra"])
                     colors = plt.get_cmap("gist_rainbow", max(N,2))
                     marker = "+" if dataset == "DESI" else "*" #TODO improve
                     self.overplotted_coordinates = []
                     for i, (x, y) in enumerate(self.euclid_object.world_2_pix(ra =  self.stored_spectrum_coordinates[dataset]["ra"],
                                                                               dec = self.stored_spectrum_coordinates[dataset]["dec"],
-                                                                             filtro = "stacked" )):
+                                                                              filtro = "stacked" )):
+
                         if (0 <= x < self.image_width) and (0 <= y < self.image_height):
                             self.overplotted_coordinates.append(hv.Points([(x,y)]).opts(
                                                                color = colors(i),
