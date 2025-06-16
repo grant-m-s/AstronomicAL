@@ -927,7 +927,7 @@ class EuclidPanelManager:
     
     def _update_image(self): 
         try:
-             self.euclid_pane.object = hv.Overlay(self.euclid_fig+ self.overplotted_coordinates)
+             self.euclid_pane.object = hv.Overlay(self.euclid_fig + self.overplotted_coordinates)
         except Exception as e:         #too generic
             print("Euclid image unavailable")
             print(e)
