@@ -22,7 +22,7 @@ class BasePlotClass(param.Parameterized):
         self.df = config.main_df
         self.close_button = close_button
         self.counter = 0
-
+    
     def update_df(self):
         self.df = config.main_df
 
@@ -149,7 +149,6 @@ class ScatterPlotDashboard(BasePlotClass):
         
         min_x, max_x = self.get_axis_limits(self.df[x_var])
         min_y, max_y = self.get_axis_limits(self.df[y_var])
-        print(min_x, max_x, min_y, max_y)
         plot = (
             dynspread(
                 datashade(
@@ -251,6 +250,7 @@ class HistoDashboard(BasePlotClass):
         self.param.X_variable.objects = self.get_variable_list(excluded_columns=excluded_columns)
         self.param.X_variable.default = config.settings["default_vars"][0]
         self.X_variable = config.settings["default_vars"][0]
+        self.param.label_selector.objects = ["All"] + list(config.settings["strings_to_labels"].keys())
 
     def _change_src_cb(self, attr, old, new):
         selected_src_plot = self.plot_selected(self.X_variable)
