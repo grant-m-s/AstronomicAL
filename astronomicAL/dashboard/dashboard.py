@@ -124,7 +124,7 @@ class Dashboard(param.Parameterized):
                 return
             self.panel_contents = HistoDashboard(self.src, self._close_button)
         
-        elif self.contents == "Ivano scatter Plot":
+        elif self.contents == "Scatter Plot":
             if not config.settings["confirmed"]:
                 self.contents = "Menu"
                 print("Please Complete Settings before accessing this view.")
