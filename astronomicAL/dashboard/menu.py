@@ -29,7 +29,7 @@ class MenuDashboard:
         plot_options = [
             "Basic Plot",
             "Histogram Plot",
-            "Scatter Plot",
+            "Test Plot",
             "Selected Source Info",
         ] + list(extension_plots.get_plot_dict().keys())
 

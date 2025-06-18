@@ -240,7 +240,6 @@ class HistoDashboard(BasePlotClass):
             margin=(10, 0, 0, 0)
         )
         self.settings_button.on_click(self._toggle_settings_panel)
-        self.panel()
     
     def _toggle_settings_panel(self, event):
         self.settings_panel.visible = not self.settings_panel.visible

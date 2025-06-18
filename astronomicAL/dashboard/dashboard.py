@@ -1,7 +1,9 @@
 from astronomicAL.dashboard.active_learning import ActiveLearningDashboard
 from astronomicAL.dashboard.labelling import LabellingDashboard
 from astronomicAL.dashboard.menu import MenuDashboard
-from astronomicAL.dashboard.plot import PlotDashboard, HistoDashboard, ScatterPlotDashboard
+from astronomicAL.dashboard.plot import HistoDashboard, ScatterPlotDashboard
+#from astronomicAL.dashboard.base import CustomPlotClass
+from astronomicAL.extensions.custom_plots import EuclidPlotClass
 from astronomicAL.dashboard.selected_source import SelectedSourceDashboard
 from astronomicAL.dashboard.settings_dashboard import SettingsDashboard
 from astronomicAL.extensions import extension_plots
@@ -110,12 +112,12 @@ class Dashboard(param.Parameterized):
             self.df = config.main_df
             self.panel_contents = ActiveLearningDashboard(self.src, self.df)
 
-        elif self.contents == "Basic Plot":
+        elif self.contents == "Test Plot":
             if not config.settings["confirmed"]:
                 self.contents = "Menu"
                 print("Please Complete Settings before accessing this view.")
                 return
-            self.panel_contents = PlotDashboard(self.src, self._close_button)
+            self.panel_contents = EuclidPlotClass(config.main_df, self.src, [], self._close_button)
         
         elif self.contents == "Histogram Plot":
             if not config.settings["confirmed"]:
@@ -124,7 +126,7 @@ class Dashboard(param.Parameterized):
                 return
             self.panel_contents = HistoDashboard(self.src, self._close_button)
         
-        elif self.contents == "Scatter Plot":
+        elif self.contents == "Basic Plot":
             if not config.settings["confirmed"]:
                 self.contents = "Menu"
                 print("Please Complete Settings before accessing this view.")
@@ -178,6 +180,8 @@ class Dashboard(param.Parameterized):
         """
         if hasattr(self.panel_contents, "panel"):
             self.row[0] = self.panel_contents.panel()
+        elif hasattr(self.panel_contents, "mypanel"):
+            self.row[0] = self.panel_contents.mypanel
         else:
             self.row[0] = pn.Card(
                 self.panel_contents,
