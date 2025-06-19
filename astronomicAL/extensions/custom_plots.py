@@ -381,7 +381,7 @@ class EuclidPlotClass(CustomPlotClass):
 class SpectrumPlotClass(CustomPlotClass):
     def __init__(self, data, src, extra_features, close_button):
         super().__init__(data, src, extra_features, close_button)
-        self.figure = pn.pane.HoloViews(width=400, height=400) #euclid_pane = Euclid cutout, figure = euclid_pane+overplotted_coordinates
+        self.figure = pn.Column(scroll = True)
         self.src.on_change("data", self._change_source_cb)
         self.radius = shared_data.get_data("Euclid_radius", 5.0)
         self.get_layout()
@@ -443,48 +443,44 @@ class SpectrumPlotClass(CustomPlotClass):
         return plot_instance.container
    
 
-    def _run_spectrum(self):
-        self.loading_pane.visible = True
+    def _initialize_spectrum_object(self):
         if self.dataset == "EuclidSpec":
-            spectrum_object = EuclidSpectraClass(self.ra, self.dec, max_separation = self.max_separation,
+            self.spectrum_object = EuclidSpectraClass(self.ra, self.dec, max_separation = self.max_separation,
                                              sourceId = self.sourceId)
         else:
             datasets = (["DESI-DR1"] if self.dataset == "DESI"
             else ["BOSS-DR16", "SDSS-DR16"] if self.dataset == "SDSS"
             else None)
-            spectrum_object = DESISpectraClass(self.ra, self.dec, datasets = datasets ,
+            self.spectrum_object = DESISpectraClass(self.ra, self.dec, datasets = datasets ,
                                         sourceId = self.sourceId, max_separation = self.max_separation,
                                         client = shared_data.get_data("Sparcl_client", None))
+
+    def _add_coordinates_to_shared(self, ra, dec, key_name):
+        """
+        ra and dec are lists
+         """
+        shared_data.publish(self.panel_id, f"{self.dataset}_coordinates", {"ra": ra, "dec": dec})
+        return None
+        
+
+    def _run_spectrum(self):
+        self.loading_pane.visible = True
+  
         
         def callback(future_result = None):
-            if future_result is not None:
+            if self.spectrum_object.spectra is not None:
+                
+                self.spectrum_object.get_smoothed_spectra(kernel = "Box1dkernel", 
+                                                        window = 5 if self.dataset == "EuclidSpec" else 10)
+                self._add_coordinates_to_shared(*self.spectrum_object.get_coordinates())
+                plot_model = True if self.dataset != "EuclidSpec" else False
+                kwargs = {"width" : 950,  "height" : 250 if self.spectrum_object.available_spectra > 1 else 300}
+                plot = self.spectrum_object.plot_all_spectra_hv(plot_model = plot_model, **kwargs)
+                self.figure.objects = [plot]
+                self.loading_pane.visible = False
 
-            spectrum_object = future.result()   
-    
-        if spectrum_object is not None:
-            _add_coordinates_to_shared(*spectrum_object.get_coordinates(), panel_id = panel_id,  key_name = dataset)
-            plot_model = True if dataset != "EuclidSpec" else False
-            kwargs = {"width" : 950,  "height" : 250 if spectrum_object.available_spectra > 1 else 300}
-            plot = spectrum_object.plot_all_spectra_hv(plot_model = plot_model, **kwargs)
-            plot_instance.container.objects = [plot] 
+        self.run_multithread(self.spectrum_object.get_spectra, callback=callback)
+         
 
         
     
-  
-    if spectrum_object.spectra is not None:
-        spectrum_object.get_smoothed_spectra(kernel = "Box1dkernel", 
-                                             window = 5 if dataset == "EuclidSpec" else 10)
-        return spectrum_object
-    return None
-
-def _add_coordinates_to_shared(ra, dec, panel_id, key_name):
-    """
-    ra and dec are lists
-    """
-    shared_data.publish(panel_id, f"{key_name}_coordinates", {"ra": ra, "dec": dec})
-    return 
-        
-    
-
-
-       
