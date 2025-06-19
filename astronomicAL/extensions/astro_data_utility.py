@@ -191,10 +191,12 @@ class EuclidCutoutsClass:
         return list(zip(x_pix, y_pix))
         
         
-    def get_final_cutout(self, radius, stretch =  "Linear", reference = "VIS", verbose = False) :
+    def get_final_cutout(self, radius, stretch =  "Linear", reference = "VIS", verbose = False,
+                         return_object = False) :
         """
         This method just calls all the other methods to obtain a color cutout which can be 
-        rendered in the Euclid Cutout extension plot panel
+        rendered in the Euclid Cutout extension plot panel. return_object = True serves to avoid race conditions 
+        in multithreading
         """
         if not hasattr(self, "cone_results"):
             self.get_cone(verbose = verbose, async_job= False)
@@ -205,6 +207,8 @@ class EuclidCutoutsClass:
             self.read_cutouts()
             self.reproject_cutouts(reference = reference)
             self.stack_cutouts(stretch = stretch)
+            if return_object:
+                return self.reprojected_data["stacked"]
         else:
             print(f"No sources in Euclid dataset with {self.coordinates} coordinates")
     
@@ -511,13 +515,22 @@ class DESISpectraClass(BaseSpectraClass):
         else:
             self.client = client
     
-    def get_spectra(self):
+    def get_spectra(self, max_separation = None, return_object = False):
         """Call all methods to get spectra"""
+        
+        if max_separation is not None:
+            self.max_separation = max_separation / 3600
+
         if self.sourceId is not None:
             self.query_spectra_specid(verbose = True)
         else:
             self.query_main_table(verbose = True)
             self.query_spectra_sparclid(verbose = True)
+        if self.spectra is not None:
+            self.get_smoothed_spectra(kernel = "Box1dkernel",  window = 10)
+        
+        if return_object:
+            return self.spectra
 
     
     def query_main_table(self, verbose = False):
@@ -627,20 +640,6 @@ class EuclidSpectraClass(BaseSpectraClass):
     def __init__(self, ra, dec, max_separation =1, sourceId = None):
         super().__init__(ra, dec, max_separation = max_separation, sourceId = sourceId)
 
-    
-    def get_spectra(self):
-        """Call all methods to get spectra"""
-        if self.sourceId is not None:
-            self.query_spectra_sourceId(verbose=True)
-        else:
-            self.query_table(verbose = True)
-            if self.available_spectra > 0:
-                self.query_spectra_sourceId(verbose=True)
-                source_id = list(self.table_results["source_id"])
-                self.spectra = self._reorder_spectra(self.spectra, source_id)
-                self._add_info_spectra()
-            else:
-                print("No spectra available spectra")
 
     def query_table(self, verbose = False):
         query = f"""SELECT TOP 400
@@ -710,7 +709,7 @@ class EuclidSpectraClass(BaseSpectraClass):
                     spectrum.set_attribute("dec", dec)
                     spectrum.set_attribute("redshift", np.nan) #avoid issues with plot
                     spectrum.set_attribute("spectype", "") #avoid issues with plot
-
+        
 
     def query_spectra_sourceId(self, verbose = False):
          
@@ -735,9 +734,14 @@ class EuclidSpectraClass(BaseSpectraClass):
         if verbose:
             print(f"Retrieving Euclid spectra required {toc-tic} seconds")
     
-    def get_spectra(self):
-        """Call all methods to get spectra"""
+    def get_spectra(self, max_separation = None, return_object = False):
+        """Call all methods to get spectra
+           max_separation allows to override self.max_separation to have multiple queries with the same
+           initialized object"""
         self.spectra = None
+        if max_separation is not None:
+            self.max_separation = max_separation / 3600
+        
         if self.sourceId is not None:
             self.query_spectra_sourceId(verbose=True)
             for spectrum in self.spectra:
@@ -755,7 +759,13 @@ class EuclidSpectraClass(BaseSpectraClass):
                 self._add_info_spectra()
             else:
                 print("No spectra available spectra")
- 
+        if self.spectra is not None:
+            self.get_smoothed_spectra(kernel = "Box1dkernel",  window = 5)
+        
+        if return_object:
+            return self.spectra
+           
+              
 
 def LoTSS_cutout(ra, dec, radius = 10, check_coverage = True):
     """radius in arcsec"""
