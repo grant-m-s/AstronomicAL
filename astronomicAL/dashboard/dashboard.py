@@ -2,11 +2,9 @@ from astronomicAL.dashboard.active_learning import ActiveLearningDashboard
 from astronomicAL.dashboard.labelling import LabellingDashboard
 from astronomicAL.dashboard.menu import MenuDashboard
 from astronomicAL.dashboard.plot import HistoDashboard, ScatterPlotDashboard
-#from astronomicAL.dashboard.base import CustomPlotClass
-from astronomicAL.extensions.custom_plots import EuclidPlotClass
 from astronomicAL.dashboard.selected_source import SelectedSourceDashboard
 from astronomicAL.dashboard.settings_dashboard import SettingsDashboard
-from astronomicAL.extensions import extension_plots
+from astronomicAL.extensions import extension_plots, custom_plots
 from bokeh.models import ColumnDataSource
 
 import astronomicAL.config as config
@@ -59,6 +57,7 @@ class Dashboard(param.Parameterized):
         self._submit_button.on_click(self._submit_button_cb)
         
         self.plot_dict = extension_plots.get_plot_dict()
+        self.cust_plot_dict = custom_plots.get_customplot_dict()
         self.contents = contents
         
  
@@ -92,9 +91,12 @@ class Dashboard(param.Parameterized):
     def _cleanup_current_extension_plot(self):
         if self.current_extension_plot and hasattr(self.current_extension_plot, 'cleanup_shared_data'):
             self.current_extension_plot.cleanup_shared_data()
+        
+        elif hasattr(self.panel_contents, "cleanup_panel_plot"):
+            self.panel_contents.cleanup_panel_plot()
         self.current_extension_plot = None
-
-
+            
+            
     @param.depends("contents", watch=True)
     def _update_contents(self):
 
@@ -112,13 +114,6 @@ class Dashboard(param.Parameterized):
             self.df = config.main_df
             self.panel_contents = ActiveLearningDashboard(self.src, self.df)
 
-        elif self.contents == "Test Plot":
-            if not config.settings["confirmed"]:
-                self.contents = "Menu"
-                print("Please Complete Settings before accessing this view.")
-                return
-            self.panel_contents = EuclidPlotClass(config.main_df, self.src, [], self._close_button)
-        
         elif self.contents == "Histogram Plot":
             if not config.settings["confirmed"]:
                 self.contents = "Menu"
@@ -144,6 +139,14 @@ class Dashboard(param.Parameterized):
                 print("Please Complete Settings before accessing this view.")
                 return
             self.panel_contents = SelectedSourceDashboard(self.src, self._close_button)
+        
+        elif self.contents in self.cust_plot_dict:
+            if not config.settings["confirmed"]:
+                self.contents = "Menu"
+                print("Please Complete Settings before accessing this view.")
+                return
+            self.panel_contents = self.cust_plot_dict[self.contents](config.main_df, self.src, self._close_button)
+        
         else:
             self.current_extension_plot = self.plot_dict[self.contents]
             self.panel_contents = self.plot_dict[self.contents].plot(

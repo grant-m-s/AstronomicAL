@@ -10,8 +10,6 @@ import astronomicAL.config as config
 import numpy as np
 import pandas as pd
 import panel as pn
-import threading
-import time
 import param
 import uuid
 import concurrent.futures 
@@ -21,11 +19,32 @@ from astronomicAL.extensions.astro_data_utility import DESISpectraClass, EuclidC
 import matplotlib.pyplot as plt
 
 
+def get_customplot_dict():
+
+    plot_dict = {
+        
+        "Euclid Cutout new" : lambda data, src, close_button : EuclidPlotClass(data, src, close_button,
+                                                            extra_features=[]),
+
+        "DESI Spectra new"  : lambda data, src, close_button : SpectrumPlotClass(data, src, close_button,
+                                                            extra_features=["DESI_TargetID"], dataset="DESI"), 
+
+        "Euclid Spectra new"  : lambda data, src, close_button : SpectrumPlotClass(data, src, close_button,
+                                                            extra_features=["EuclidSpec_TargetID"], dataset="EuclidSpec"), 
+
+        "SDSS Spectra new"  : lambda data, src, close_button : SpectrumPlotClass(data, src, close_button,
+                                                            extra_features=["SDSS_TargetID"], dataset="SDSS"),                                                                                                                                                                               
+
+    }
+
+    return plot_dict
+
+
 class CustomPlotClass(param.Parameterized):
 
     stage = param.ObjectSelector(default="column_selection", objects=["column_selection", "plot"])
     
-    def __init__(self, data, src, extra_features, close_button):
+    def __init__(self, data, src, close_button, extra_features):
         super().__init__()
         self.df = data
         self.src = src
@@ -37,9 +56,11 @@ class CustomPlotClass(param.Parameterized):
         self.figure = pn.pane.HoloViews(sizing_mode="stretch_both", min_height = 400)
         self.loading_pane = pn.pane.Markdown("## Loading...", sizing_mode="stretch_both", max_height = 30)
 
-    def _confirm_button_cb(self, event):
+    def _submit_button_cb(self, event):
         for col, widget in self.select_widgets.items():
-            print(col, widget.value)
+            selected_value = widget.value
+            print(f"{col} --> {selected_value}")
+            config.settings[col] = selected_value
         self.stage = "plot"
 
     def get_selected_source(self):
@@ -69,7 +90,7 @@ class CustomPlotClass(param.Parameterized):
         settings_grid = pn.GridBox(ncols=3, sizing_mode = "stretch_width", scroll = True)  
         options = list(config.main_df.columns)
         submit_button = pn.widgets.Button(name='Confirm', button_type='primary', max_height=120)
-        submit_button.on_click(self._confirm_button_cb)
+        submit_button.on_click(self._submit_button_cb)
         for col in self.unknown_columns:
             select_widget = pn.widgets.Select(name= col, options=options, max_height=120, sizing_mode = "stretch_width")
             settings_grid.append(select_widget)
@@ -116,27 +137,43 @@ class CustomPlotClass(param.Parameterized):
 
         return future
     
-    def cleanup_subscriptions(self):
+    def remove_subscriptions(self):
         """Removes subscriptions to the shared data
            Used in a previous version"""
         shared_data.unsubscribe_panel(self.panel_id)
-        print(f"CustomPlot {self.panel_id} removed from subscriptions")
+        print(f"[{self.panel_id}] removed from subscriptions")
     
-    def cleanup_shared_data(self):
+    def remove_shared_data(self):
         """Removes subscriptions and published data from the shared data"""
         shared_data.cleanup_extension_panel(self.panel_id)
-        print(f"CustomPlot {self.panel_id} removed from shared data")
+        print(f"[{self.panel_id}] removed from shared data")
+
+    def remove_src_listener(self):
+        """Removes the callback to a change in the selected source"""
+        if self.src is not None and hasattr(self, "_src_callback"):
+            try:
+                self.src.remove_on_change("data", self._src_callback)
+                print(f"[{self.panel_id}] Listener removed")
+            except Exception as e:
+                print(f"[{self.panel_id}] Error removing src listener: {e}")
+
+    def remove_column_selection(self):
+        if hasattr(self, "unknown_columns"):
+            for col in self.unknown_columns:
+                if col in config.settings:
+                    del config.settings[col]
+            print(f"[{self.panel_id}] unknown columns selected removed from config")
+            
+    def cleanup_panel_plot(self):
+        self.remove_subscriptions()
+        self.remove_shared_data()
+        self.remove_src_listener()
+        self.remove_column_selection()
+        if hasattr(self, "executor"):
+            self.executor.shutdown(wait=False)
+            print(f"[{self.panel_id}] Thread executor shutdown.")
 
 
-    def get_layout(self):
-        points_input = pn.widgets.IntInput(name="Number of points", value=20, start=1, sizing_mode = "stretch_width" )
-        def update_points(event):
-            N = points_input.value
-            self.plot_async()
-        points_input.param.watch(update_points, 'value')
-        self.plot(points_input.value)
-        return pn.Column(self.loading_pane, self.figure, points_input, sizing_mode="stretch_both", min_height = 450,
-                          styles={'background': 'lightgreen'})
     
     def plot(self, N=20):
         self.loading_pane.visible = True
@@ -145,6 +182,17 @@ class CustomPlotClass(param.Parameterized):
         self.figure.object = scatter
         self.loading_pane.visible = False
 
+
+    def get_layout(self):
+        points_input = pn.widgets.IntInput(name="Number of points", value=20, start=1, sizing_mode = "stretch_width" )
+        def update_points(event):
+            N = points_input.value
+            self.plot(N)
+        points_input.param.watch(update_points, 'value')
+        self.plot(points_input.value)
+        return pn.Column(self.loading_pane, self.figure, points_input, sizing_mode="stretch_both", min_height = 450,
+                          styles={'background': 'lightgreen'})
+    
     def plot_panel(self):
         self.layout = self.get_layout()
         return pn.Card(self.layout, header = pn.Row(pn.Spacer(width=25,),self.close_button),
@@ -161,13 +209,13 @@ class CustomPlotClass(param.Parameterized):
 
 
 class EuclidPlotClass(CustomPlotClass):
-    def __init__(self, data, src, extra_features, close_button):
-        super().__init__(data, src, extra_features, close_button)
+    def __init__(self, data, src, close_button, extra_features ):
+        super().__init__(data, src, close_button, extra_features)
         self.euclid_pane = pn.pane.HoloViews(width=400, height=400) #euclid_pane = Euclid cutout, figure = euclid_pane+overplotted_coordinates
-        self.src.on_change("data", self._change_source_cb)
+        self._src_callback = self._change_source_cb
+        self.src.on_change("data", self._src_callback)
         self.radius = shared_data.get_data("Euclid_radius", 5.0)
-        self.get_layout()
-        self._subscribe_to_shared()
+        
    
     def _change_source_cb(self, attr, old, new):
         self._initialise_euclid_object()
@@ -176,11 +224,12 @@ class EuclidPlotClass(CustomPlotClass):
     def get_layout(self):
         self._initialise_widgets()
         self._initialise_euclid_object()
+        self._subscribe_to_shared()
         self._run_euclid()
         return  pn.Column(self.loading_pane, pn.Row(self.figure, pn.Column(self.stretching_input, 
                                                 self.radius_input,
                                                 self.contrast_scaler,
-                                                self.overplot_coords_widget))
+                                                self.overplot_coords_widget), scroll = True)
         )
 
     def _initialise_euclid_object(self):
@@ -233,7 +282,6 @@ class EuclidPlotClass(CustomPlotClass):
         scaled_image = self.change_intensity_range(self.euclid_object.reprojected_data["stacked"], 
                                                    low, high)
         self.get_euclid_figure(scaled_image)
-
         self._update_image()
     
     def _update_stretching(self, event):
@@ -354,8 +402,8 @@ class EuclidPlotClass(CustomPlotClass):
             self._update_image()
         
         self.run_multithread(self.euclid_object.get_final_cutout,
-                             {"radius" : self.radius, "stretch" : self.stretching_input.value, 
-                              "reference" : "VIS", "verbose" : True}, 
+                             func_kwargs = {"radius" : self.radius, "stretch" : self.stretching_input.value, 
+                              "reference" : "VIS", "verbose" : True, "return_object" : True}, 
                               callback = callback)
         
     
@@ -379,108 +427,115 @@ class EuclidPlotClass(CustomPlotClass):
 
 
 class SpectrumPlotClass(CustomPlotClass):
-    def __init__(self, data, src, extra_features, close_button):
-        super().__init__(data, src, extra_features, close_button)
+    
+    stage = param.ObjectSelector(default="target_id_check", objects=["target_id_check", "column_selection", "plot"])
+
+    def __init__(self, data, src, close_button, extra_features, dataset = "DESI"):
+        super().__init__(data, src, close_button, extra_features)
         self.figure = pn.Column(scroll = True)
-        self.src.on_change("data", self._change_source_cb)
-        self.radius = shared_data.get_data("Euclid_radius", 5.0)
-        self.get_layout()
+        self.dataset = dataset
+        self._src_callback = self._change_source_cb
+        self.src.on_change("data", self._src_callback)
+        self.max_separation = shared_data.get_data("Euclid_radius", 0.5)
+
+
+    def get_layout(self):
         self._subscribe_to_shared()
-
-
-
-    def spectrum_plot(data, selected = None, plot_instance = None, dataset = "DESI", from_sourceId = False):
-
-        if not hasattr(plot_instance, "container"):
-        plot_instance.container = pn.Column(scroll = True)
+        self._initialize_spectrum_object()
+        self._run_spectrum()
+        return pn.Column(self.loading_pane, self.figure, scroll = True)
     
-    def update_plot(new_radius, panel_id = None):
+    def _change_source_cb(self, attr, old, new):
+        #TODO maybe add a mehtod to reset the same object
+        self._initialize_spectrum_object()
+        self._run_spectrum()
 
-        selected_source = get_selected_source(data=data, selected = selected)
-    
-        if from_sourceId:
-            if config.settings[f"{dataset}_TargetID"] in selected_source.columns:
-                sourceId = int(selected_source[config.settings[f"{dataset}_TargetID"]].iloc[0])
-                ra, dec = None, None
-            else:
-                print("Missing column with target ID")
-                plot_instance.container.objects = [pn.pane.Markdown("Missing Target ID")]
-                return
-        elif not from_sourceId:
-            ra, dec = get_ra_dec(selected_source)
-            if (ra is None) or (dec is None):
-                plot_instance.container.objects = [pn.pane.Markdown("Missing RA and Dec")]
-                return 
-            sourceId = None 
-    
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            future = executor.submit(run_spectrum, 
-                                     ra = ra, dec = dec, dataset = dataset,
-                                     sourceId = sourceId,
-                                     max_separation = new_radius,
-                                     check_coverage = not sourceId,
-                                     )
-        
-        spectrum_object = future.result()   
-    
-        if spectrum_object is not None:
-            _add_coordinates_to_shared(*spectrum_object.get_coordinates(), panel_id = panel_id,  key_name = dataset)
-            plot_model = True if dataset != "EuclidSpec" else False
-            kwargs = {"width" : 950,  "height" : 250 if spectrum_object.available_spectra > 1 else 300}
-            plot = spectrum_object.plot_all_spectra_hv(plot_model = plot_model, **kwargs)
-            plot_instance.container.objects = [plot] 
-
-        else:
-            plot_instance.container.objects = [pn.pane.Markdown("No spectrum found.")]
-        
-        
-        initial_radius = shared_data.get_data("Euclid_radius", 0.5)
-        update_plot(initial_radius, panel_id = plot_instance.panel_id)
-        
-        if not from_sourceId:
-        if not shared_data.is_subscribed(plot_instance.panel_id, "Euclid_radius"):
-            shared_data.subscribe(plot_instance.panel_id, "Euclid_radius", partial(update_plot, panel_id = plot_instance.panel_id))
-        return plot_instance.container
-   
+    def _subscribe_to_shared(self):
+        if not self.from_sourceId:
+            if not  shared_data.is_subscribed(self.panel_id, "Euclid_radius"):
+               shared_data.subscribe(self.panel_id, "Euclid_radius", self._run_spectrum)
 
     def _initialize_spectrum_object(self):
+        
+        if self.from_sourceId:
+            self.selected_source = self.get_selected_source()
+            try:
+                self.sourceId = int(self.selected_source[config.settings[f"{self.dataset}_TargetID"]].iloc[0])
+                self.ra, self.dec = None, None
+            except KeyError:
+                raise KeyError("Missing column with target ID")
+            except ValueError:
+                raise ValueError(f"{self.dataset}_TargetID must be convertible to int")
+        else:
+            self.sourceId = None
+            self.ra, self.dec = self.get_ra_dec()
+            if (self.ra is None) or (self.dec is None):
+                raise ValueError("Missing ra and dec")
+
         if self.dataset == "EuclidSpec":
             self.spectrum_object = EuclidSpectraClass(self.ra, self.dec, max_separation = self.max_separation,
                                              sourceId = self.sourceId)
         else:
             datasets = (["DESI-DR1"] if self.dataset == "DESI"
-            else ["BOSS-DR16", "SDSS-DR16"] if self.dataset == "SDSS"
-            else None)
+                else ["BOSS-DR16", "SDSS-DR16"] if self.dataset == "SDSS"
+                else None)
             self.spectrum_object = DESISpectraClass(self.ra, self.dec, datasets = datasets ,
                                         sourceId = self.sourceId, max_separation = self.max_separation,
                                         client = shared_data.get_data("Sparcl_client", None))
 
-    def _add_coordinates_to_shared(self, ra, dec, key_name):
+    def _add_coordinates_to_shared(self, ra, dec):
         """
         ra and dec are lists
-         """
+        """
         shared_data.publish(self.panel_id, f"{self.dataset}_coordinates", {"ra": ra, "dec": dec})
         return None
         
-
-    def _run_spectrum(self):
+    def _run_spectrum(self, max_separation = None):
         self.loading_pane.visible = True
-  
+        if max_separation is None:
+            max_separation = self.max_separation
         
         def callback(future_result = None):
             if self.spectrum_object.spectra is not None:
-                
-                self.spectrum_object.get_smoothed_spectra(kernel = "Box1dkernel", 
-                                                        window = 5 if self.dataset == "EuclidSpec" else 10)
-                self._add_coordinates_to_shared(*self.spectrum_object.get_coordinates())
+                print("Finished multithreading")
                 plot_model = True if self.dataset != "EuclidSpec" else False
                 kwargs = {"width" : 950,  "height" : 250 if self.spectrum_object.available_spectra > 1 else 300}
                 plot = self.spectrum_object.plot_all_spectra_hv(plot_model = plot_model, **kwargs)
                 self.figure.objects = [plot]
+                self._add_coordinates_to_shared(*self.spectrum_object.get_coordinates())
                 self.loading_pane.visible = False
 
-        self.run_multithread(self.spectrum_object.get_spectra, callback=callback)
-         
-
-        
+        self.run_multithread(self.spectrum_object.get_spectra, 
+                             func_kwargs = {"max_separation" : max_separation, "return_object" : True},
+                             callback=callback)
     
+    def target_id_check_panel(self):
+        self.use_target_id = pn.widgets.RadioBoxGroup(name="target_id_selector", options=["Use TargetId", "Query all spectra in cutout area"], 
+                                                      inline = False, margin=(20, 0, 20, 0))
+        submit_button = pn.widgets.Button(name='Confirm', button_type='primary', max_height=120)
+        text_pane = pn.pane.Markdown(f"""Retrieve spectrum using its TargetID or query all spectra 
+                                        whithin the region covered by Euclid Cutout?""")
+        submit_button.on_click(self._target_id_continue_cb)
+        return pn.Card(pn.Column(text_pane, self.use_target_id, max_height = 100), 
+                            header = pn.Row(pn.Spacer(width=25), self.close_button, submit_button),
+                            sizing_mode="stretch_both", scroll=True, collapsible = False, min_height = 300 )
+
+
+    def _target_id_continue_cb(self, event):
+        if self.use_target_id.value == "Use TargetId":
+            self.from_sourceId = True
+            self.stage = "column_selection"
+        else:
+            self.from_sourceId = False
+            self.stage = "plot" 
+
+         
+    @param.depends("stage")
+    def mypanel(self):
+        if self.stage == "target_id_check":
+            return self.target_id_check_panel()
+        elif self.stage == "column_selection":
+            return self.column_selection_panel()
+        else:
+            return self.plot_panel()
+        
