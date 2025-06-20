@@ -9,7 +9,7 @@ models
 *.py.bak
 *.bak 
 *Euclid_and_Desi_reduced.fits
-
+*.DS_Store
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
