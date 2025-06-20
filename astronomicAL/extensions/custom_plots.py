@@ -23,16 +23,16 @@ def get_customplot_dict():
 
     plot_dict = {
         
-        "Euclid Cutout new" : lambda data, src, close_button : EuclidPlotClass(data, src, close_button,
+        "Euclid Cutout" : lambda data, src, close_button : EuclidPlotClass(data, src, close_button,
                                                             extra_features=[]),
 
-        "DESI Spectra new"  : lambda data, src, close_button : SpectrumPlotClass(data, src, close_button,
+        "DESI Spectra"  : lambda data, src, close_button : SpectrumPlotClass(data, src, close_button,
                                                             extra_features=["DESI_TargetID"], dataset="DESI"), 
 
-        "Euclid Spectra new"  : lambda data, src, close_button : SpectrumPlotClass(data, src, close_button,
+        "Euclid Spectra"  : lambda data, src, close_button : SpectrumPlotClass(data, src, close_button,
                                                             extra_features=["EuclidSpec_TargetID"], dataset="EuclidSpec"), 
 
-        "SDSS Spectra new"  : lambda data, src, close_button : SpectrumPlotClass(data, src, close_button,
+        "SDSS Spectra"  : lambda data, src, close_button : SpectrumPlotClass(data, src, close_button,
                                                             extra_features=["SDSS_TargetID"], dataset="SDSS"),                                                                                                                                                                               
 
     }
@@ -137,12 +137,7 @@ class CustomPlotClass(param.Parameterized):
 
         return future
     
-    def remove_subscriptions(self):
-        """Removes subscriptions to the shared data
-           Used in a previous version"""
-        shared_data.unsubscribe_panel(self.panel_id)
-        print(f"[{self.panel_id}] removed from subscriptions")
-    
+
     def remove_shared_data(self):
         """Removes subscriptions and published data from the shared data"""
         shared_data.cleanup_extension_panel(self.panel_id)
@@ -165,7 +160,6 @@ class CustomPlotClass(param.Parameterized):
             print(f"[{self.panel_id}] unknown columns selected removed from config")
             
     def cleanup_panel_plot(self):
-        self.remove_subscriptions()
         self.remove_shared_data()
         self.remove_src_listener()
         self.remove_column_selection()
@@ -436,7 +430,6 @@ class SpectrumPlotClass(CustomPlotClass):
         self.dataset = dataset
         self._src_callback = self._change_source_cb
         self.src.on_change("data", self._src_callback)
-        self.max_separation = shared_data.get_data("Euclid_radius", 0.5)
 
 
     def get_layout(self):
@@ -457,6 +450,8 @@ class SpectrumPlotClass(CustomPlotClass):
 
     def _initialize_spectrum_object(self):
         
+        self.max_separation = shared_data.get_data("Euclid_radius", 0.5)
+
         if self.from_sourceId:
             self.selected_source = self.get_selected_source()
             try:

@@ -44,7 +44,7 @@ class EuclidCutoutsClass:
     
     def get_cone(self, initial_radius = 0.5*u.degree, async_job= False, verbose = True):
         tic = time.perf_counter()
-        job = Euclid.cone_search(self.coordinates, initial_radius, table_name="sedm.mosaic_product", ra_column_name="ra",
+        job = Euclid.cone_search(self.coordinates, initial_radius, table_name = "sedm.mosaic_product", ra_column_name="ra",
                                       dec_column_name="dec", columns="*", async_job= async_job)
         self.cone_results = job.get_results()
         toc = time.perf_counter()
@@ -113,7 +113,7 @@ class EuclidCutoutsClass:
         ref_wcs = self.wcs[reference]  
         ref_shape = self.data[reference].shape
         self.arcsec_per_pix |= {"stacked" : self.arcsec_per_pix[reference]}
-        self.wcs  |= {"stacked" : ref_wcs} #just in case
+        self.wcs  |= {"stacked" : ref_wcs} 
         
         self.reprojected_data = {}
         for band in self.euclid_filters:
@@ -201,7 +201,6 @@ class EuclidCutoutsClass:
         if not hasattr(self, "cone_results"):
             self.get_cone(verbose = verbose, async_job= False)
         
-        
         if len(self.cone_results) > 2:
             self.get_cutouts(radius = radius, verbose = verbose)
             self.read_cutouts()
@@ -211,7 +210,7 @@ class EuclidCutoutsClass:
                 return self.reprojected_data["stacked"]
         else:
             print(f"No sources in Euclid dataset with {self.coordinates} coordinates")
-    
+
 
     def check_coverage(self, path = "data/mocs"):
         self.has_coverage = check_isin_survey(ra = self.coordinates.ra.value,
@@ -313,6 +312,7 @@ class BaseSpectraClass:
         self.emline_table = pd.read_csv(path)
         if primary:
             self.emline_table = self.emline_table[self.emline_table["primary"]==1]
+        self.emline_table["Name"] = self.emline_table["Name"].replace(np.nan, "")
         
     def get_absline_table(self, primary = True, extra_path = "data"):
         """Absorption lines for Stars """
@@ -320,6 +320,7 @@ class BaseSpectraClass:
         self.absline_table = pd.read_csv(path)
         if primary:
             self.absline_table = self.absline_table[self.absline_table["primary"]==1]
+        self.absline_table["Name"] = self.absline_table["Name"].replace(np.nan, "")
 
     
     def plot_spectrum(self,  ax, idx = 0, plot_model = True, 
@@ -424,34 +425,37 @@ class BaseSpectraClass:
             model_curve = hv.Curve((wavlen, model)).opts(**model_kwargs)
             overlays.append(model_curve)
         
-        ymin, ymax = np.min(smoothed), np.max(smoothed)*1.5
+        ymin, ymax = np.min(smoothed), np.max(smoothed)
         ymin = ymin / 3 if ymin >= 0 else ymin * 1.5
+        ymax = ymax * 1.5 if ymax >= 0 else ymax / 3 ##Sometimes Euclid Fluxes are negative
         xmin, xmax =  xmin, xmax = np.min(wavlen), np.max(wavlen)
-        
+    
         if plot_emlines and np.isfinite(redshift):
             if not hasattr(self, "emline_table"):
                 self.get_emline_table()
-            for name, wav in zip(self.emline_table["Name"], self.emline_table["wave_vac"]):
-                obs_wav = wav * (redshift + 1)
-                if obs_wav > xmax: #emission lines are sorted
-                    break
-                if obs_wav < xmin:
-                    continue
-                overlays.append(hv.VLine(obs_wav).opts(color='red', line_width=0.5, line_dash='dotted'))
-                if annotate_emlines:
-                    overlays.append(hv.Text(obs_wav, ymax * 0.8, str(name)).opts(
-                                      yrotation=90, text_font_size='8pt'))
+            obs_wav = self.emline_table["wave_vac"] * (redshift +1)
+            logic = np.logical_and(obs_wav >= xmin, obs_wav <= xmax)
+            obs_wav = obs_wav[logic]
+            overlays.append(hv.VLines(obs_wav).opts(color='red', line_width=0.5, line_dash='dotted'))
+            if annotate_emlines:
+                y = 0.8 * ymax *np.ones_like(obs_wav)
+                names = self.emline_table["Name"][logic].astype(str)
+                overlays.append(hv.Labels((obs_wav, y,  names), vdims = "names").opts(
+                                       text_font_size='8pt', text_color = "black"))
+
         if plot_abslines and np.isfinite(redshift):
             if not hasattr(self, "absline_table"):
                 self.get_absline_table()
-            for name, wav in zip(self.absline_table["Name"], self.absline_table["wave_vac"]):
-                obs_wav = wav * (redshift + 1)
-                if (obs_wav > xmax) or (obs_wav < xmin):
-                    continue
-                overlays.append(hv.VLine(obs_wav).opts(color='blue', line_width=0.5, line_dash='dotted'))
-                if annotate_abslines:
-                    overlays.append(hv.Text(obs_wav, ymax * 0.2, str(name)).opts(
-                                         yrotation=90, text_font_size='8pt'))
+            obs_wav = self.absline_table["wave_vac"] * (redshift +1)
+            logic = np.logical_and(obs_wav >= xmin, obs_wav <= xmax)
+            obs_wav = obs_wav[logic]
+            
+            overlays.append(hv.VLines(obs_wav).opts(color='blue', line_width=0.5, line_dash='dotted'))
+            if annotate_emlines:
+                y = 0.2 * ymax *np.ones_like(obs_wav)
+                names = self.absline_table["Name"][logic].astype(str)
+                overlays.append(hv.Labels((obs_wav, y,  names), vdims = "names").opts(
+                                        text_font_size='8pt', text_color = "black"))
         
         xlabel = r'$$ \lambda_{obs} ~{Å} $$' if show_xlabel else ''
         ylabel = r'$$ F_{\lambda}~[10^{-17}~ergs~s^{-1}~cm^{-2}~{Å}^{-1}] $$' if show_ylabel else ''
@@ -854,6 +858,12 @@ def get_ra_dec_Euclid():
     return ra, dec  
 
 
+def print_Euclid_tables():
+    tables = Euclid.load_tables(only_names=True, include_shared_tables=True)
+    print(f"{len(tables)} tables are available")
+    print(*(table.name for table in tables), sep="\n")
+
+
 #########previous stuff 
 
 
@@ -901,7 +911,6 @@ class radio_cutouts_class:
         self.dec = float(dec)
         self.get_url()
         return None
-
 
 
 class sdss_cutouts_class:

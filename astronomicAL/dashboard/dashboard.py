@@ -89,8 +89,8 @@ class Dashboard(param.Parameterized):
             self.panel()
     
     def _cleanup_current_extension_plot(self):
-        if self.current_extension_plot and hasattr(self.current_extension_plot, 'cleanup_shared_data'):
-            self.current_extension_plot.cleanup_shared_data()
+        if self.current_extension_plot and hasattr(self.current_extension_plot, 'cleanup_panel_plot'):
+            self.current_extension_plot.cleanup_panel_plot()
         
         elif hasattr(self.panel_contents, "cleanup_panel_plot"):
             self.panel_contents.cleanup_panel_plot()
@@ -149,7 +149,7 @@ class Dashboard(param.Parameterized):
         
         else:
             self.current_extension_plot = self.plot_dict[self.contents]
-            self.panel_contents = self.plot_dict[self.contents].plot(
+            self.panel_contents = self.current_extension_plot.plot(
                 self._submit_button
             )(config.main_df, self.src)
 

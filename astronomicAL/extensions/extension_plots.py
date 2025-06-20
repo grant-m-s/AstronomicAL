@@ -34,19 +34,19 @@ def get_plot_dict():
 
         #"Debug subscribe" : CustomPlot(debug_plot_subscriber, []),
 
-        "Euclid Cutout" : CustomPlot(euclid_cutout_plot, []),
+        #"Euclid Cutout" : CustomPlot(euclid_cutout_plot, []),
+       
+        #"DESI Spectra from Coords" : CustomPlot(spectrum_plot, [], dataset="DESI", from_sourceId=False),
 
-        "DESI Spectra from Coords" : CustomPlot(spectrum_plot, [], dataset="DESI", from_sourceId=False),
+        #"DESI Spectrum from ID" : CustomPlot(spectrum_plot, ["DESI_TargetID"], dataset="DESI", from_sourceId=True),
 
-        "DESI Spectrum from ID" : CustomPlot(spectrum_plot, ["DESI_TargetID"], dataset="DESI", from_sourceId=True),
+        #"Euclid Spectra from Coords" : CustomPlot(spectrum_plot, [], dataset="EuclidSpec", from_sourceId=False),
 
-        "Euclid Spectra from Coords" : CustomPlot(spectrum_plot, [], dataset="EuclidSpec", from_sourceId=False),
+        #"Euclid Spectrum from ID" : CustomPlot(spectrum_plot, ["Euclid_TargetID"], dataset="EuclidSpec", from_sourceId=True),
 
-        "Euclid Spectrum from ID" : CustomPlot(spectrum_plot, ["Euclid_TargetID"], dataset="EuclidSpec", from_sourceId=True),
+        #"SDSS Spectra from Coords" : CustomPlot(spectrum_plot, [], dataset="SDSS", from_sourceId=False),
 
-        "SDSS Spectra from Coords" : CustomPlot(spectrum_plot, [], dataset="SDSS", from_sourceId=False),
-
-        "SDSS Spectrum from ID" : CustomPlot(spectrum_plot, ["SDSS_TargetID"], dataset="SDSS", from_sourceId=True),
+        #"SDSS Spectrum from ID" : CustomPlot(spectrum_plot, ["SDSS_TargetID"], dataset="SDSS", from_sourceId=True),
 
         "Mateos 2012 Wedge": CustomPlot(
             mateos_2012_wedge, ["Log10(W3_Flux/W2_Flux)", "Log10(W2_Flux/W1_Flux)"]
@@ -115,16 +115,16 @@ class CustomPlot:
         
         current_cols = config.main_df.columns
         
-        unknown_cols = []
+        self.unknown_cols = []
         
         for col in self.extra_features:
             if col not in list(config.settings.keys()):
                 if col not in current_cols:
-                    unknown_cols.append(col)
+                    self.unknown_cols.append(col)
                 else:
                     config.settings[col] = col
-        if len(unknown_cols) > 0:
-            self.col_selection = self.create_settings(unknown_cols)
+        if len(self.unknown_cols) > 0:
+            self.col_selection = self.create_settings(self.unknown_cols)
             return self.render
         
         else:
@@ -133,16 +133,22 @@ class CustomPlot:
             
             return plot_with_instance
     
-    def cleanup_subscriptions(self):
-        """Removes subscriptions to the shared data
-           Used in a previous version"""
-        shared_data.unsubscribe_panel(self.panel_id)
-        print(f"CustomPlot {self.panel_id} removed from subscriptions")
-    
-    def cleanup_shared_data(self):
+    def remove_shared_data(self):
         """Removes subscriptions and published data from the shared data"""
         shared_data.cleanup_extension_panel(self.panel_id)
-        print(f"CustomPlot {self.panel_id} removed from shared data")
+        print(f"[{self.panel_id}] removed from shared data")
+
+    def remove_column_selection(self):
+        if hasattr(self, "unknown_columns"):
+            for col in self.unknown_columns:
+                if col in config.settings:
+                    del config.settings[col]
+            print(f"[{self.panel_id}] unknown columns selected removed from config")
+            
+    def cleanup_panel_plot(self):
+        self.remove_shared_data()
+        self.remove_column_selection()
+
     
 
 def create_plot(
