@@ -271,7 +271,7 @@ class HistoDashboard(BasePlotClass):
 
     @staticmethod
     def get_histogram_hv(x_var, Nbins = 10, log_x = False, log_y = False, density = False, cumulative = False, 
-                      range = (-np.inf, np.inf), label = "",
+                      range = (-np.inf, np.inf), label = "", xlabel = "x", ylabel = "frequency",
                       **kwargs):
         
         x = x_var[np.isfinite(x_var)]
@@ -307,12 +307,13 @@ class HistoDashboard(BasePlotClass):
         ylim = (0.2,None) if log_y else (0,None)   #holoviews doesn't like no ylim passed with log yscale
         ylim = (np.min(stats[stats>0])/5, None) if (density and log_y) else ylim 
         
-        histogram = hv.Histogram((stats, edges), label = label).opts(logy = log_y,
-                                                              logx = log_x,
-                                                              ylim = ylim,
-                                                              xlim = (xmin, xmax),
-                                                              active_tools = [],
-                                                              **kwargs)
+        histogram = hv.Histogram((edges, stats), kdims= [xlabel], 
+                                 vdims=[ylabel], label = label).opts(logy = log_y,
+                                                                logx = log_x,
+                                                                ylim = ylim,
+                                                                xlim = (xmin, xmax),
+                                                                active_tools = [],
+                                                                **kwargs)
         
         return histogram, xmin, xmax
 
@@ -339,12 +340,17 @@ class HistoDashboard(BasePlotClass):
         
         self.overlays = []
         xmin, xmax = np.inf, -np.inf 
+        
+        xlabel=x_var_name
+        ylabel= "% of Sources" if self.density else "# Sources" 
+
+
         if "All" in strings_to_plot:
             h, xmin_temp, xmax_temp = self.get_histogram_hv(x_var, Nbins = self.Nbins, 
                             log_x = self.log_xscale, log_y = self.log_yscale,
                             cumulative = self.cumulative, density = self.density,
                             range = (self.range_min, self.range_max),
-                            label = "All",
+                            label = "All", xlabel=xlabel, ylabel=ylabel,
                             **{"fill_color" : "blue", "line_color" : "blue"})
             self.overlays.append(h)
             xmin = min(xmin, xmin_temp)
@@ -356,6 +362,7 @@ class HistoDashboard(BasePlotClass):
                             cumulative = self.cumulative, density=self.density,
                             range = (self.range_min, self.range_max),
                             label = config.settings["labels_to_strings"][str(label_to_plot)],
+                            xlabel=xlabel, ylabel=ylabel,
                             **{"fill_color" : config.settings["label_colours"][label_to_plot] if i < 2 else "none",
                                "line_color" : config.settings["label_colours"][label_to_plot],
                                "line_width" : 1.5,
@@ -365,12 +372,8 @@ class HistoDashboard(BasePlotClass):
             self.overlays.append(h)
             xmin = min(xmin, xmin_temp)
             xmax = max(xmax, xmax_temp)
-            
-        xlabel=x_var_name
-        ylabel= "% of Sources" if self.density else "# Sources" 
+
         plot = hv.Overlay(self.overlays).opts(active_tools = [],
-                                              xlabel = xlabel,
-                                              ylabel = ylabel,
                                               xlim = (xmin, xmax),
                                               )
         self.counter +=1 
