@@ -8,8 +8,10 @@ import holoviews as hv
 
 import astronomicAL.config as config
 import numpy as np
+import os
 import pandas as pd
 import panel as pn
+import json
 import param
 import uuid
 import concurrent.futures 
@@ -17,6 +19,7 @@ from bokeh.document import without_document_lock
 from astronomicAL.extensions.shared_data import shared_data
 from astronomicAL.extensions.astro_data_utility import DESISpectraClass, EuclidCutoutsClass, EuclidSpectraClass
 import matplotlib.pyplot as plt
+
 
 
 def get_customplot_dict():
@@ -33,8 +36,10 @@ def get_customplot_dict():
                                                             extra_features=["EuclidSpec_TargetID"], dataset="EuclidSpec"), 
 
         "SDSS Spectra"  : lambda data, src, close_button : SpectrumPlotClass(data, src, close_button,
-                                                            extra_features=["SDSS_TargetID"], dataset="SDSS"),                                                                                                                                                                               
+                                                            extra_features=["SDSS_TargetID"], dataset="SDSS"),
 
+        "BroadBand SED"  : lambda data, src, close_button : SEDPlotClass(data, src, close_button,
+                                                            extra_features=["Do not skip to Plot Stage"])
     }
 
     return plot_dict
@@ -52,7 +57,7 @@ class CustomPlotClass(param.Parameterized):
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
         self.close_button = close_button
         self.panel_id = str(uuid.uuid4()) 
-        self.get_unknown_columns()
+        self.get_unknown_columns(self.extra_features)
         self.figure = pn.pane.HoloViews(sizing_mode="stretch_both", min_height = 400)
         self.loading_pane = pn.pane.Markdown("## Loading...", sizing_mode="stretch_both", max_height = 30)
 
@@ -98,14 +103,13 @@ class CustomPlotClass(param.Parameterized):
         return pn.Card(settings_grid, header = pn.Row(pn.Spacer(width=25), self.close_button, submit_button),
                                 sizing_mode="stretch_both", scroll=True, collapsible = False, min_height = 300 )
     
-    def get_unknown_columns(self):
+    def get_unknown_columns(self, columns_needed):
         current_cols = config.main_df.columns
         self.unknown_columns = []
-        for col in self.extra_features:
+        for col in columns_needed:
             if col not in list(config.settings.keys()):
                 print(f"{col} not in config")
                 if col not in current_cols:
-                    print(f"{col} not in df")
                     self.unknown_columns.append(col)
                 else:
                     config.settings[col] = col
@@ -440,8 +444,9 @@ class SpectrumPlotClass(CustomPlotClass):
     
     def _change_source_cb(self, attr, old, new):
         #TODO maybe add a mehtod to reset the same object
-        self._initialize_spectrum_object()
-        self._run_spectrum()
+        if self.stage == "plot":
+            self._initialize_spectrum_object()
+            self._run_spectrum()
 
     def _subscribe_to_shared(self):
         if not self.from_sourceId:
@@ -534,3 +539,194 @@ class SpectrumPlotClass(CustomPlotClass):
         else:
             return self.plot_panel()
         
+
+class SEDPlotClass(CustomPlotClass):
+    stage = param.ObjectSelector(default="filter_selection", objects=["filter_selection", "column_selection_filters",
+                                                                      "column_selection_errors", "plot"])
+
+    def __init__(self, data, src, close_button, extra_features):
+        super().__init__(data, src, close_button, extra_features)
+        self.figure = pn.Column(scroll = True)
+        self._src_callback = self._change_source_cb
+        self.src.on_change("data", self._src_callback)
+
+    def _change_source_cb(self, attr, old, new):
+        pass
+    
+    
+    def filter_selection_panel(self):
+        self.filter_data = self.read_photometric_file()
+        self._initialize_checkboxes()
+        self.checkbox_pane = pn.Column(*self.checkbox_group)
+        self._initialize_add_band()
+        submit_button = pn.widgets.Button(name='Confirm', button_type='primary', max_height=120)
+        submit_button.on_click(self._filter_selection_continue_cb)
+
+        return pn.Card(pn.Row(pn.Column("## Available Bands", self.checkbox_pane, scroll = True),
+                        pn.Column(self.add_band_button, self.add_band_pane, scroll = True)),
+                        header = pn.Row(pn.Spacer(width=25), self.close_button, submit_button),
+                        sizing_mode="stretch_both",  scroll = True, collapsible = False, min_height = 300 )
+
+
+    @staticmethod
+    def read_photometric_file(extra_path = ""):
+        filepath = os.path.join(extra_path, "data/sed_data/photometric_bands.json")
+        with open(filepath, 'r') as f:
+            filter_data = json.load(f)
+        return filter_data
+    
+    def create_checkbox_tooltip(self, band, name, wavlen, fwhm):
+        checkbox = pn.widgets.Checkbox(name=band, value=False, width=150)
+        tooltip_text = f"{name},  (Wavelength: {wavlen} Å, FWHM: {fwhm} Å)"
+        tooltip_icon = pn.widgets.TooltipIcon(value=tooltip_text, margin=(0, 0, 0, 0))
+        return checkbox, tooltip_icon
+
+    def _initialize_checkboxes(self):
+        self.checkboxes = {} #dictionary storing all the checkboxs available
+        self.checkbox_group = [] #List storing all pairs of checkbox-tooltip
+        for band, info in self.filter_data.items():
+            checkbox, tooltip_icon = self.create_checkbox_tooltip(band, info["name"], 
+                                                                  info["wavelength"], info["FWHM"])
+            self.checkbox_group.append(pn.Row(checkbox, tooltip_icon, align='center'))
+            self.checkboxes[band] = checkbox
+
+
+    def _initialize_add_band(self):
+        self.short_name_input = pn.widgets.TextInput(name="Short Filter Name")
+        self.full_name_input = pn.widgets.TextInput(name="Full Filter Name", value ="")
+        self.wavelength_input = pn.widgets.FloatInput(name="Effective Wavelength [Å]")
+        self.fwhm_input = pn.widgets.FloatInput(name="FWHM [Å]", value = 0)
+        confirm_button = pn.widgets.Button(name="Confirm", button_type="primary")
+
+        self.add_band_pane = pn.Column(self.short_name_input, self.full_name_input, 
+                                       self.wavelength_input, self.fwhm_input, confirm_button, visible=False)
+        self.add_band_button = pn.widgets.Button(name="Add Band", button_type="success", max_height = 50)
+
+        self.add_band_button.on_click(self.show_band_form)
+        confirm_button.on_click(self.add_new_band)
+
+    def update_photometric_file(self, new_band, name, wavlen, fwhm):
+        self.filter_data[new_band] = {"name" : name, 
+                                    "wavelength" : wavlen,
+                                    "FWHM" : fwhm}
+        
+    def show_band_form(self, event):
+        self.add_band_pane.visible = True
+    
+    def add_new_band(self, event):
+        try:
+            new_band = self.short_name_input.value.strip()
+        except AttributeError:
+            self.short_name_input.value = "Insert a valid name (no empty string)"
+            return
+        try:
+            name = self.full_name_input.value.strip()
+        except AttributeError:
+            self.short_name_input.value = "Insert a valid name (no empty string)"
+            return
+        wavlen = self.wavelength_input.value
+        fwhm = self.fwhm_input.value
+
+        if new_band:
+            if new_band not in self.checkboxes:
+                checkbox, tooltip_icon = self.create_checkbox_tooltip(new_band, name, wavlen, fwhm)
+                self.checkbox_group.append(pn.Row(checkbox, tooltip_icon, align='center'))
+                self.checkboxes[new_band] = checkbox
+                self.checkbox_pane.objects = [*self.checkbox_group]
+            self.update_photometric_file(new_band, name, wavlen, fwhm)
+
+        self.short_name_input.value = ""
+        self.full_name_input = ""
+        self.wavelength_input.value = 0.0
+        self.fwhm_input.value = 0.0
+        self.add_band_pane.visible = False
+    
+
+    def _filter_selection_continue_cb(self, event):
+        self.bands_to_plot = [band for band in self.checkboxes.keys() if  self.checkboxes[band].value]
+        self.error_bands_to_plot = [f"err_{band}" for band in self.bands_to_plot]
+        self.get_unknown_columns(self.bands_to_plot+self.error_bands_to_plot)
+        if not self.stage == "plot":
+            self.stage = "column_selection_filters"
+    
+    def _submit_button_cb(self, event):
+        for col, widget in self.select_widgets.items():
+            selected_value = widget.value
+            print(f"{col} --> {selected_value}")
+            config.settings[col] = selected_value
+        
+        if self.stage == "column_selection_filters":
+            self.stage = "column_selection_errors"
+        elif self.stage == "column_selection_errors":
+            self.stage = "plot"
+        else:
+            print("There has been an error")
+    
+    def _skip_button_cb(self, event):
+        if self.stage == "column_selection_errors":
+            self.stage = "plot"
+
+    def column_selection_panel(self, columns_to_select, skippable = False):
+        settings_grid = pn.GridBox(ncols=3, sizing_mode = "stretch_width", scroll = True)  
+        options = list(config.main_df.columns)
+        submit_button = pn.widgets.Button(name='Confirm', button_type='primary', max_height=120)
+        submit_button.on_click(self._submit_button_cb)
+        
+        skip_button = pn.widgets.Button(name='Skip', button_type='primary', max_height=120)
+        skip_button.on_click(self._skip_button_cb)
+        if not skippable:
+            skip_button.disabled = True
+        
+        for col in columns_to_select:
+            select_widget = pn.widgets.Select(name= col, options=options, max_height=120, sizing_mode = "stretch_width")
+            settings_grid.append(select_widget)
+            self.select_widgets[col] = select_widget
+        return pn.Card(settings_grid, header = pn.Row(pn.Spacer(width=25), self.close_button, skip_button, submit_button),
+                                sizing_mode="stretch_both", scroll=True, collapsible = False, min_height = 300 )
+    
+    
+    def get_filter_information(self):
+        self.obs_wavlen = np.array([self.filter_data[band]["wavelength"] for band in self.bands_to_plot]).flatten()
+        self.fwhm = np.array([self.filter_data[band]["FWHM"] for band in self.bands_to_plot]).flatten()
+        self.fwhm = np.where(np.logical_and(np.isfinite(self.fwhm), self.fwhm>0), self.fwhm, 1) #avoid potential issues
+
+
+    def get_fluxes_from_selected_source(self):
+        selected_source = self.get_selected_source()
+        fluxes = selected_source[[config.settings[col] for col in self.bands_to_plot]]
+        errors = []
+        for col in  self.error_bands_to_plot:
+            try:
+                errors.append(selected_source.loc[config.settings[col], 0])
+            except KeyError:
+                errors.append(np.nan)
+        return np.array(fluxes).flatten(), np.array(errors).flatten()
+ 
+    
+    def get_layout(self):
+        self.get_filter_information()
+        y, err = self.get_fluxes_from_selected_source()
+        print(y.shape, self.obs_wavlen.shape)
+        df = pd.DataFrame({'wavlen': self.obs_wavlen, 'flux': y})
+        self.figure.objects = [hv.Scatter(df, kdims='wavlen', vdims='flux').opts(logx = True, logy = True)]
+
+        
+
+
+    @param.depends("stage")
+    def mypanel(self):
+        if self.stage == "filter_selection":
+            return self.filter_selection_panel()
+        elif self.stage == "column_selection_filters":
+            return self.column_selection_panel(self.bands_to_plot, skippable=False)
+        elif self.stage == "column_selection_errors":
+            return self.column_selection_panel(self.error_bands_to_plot, skippable=True)
+        else:
+            return self.plot_panel()
+    
+
+
+
+
+    
+    
