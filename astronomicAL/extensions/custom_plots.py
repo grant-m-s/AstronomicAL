@@ -16,6 +16,7 @@ import param
 import uuid
 import concurrent.futures 
 from bokeh.document import without_document_lock
+from bokeh.models import  NormalHead
 from astronomicAL.extensions.shared_data import shared_data
 from astronomicAL.extensions.astro_data_utility import DESISpectraClass, EuclidCutoutsClass, EuclidSpectraClass
 import matplotlib.pyplot as plt
@@ -194,8 +195,7 @@ class CustomPlotClass(param.Parameterized):
     def plot_panel(self):
         self.layout = self.get_layout()
         return pn.Card(self.layout, header = pn.Row(pn.Spacer(width=25,),self.close_button),
-                       collapsible = False, sizing_mode="stretch_both", min_height =450,
-                       styles={'background': 'lightblue'})
+                       collapsible = False, sizing_mode="stretch_both", min_height =450,)
     
     @param.depends("stage")                        
     def mypanel(self):
@@ -541,17 +541,20 @@ class SpectrumPlotClass(CustomPlotClass):
         
 
 class SEDPlotClass(CustomPlotClass):
+    """A class used to plot the Broadband SED of the selected source. By default all fluxes are 
+       assumed to be either in magnitudes or microJy"""
+
     stage = param.ObjectSelector(default="filter_selection", objects=["filter_selection", "column_selection_filters",
                                                                       "column_selection_errors", "plot"])
 
     def __init__(self, data, src, close_button, extra_features):
         super().__init__(data, src, close_button, extra_features)
-        self.figure = pn.Column(scroll = True)
         self._src_callback = self._change_source_cb
         self.src.on_change("data", self._src_callback)
 
     def _change_source_cb(self, attr, old, new):
-        pass
+        if self.stage == "plot":
+            self._update_plot(new)
     
     
     def filter_selection_panel(self):
@@ -600,9 +603,9 @@ class SEDPlotClass(CustomPlotClass):
 
         self.add_band_pane = pn.Column(self.short_name_input, self.full_name_input, 
                                        self.wavelength_input, self.fwhm_input, confirm_button, visible=False)
-        self.add_band_button = pn.widgets.Button(name="Add Band", button_type="success", max_height = 50)
+        self.add_band_button = pn.widgets.Button(name="Add Band ▾", button_type="success", max_height = 50)
 
-        self.add_band_button.on_click(self.show_band_form)
+        self.add_band_button.on_click(self._toggle_add_band_cb)
         confirm_button.on_click(self.add_new_band)
 
     def update_photometric_file(self, new_band, name, wavlen, fwhm):
@@ -610,8 +613,10 @@ class SEDPlotClass(CustomPlotClass):
                                     "wavelength" : wavlen,
                                     "FWHM" : fwhm}
         
-    def show_band_form(self, event):
-        self.add_band_pane.visible = True
+    def _toggle_add_band_cb(self, event):
+        self.add_band_pane.visible = not self.add_band_pane.visible
+        self.add_band_button.name = "Add Band ▴" if self.add_band_pane.visible else "Add Band ▾"
+        
     
     def add_new_band(self, event):
         try:
@@ -686,43 +691,165 @@ class SEDPlotClass(CustomPlotClass):
     
     
     def get_filter_information(self):
-        self.obs_wavlen = np.array([self.filter_data[band]["wavelength"] for band in self.bands_to_plot]).flatten()
+        self.wavlen = np.array([self.filter_data[band]["wavelength"] for band in self.bands_to_plot]).flatten()
         self.fwhm = np.array([self.filter_data[band]["FWHM"] for band in self.bands_to_plot]).flatten()
-        self.fwhm = np.where(np.logical_and(np.isfinite(self.fwhm), self.fwhm>0), self.fwhm, 1) #avoid potential issues
+        self.fwhm = np.where(np.logical_and(np.isfinite(self.fwhm), self.fwhm>0), self.fwhm, np.nan) #avoid potential issues
 
 
     def get_fluxes_from_selected_source(self):
         selected_source = self.get_selected_source()
-        fluxes = selected_source[[config.settings[col] for col in self.bands_to_plot]]
-        errors = []
+        flux = selected_source[[config.settings[col] for col in self.bands_to_plot]].to_numpy().flatten()
+        flux_err = []
         for col in  self.error_bands_to_plot:
             try:
-                errors.append(selected_source.loc[config.settings[col], 0])
+                flux_err.append(selected_source[config.settings[col]].iloc[0])
             except KeyError:
-                errors.append(np.nan)
-        return np.array(fluxes).flatten(), np.array(errors).flatten()
+                flux_err.append(np.nan)
+        return flux, np.array(flux_err).flatten()
  
     
     def get_layout(self):
         self.get_filter_information()
-        y, err = self.get_fluxes_from_selected_source()
-        print(y.shape, self.obs_wavlen.shape)
-        df = pd.DataFrame({'wavlen': self.obs_wavlen, 'flux': y})
-        self.figure.objects = [hv.Scatter(df, kdims='wavlen', vdims='flux').opts(logx = True, logy = True)]
+        self._initialize_settings_panel()
+        self.flux, self.flux_err = self.get_fluxes_from_selected_source()
+        self.clean_fluxes()
+        y, y_err = self.convert_to_microjy(self.flux, self.flux_err, starting_unit=self.unit_selector.value)
+        self.figure.object = self.plot_SED(self.wavlen, y, y_err, self.fwhm)
+        self.loading_pane.visible = False
+        return pn.Column(self.loading_pane, self.figure, self.settings_panel, scroll = True)
 
+
+    
+    def clean_fluxes(self):
+        if self.unit_selector.value == "AB magnitudes":
+            mask = np.logical_or(self.flux > 40, self.flux < -40)
+        else:
+            mask = self.flux < 0    
+        self.flux[mask] = np.nan
+        self.flux_err[mask] = np.nan
         
 
+    @staticmethod
+    def plot_SED(wavlen, flux, flux_err, fwhm, redshift=0):
+
+        mask = np.logical_and(np.isfinite(wavlen), np.isfinite(flux))
+        if np.sum(mask) < 1:
+            return pn.pane.Markdown(f"##There are no available points to plot. All specified bands have nan values") 
+        x = wavlen[mask] / (1 + redshift)
+        y = flux[mask]
+        err_y = flux_err[mask]
+        fwhm = fwhm[mask]
+    
+        xmin, xmax = np.min(x), np.max(x)
+        ymin, ymax = np.min(y), np.max(y)
+    
+        scatter = hv.Scatter((x, y), kdims='wavelength', vdims="Flux").opts(
+            color="red", fill_color = None, marker="o", size=9, active_tools=[])
+      
+        xerrbars = hv.ErrorBars((x, y, fwhm / 2, fwhm / 2), kdims= 'wavelength', vdims=["Flux", "xneg", "xpos"], horizontal = True).opts(color = "black",
+                                                                                        lower_head = None, upper_head = None, active_tools =[])
+                                                                                                                   
+        is_upper_limit = err_y < 0
+        has_larger_errors = err_y > y #These could also be considered a upper limits...
+        good_measure = np.logical_and(~is_upper_limit, ~has_larger_errors)
+    
+    
+        ybars = hv.ErrorBars((x[good_measure ], y[good_measure ], err_y[good_measure ], err_y[good_measure ]), kdims='wavelength', vdims=["Flux", "yneg", "ypos"]).opts(
+                color="black", line_width = 1.5, active_tools =[])
+        
+    
+        arrow_length = 0.8 * y[has_larger_errors] #all arrows have the same length in logy scale
+        larger_errors = hv.ErrorBars(
+            (x[has_larger_errors], y[has_larger_errors], np.full(np.sum(has_larger_errors), arrow_length), err_y[has_larger_errors]),
+            kdims='wavelength', vdims=["Flux", "yneg", "ypos"]).opts(color="black",lower_head = NormalHead(size=8),
+                                                                     line_width = 1.5, active_tools =[])
+     
+        arrow_length = 0.8* y[is_upper_limit] #all arrows have the same length in logy scale
+        upper_limits = hv.ErrorBars(
+            (x[is_upper_limit], y[is_upper_limit], np.full(np.sum(is_upper_limit), arrow_length), np.zeros(np.sum(is_upper_limit))),
+            kdims='wavelength', vdims=["Flux", "yneg", "ypos"]).opts(color="black",lower_head = NormalHead(size=8),
+                                                                     line_width = 1.5, active_tools =[])
+        
+    
+        plot = scatter * xerrbars * ybars * upper_limits * larger_errors
+        xlabel = "Rest-Frame Wavelength" if redshift > 0 else "Observed Wavelength"
+        return plot.opts(
+            xlabel=xlabel,
+            logx = True, logy = True, 
+            xlim = (xmin/2, xmax*2),
+            ylim = (ymin/3, ymax*3),
+            ylabel="Flux", show_grid=True,
+            active_tools =[]
+        )
+    
+    @staticmethod
+    def mag_to_flux(mag, err_mag):
+        """Converts AB magnitudes in flux densities in microJy"""    
+        flux = 10**((23.9 - mag)/2.5)
+        err_flux = flux * err_mag * np.log(10)
+        return flux, err_flux
+    
+    @staticmethod
+    def flux_to_mag(flux, err_flux):
+        """Converts fluxes in microJansky to AB magnitudes"""
+        mag = -2.5*np.log10(flux) + 23.9
+        err_mag = (err_flux/flux)/np.log(10)
+        return mag, err_mag
+    
+    
+    def convert_to_microjy(self, flux, err_flux, starting_unit):
+        conversion_dict = {"AB magnitudes" : lambda f, e : self.mag_to_flux(f,e),
+                           "milliJy" : lambda f, e : (f * 1000, e * 1000),
+                           "microJy" : lambda f, e : (f,e),
+                           "nanoJy"  : lambda f, e : (f / 1000, e / 1000),
+                           "cgs (erg/s/Hz)" : lambda f, e : (f * 1e23, e * 1e23)
+        }
+        if starting_unit not in conversion_dict:
+            raise KeyError(f"Unrecognized unit {starting_unit}")
+        
+        return conversion_dict[starting_unit](flux, err_flux)
+                           
+    def _initialize_settings_panel(self):
+        self.settings_button = pn.widgets.Button(name="Settings ▾", button_type="primary", max_height = 40)
+        self.settings_button.on_click(self._toggle_settings_panel)
+        units = ["AB magnitudes", "milliJy", "microJy", "nanoJy", "cgs (erg/s/Hz)"]                                                                            
+        self.unit_selector = pn.widgets.Select(name = "Data Units", options = units, value = "microJy")
+        self.unit_selector.param.watch(self._update_plot, "value")
+        self.settings_panel = pn.Column(self.unit_selector, visible = False)
+                                                                                
+                                                                                
+    def _toggle_settings_panel(self, event):
+        self.settings_panel.visible = not self.settings_panel.visible
+        self.settings_button.name = "Settings ▴" if self.settings_panel.visible else "Settings ▾"
+
+    def _update_plot(self, event):
+        self.flux, self.flux_err = self.get_fluxes_from_selected_source()
+        self.clean_fluxes()
+        y, y_err = self.convert_to_microjy(self.flux, self.flux_err, starting_unit=self.unit_selector.value)
+        self.figure.object = self.plot_SED(self.wavlen, y, y_err, self.fwhm)
+        self.loading_pane.visible = False
+        
+    
+    def plot_panel(self):
+        self.layout = self.get_layout()
+        return pn.Card(self.layout, header = pn.Row(pn.Spacer(width=25,),self.close_button, self.settings_button),
+                       collapsible = False, sizing_mode="stretch_both", min_height =450,)  
 
     @param.depends("stage")
     def mypanel(self):
         if self.stage == "filter_selection":
             return self.filter_selection_panel()
         elif self.stage == "column_selection_filters":
-            return self.column_selection_panel(self.bands_to_plot, skippable=False)
+            return self.column_selection_panel([i for i in self.bands_to_plot if i in self.unknown_columns], 
+                                               skippable=False)
         elif self.stage == "column_selection_errors":
-            return self.column_selection_panel(self.error_bands_to_plot, skippable=True)
+            return self.column_selection_panel([i for i in self.error_bands_to_plot if i in self.unknown_columns],
+                                               skippable=True)
         else:
             return self.plot_panel()
+        
+
+    
     
 
 
