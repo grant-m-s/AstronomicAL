@@ -1,5 +1,6 @@
 from astronomicAL.dashboard.active_learning import ActiveLearningDashboard
 from astronomicAL.dashboard.labelling import LabellingDashboard
+from astronomicAL.dashboard.exploration import ExplorationDashboard
 from astronomicAL.dashboard.menu import MenuDashboard
 from astronomicAL.dashboard.plot import HistoDashboard, ScatterPlotDashboard
 from astronomicAL.dashboard.selected_source import SelectedSourceDashboard
@@ -52,6 +53,10 @@ class Dashboard(param.Parameterized):
         
         self._close_button = pn.widgets.Button(name="Close", max_width=100)
         self._close_button.on_click(self._close_button_cb)
+        
+        self._switch_mode_button = pn.widgets.ToggleGroup(name="Mode", options = ["Labelling", "Exploration"],
+                                                          value = "Labelling", behavior="radio", sizing_mode = "stretch_both")
+        self._switch_mode_button.param.watch(self._switch_mode_cb, "value")
 
         self._submit_button = pn.widgets.Button(name="Submit Column Names")
         self._submit_button.on_click(self._submit_button_cb)
@@ -79,6 +84,10 @@ class Dashboard(param.Parameterized):
     def _close_button_cb(self, event):
         self._cleanup_current_extension_plot()
         self.contents = "Menu"
+    
+    def _switch_mode_cb(self, event):
+        self._cleanup_current_extension_plot()
+        self.contents = event.new
 
     def _update_extension_plots_cb(self, attr, old, new):
         if self.contents in list(self.plot_dict.keys()):
@@ -129,9 +138,12 @@ class Dashboard(param.Parameterized):
             self.panel_contents = ScatterPlotDashboard(self.src, self._close_button)
 
         elif self.contents == "Labelling":
-
             self.df = config.main_df
-            self.panel_contents = LabellingDashboard(self.src, self.df)
+            self.panel_contents = LabellingDashboard(self.src, self.df, self._switch_mode_button)
+        
+        elif self.contents == "Exploration":
+            self.df = config.main_df
+            self.panel_contents = ExplorationDashboard(self.src, self.df, self._switch_mode_button)
 
         elif self.contents == "Selected Source Info":
             if not config.settings["confirmed"]:

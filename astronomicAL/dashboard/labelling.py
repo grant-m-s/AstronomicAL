@@ -63,7 +63,7 @@ class LabellingDashboard(param.Parameterized):
         objects=["1"], default="1", doc="Selection box for the Y axis of the plot."
     )
 
-    def __init__(self, src, df):
+    def __init__(self, src, df, switch_mode_button):
         super(LabellingDashboard, self).__init__()
 
         self.row = pn.Row(pn.pane.Str("loading"))
@@ -72,6 +72,7 @@ class LabellingDashboard(param.Parameterized):
         self.region_criteria_df = pd.DataFrame([], columns=["column", "oper", "value"])
         self.region_message = ""
         self.src = src
+        self._switch_mode_button = switch_mode_button 
         self.src.on_change("data", self._panel_cb)
 
         self.labels = self.get_previous_labels()
@@ -81,6 +82,8 @@ class LabellingDashboard(param.Parameterized):
 
         self._update_variable_lists()
         self.select_random_point()
+        
+        
 
     def _construct_panel(self):
 
@@ -672,6 +675,7 @@ class LabellingDashboard(param.Parameterized):
                            ),
                 pn.Row(self.param.X_variable, max_width=100),
                 pn.Row(self.param.Y_variable, max_width=100),
+                self._switch_mode_button,
                 max_width=100,
                 # sizing_mode="fixed",
             ),
