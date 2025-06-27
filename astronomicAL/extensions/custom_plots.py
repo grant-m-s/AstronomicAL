@@ -31,13 +31,13 @@ def get_customplot_dict():
                                                             extra_features=[]),
 
         "DESI Spectra"  : lambda data, src, close_button : SpectrumPlotClass(data, src, close_button,
-                                                            extra_features=["DESI_TargetID"], dataset="DESI"), 
+                                                            extra_features=[], dataset="DESI"), 
 
         "Euclid Spectra"  : lambda data, src, close_button : SpectrumPlotClass(data, src, close_button,
-                                                            extra_features=["EuclidSpec_TargetID"], dataset="EuclidSpec"), 
+                                                            extra_features=[], dataset="EuclidSpec"), 
 
         "SDSS Spectra"  : lambda data, src, close_button : SpectrumPlotClass(data, src, close_button,
-                                                            extra_features=["SDSS_TargetID"], dataset="SDSS"),
+                                                            extra_features=[], dataset="SDSS"),
 
         "BroadBand SED"  : lambda data, src, close_button : SEDPlotClass(data, src, close_button,
                                                             extra_features=["Do not skip to Plot Stage"])
@@ -59,8 +59,11 @@ class CustomPlotClass(param.Parameterized):
         self.close_button = close_button
         self.panel_id = str(uuid.uuid4()) 
         self.get_unknown_columns(self.extra_features)
-        self.figure = pn.pane.HoloViews(sizing_mode="stretch_both", min_height = 400)
-        self.loading_pane = pn.pane.Markdown("## Loading...", sizing_mode="stretch_both", max_height = 30)
+        self.figure = pn.pane.HoloViews(sizing_mode="stretch_both")
+        self.message_pane = pn.pane.Markdown("## Loading...", sizing_mode="stretch_both", max_height = 30)
+        self.plot_settings_button = pn.widgets.Button(name="Settings ▾", button_type="primary", max_height = 40, max_width=100, sizing_mode="stretch_both" )
+        self.plot_settings_button.on_click(self._toggle_settings_panel)
+        self.plot_settings_panel = pn.Column(visible = False)
 
     def _submit_button_cb(self, event):
         for col, widget in self.select_widgets.items():
@@ -68,6 +71,10 @@ class CustomPlotClass(param.Parameterized):
             print(f"{col} --> {selected_value}")
             config.settings[col] = selected_value
         self.stage = "plot"
+    
+    def _toggle_settings_panel(self, event):
+        self.plot_settings_panel.visible = not self.plot_settings_panel.visible
+        self.plot_settings_button.name = "Settings ▴" if self.plot_settings_panel.visible else "Settings ▾"
 
     def get_selected_source(self):
         if self.src is None:
@@ -95,7 +102,7 @@ class CustomPlotClass(param.Parameterized):
     def column_selection_panel(self):
         settings_grid = pn.GridBox(ncols=3, sizing_mode = "stretch_width", scroll = True)  
         options = list(config.main_df.columns)
-        submit_button = pn.widgets.Button(name='Confirm', button_type='primary', max_height=120)
+        submit_button = pn.widgets.Button(name='Confirm', button_type='primary', max_height = 30, max_width=100)
         submit_button.on_click(self._submit_button_cb)
         for col in self.unknown_columns:
             select_widget = pn.widgets.Select(name= col, options=options, max_height=120, sizing_mode = "stretch_width")
@@ -104,7 +111,7 @@ class CustomPlotClass(param.Parameterized):
         return pn.Card(settings_grid, header = pn.Row(pn.Spacer(width=25), self.close_button, submit_button),
                                 sizing_mode="stretch_both", scroll=True, collapsible = False, min_height = 300 )
     
-    def get_unknown_columns(self, columns_needed):
+    def get_unknown_columns(self, columns_needed, change_stage = False):
         current_cols = config.main_df.columns
         self.unknown_columns = []
         for col in columns_needed:
@@ -116,6 +123,8 @@ class CustomPlotClass(param.Parameterized):
                     config.settings[col] = col
         if len(self.unknown_columns) > 0:
             self.select_widgets = {}
+            if change_stage and (not self.stage == "column_selection"):
+                self.stage = "column_selection"
         else:
             self.stage = "plot"
     
@@ -173,28 +182,29 @@ class CustomPlotClass(param.Parameterized):
             print(f"[{self.panel_id}] Thread executor shutdown.")
 
 
-    
+    ##Example method
     def plot(self, N=20):
-        self.loading_pane.visible = True
+        self.message_pane.visible = True
         coords = [(i, np.random.random()) for i in range(N)]
         scatter = hv.Scatter(coords).opts(color='black', marker='+')
         self.figure.object = scatter
-        self.loading_pane.visible = False
+        self.message_pane.visible = False
 
-
+    ##Example method
     def get_layout(self):
         points_input = pn.widgets.IntInput(name="Number of points", value=20, start=1, sizing_mode = "stretch_width" )
         def update_points(event):
             N = points_input.value
             self.plot(N)
+        self.plot_settings_panel.objects = [points_input]
         points_input.param.watch(update_points, 'value')
         self.plot(points_input.value)
-        return pn.Column(self.loading_pane, self.figure, points_input, sizing_mode="stretch_both", min_height = 450,
-                          styles={'background': 'lightgreen'})
+        return pn.Column(self.message_pane, self.figure, self.plot_settings_panel, 
+                         sizing_mode="stretch_both", min_height = 450, styles={'background': 'lightgreen'})
     
     def plot_panel(self):
         self.layout = self.get_layout()
-        return pn.Card(self.layout, header = pn.Row(pn.Spacer(width=25,),self.close_button),
+        return pn.Card(self.layout, header = pn.Row(pn.Spacer(width=25,),self.close_button, self.plot_settings_button),
                        collapsible = False, sizing_mode="stretch_both", min_height =450,)
     
     @param.depends("stage")                        
@@ -224,11 +234,8 @@ class EuclidPlotClass(CustomPlotClass):
         self._initialise_euclid_object()
         self._subscribe_to_shared()
         self._run_euclid()
-        return  pn.Column(self.loading_pane, pn.Row(self.figure, pn.Column(self.stretching_input, 
-                                                self.radius_input,
-                                                self.contrast_scaler,
-                                                self.overplot_coords_widget), scroll = True)
-        )
+        return  pn.Column(self.message_pane, self.figure, self.plot_settings_panel, 
+                          scroll = True, sizing_mode = "stretch_both")
 
     def _initialise_euclid_object(self):
         self.ra, self.dec = self.get_ra_dec()
@@ -238,27 +245,32 @@ class EuclidPlotClass(CustomPlotClass):
         else:
             self.euclid_object = EuclidCutoutsClass(self.ra, self.dec, 
                              euclid_filters= ["VIS", "NIR_Y", "NIR_H"])
+            self.euclid_object.check_coverage()
             self.overplotted_coordinates = []
             
 
     def _initialise_widgets(self):
-        self.radius_input = pn.widgets.FloatInput(name = "Radius [arcsec]", value = self.radius,
-                                                  step = 0.5, start = 1, end = 100, 
-                                                  sizing_mode="scale_width")
+
+        self.radius_input = pn.widgets.FloatInput(name = "Radius [arcsec]", value = self.radius, 
+                                                  step = 0.5, start = 1, end = 100, max_width = 200,
+                                                  sizing_mode="stretch_both")
         self.radius_input.param.watch(self._update_radius, "value")
 
         self.stretching_input = pn.widgets.Select(name = "Stretching function", 
                                                 options=  ['Linear', 'Sqrt', 'Log', 'Asinh', 'PowerLaw'],
-                                                sizing_mode = "scale_width")
+                                                sizing_mode = "stretch_both")
         self.stretching_input.param.watch(self._update_stretching, "value")
 
         self.contrast_scaler = pn.widgets.RangeSlider(name = "Image scaling", 
-                                                    start = 0, end = 0.996,value = (0,1), step = 0.004, 
-                                                    sizing_mode = "scale_both")
+                                                    start = 0, end = 1, value = (0,1), step = 0.004, 
+                                                    sizing_mode = "stretch_both")
         self.contrast_scaler.param.watch(self._update_intensity_scaling, "value")  
 
         self.overplot_coords_widget = pn.widgets.Checkbox(name = "Spectrum Coordinates")
         self.overplot_coords_widget.param.watch(self._overplot_coordinates_callback, "value")
+
+        self.plot_settings_panel = pn.Column(self.contrast_scaler, self.radius_input, self.stretching_input, 
+                                             self.overplot_coords_widget, scroll = True, visible = False)
 
      
     def _update_radius(self, event):
@@ -292,7 +304,7 @@ class EuclidPlotClass(CustomPlotClass):
     def _update_image(self): 
         try:
              self.figure.object = hv.Overlay(self.euclid_fig + self.overplotted_coordinates)
-             self.loading_pane.visible = False
+             self.message_pane.visible = False
         except Exception as e:         #too generic
             print("Euclid image unavailable")
             print(e)
@@ -391,13 +403,34 @@ class EuclidPlotClass(CustomPlotClass):
 
     def _run_euclid(self):
         """Wrapper for multithreading"""
-        self.loading_pane.visible = True
+        self.message_pane.object = "## Loading..."
+        self.message_pane.visible = True
+        if not self.euclid_object.has_coverage:
+            print("The Source is not contained in Euclid mocs")
+            self.message_pane.object = "##The source is not in the Euclid covered area"
+            self.figure.object = hv.Empty()
+
+        shared_data.publish(self.panel_id, "EuclidCutout_running", True)
  
         def callback(future_obj=None):
+            shared_data.publish(self.panel_id, "EuclidCutout_running", False)
+            result = future_obj.result() #result = self.euclid_object.reprojected_data["stacked"] or None
+            if result is None:
+                self.message_pane.object = "## The Euclid cutout query failed"
+                self.message_pane.visible = True #probably already visible
+                self.figure.object = hv.Empty()
+                return
+            
             self.overplot_coords_widget.value = False
-            self.contrast_scaler.value = (0,1)
-            self.get_euclid_figure(self.euclid_object.reprojected_data["stacked"])
+            if self.contrast_scaler.value != (0,1):
+                low, high =  self.contrast_scaler.value
+                scaled_image = self.change_intensity_range(self.euclid_object.reprojected_data["stacked"], low, high)
+                self.get_euclid_figure(scaled_image)
+            else:
+                self.get_euclid_figure( self.euclid_object.reprojected_data["stacked"])
             self._update_image()
+            self.message_pane.visible = False
+     
         
         self.run_multithread(self.euclid_object.get_final_cutout,
                              func_kwargs = {"radius" : self.radius, "stretch" : self.stretching_input.value, 
@@ -426,21 +459,22 @@ class EuclidPlotClass(CustomPlotClass):
 
 class SpectrumPlotClass(CustomPlotClass):
     
-    stage = param.ObjectSelector(default="target_id_check", objects=["target_id_check", "column_selection", "plot"])
 
     def __init__(self, data, src, close_button, extra_features, dataset = "DESI"):
         super().__init__(data, src, close_button, extra_features)
-        self.figure = pn.Column(scroll = True)
+        self.figure = pn.Column(scroll = True, sizing_mode = "stretch_both")
         self.dataset = dataset
         self._src_callback = self._change_source_cb
         self.src.on_change("data", self._src_callback)
+        self.from_sourceId = False
 
 
     def get_layout(self):
+        self._initialize_settings_panel()
         self._subscribe_to_shared()
         self._initialize_spectrum_object()
         self._run_spectrum()
-        return pn.Column(self.loading_pane, self.figure, scroll = True)
+        return pn.Column(self.message_pane, self.figure, self.plot_settings_panel,  scroll = True)
     
     def _change_source_cb(self, attr, old, new):
         #TODO maybe add a mehtod to reset the same object
@@ -450,7 +484,7 @@ class SpectrumPlotClass(CustomPlotClass):
 
     def _subscribe_to_shared(self):
         if not self.from_sourceId:
-            if not  shared_data.is_subscribed(self.panel_id, "Euclid_radius"):
+            if not shared_data.is_subscribed(self.panel_id, "Euclid_radius"):
                shared_data.subscribe(self.panel_id, "Euclid_radius", self._run_spectrum)
 
     def _initialize_spectrum_object(self):
@@ -491,50 +525,46 @@ class SpectrumPlotClass(CustomPlotClass):
         return None
         
     def _run_spectrum(self, max_separation = None):
-        self.loading_pane.visible = True
+        self.message_pane.visible = True
+        shared_data.publish(self.panel_id, f"{self.dataset}_running", True)
         if max_separation is None:
             max_separation = self.max_separation
         
         def callback(future_result = None):
+            shared_data.publish(self.panel_id, f"{self.dataset}_running", False)
             if self.spectrum_object.spectra is not None:
-                print("Finished multithreading")
                 plot_model = True if self.dataset != "EuclidSpec" else False
-                kwargs = {"width" : 950,  "height" : 250 if self.spectrum_object.available_spectra > 1 else 300}
+                kwargs = {"aspect" : 3.8 if self.spectrum_object.available_spectra > 1 else 3.17, "responsive" : True}
                 plot = self.spectrum_object.plot_all_spectra_hv(plot_model = plot_model, **kwargs)
                 self.figure.objects = [plot]
                 self._add_coordinates_to_shared(*self.spectrum_object.get_coordinates())
-                self.loading_pane.visible = False
+                self.message_pane.visible = False
+                
 
         self.run_multithread(self.spectrum_object.get_spectra, 
                              func_kwargs = {"max_separation" : max_separation, "return_object" : True},
                              callback=callback)
+        
+
+    def _initialize_settings_panel(self):
+        self.retrieve_mode_button = pn.widgets.RadioButtonGroup(name="How to retrieve spectrum", options=["Use TargetId", "Cone Search"], 
+                                            value = "Cone search", sizing_mode = "stretch_both", max_height = 40)
+        self.retrieve_mode_button.param.watch(self._retrieve_mode_cb, "value")
+        self.plot_settings_panel = pn.Column(self.retrieve_mode_button, scroll = True, visible = False)
+        
     
-    def target_id_check_panel(self):
-        self.use_target_id = pn.widgets.RadioBoxGroup(name="target_id_selector", options=["Use TargetId", "Query all spectra in cutout area"], 
-                                                      inline = False, margin=(20, 0, 20, 0))
-        submit_button = pn.widgets.Button(name='Confirm', button_type='primary', max_height=120)
-        text_pane = pn.pane.Markdown(f"""Retrieve spectrum using its TargetID or query all spectra 
-                                        whithin the region covered by Euclid Cutout?""")
-        submit_button.on_click(self._target_id_continue_cb)
-        return pn.Card(pn.Column(text_pane, self.use_target_id, max_height = 100), 
-                            header = pn.Row(pn.Spacer(width=25), self.close_button, submit_button),
-                            sizing_mode="stretch_both", scroll=True, collapsible = False, min_height = 300 )
-
-
-    def _target_id_continue_cb(self, event):
-        if self.use_target_id.value == "Use TargetId":
+    def _retrieve_mode_cb(self, event):
+        if event.new == "Use TargetId":
             self.from_sourceId = True
-            self.stage = "column_selection"
-        else:
+            self.get_unknown_columns([f"{self.dataset}_TargetID"], change_stage=True)
+        elif event.new == "Cone Search":
             self.from_sourceId = False
-            self.stage = "plot" 
+            self.get_layout()
 
-         
+
     @param.depends("stage")
     def mypanel(self):
-        if self.stage == "target_id_check":
-            return self.target_id_check_panel()
-        elif self.stage == "column_selection":
+        if self.stage == "column_selection":
             return self.column_selection_panel()
         else:
             return self.plot_panel()
@@ -627,7 +657,7 @@ class SEDPlotClass(CustomPlotClass):
         try:
             name = self.full_name_input.value.strip()
         except AttributeError:
-            self.short_name_input.value = "Insert a valid name (no empty string)"
+            self.full_name_input.value = "Insert a valid name (no empty string)"
             return
         wavlen = self.wavelength_input.value
         fwhm = self.fwhm_input.value
@@ -715,8 +745,8 @@ class SEDPlotClass(CustomPlotClass):
         self.clean_fluxes()
         y, y_err = self.convert_to_microjy(self.flux, self.flux_err, starting_unit=self.unit_selector.value)
         self.figure.object = self.plot_SED(self.wavlen, y, y_err, self.fwhm)
-        self.loading_pane.visible = False
-        return pn.Column(self.loading_pane, self.figure, self.settings_panel, scroll = True)
+        self.message_pane.visible = False
+        return pn.Column(self.message_pane, self.figure, self.plot_settings_panel, scroll = True, sizing_mode = "stretch_both")
 
 
     
@@ -810,29 +840,23 @@ class SEDPlotClass(CustomPlotClass):
         return conversion_dict[starting_unit](flux, err_flux)
                            
     def _initialize_settings_panel(self):
-        self.settings_button = pn.widgets.Button(name="Settings ▾", button_type="primary", max_height = 40)
-        self.settings_button.on_click(self._toggle_settings_panel)
         units = ["AB magnitudes", "milliJy", "microJy", "nanoJy", "cgs (erg/s/Hz)"]                                                                            
         self.unit_selector = pn.widgets.Select(name = "Data Units", options = units, value = "microJy")
         self.unit_selector.param.watch(self._update_plot, "value")
-        self.settings_panel = pn.Column(self.unit_selector, visible = False)
-                                                                                
-                                                                                
-    def _toggle_settings_panel(self, event):
-        self.settings_panel.visible = not self.settings_panel.visible
-        self.settings_button.name = "Settings ▴" if self.settings_panel.visible else "Settings ▾"
+        self.plot_settings_panel = pn.Column(self.unit_selector, visible = False)
+                                                                                                                                                          
 
     def _update_plot(self, event):
         self.flux, self.flux_err = self.get_fluxes_from_selected_source()
         self.clean_fluxes()
         y, y_err = self.convert_to_microjy(self.flux, self.flux_err, starting_unit=self.unit_selector.value)
         self.figure.object = self.plot_SED(self.wavlen, y, y_err, self.fwhm)
-        self.loading_pane.visible = False
+        self.message_pane.visible = False
         
     
     def plot_panel(self):
         self.layout = self.get_layout()
-        return pn.Card(self.layout, header = pn.Row(pn.Spacer(width=25,),self.close_button, self.settings_button),
+        return pn.Card(self.layout, header = pn.Row(pn.Spacer(width=25,),self.close_button, self.plot_settings_button),
                        collapsible = False, sizing_mode="stretch_both", min_height =450,)  
 
     @param.depends("stage")

@@ -19,7 +19,7 @@ import mocpy
 
 from sparcl.client import SparclClient 
 from astronomicAL.extensions.shared_data import shared_data
-#from dl import queryClient as qc
+
 
 import matplotlib.transforms as transforms
 import matplotlib.pyplot as plt
@@ -201,6 +201,10 @@ class EuclidCutoutsClass:
         if not hasattr(self, "cone_results"):
             self.get_cone(verbose = verbose, async_job= False)
         
+        if len(self.cone_results) < 2:
+            print("Initial Cone Results failed, trying with a 1 deg^2 search radius")
+            self.get_cone(initial_radius = 1*u.degree,  verbose = verbose, async_job= False)
+        
         if len(self.cone_results) > 2:
             self.get_cutouts(radius = radius, verbose = verbose)
             self.read_cutouts()
@@ -208,8 +212,11 @@ class EuclidCutoutsClass:
             self.stack_cutouts(stretch = stretch)
             if return_object:
                 return self.reprojected_data["stacked"]
+        
         else:
-            print(f"No sources in Euclid dataset with {self.coordinates} coordinates")
+            print(f"Cone search failed")
+            if return_object:
+                return None
 
 
     def check_coverage(self, path = "data/mocs"):
@@ -392,9 +399,9 @@ class BaseSpectraClass:
                          plot_emlines=True, annotate_emlines=True,
                          plot_abslines=True, annotate_abslines=True,
                          show_xlabel=True, show_ylabel=True,
-                         width=400, height=250, 
                          model_kwargs = {"line_width" : 2, "color" : "red"},
-                         smoothed_kwargs = {"line_width" : 1, "color" : "black"}):
+                         smoothed_kwargs = {"line_width" : 1, "color" : "black"},
+                         **kwargs):
         """Same as above but for holoviews
            plot_lines = True, False, "class" overrides plot_emlines and plot_abslines
         """
@@ -449,9 +456,8 @@ class BaseSpectraClass:
             obs_wav = self.absline_table["wave_vac"] * (redshift +1)
             logic = np.logical_and(obs_wav >= xmin, obs_wav <= xmax)
             obs_wav = obs_wav[logic]
-            
             overlays.append(hv.VLines(obs_wav).opts(color='blue', line_width=0.5, line_dash='dotted'))
-            if annotate_emlines:
+            if annotate_abslines:
                 y = 0.2 * ymax *np.ones_like(obs_wav)
                 names = self.absline_table["Name"][logic].astype(str)
                 overlays.append(hv.Labels((obs_wav, y,  names), vdims = "names").opts(
@@ -462,15 +468,14 @@ class BaseSpectraClass:
 
         spectrum_overlay = hv.Overlay(overlays).opts(
                 opts.Overlay(
-                    width=width, 
-                    height=height,
                     xlabel=xlabel,
                     ylabel=ylabel,
                     logx=True,
                     xlim=(xmin, xmax * 1.02),
                     ylim=(ymin, ymax),
                     active_tools=[],
-                    show_legend=False
+                    show_legend=False,
+                    **kwargs,
                     )
                 )
         return spectrum_overlay

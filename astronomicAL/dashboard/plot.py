@@ -219,7 +219,7 @@ class HistoDashboard(BasePlotClass):
         self.src.on_change("data", self._change_src_cb)
         self.update_variable_lists(excluded_columns = ["id_col", "ra_dec"])
 
-        self.settings_button = pn.widgets.Button(name="Settings ▾", button_type="primary")
+        self.settings_button = pn.widgets.Button(name="Settings ▾", button_type="primary",  max_height = 40, max_width=100)
         self.settings_panel = pn.Column(
             pn.Param(
                 self,

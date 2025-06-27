@@ -28,6 +28,7 @@ class MenuDashboard:
         self.row = pn.Row(pn.pane.Str("loading"))
 
         plot_options = [
+            "Exploration",
             "Basic Plot",
             "Histogram Plot",
             "Selected Source Info",
