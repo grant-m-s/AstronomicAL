@@ -308,7 +308,8 @@ class BaseSpectraClass:
         else:
             kernel = kernel(window)
         
-        self.smoothed_fluxes  = [convolve(spectrum.flux, kernel) for spectrum in self.spectra]
+        self.smoothed_fluxes = [convolve(spectrum.flux, kernel, mask = spectrum.mask, boundary = "extend") 
+                                for spectrum in self.spectra]
     
     def get_emline_table(self, primary = True, extra_path = "data"):
         """Emission lines for galaxies/AGN. 
@@ -329,10 +330,28 @@ class BaseSpectraClass:
             self.absline_table = self.absline_table[self.absline_table["primary"]==1]
         self.absline_table["Name"] = self.absline_table["Name"].replace(np.nan, "")
 
+    @staticmethod
+    def find_masked_regions(mask, min_width = 1):
+        """Returns indexes indicating the start and the end of a masked region fom a boolean mask
+           Returnin indexes only if the mask is wider than min_width (to avoid messy plots)"""
+        mask = mask.astype(bool)
+        diff = np.diff(mask.astype(int))
+        mask_start_idx = np.where(diff == 1)[0] + 1 #True - False i.e. begin of the mask
+        mask_end_idx = np.where(diff == -1)[0]   # False - True  i.e. end of the mask
+        if mask[0]:
+            mask_start_idx = np.insert(mask_start_idx, 0, 0)
+        if mask[-1]:
+            mask_end_idx = np.append(mask_end_idx, len(mask) - 1)
+        
+        mask_width = mask_end_idx-mask_start_idx + 1 #number of masked elements per region
+        select = mask_width >= min_width
+        return mask_start_idx[select], mask_end_idx[select]
+
     
     def plot_spectrum(self,  ax, idx = 0, plot_model = True, 
                       plot_emlines = True, annotate_emlines = True,  
                       plot_abslines = True, annotate_abslines = True,
+                      plot_mask = True,
                       set_ylabel = True, model_kwargs = {"lw" : 2, "color" : "r"},
                       smoothed_kwargs = {"lw" : 1, "color" : "k"}):
         
@@ -398,6 +417,7 @@ class BaseSpectraClass:
                          plot_lines = 'class',
                          plot_emlines=True, annotate_emlines=True,
                          plot_abslines=True, annotate_abslines=True,
+                         plot_mask = True,
                          show_xlabel=True, show_ylabel=True,
                          model_kwargs = {"line_width" : 2, "color" : "red"},
                          smoothed_kwargs = {"line_width" : 1, "color" : "black"},
@@ -413,6 +433,7 @@ class BaseSpectraClass:
         smoothed = self.smoothed_fluxes[idx]
         redshift = self.spectra[idx].redshift
 
+
         if plot_lines == "class":
             is_extragal = self.spectra[idx].spectype == "GALAXY" or self.spectra[idx].spectype == "QSO"
             plot_emlines = is_extragal and plot_abslines
@@ -422,10 +443,16 @@ class BaseSpectraClass:
             plot_abslines = False
             plot_emlines = False
 
-        flux_curve = hv.Curve((wavlen, flux)).opts(color='grey', line_width=0.1)
+        flux_curve = hv.Curve((wavlen, flux)).opts(color='grey', line_width=0.3)
         smoothed_curve = hv.Curve((wavlen, smoothed)).opts(**smoothed_kwargs)
-        
-        overlays = [flux_curve, smoothed_curve]
+
+        if plot_mask:
+            start_idx, end_idx = self.find_masked_regions(mask = self.spectra[idx].mask, min_width=5)
+            masked_regions =hv.VSpans((wavlen[start_idx], wavlen[end_idx])).opts(line_color=None, 
+                                                                                 color = "lightgrey")
+            overlays = [masked_regions, flux_curve, smoothed_curve]
+        else:
+            overlays = [flux_curve, smoothed_curve]
         
         if plot_model:
             model = self.spectra[idx].model
@@ -481,7 +508,7 @@ class BaseSpectraClass:
         return spectrum_overlay
     
     def plot_all_spectra_hv(self, plot_lines = "class",
-                            plot_model = True,  cmap = "gist_rainbow", **kwargs):
+                            plot_model = True,  cmap = "gist_rainbow", plot_mask = True, **kwargs):
         N = self.available_spectra
         nrows, ncols = N, 1
         hv_plots = []
@@ -492,6 +519,7 @@ class BaseSpectraClass:
                         idx=idx,
                         plot_lines = plot_lines,
                         plot_model = plot_model,
+                        plot_mask = plot_mask,
                         model_kwargs = {"line_width" : 2, "color" : colors(idx)},
                         smoothed_kwargs = {"line_width" : 1 if plot_model else 2, "color" :  "black" if plot_model else colors(idx)},
                         **kwargs
@@ -580,7 +608,7 @@ class DESISpectraClass(BaseSpectraClass):
     
     def query_spectra_sparclid(self, verbose = False):
         include = ['sparcl_id', 'specid', 'data_release', 'redshift', 'flux',
-                   'wavelength', 'model', 'spectype', "ra", "dec"]
+                   'wavelength', 'model', 'spectype', "ra", "dec", "mask"]
         
         if self.available_spectra >= 1:
             sparcl_id = list(self.table_results["sparcl_id"])
@@ -627,11 +655,12 @@ class DESISpectraClass(BaseSpectraClass):
     
     
 class SpectrumContainer:
-    """Utility class to store retrieved Euclid Spectra in a simial way to DESI ones"""
+    """Utility class to store retrieved Euclid Spectra in a similar way to DESI ones"""
 
-    def __init__(self, wavelength, flux, sourceId, **kwargs):
+    def __init__(self, wavelength, flux, mask, sourceId, **kwargs):
         self.wavelength = wavelength
         self.flux = flux
+        self.mask = mask
         self.sourceId = sourceId
         self.allowed_attributes = ['model', "redshift", "ra", "dec", "spectype"]
         for name, value in kwargs.items():
@@ -706,6 +735,14 @@ class EuclidSpectraClass(BaseSpectraClass):
         return ordered_spectra
     
 
+    @staticmethod
+    def _get_Euclid_mask(euclid_mask):
+        """Converts Euclid Mask Flags convention into a boolean mask.
+           odd flags and >=64 flags mean bad pixels
+           Following https://caltech-ipac.github.io/irsa-tutorials/tutorials/euclid_access/3_Euclid_intro_1D_spectra.html"""
+        mask = np.where((euclid_mask % 2 ==1) | (euclid_mask >= 64 ), 1, 0)
+        return mask.astype(bool)
+
     def _add_info_spectra(self):
         """Spectra and main table must be ordered """
         if len(self.spectra) == len(self.table_results):
@@ -732,7 +769,8 @@ class EuclidSpectraClass(BaseSpectraClass):
                 hdus = fits.open(BytesIO(r.content))
                 for hdu in hdus[1:]:  #first one is empty
                     spectrum  = SpectrumContainer(wavelength = hdu.data['WAVELENGTH'],
-                                                  flux = hdu.data["SIGNAL"],
+                                                  flux = hdu.data["SIGNAL"] * hdu.header["FSCALE"] * 1e17,
+                                                  mask = self._get_Euclid_mask(hdu.data["MASK"]),
                                                   sourceId = hdu.header["SOURC_ID"])
                     self.spectra.append(spectrum)
             else:
