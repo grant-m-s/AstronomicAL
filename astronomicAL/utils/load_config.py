@@ -136,6 +136,7 @@ def verify_import_config(curr_config_file):
                 "Basic Plot",
                 "Histogram Plot",
                 "Labelling",
+                'Exploration',
                 "Selected Source Info",
             ] + plots
 
@@ -221,6 +222,8 @@ def create_layout_from_file(react):
     with open(config.layout_file) as layout_file:
         curr_config_file = json.load(layout_file)
 
+    print("Loading the customized layout here ivano")
+
     if len(curr_config_file.keys()) > 1:
 
         if config.settings["config_load_level"] > 0:
@@ -235,20 +238,22 @@ def create_layout_from_file(react):
             src = {}
             for col in config.main_df:
                 src[f"{col}"] = []
+            if not config.settings["id_col"] in src.keys():
+                src[config.settings["id_col"]] = []
 
             config.source.data = src
 
     curr_layout = curr_config_file["layout"]
 
-    for p in curr_layout:
+    for p, panel in curr_layout.items():
         print("curr_layout: ", p)
-        start_row = curr_layout[p]["y"]
-        end_row = curr_layout[p]["y"] + curr_layout[p]["h"]
-        start_col = curr_layout[p]["x"]
-        end_col = curr_layout[p]["x"] + curr_layout[p]["w"]
+        start_row = panel["y"]
+        end_row = panel["y"] + panel["h"]
+        start_col = panel["x"]
+        end_col = panel["x"] + panel["w"]
 
-        if "contents" in curr_layout[p].keys():
-            contents = curr_layout[p]["contents"]
+        if "contents" in panel.keys():
+            contents = panel["contents"]
         else:
             contents = "Menu"
 
@@ -259,9 +264,12 @@ def create_layout_from_file(react):
                 contents = "Labelling"
             elif config.mode == "AL":
                 contents = "Active Learning"
+            elif config.mode == "Exploring":
+                contents = "Exploring"
             main_plot = Dashboard(src=config.source, contents=contents)
             config.dashboards[p] = main_plot
             react.main[start_row:end_row, start_col:end_col] = main_plot.panel()
+        
         else:
             if "config_load_level" in list(config.settings.keys()):
                 if config.settings["config_load_level"] == 0:
@@ -270,21 +278,18 @@ def create_layout_from_file(react):
             config.dashboards[p] = new_plot
             if contents == "Basic Plot":
 
-                x_axis = curr_layout[p]["panel_contents"][0]
-                y_axis = curr_layout[p]["panel_contents"][1]
+                x_axis = panel["panel_contents"][0]
+                y_axis = panel["panel_contents"][1]
 
                 if x_axis in list(config.source.data.keys()):
 
-                    new_plot.panel_contents.X_variable = curr_layout[p][
-                        "panel_contents"
-                    ][0]
+                    new_plot.panel_contents.X_variable = panel["panel_contents"][0]
                 if y_axis in list(config.source.data.keys()):
-                    new_plot.panel_contents.Y_variable = curr_layout[p][
-                        "panel_contents"
-                    ][1]
+                    new_plot.panel_contents.Y_variable = panel["panel_contents"][1]
             react.main[start_row:end_row, start_col:end_col] = new_plot.panel()
 
     return react
+
 
 
 def create_default_layout(react):

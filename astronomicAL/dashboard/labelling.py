@@ -63,7 +63,7 @@ class LabellingDashboard(param.Parameterized):
         objects=["1"], default="1", doc="Selection box for the Y axis of the plot."
     )
 
-    def __init__(self, src, df, switch_mode_button):
+    def __init__(self, src, df):
         super(LabellingDashboard, self).__init__()
 
         self.row = pn.Row(pn.pane.Str("loading"))
@@ -72,7 +72,6 @@ class LabellingDashboard(param.Parameterized):
         self.region_criteria_df = pd.DataFrame([], columns=["column", "oper", "value"])
         self.region_message = ""
         self.src = src
-        self._switch_mode_button = switch_mode_button 
         self.src.on_change("data", self._panel_cb)
 
         self.labels = self.get_previous_labels()
@@ -466,7 +465,7 @@ class LabellingDashboard(param.Parameterized):
 
     def select_random_point(self):
 
-        inside_region = list(self.sample_region[config.settings["id_col"]].values)
+        inside_region = list(self.get_id(df =self.sample_region).values)
 
         if len(inside_region) == 0:
             self.region_message = "No Matching Sources!"
@@ -476,11 +475,13 @@ class LabellingDashboard(param.Parameterized):
         else:
             self.region_message = f"{len(inside_region)} Matching Sources"
 
-        selected = random.choice(
-            list(self.sample_region[config.settings["id_col"]].values)
-        )
-        selected_source = self.df[self.df[config.settings["id_col"]] == selected]
+        selected = random.choice(inside_region)
+        
+        
+        selected_source = self.df[self.get_id() == selected]
         selected_dict = selected_source.to_dict("list")
+        if config.settings["id_col"] not in selected_dict:
+            selected_dict[config.settings["id_col"]] = selected
 
         self.src.data = selected_dict
         self.assign_label_group.value = "Unsure"
@@ -509,8 +510,11 @@ class LabellingDashboard(param.Parameterized):
 
         if updated is not None:
 
-            selected_source = self.df[self.df[config.settings["id_col"]] == updated]
+            selected_source = self.df[self.get_id() == updated]
             selected_dict = selected_source.to_dict("list")
+            if config.settings["id_col"] not in selected_dict:
+                selected_dict[config.settings["id_col"]] = updated
+
             self.assign_label_group.value = config.settings["labels_to_strings"][
                 f"{self.labels[updated]}"
             ]
@@ -518,20 +522,30 @@ class LabellingDashboard(param.Parameterized):
             self.src.data = selected_dict
 
     def get_current_index_in_labelled_data(self):
-
-        total = len(self.labels.keys())
-
-        if len(self.src.data[config.settings["id_col"]]) > 0:
-            if self.src.data[config.settings["id_col"]][0] in list(self.labels.keys()):
-                index = list(self.labels.keys()).index(
-                    self.src.data[config.settings["id_col"]][0]
+        id_col = config.settings["id_col"]
+        labelled_keys = list(self.labels.keys())
+        total = len(labelled_keys)
+        if id_col in self.src.data and len(self.src.data[id_col]) > 0:
+            if self.src.data[id_col][0] in list(self.labels.keys()):
+                index = labelled_keys .index(
+                    self.src.data[id_col][0]
                 )
             else:
                 index = total
         else:
             index = "-"
-
         return index
+    
+    def get_id(self, df = None):
+        id_col = config.settings["id_col"]
+        target_df = self.df if df is None else df
+
+        if id_col == "Use Index":
+            return pd.Series(target_df.index, index=target_df.index)
+        else:
+            if id_col not in target_df.columns:
+                raise KeyError(f"ID column '{id_col}' not found in DataFrame.")
+            return target_df[id_col]
 
     def _reset_index_buttons(self):
         self.first_labelled_button.disabled = False
@@ -675,7 +689,6 @@ class LabellingDashboard(param.Parameterized):
                            ),
                 pn.Row(self.param.X_variable, max_width=100),
                 pn.Row(self.param.Y_variable, max_width=100),
-                self._switch_mode_button,
                 max_width=100,
                 # sizing_mode="fixed",
             ),
@@ -683,3 +696,6 @@ class LabellingDashboard(param.Parameterized):
             sizing_mode="stretch_both",
         )
         return self.row
+
+
+
