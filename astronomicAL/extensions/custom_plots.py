@@ -17,6 +17,7 @@ import uuid
 import concurrent.futures 
 from bokeh.document import without_document_lock
 from bokeh.models import  NormalHead
+from bokeh.models import Range1d, LinearAxis
 from astronomicAL.extensions.shared_data import shared_data
 from astronomicAL.extensions.astro_data_utility import DESISpectraClass, EuclidCutoutsClass, EuclidSpectraClass
 import matplotlib.pyplot as plt
@@ -219,9 +220,10 @@ class CustomPlotClass(param.Parameterized):
 class EuclidPlotClass(CustomPlotClass):
     def __init__(self, data, src, close_button, extra_features ):
         super().__init__(data, src, close_button, extra_features)
-        self.euclid_pane = pn.pane.HoloViews(width=400, height=400) #euclid_pane = Euclid cutout, figure = euclid_pane+overplotted_coordinates
         self._src_callback = self._change_source_cb
         self.src.on_change("data", self._src_callback)
+        self.euclid_pane = pn.pane.HoloViews(width=400, height=400) #euclid_pane = Euclid cutout, figure = euclid_pane+overplotted_coordinates
+        self.filter = "stacked"
         self.radius = shared_data.get_data("Euclid_radius", 5.0)
         
    
@@ -244,7 +246,7 @@ class EuclidPlotClass(CustomPlotClass):
             #TODO Raise esception
         else:
             self.euclid_object = EuclidCutoutsClass(self.ra, self.dec, 
-                             euclid_filters= ["VIS", "NIR_Y", "NIR_H"])
+                             euclid_filters= ["VIS", "NIR_Y", "NIR_J", "NIR_H"])
             self.euclid_object.check_coverage()
             self.overplotted_coordinates = []
             
@@ -258,6 +260,7 @@ class EuclidPlotClass(CustomPlotClass):
 
         self.stretching_input = pn.widgets.Select(name = "Stretching function", 
                                                 options=  ['Linear', 'Sqrt', 'Log', 'Asinh', 'PowerLaw'],
+                                                value = "Linear",
                                                 sizing_mode = "stretch_both")
         self.stretching_input.param.watch(self._update_stretching, "value")
 
@@ -266,10 +269,19 @@ class EuclidPlotClass(CustomPlotClass):
                                                     sizing_mode = "stretch_both")
         self.contrast_scaler.param.watch(self._update_intensity_scaling, "value")  
 
+        self.filter_input = pn.widgets.Select(name = "Euclid Filter", 
+                                              options =  {"VIS" : "VIS", 'Y' : "NIR_Y", 'J' : "NIR_J", 
+                                                        'H' : "NIR_H", 'Color' : "stacked"},
+                                                        value  = "stacked",
+                                                sizing_mode = "stretch_both")
+        self.filter_input.param.watch(self._update_filter, "value")
+
+
         self.overplot_coords_widget = pn.widgets.Checkbox(name = "Spectrum Coordinates")
         self.overplot_coords_widget.param.watch(self._overplot_coordinates_callback, "value")
 
         self.plot_settings_panel = pn.Column(self.contrast_scaler, self.radius_input, self.stretching_input, 
+                                             self.filter_input,
                                              self.overplot_coords_widget, scroll = True, visible = False)
 
      
@@ -289,15 +301,21 @@ class EuclidPlotClass(CustomPlotClass):
 
     def _update_intensity_scaling(self, event):
         low, high = event.new
-        scaled_image = self.change_intensity_range(self.euclid_object.reprojected_data["stacked"], 
+        scaled_image = self.change_intensity_range(self.euclid_object.plot_data[self.filter], 
                                                    low, high)
         self.get_euclid_figure(scaled_image)
         self._update_image()
-    
+
+    def _update_filter(self, event):
+        self.filter = event.new
+        self.get_euclid_figure(self.euclid_object.plot_data[self.filter])
+        self._update_image()
+        
+
     def _update_stretching(self, event):
         stretch = event.new
-        self.euclid_object.stack_cutouts(stretch = stretch)
-        self.get_euclid_figure(self.euclid_object.reprojected_data["stacked"])
+        self.euclid_object.get_plot_data(stretch = stretch)
+        self.get_euclid_figure(self.euclid_object.plot_data[self.filter])
         self._update_image()
 
     
@@ -340,7 +358,7 @@ class EuclidPlotClass(CustomPlotClass):
                     self.overplotted_coordinates = []
                     for i, (x, y) in enumerate(self.euclid_object.world_2_pix(ra =  self.stored_spectrum_coordinates[dataset]["ra"],
                                                                               dec = self.stored_spectrum_coordinates[dataset]["dec"],
-                                                                              filtro = "stacked" )):
+                                                                              filtro = self.filter)):
 
                         if (0 <= x < self.image_width) and (0 <= y < self.image_height):
                             self.overplotted_coordinates.append(hv.Points([(x,y)]).opts(
@@ -366,23 +384,34 @@ class EuclidPlotClass(CustomPlotClass):
         self._update_image()
 
     def get_plot_scale(self):
-        bar_length_arcsecond = self.bar_length_pixels * self.euclid_object.arcsec_per_pix["stacked"]
+        bar_length_arcsecond = self.bar_length_pixels * self.euclid_object.arcsec_per_pix[self.filter]
         return bar_length_arcsecond
 
     
     def get_euclid_figure(self, data, show_scale = True):
         
-        self.image_height, self.image_width = data.shape[:2]
+        self.image_height, self.image_width,  = data.shape[:2]
         bounds = (0, 0, self.image_height, self.image_width)
-
-        image = hv.RGB(data[::-1,...], bounds=bounds).opts(
-                                    active_tools =[], toolbar=None,
-                                    padding = 0,
-                                    border = 0,
-                                    framewise = True,
-                                    xaxis=None, 
-                                    yaxis=None,
-                                    )
+        
+        if len(data.shape) == 3:
+            image = hv.RGB(data[::-1,...], bounds=bounds).opts(
+                                         active_tools =[], toolbar=None,
+                                         padding = 0,
+                                         border = 0,
+                                         framewise = True,
+                                         xaxis=None, 
+                                         yaxis=None,
+                                         )
+        else:
+            image = hv.Image(data[::-1,...], bounds=bounds).opts(
+                                         active_tools =[], toolbar=None,
+                                         padding = 0,
+                                         border = 0,
+                                         framewise = True,
+                                         xaxis=None, 
+                                         yaxis=None,
+                                         cmap = "grey",
+                                         )
 
         self.euclid_fig = [image]
         
@@ -408,32 +437,33 @@ class EuclidPlotClass(CustomPlotClass):
         if not self.euclid_object.has_coverage:
             print("The Source is not contained in Euclid mocs")
             self.message_pane.object = "##The source is not in the Euclid covered area"
-            self.figure.object = hv.Empty()
+            self.figure.object = hv.Image(np.zeros((10,10)))
 
         shared_data.publish(self.panel_id, "EuclidCutout_running", True)
  
         def callback(future_obj=None):
             shared_data.publish(self.panel_id, "EuclidCutout_running", False)
-            result = future_obj.result() #result = self.euclid_object.reprojected_data["stacked"] or None
+            result = future_obj.result() #result = self.euclid_object.plot_data[self.filter] or None
             if result is None:
                 self.message_pane.object = "## The Euclid cutout query failed"
                 self.message_pane.visible = True #probably already visible
-                self.figure.object = hv.Empty()
+                self.figure.object = hv.Image(np.zeros((10,10)))
                 return
-            
+
             self.overplot_coords_widget.value = False
             if self.contrast_scaler.value != (0,1):
                 low, high =  self.contrast_scaler.value
-                scaled_image = self.change_intensity_range(self.euclid_object.reprojected_data["stacked"], low, high)
+                scaled_image = self.change_intensity_range(self.euclid_object.plot_data[self.filter], low, high)
                 self.get_euclid_figure(scaled_image)
             else:
-                self.get_euclid_figure( self.euclid_object.reprojected_data["stacked"])
+                self.get_euclid_figure( self.euclid_object.plot_data[self.filter])
             self._update_image()
             self.message_pane.visible = False
      
         
         self.run_multithread(self.euclid_object.get_final_cutout,
                              func_kwargs = {"radius" : self.radius, "stretch" : self.stretching_input.value, 
+                              "filtro" : self.filter_input.value,
                               "reference" : "VIS", "verbose" : True, "return_object" : True}, 
                               callback = callback)
         
@@ -471,7 +501,6 @@ class SpectrumPlotClass(CustomPlotClass):
 
     def get_layout(self):
         self._initialize_settings_panel()
-        self._subscribe_to_shared()
         self._initialize_spectrum_object()
         self._run_spectrum()
         return pn.Column(self.message_pane, self.figure, self.plot_settings_panel,  scroll = True)
@@ -485,7 +514,7 @@ class SpectrumPlotClass(CustomPlotClass):
     def _subscribe_to_shared(self):
         if not self.from_sourceId:
             if not shared_data.is_subscribed(self.panel_id, "Euclid_radius"):
-               shared_data.subscribe(self.panel_id, "Euclid_radius", self._run_spectrum)
+               shared_data.subscribe(self.panel_id, "Euclid_radius", self._update_max_separation)
 
     def _initialize_spectrum_object(self):
         
@@ -549,17 +578,51 @@ class SpectrumPlotClass(CustomPlotClass):
     def _initialize_settings_panel(self):
         self.retrieve_mode_button = pn.widgets.RadioButtonGroup(name="How to retrieve spectrum", options=["Use TargetId", "Cone Search"], 
                                             value = "Cone search", sizing_mode = "stretch_both", max_height = 40)
+        self.max_separation_input = pn.widgets.FloatInput(name = "Cone Radius [arcsec]", value = shared_data.get_data("Euclid_radius", 0.5), 
+                                                          step = 0.5, start = 1, end = 100, max_width = 200, max_height = 40,
+                                                          sizing_mode="stretch_both")
+        
+        self.link_to_cutout_checkbox = pn.widgets.Checkbox(name = "Use radius from Euclid cutout",  value = False, align = "center")
+
+        
+        self.max_separation_input.disabled = (self.retrieve_mode_button.value == "Use TargetId")
+        self.link_to_cutout_checkbox.disabled = (self.retrieve_mode_button.value == "Use TargetId")
+      
         self.retrieve_mode_button.param.watch(self._retrieve_mode_cb, "value")
-        self.plot_settings_panel = pn.Column(self.retrieve_mode_button, scroll = True, visible = False)
+        self.max_separation_input.param.watch(self._max_separation_input_cb, "value")
+        self.link_to_cutout_checkbox.param.watch(self._link_to_cutout_cb, "value")
+
+        self.plot_settings_panel = pn.Column(self.retrieve_mode_button, 
+                                             pn.Row(self.max_separation_input, self.link_to_cutout_checkbox),
+                                                    scroll = True, visible = False)
         
     
     def _retrieve_mode_cb(self, event):
         if event.new == "Use TargetId":
             self.from_sourceId = True
+            self.link_to_cutout_checkbox.disabled = True
+            self.max_separation_input.disabled = True
             self.get_unknown_columns([f"{self.dataset}_TargetID"], change_stage=True)
         elif event.new == "Cone Search":
             self.from_sourceId = False
+            self.link_to_cutout_checkbox.disabled = False
+            self.max_separation_input.disabled = False
             self.get_layout()
+    
+    def _max_separation_input_cb(self, event):
+        if event.new is not None:
+            self.max_separation = event.new
+            self._run_spectrum(self.max_separation)
+
+    def _link_to_cutout_cb(self, event):
+        if event.new:
+            self._subscribe_to_shared()
+        else:
+            shared_data.unsubscribe(self.panel_id, "Euclid_radius")
+    
+    def _update_max_separation(self, new_separation):
+         self.max_separation_input.value = new_separation
+
 
 
     @param.depends("stage")
@@ -808,9 +871,29 @@ class SEDPlotClass(CustomPlotClass):
             logx = True, logy = True, 
             xlim = (xmin/2, xmax*2),
             ylim = (ymin/3, ymax*3),
-            ylabel="Flux", show_grid=True,
-            active_tools =[]
+            ylabel="Flux μJy", show_grid=True,
+            active_tools =[],
+            hooks = [SEDPlotClass.add_magnitude_axis]
         )
+    
+    @staticmethod
+    def add_magnitude_axis(plot, element):
+        """Bokeh hook to add secondary Y-axis with magnitude scale"""
+        fig = plot.state
+        y_start, y_end = fig.y_range.start, fig.y_range.end
+        mag_start, _ = SEDPlotClass.flux_to_mag(y_start, 0)
+        mag_end, _  =  SEDPlotClass.flux_to_mag(y_end, 0)
+
+        #Note mag_start and end are reversed compared to fluxes
+
+        fig.extra_y_ranges = {"mag": Range1d(start=mag_start, end=mag_end)}
+
+        mag_axis = LinearAxis(y_range_name="mag", axis_label="AB Magnitude",
+                              major_label_text_color="black", axis_label_text_color="black")
+        fig.add_layout(mag_axis, 'right')
+
+
+
     
     @staticmethod
     def mag_to_flux(mag, err_mag):

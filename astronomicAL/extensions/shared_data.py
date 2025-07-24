@@ -7,8 +7,8 @@ import astronomicAL.config as config
 # SDSS_coordinates : dictionary {"ra" : [ra], "dec" : [dec]}, coordinates of SDSS spectra retrieved
 # EuclidSpec_coordinates : dictionary {"ra" : [ra], "dec" : [dec]}, coordinates of Euclid spectra retrieved
 # Euclid_radius : float, radius of the Euclid cutout
-
-
+# selected_sourceid: str, the sourceId of the source selected from the scatter plot
+# *_running: boolean, whether one of the panles is running in multithread
 
 
 
@@ -103,6 +103,9 @@ class SharedDataManager:
     
     def get_data(self, key, default=None):
         return self.data.get(key, default)
+    
+    def check_key(self, key):
+        return key in self.data
     
     def replace_subscribe(self, panel_id, key, new_callback):
         if key not in self.subscriptions:

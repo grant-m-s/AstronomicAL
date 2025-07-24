@@ -144,6 +144,12 @@ class DataSelection(param.Parameterized):
                 "Only load layout. Let me choose all my own settings",
                 "Load all settings and begin labelling data.",
             ]
+        
+        elif self.mode == "Exploring":
+            options = [
+                "Only load layout. Let me choose all my own settings",
+                "Load all settings and begin labelling data.",
+            ]
         else:
             options = []
 

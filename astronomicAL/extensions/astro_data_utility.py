@@ -134,21 +134,31 @@ class EuclidCutoutsClass:
                         stretch = LinearStretch(slope =1), 
                         interval = AsymmetricPercentileInterval(lower_percentile = 1, upper_percentile=99) ):
         
+        norm_images = [self.transform_image(self.reprojected_data[band], stretch = stretch, interval = interval)
+                   for band in [r_img, g_img, b_img]]
+        return  np.dstack(norm_images)
+
+
+    def get_plot_data(self, stretch,  interval = AsymmetricPercentileInterval(lower_percentile = 1, upper_percentile=99)):
+        """This is just a convenient method which creates a dictionary with the cutouts to be 
+           plotted preserving the original data"""
+        
         stretch_map = {"Linear": lambda: LinearStretch(slope=1),
                       "Sqrt": lambda: SqrtStretch(),
                       "Log" : lambda: LogStretch(),
                       "Asinh": lambda: AsinhStretch(),
                       "PowerLaw": lambda: PowerStretch(a=2)}
-
-
         if isinstance(stretch, str):
             stretch = stretch_map.get(stretch)()
-
-        norm_images = [self.transform_image(self.reprojected_data[band], stretch = stretch, interval = interval)
-                   for band in [r_img, g_img, b_img]]
-        self.reprojected_data |= {"stacked" : np.dstack(norm_images)}
+        
+        self.plot_data = {}
+        for band in self.euclid_filters:
+            self.plot_data[band] =  self.transform_image(self.data[band], stretch = stretch, interval = interval)
+        
+        self.plot_data["stacked"] = self.stack_cutouts(r_img = "NIR_H", g_img = "NIR_Y", b_img = "VIS", stretch=stretch,
+                                                       interval = interval)
+         
  
-    
     def _add_overplot_coordinates(self, ra, dec, dataset = "default"):
         """
         Creates a dictionary to store coordinates from different dataset which can
@@ -191,10 +201,11 @@ class EuclidCutoutsClass:
         return list(zip(x_pix, y_pix))
         
         
-    def get_final_cutout(self, radius, stretch =  "Linear", reference = "VIS", verbose = False,
+    def get_final_cutout(self, radius, stretch =  "Linear", filtro = "stacked", reference = "VIS", 
+                         verbose = False,
                          return_object = False) :
         """
-        This method just calls all the other methods to obtain a color cutout which can be 
+        This method just calls all the other methods to obtain cutouts which can be 
         rendered in the Euclid Cutout extension plot panel. return_object = True serves to avoid race conditions 
         in multithreading
         """
@@ -209,9 +220,9 @@ class EuclidCutoutsClass:
             self.get_cutouts(radius = radius, verbose = verbose)
             self.read_cutouts()
             self.reproject_cutouts(reference = reference)
-            self.stack_cutouts(stretch = stretch)
+            self.get_plot_data(stretch = stretch)
             if return_object:
-                return self.reprojected_data["stacked"]
+                return self.plot_data[filtro]
         
         else:
             print(f"Cone search failed")
@@ -491,7 +502,7 @@ class BaseSpectraClass:
                                         text_font_size='8pt', text_color = "black"))
         
         xlabel = r'$$ \lambda_{obs} ~{Å} $$' if show_xlabel else ''
-        ylabel = r'$$ F_{\lambda}~[10^{-17}~ergs~s^{-1}~cm^{-2}~{Å}^{-1}] $$' if show_ylabel else ''
+        ylabel = r'$$ F_{\lambda}~[10^{-17}~erg~s^{-1}~cm^{-2}~{Å}^{-1}] $$' if show_ylabel else ''
 
         spectrum_overlay = hv.Overlay(overlays).opts(
                 opts.Overlay(
@@ -563,6 +574,7 @@ class DESISpectraClass(BaseSpectraClass):
         else:
             self.query_main_table(verbose = True)
             self.query_spectra_sparclid(verbose = True)
+        
         if self.spectra is not None:
             self.get_smoothed_spectra(kernel = "Box1dkernel",  window = 10)
         
@@ -630,7 +642,7 @@ class DESISpectraClass(BaseSpectraClass):
     
     def query_spectra_specid(self, verbose = False):
         include = ['sparcl_id', 'specid', 'data_release', 'redshift', 'flux',
-                            'wavelength', 'model', 'spectype', "ra", "dec"]
+                    'wavelength', 'model', 'spectype', "ra", "dec", "mask"]
         tic = time.perf_counter()
         if self.sourceId is not None:
             self.spectrum_query = self.client.retrieve_by_specid([self.sourceId], include = include,
@@ -805,7 +817,7 @@ class EuclidSpectraClass(BaseSpectraClass):
                 self.spectra = self._reorder_spectra(self.spectra, source_id)
                 self._add_info_spectra()
             else:
-                print("No spectra available spectra")
+                print("No available spectra")
         if self.spectra is not None:
             self.get_smoothed_spectra(kernel = "Box1dkernel",  window = 5)
         

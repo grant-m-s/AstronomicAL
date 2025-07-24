@@ -1,4 +1,5 @@
 from astronomicAL.settings.active_learning import ActiveLearningSettings
+from astronomicAL.settings.exploring import ExploringSettings
 from astronomicAL.settings.data_selection import DataSelection
 from astronomicAL.settings.param_assignment import ParameterAssignment
 from functools import partial
@@ -62,6 +63,12 @@ class SettingsDashboard:
             partial(self._create_pipeline_cb, mode="Labelling", main=main)
         )
 
+        self.select_exploring_mode_button = pn.widgets.Button(name="Exploring Mode")
+
+        self.select_exploring_mode_button.on_click(
+            partial(self._create_pipeline_cb, mode="Exploring", main=main)
+        )
+
     def _create_pipeline_cb(self, event, mode, main):
         main.mode = mode
         config.mode = mode
@@ -87,6 +94,15 @@ class SettingsDashboard:
                         margin=(0, 0, 0, 50),
                     ),
                     pn.Row(self.select_AL_mode_button, max_height=30),
+                ),
+                 pn.Column(
+                    pn.pane.PNG(
+                        "images/exploration.png",
+                        width=250,
+                        height=250,
+                        margin=(0, 0, 0, 50),
+                    ),
+                    pn.Row(self.select_exploring_mode_button, max_height=30),
                 ),
             )
         )
@@ -115,10 +131,10 @@ class SettingsDashboard:
                 ready_parameter="ready",
             ),
             self.pipeline.add_stage(
-                "Assign Parameters", ParameterAssignment(), ready_parameter="ready"
+                "Assign Parameters", ParameterAssignment(mode = mode), ready_parameter="ready"
             ),
             self.pipeline.add_stage(
-                "Active Learning Settings",
+                "Features Settings",
                 ActiveLearningSettings(self._close_settings_button, mode=mode),
             )
         elif mode == "Labelling":
@@ -128,11 +144,25 @@ class SettingsDashboard:
                 ready_parameter="ready",
             ),
             self.pipeline.add_stage(
-                "Assign Parameters", ParameterAssignment(), ready_parameter="ready"
+                "Assign Parameters", ParameterAssignment(mode = mode), ready_parameter="ready"
             ),
             self.pipeline.add_stage(
-                "Active Learning Settings",
+                "Features Settings",
                 ActiveLearningSettings(self._close_settings_button, mode=mode),
+            )
+
+        elif mode == "Exploring":
+            self.pipeline.add_stage(
+                "Select Your Data",
+                DataSelection(self.src, mode=mode),
+                ready_parameter="ready",
+            ),
+            self.pipeline.add_stage(
+                "Assign Parameters", ParameterAssignment(mode = mode), ready_parameter="ready"
+            ),
+            self.pipeline.add_stage(
+                "Features Settings",
+                ExploringSettings(self._close_settings_button, mode=mode),
             )
         else:
             valid_mode = False
@@ -176,7 +206,7 @@ class SettingsDashboard:
             "Assign Parameters"
         ].get_label_column()
         updated_settings["default_vars"] = self.pipeline[
-            "Active Learning Settings"
+            "Features Settings"
         ].get_default_variables()
         updated_settings["label_colours"] = self.pipeline[
             "Assign Parameters"
@@ -187,7 +217,7 @@ class SettingsDashboard:
     def _close_settings_cb(self, event, main):
         print("closing settings")
 
-        self.df = self.pipeline["Active Learning Settings"].get_df()
+        self.df = self.pipeline["Features Settings"].get_df()
 
         config.main_df = self.df
 
@@ -204,6 +234,9 @@ class SettingsDashboard:
             main.set_contents(updated="Active Learning")
         elif config.mode == "Labelling":
             main.set_contents(updated="Labelling")
+        
+        elif config.mode == "Exploring":
+            main.set_contents(updated="Exploring")
 
     def _stage_previous_cb(self, event):
 
@@ -241,7 +274,7 @@ class SettingsDashboard:
 
         else:
 
-            if self.pipeline["Active Learning Settings"].is_complete():
+            if self.pipeline["Features Settings"].is_complete():
                 self._close_settings_button.disabled = False
 
             self.row[0] = pn.Card(

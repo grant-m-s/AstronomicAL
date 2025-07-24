@@ -42,7 +42,7 @@ class Dashboard(param.Parameterized):
 
     contents = param.String()
 
-    def __init__(self, src, contents="Menu"):
+    def __init__(self, src, contents= "Menu"):
         super(Dashboard, self).__init__()
 
         self.src = src
@@ -54,10 +54,6 @@ class Dashboard(param.Parameterized):
         self._close_button = pn.widgets.Button(name="Close", max_width=100)
         self._close_button.on_click(self._close_button_cb)
         
-        self._switch_mode_button = pn.widgets.ToggleGroup(name="Mode", options = ["Labelling", "Exploration"],
-                                                          value = "Labelling", behavior="radio", sizing_mode = "stretch_both")
-        self._switch_mode_button.param.watch(self._switch_mode_cb, "value")
-
         self._submit_button = pn.widgets.Button(name="Submit Column Names")
         self._submit_button.on_click(self._submit_button_cb)
         
@@ -85,9 +81,6 @@ class Dashboard(param.Parameterized):
         self._cleanup_current_extension_plot()
         self.contents = "Menu"
     
-    def _switch_mode_cb(self, event):
-        self._cleanup_current_extension_plot()
-        self.contents = event.new
 
     def _update_extension_plots_cb(self, attr, old, new):
         if self.contents in list(self.plot_dict.keys()):
@@ -96,6 +89,7 @@ class Dashboard(param.Parameterized):
                 config.main_df, self.src
             )
             self.panel()
+
     
     def _cleanup_current_extension_plot(self):
         if self.current_extension_plot and hasattr(self.current_extension_plot, 'cleanup_panel_plot'):
@@ -139,11 +133,11 @@ class Dashboard(param.Parameterized):
 
         elif self.contents == "Labelling":
             self.df = config.main_df
-            self.panel_contents = LabellingDashboard(self.src, self.df, self._switch_mode_button)
+            self.panel_contents = LabellingDashboard(self.src, self.df)
         
-        elif self.contents == "Exploration":
+        elif self.contents == "Exploring":
             self.df = config.main_df
-            self.panel_contents = ExplorationDashboard(self.src, self.df, self._switch_mode_button)
+            self.panel_contents = ExplorationDashboard(self.src, self.df)
 
         elif self.contents == "Selected Source Info":
             if not config.settings["confirmed"]:

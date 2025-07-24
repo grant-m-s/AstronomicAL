@@ -5,26 +5,36 @@ from holoviews.operation.datashader import (
 
 import datashader as ds
 import holoviews as hv
+from holoviews import streams
 
-import astronomicAL.config as config
+import uuid
 import numpy as np
 import pandas as pd
 import panel as pn
 import param
+
+import astronomicAL.config as config
+from astronomicAL.extensions.shared_data import shared_data
 
 
 class BasePlotClass(param.Parameterized):
 
     def  __init__(self,  src, close_button):
         super().__init__()
-        self.figure = pn.pane.HoloViews(sizing_mode="stretch_both")
+        self.panel_id = str(uuid.uuid4()) 
         self.src = src
         self.df = config.main_df
         self.close_button = close_button
-        self.counter = 0
+        self.figure = pn.pane.HoloViews(sizing_mode="stretch_both")
+        self.settings_button = pn.widgets.Button(name="Settings ▾", button_type="primary",  max_height = 40, max_width=100)
+        self.settings_button.on_click(self._toggle_settings_panel)
     
     def update_df(self):
         self.df = config.main_df
+
+    def _toggle_settings_panel(self, event):
+        self.settings_panel.visible = not self.settings_panel.visible
+        self.settings_button.name = "Settings ▴" if self.settings_panel.visible else "Settings ▾"
 
     def get_variable_list(self, excluded_columns = ["id_col", "ra_dec", "label_col"]):
         """Returns the list of options used inside `X_variable` or `Y_variable`.
@@ -39,13 +49,41 @@ class BasePlotClass(param.Parameterized):
         self.update_df()
         cols = list(self.df.columns)
 
-        for exluded_col in excluded_columns:
-            if config.settings.get(exluded_col, "hopefully_not_a_column_name") in cols:
-                cols.remove(config.settings[exluded_col])
-            elif exluded_col in cols:
-                cols.remove(exluded_col)
+        for excluded_col in excluded_columns:
+            col_name = config.settings.get(excluded_col, excluded_col)
+            if col_name in cols:
+               cols.remove(col_name)
         
+        cols = [col for col in cols if self.df[col].dtype != "object"]
+
         return cols
+    
+    def get_id(self):
+        id_col = config.settings["id_col"]
+        if id_col == "Use Index":
+            ids = self.df.index.values
+        else:
+            ids = self.df[id_col].values
+        return ids
+        
+    
+    def remove_shared_data(self):
+        """Removes subscriptions and published data from the shared data"""
+        shared_data.cleanup_extension_panel(self.panel_id)
+        print(f"[{self.panel_id}] removed from shared data")
+
+    def remove_src_listener(self):
+        """Removes the callback to a change in the selected source"""
+        if self.src is not None and hasattr(self, "_src_callback"):
+            try:
+                self.src.remove_on_change("data", self._src_callback)
+                print(f"[{self.panel_id}] Listener removed")
+            except Exception as e:
+                print(f"[{self.panel_id}] Error removing src listener: {e}")
+
+    def cleanup_panel_plot(self):
+        self.remove_shared_data()
+        self.remove_src_listener()
     
 
 
@@ -67,19 +105,39 @@ class ScatterPlotDashboard(BasePlotClass):
 
     """
 
-    X_variable = param.Selector(
-        objects=["0"], default="0", doc="Selection box for the X axis of the plot."
-    )
+    X_variable = param.Selector(objects=["0"], default="0", doc="Selection box for the X axis of the plot.")
+    Y_variable = param.Selector(objects=["1"], default="1", doc="Selection box for the Y axis of the plot.")
+    log_xscale = param.Boolean(default=False, doc = "Use log for x axis")
+    log_yscale = param.Boolean(default=False, doc = "Use log for y axis")
+    label_selector = param.ListSelector(default=["All"], objects=["All"], doc="Labels to plot")
+    plot_mode = param.Selector(default="tap", objects=["tap", "rasterized"], doc= "Plot Mode")
+    
 
-    Y_variable = param.Selector(
-        objects=["1"], default="1", doc="Selection box for the Y axis of the plot."
-    )
 
     def __init__(self, src, close_button):
         super().__init__(src, close_button)
-        self.src.on_change("data", self._change_src_cb)
+        self._src_callback = self._change_source_cb
+        self.src.on_change("data", self._src_callback)
         self.update_variable_lists(excluded_columns = ["id_col", "label_col", "ra_dec"])
-        self.panel()
+        
+        self.settings_panel = pn.Column(
+            pn.Param(
+                self,
+                parameters=[
+                    "log_xscale", "log_yscale", "label_selector", "plot_mode"
+                ],
+                widgets={
+                        "label_selector": {"type": pn.widgets.MultiChoice, "width": 200, "height": 80},
+                        "plot_mode":  {"type" : pn.widgets.RadioBoxGroup}
+                },
+                show_name=False,
+                sizing_mode="stretch_width"
+            ),
+            visible=False,
+            margin=(10, 0, 0, 0)
+        )
+
+
 
     def update_variable_lists(self, excluded_columns = ["id_col", "label_col", "ra_dec"] ):
         self.param.X_variable.objects = self.get_variable_list(excluded_columns=excluded_columns)
@@ -88,17 +146,18 @@ class ScatterPlotDashboard(BasePlotClass):
         self.param.Y_variable.default = config.settings["default_vars"][1]
         self.X_variable = config.settings["default_vars"][0]
         self.Y_variable = config.settings["default_vars"][1]
+        self.param.label_selector.objects = ["All"] + list(config.settings["strings_to_labels"].keys())
 
-    def _change_src_cb(self, attr, old, new):
+    def _change_source_cb(self, attr, old, new):
         selected_src_plot = self.plot_selected(self.X_variable, self.Y_variable)
         if selected_src_plot is not None:
             self.figure.object = hv.Overlay(self.main_plot + selected_src_plot).collate()
 
-
     @staticmethod
     def get_axis_limits(x_var, Nsigma = 3):
-        
         x = x_var[np.isfinite(x_var)]
+        if len(x) == 0:
+            return 0, 1 
         max_x = np.max(x)
         min_x = np.min(x)
         x_sd = np.std(x)
@@ -108,7 +167,9 @@ class ScatterPlotDashboard(BasePlotClass):
         return min_x, max_x
     
 
-    @param.depends("X_variable", "Y_variable", watch=True)
+    @param.depends("X_variable", "Y_variable", "label_selector", "log_xscale",
+                   "log_yscale", "plot_mode",
+                   watch=True)
     def _update_plot(self):
         self.main_plot = self.plot()
         selected_src_plot = self.plot_selected(self.X_variable, self.Y_variable)
@@ -117,55 +178,87 @@ class ScatterPlotDashboard(BasePlotClass):
         else:
             self.figure.object = self.main_plot
     
-    def plot(self, x_var = None, y_var = None):
-        """Create a basic scatter plot of the data with the selected axis.
 
-        The data is represented as a Holoviews Datashader object allowing for
-        large numbers of points to be rendered at once. Plotted using a Bokeh
-        renderer, the user has full manuverabilty of the data in the plot.
+    def get_scatter_hv(self, x, y, sourceid = None,  plot_mode = "tap", color = "blue"):
 
-        Returns
-        -------
-        plot : Holoviews Object
-            A Holoviews plot
-
-        """
-        if x_var is None:
-            x_var = self.X_variable
-
-        if y_var is None:
-            y_var = self.Y_variable
-
-        if (self.df[[x_var, y_var]].dtypes == "object").any():
-            print("One of the selected columns is not of float or int type")
-            return
+        min_x, max_x = self.get_axis_limits(x)
+        min_y, max_y = self.get_axis_limits(y)
         
-        color_key = config.settings["label_colours"]
+        if plot_mode == "tap" and (sourceid is not None):
+            points = hv.Points((x, y, sourceid), kdims=["x", "y"], vdims=["id"]).opts(
+                     size = 5,
+                     xlim=(min_x, max_x),
+                     ylim=(min_y, max_y),
+                     tools = ["tap", "box_select"],
+                     active_tools=["tap"],
+                     selection_fill_color="red",
+                     nonselection_alpha=0.4,
+                     logx = self.log_xscale,
+                     logy = self.log_yscale,
+                     color=color,)
+            
+            sel_stream = streams.Selection1D(source=points)
 
-        p = hv.Points(
-            self.df,
-            [x_var, y_var], 
-        ).opts()
-        
-        min_x, max_x = self.get_axis_limits(self.df[x_var])
-        min_y, max_y = self.get_axis_limits(self.df[y_var])
-        plot = (
-            dynspread(
-                datashade(
-                    p,
-                    color_key=color_key,
-                    aggregator=ds.by(config.settings["label_col"], ds.count()),
-                ).opts(
-                    xlim=(min_x, max_x),
-                    ylim=(min_y, max_y),
-                    active_tools = [], 
+            def tap_callback(event):
+                if event.new:
+                   shared_data.publish(self.panel_id, "selected_sourceid", str(sourceid[event.new[0]]))
+                   for idx in event.new:
+                       print(sourceid[idx])
+
+            sel_stream.param.watch(tap_callback, 'index')
+                   
+        else:
+            points = hv.Points((x, y), kdims=["x", "y"]).opts( logx = self.log_xscale,
+                     logy = self.log_yscale)
+            points = dynspread(datashade(points, 
+                                       aggregator = ds.count(),
+                                       cmap = [color],
+                            ).opts(
+                            xlim=(min_x, max_x),
+                            ylim=(min_y, max_y),
+                           active_tools = [], 
                 ),
                 threshold=0.75,
-                how="saturate",
-            )
-        ).opts(legend_position="bottom_right")
-        self.counter +=1
-        print(f"Called Ivano scatter plot function overall {self.counter} times")
+                how="saturate").opts(legend_position="bottom_right")
+            
+        return points
+   
+    
+    def plot(self, x_var = None, y_var = None):
+
+        if x_var is None:
+            x_var = self.df[self.X_variable].to_numpy()
+        if y_var is None:
+            y_var = self.df[self.Y_variable].to_numpy()
+        
+        strings_to_plot = self.label_selector
+       
+        sourceid = self.get_id().astype(str) if self.plot_mode == "tap" else None
+        
+        if bool(strings_to_plot) and ("All" not in strings_to_plot or len(strings_to_plot)>1):
+           labels = self.df[config.settings["label_col"]]
+           labels_to_plot = [config.settings["strings_to_labels"][i] for i in strings_to_plot if i != "All"]
+        
+        else:
+            labels_to_plot = []
+       
+        self.overlays = []
+        if "All" in strings_to_plot:
+            h = self.get_scatter_hv(x_var, y_var,  sourceid = sourceid,  plot_mode = self.plot_mode, color = "blue")
+            self.overlays.append(h)
+            
+            
+        for i, label_to_plot in enumerate(labels_to_plot):
+            select = labels == label_to_plot
+            label_sourceid = sourceid[select] if sourceid is not None else None
+            h = self.get_scatter_hv(x_var[select], y_var[select],
+                                    sourceid = label_sourceid,
+                                    plot_mode = self.plot_mode,
+                                    color = config.settings["label_colours"][label_to_plot])
+                                    
+            self.overlays.append(h)          
+        plot = hv.Overlay(self.overlays).opts(active_tools = [], xlabel=self.X_variable,
+                                            ylabel=self.Y_variable)
         return plot
     
     def plot_selected(self, x_var, y_var):
@@ -186,19 +279,20 @@ class ScatterPlotDashboard(BasePlotClass):
     def panel(self):
         self._update_plot()
         return pn.Card(
-            pn.Row(self.figure, sizing_mode="stretch_both"),
-            header=pn.Row(
-                    pn.Spacer(width=25,),
-                self.close_button,
-                pn.Row(self.param.X_variable, max_width=100),
-                pn.Row(self.param.Y_variable, max_width=100),
-                max_width=400,
-
-            ),
+                  pn.Column(
+                      pn.Row(self.figure, sizing_mode="scale_both"),
+                        self.settings_panel, scroll = True),
+                  header=pn.Row(
+                        pn.Spacer(width=25,),
+                        self.close_button,
+                        pn.Row(self.param.X_variable, max_width=100),
+                        pn.Row(self.param.Y_variable, max_width=100),
+                        self.settings_button,
+                        max_width=400,
+                    ),
             collapsible=False,
             sizing_mode="stretch_both",
         )
-
 
 
 class HistoDashboard(BasePlotClass):
@@ -216,10 +310,10 @@ class HistoDashboard(BasePlotClass):
     def __init__(self, src, close_button):
         
         super().__init__(src, close_button)
-        self.src.on_change("data", self._change_src_cb)
+        self._src_callback = self._change_source_cb
+        self.src.on_change("data", self._src_callback)
         self.update_variable_lists(excluded_columns = ["id_col", "ra_dec"])
 
-        self.settings_button = pn.widgets.Button(name="Settings ▾", button_type="primary",  max_height = 40, max_width=100)
         self.settings_panel = pn.Column(
             pn.Param(
                 self,
@@ -239,19 +333,15 @@ class HistoDashboard(BasePlotClass):
             visible=False,
             margin=(10, 0, 0, 0)
         )
-        self.settings_button.on_click(self._toggle_settings_panel)
     
-    def _toggle_settings_panel(self, event):
-        self.settings_panel.visible = not self.settings_panel.visible
-        self.settings_button.name = "Settings ▴" if self.settings_panel.visible else "Settings ▾"
-    
+
     def update_variable_lists(self, excluded_columns = ["id_col", "ra_dec"] ):
         self.param.X_variable.objects = self.get_variable_list(excluded_columns=excluded_columns)
         self.param.X_variable.default = config.settings["default_vars"][0]
         self.X_variable = config.settings["default_vars"][0]
         self.param.label_selector.objects = ["All"] + list(config.settings["strings_to_labels"].keys())
 
-    def _change_src_cb(self, attr, old, new):
+    def _change_source_cb(self, attr, old, new):
         selected_src_plot = self.plot_selected(self.X_variable)
         if selected_src_plot is not None:
             self.figure.object = hv.Overlay(self.main_plot + selected_src_plot).collate()
@@ -330,7 +420,6 @@ class HistoDashboard(BasePlotClass):
             x_var = self.df[self.X_variable].to_numpy()
         
         strings_to_plot = self.label_selector
-        
         if bool(strings_to_plot) and ("All" not in strings_to_plot or len(strings_to_plot)>1):
            labels = self.df[config.settings["label_col"]]
            labels_to_plot = [config.settings["strings_to_labels"][i] for i in strings_to_plot if i != "All"]
@@ -376,8 +465,6 @@ class HistoDashboard(BasePlotClass):
         plot = hv.Overlay(self.overlays).opts(active_tools = [],
                                               xlim = (xmin, xmax),
                                               )
-        self.counter +=1 
-        print(f"called histogram plot function  {self.counter} times")
         return plot
     
     
@@ -412,7 +499,8 @@ class HistoDashboard(BasePlotClass):
                                 sizing_mode="stretch_both",
                         )
 
-        
+
+
 class PlotDashboard(param.Parameterized):
     """A Dashboard used for rendering dynamic plots of the data.
 
@@ -613,8 +701,6 @@ class PlotDashboard(param.Parameterized):
         ).opts(legend_position="bottom_right", 
                #shared_axes=False
                )
-        self.counter +=1 
-        print(f"Called basic plot scatter function  {self.counter} times")
         return plot
     
 
