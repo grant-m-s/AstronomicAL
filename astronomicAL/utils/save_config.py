@@ -108,6 +108,18 @@ def save_config_file(layout_from_js, trigger_text, autosave=False, test=False):
     export_config["ra_col_name"] = config.settings["ra_col_name"]
     export_config["dec_col_name"] = config.settings["dec_col_name"]
 
+    for i in layout:
+        curr_contents = config.dashboards[i].contents
+        if curr_contents == "BroadBand SED":
+            export_config["bands_used_SED"] = {
+                col: config.settings[col] for col in config.settings["bands_to_plot_SED"]}
+            err_bands = [f"err_{band}" for band in config.settings["bands_to_plot_SED"]]
+            export_config["bands_used_SED"] |= {
+                col: config.settings[col] for col in err_bands}
+        #here i am saving only the association between the columns and the bands, not all the SED
+        #settings
+
+
     if "classifiers" not in config.settings.keys():
         config.settings["classifiers"] = {}
 
