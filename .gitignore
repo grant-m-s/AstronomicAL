@@ -11,7 +11,7 @@ models
 *Euclid_and_Desi_reduced.fits
 *.DS_Store
 *.login
-*DESI-only.fits
+data/EDFN_DESI.fits
 
 
 
