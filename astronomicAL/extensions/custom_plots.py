@@ -816,6 +816,7 @@ class SEDPlotClass(CustomPlotClass):
 
     def _filter_selection_continue_cb(self, event):
         self.bands_to_plot = [band for band in self.checkboxes.keys() if  self.checkboxes[band].value]
+        config.settings["bands_to_plot_SED"] = self.bands_to_plot
         self.error_bands_to_plot = [f"err_{band}" for band in self.bands_to_plot]
         self.get_unknown_columns(self.bands_to_plot+self.error_bands_to_plot)
         if not self.stage == "plot":
