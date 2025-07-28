@@ -1,3 +1,8 @@
+
+import panel as pn
+import json
+import os
+from astropy.table import Table
 import astronomicAL.config as config
 from astronomicAL.dashboard.dashboard import Dashboard
 from astronomicAL.extensions.extension_plots import get_plot_dict
@@ -6,9 +11,7 @@ from astronomicAL.extensions.feature_generation import get_oper_dict
 from astronomicAL.extensions.models import get_classifiers
 from astronomicAL.extensions.query_strategies import get_strategy_dict
 from astronomicAL.settings.data_selection import DataSelection
-from astropy.table import Table
-import json
-import os
+
 
 
 def verify_import_config(curr_config_file):
@@ -114,9 +117,12 @@ def verify_import_config(curr_config_file):
                 missing_cols.append(col)
 
         if len(missing_cols) > 0:
-            has_error = True
-            error_message += f"The dataset is missing these columns:\n\n{missing_cols}\n\n **[Rerun astronomicAL and assign the settings yourself or manually edit `{filename}`, replacing the missing columns]**\n\n\n"
-            error_message += "\n\n-------------------------------\n\n"
+            allowed_missing = ["Use Index", "No Labels"]
+            if any(col not in allowed_missing for col in missing_cols):
+                wrong_cols = [col for col in missing_cols if col not in  allowed_missing]
+                has_error = True
+                error_message += f"The dataset is missing these columns:\n\n{wrong_cols}\n\n **[Rerun astronomicAL and assign the settings yourself or manually edit `{filename}`, replacing the missing columns]**\n\n\n"
+                error_message += "\n\n-------------------------------\n\n"
         if "feature_generation" not in missing_settings:
             opers = list(get_oper_dict().keys())
             missing_opers = []
@@ -136,7 +142,7 @@ def verify_import_config(curr_config_file):
                 "Basic Plot",
                 "Histogram Plot",
                 "Labelling",
-                'Exploration',
+                'Exploring',
                 "Selected Source Info",
             ] + plots
 
@@ -221,8 +227,6 @@ def create_layout_from_file(react):
 
     with open(config.layout_file) as layout_file:
         curr_config_file = json.load(layout_file)
-
-    print("Loading the customized layout here ivano")
 
     if len(curr_config_file.keys()) > 1:
 
@@ -318,3 +322,46 @@ def create_default_layout(react):
         num += 1
 
     return react
+
+
+def create_exploring_layout(react, filepath = "astronomicAL/exploring_layout.json"):
+    """
+    Creates aa different react template if Exploring mode is chosen
+    Parameters
+        ----------
+    react : pn.template.ReactTemplate
+        The react template instance to populate.
+    filepath : str
+        The path to the exploration layout JSON file
+    """
+    if not os.path.isfile(filepath):
+        print(f"I did not find the Exploring layout at {filepath}. Loading default layout.")
+        return create_default_layout(react)
+    
+    with open(filepath) as layout_file:
+        exploring_config = json.load(layout_file)
+
+    react.main.objects.clear() 
+    config.dashboards = {}
+
+    if "layout" not in exploring_config:
+        print(f"Error: The file '{filepath}' is missing the required 'layout' key.")
+        return react
+    
+    layout = exploring_config["layout"]
+    
+    for p, panel in layout.items():
+        start_row = panel["y"]
+        end_row = panel["y"] + panel["h"]
+        start_col = panel["x"]
+        end_col = panel["x"] + panel["w"]
+
+        contents = panel.get("contents", "Menu")
+
+        new_plot = Dashboard(src=config.source, contents=contents)
+        config.dashboards[p] = new_plot
+        react.main[start_row:end_row, start_col:end_col] = new_plot.panel()
+    
+    return react
+    
+

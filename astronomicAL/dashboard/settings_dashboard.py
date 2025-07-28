@@ -51,19 +51,22 @@ class SettingsDashboard:
             partial(self._close_settings_cb, main=main)
         )
 
-        self.select_AL_mode_button = pn.widgets.Button(name="Active Learning Mode")
+        self.select_AL_mode_button = pn.widgets.Button(name="Active Learning Mode", sizing_mode = "stretch_width", max_width =150,
+                                                       align="center")
 
         self.select_AL_mode_button.on_click(
             partial(self._create_pipeline_cb, mode="AL", main=main)
         )
 
-        self.select_labelling_mode_button = pn.widgets.Button(name="Labelling Mode")
+        self.select_labelling_mode_button = pn.widgets.Button(name="Labelling Mode", sizing_mode = "stretch_width", max_width =150,
+                                                              align="center")
 
         self.select_labelling_mode_button.on_click(
             partial(self._create_pipeline_cb, mode="Labelling", main=main)
         )
 
-        self.select_exploring_mode_button = pn.widgets.Button(name="Exploring Mode")
+        self.select_exploring_mode_button = pn.widgets.Button(name="Exploring Mode", sizing_mode = "stretch_width", max_width =150,
+                                                              align="center")
 
         self.select_exploring_mode_button.on_click(
             partial(self._create_pipeline_cb, mode="Exploring", main=main)
@@ -76,38 +79,42 @@ class SettingsDashboard:
 
     def create_mode_selection_menu(self):
         layout = pn.Card(
-            pn.Row(
-                pn.Column(
-                    pn.pane.PNG(
-                        "images/classification.png",
-                        width=250,
-                        height=250,
-                        margin=(0, 0, 0, 50),
-                    ),
-                    pn.Row(self.select_labelling_mode_button, max_height=30),
-                ),
-                pn.Column(
-                    pn.pane.PNG(
-                        "images/cluster.png",
-                        width=250,
-                        height=250,
-                        margin=(0, 0, 0, 50),
-                    ),
-                    pn.Row(self.select_AL_mode_button, max_height=30),
-                ),
-                 pn.Column(
-                    pn.pane.PNG(
-                        "images/exploration.png",
-                        width=250,
-                        height=250,
-                        margin=(0, 0, 0, 50),
-                    ),
-                    pn.Row(self.select_exploring_mode_button, max_height=30),
-                ),
+            pn.Column(
+                self._make_mode_row("images/classification.png", self.select_labelling_mode_button),
+                self._make_mode_row("images/cluster.png", self.select_AL_mode_button),
+                self._make_mode_row("images/exploration.png", self.select_exploring_mode_button),
+                min_height = 600,
+                )
+                
             )
-        )
 
         return layout
+    
+    def _make_mode_row(self, image_path, button):
+        return pn.Row(pn.pane.PNG(
+                                   image_path,
+                                   width = 200,
+                                   height = 200,          
+                                   margin=(0, 0, 5, 0),
+                                   ),
+                                   button,)      
+           
+    
+    def _make_mode_column(self, image_path, button):
+        return pn.Column(
+                        pn.pane.PNG(
+                                   image_path,
+                                   sizing_mode="stretch_width",  
+                                   aspect_ratio=1.0,             
+                                   margin=(0, 0, 5, 0),
+                                   max_height=250,
+                                   max_width = 250,
+                                   ),
+                                   pn.Spacer(height = 10),
+                                   pn.Row(button, min_height=40),        
+           
+                )
+
 
     def create_pipeline(self, mode):
         """Create the pipeline of setting stages.

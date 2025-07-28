@@ -29,15 +29,14 @@ class ExplorationDashboard(param.Parameterized):
         self._update_selected_src()
         
 
-        self.prev_button = pn.widgets.Button(name="Previous", button_type="primary", max_height = 80, max_width=150)
-        self.next_button = pn.widgets.Button(name="Next", button_type="primary",  max_height = 80, max_width=150)
-        self.prev_button = pn.widgets.Button(name="Previous", button_type="primary", max_height = 80, max_width=150)
-        self.search_button = pn.widgets.Button(name= "Search", button_type="primary",  max_height = 80, max_width=150)
-        self.sourceid_input = pn.widgets.TextInput(name = "SourceId", value = "")
+        self.prev_button = pn.widgets.Button(name="Previous", button_type="primary", max_height = 50, max_width=100)
+        self.next_button = pn.widgets.Button(name="Next", button_type="primary",  max_height = 50, max_width=100)
+        self.prev_button = pn.widgets.Button(name="Previous", button_type="primary", max_height = 50, max_width=100)
+        self.search_button = pn.widgets.Button(name= "Search", button_type="primary",  max_height = 50, max_width=100)
+        self.sourceid_input = pn.widgets.TextInput(name = "SourceId", value = "",  max_height = 50)
 
         self.extra_info_pane = pn.pane.DataFrame(self._get_extra_info_df(), index = False, header = False,
-                                                 sizing_mode="stretch_both")
-        
+                                                 sizing_mode="stretch_both" )
         self.prev_button.on_click(self._go_previous)
         self.next_button.on_click(self._go_next)
         self.search_button.on_click(self._search_button_cb)
@@ -125,7 +124,7 @@ class ExplorationDashboard(param.Parameterized):
         self.next_button.disabled = is_running
        
     def _subscribe_to_shared(self):
-        panels_using_multithread = ["EuclidCutout", "EuclidSpec", "DESI", "SDSS"]
+        panels_using_multithread = ["EuclidCutout", "EuclidSpec", "DESI", "SDSS", "VLASS", "LoTSS"]
         for panel in panels_using_multithread:
             shared_data.replace_subscribe(self.panel_id, f"{panel}_running", self._multithread_running_cb)
         shared_data.replace_subscribe(self.panel_id, "selected_sourceid", self._plot_selected_src_cb)
@@ -202,16 +201,30 @@ class ExplorationDashboard(param.Parameterized):
             df[config.settings["label_col"]] = np.nan
         return df
     
+
+    def _add_ra_dec_col(self, df):
+
+        new_df = df
+
+        ra_col_name = config.settings["ra_col_name"]
+        dec_col_name = config.settings["dec_col_name"]
+
+        new_df["ra_dec"] = df[ra_col_name].astype(str) + "," + df[dec_col_name].astype(str)
+      
+        return new_df
+
+
     def _preprocess_data(self):
         """Process all the data according to the config file. In exploring panel it just"
-           compute combination of features"""
+           compute combination of features and creating ra and dec column"""
         self.df = self._generate_fake_label_column(self.df)
         self.df = self._generate_features(self.df)
+        self.df = self._add_ra_dec_col(self.df)
 
 
     def get_layout(self):
         return pn.Column(pn.Param(self, parameters = ["index"], widgets={"index": pn.widgets.IntInput}),
-                         self.extra_info_pane,
+                         pn.Column(self.extra_info_pane, sizing_mode = "stretch_both", scroll = True, max_height = 200),
                          self.sourceid_input,
                          pn.Row(self.prev_button,self.next_button, self.search_button), sizing_mode = "stretch_both")
 

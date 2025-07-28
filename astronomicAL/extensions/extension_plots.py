@@ -48,23 +48,23 @@ def get_plot_dict():
 
         #"SDSS Spectrum from ID" : CustomPlot(spectrum_plot, ["SDSS_TargetID"], dataset="SDSS", from_sourceId=True),
 
-        "Mateos 2012 Wedge": CustomPlot(
-            mateos_2012_wedge, ["Log10(W3_Flux/W2_Flux)", "Log10(W2_Flux/W1_Flux)"]
-        ),
-        "BPT Plots": CustomPlot(
-            bpt_plot,
-            [
-                "Log10(NII_6584_FLUX/H_ALPHA_FLUX)",
-                "Log10(SII_6717_FLUX/H_ALPHA_FLUX)",
-                "Log10(OI_6300_FLUX/H_ALPHA_FLUX)",
-                "Log10(OIII_5007_FLUX/H_BETA_FLUX)",
-            ],
-        ),
-        "SED Plot": SEDPlot(sed_plot, []),
+        #"Mateos 2012 Wedge": CustomPlot(
+        #    mateos_2012_wedge, ["Log10(W3_Flux/W2_Flux)", "Log10(W2_Flux/W1_Flux)"]
+        #),
+        #"BPT Plots": CustomPlot(
+        #    bpt_plot,
+        #    [
+        #        "Log10(NII_6584_FLUX/H_ALPHA_FLUX)",
+        #        "Log10(SII_6717_FLUX/H_ALPHA_FLUX)",
+        #        "Log10(OI_6300_FLUX/H_ALPHA_FLUX)",
+        #        "Log10(OIII_5007_FLUX/H_BETA_FLUX)",
+        #    ],
+        #),
+        #"SED Plot": SEDPlot(sed_plot, []),
 
-        "VLA-VLASS Cutout" : CustomPlot(vlass_cutout_plot, []),
+        #"VLA-VLASS Cutout" : CustomPlot(vlass_cutout_plot, []),
 
-        "LOFAR-LoTSS Cutout" : CustomPlot(lotss_cutout_plot, []),
+        #"LOFAR-LoTSS Cutout" : CustomPlot(lotss_cutout_plot, []),
 
         "Stored Image"  : CustomPlot(local_stored_plot, ["Local_image_path"])
     }

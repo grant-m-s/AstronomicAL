@@ -14,13 +14,14 @@ import panel as pn
 import json
 import param
 import uuid
+import matplotlib.pyplot as plt
 import concurrent.futures 
 from bokeh.document import without_document_lock
 from bokeh.models import  NormalHead
 from bokeh.models import Range1d, LinearAxis
 from astronomicAL.extensions.shared_data import shared_data
 from astronomicAL.extensions.astro_data_utility import DESISpectraClass, EuclidCutoutsClass, EuclidSpectraClass
-import matplotlib.pyplot as plt
+from astronomicAL.extensions.astro_data_utility import VLASS_cutout, LoTSS_cutout
 
 
 
@@ -41,7 +42,14 @@ def get_customplot_dict():
                                                             extra_features=[], dataset="SDSS"),
 
         "BroadBand SED"  : lambda data, src, close_button : SEDPlotClass(data, src, close_button,
-                                                            extra_features=["Do not skip to Plot Stage"])
+                                                            extra_features=["Do not skip to Plot Stage"]),
+        
+        "VLASS Cutout"  : lambda data, src, close_button : RadioClass(data, src, close_button,
+                                                            extra_features=[], dataset="VLASS"),
+        
+        "LoTSS Cutout"  : lambda data, src, close_button : RadioClass(data, src, close_button,
+                                                            extra_features=[], dataset="LoTSS")                                                  
+
     }
 
     return plot_dict
@@ -243,10 +251,11 @@ class EuclidPlotClass(CustomPlotClass):
         self.ra, self.dec = self.get_ra_dec()
         if (self.ra is None) or (self.dec is None):
             print("no ra or dec available")
-            #TODO Raise esception
+            #TODO Raise exception
         else:
             self.euclid_object = EuclidCutoutsClass(self.ra, self.dec, 
-                             euclid_filters= ["VIS", "NIR_Y", "NIR_J", "NIR_H"])
+                             euclid_filters= ["VIS", "NIR_Y", "NIR_J", "NIR_H"],
+                             client = shared_data.get_data("Euclid_client", None))
             self.euclid_object.check_coverage()
             self.overplotted_coordinates = []
             
@@ -280,9 +289,39 @@ class EuclidPlotClass(CustomPlotClass):
         self.overplot_coords_widget = pn.widgets.Checkbox(name = "Spectrum Coordinates")
         self.overplot_coords_widget.param.watch(self._overplot_coordinates_callback, "value")
 
+
+        self.environment_input = pn.widgets.Select(name = "Euclid Science Archive Environment", 
+                                              options =  {"Public Data Release" : "PDR", "Internal Data Release" : "IDR", 
+                                                          "On The Fly" : "OTF", "REG" : "REG"},
+                                                           value  = "PDR",
+                                                           disabled_options=["REG"],
+                                                sizing_mode = "stretch_both")
+        self.environment_input.param.watch(self._change_euclid_environment, "value")
+
+        self.user_input = pn.widgets.TextInput(name = 'Euclid Science Archive username', 
+                                               placeholder = 'Enter your Euclid Science Archive username here',
+                                               sizing_mode = "stretch_both")
+        self.password_input = pn.widgets.PasswordInput(name = "Password", 
+                                                       placeholder = 'Enter your Euclid Science Archive password here',
+                                                       sizing_mode = "stretch_both")
+
+        self.confirm_login_button = pn.widgets.Button(name = "Confirm", sizing_mode = "stretch_both", max_height = 30, 
+                                                       max_width = 80, button_type= "primary")
+        self.confirm_login_button.on_click(self._confirm_login_credentials_cb)
+
+        self.login_column = pn.Column(self.user_input, self.password_input, self.confirm_login_button, visible = False)
+
+        
+        
+        
         self.plot_settings_panel = pn.Column(self.contrast_scaler, self.radius_input, self.stretching_input, 
                                              self.filter_input,
-                                             self.overplot_coords_widget, scroll = True, visible = False)
+                                             self.overplot_coords_widget, 
+                                             self.environment_input, 
+                                             self.login_column, 
+                                             scroll = True, visible = False)
+        
+
 
      
     def _update_radius(self, event):
@@ -367,7 +406,6 @@ class EuclidPlotClass(CustomPlotClass):
                                                                  size = 20,
                                                                  ))
     
-
     def _overplot_coordinates_callback(self, event):
         if event.new:
             if not hasattr(self, "stored_spectrum_coordinates"):
@@ -382,6 +420,37 @@ class EuclidPlotClass(CustomPlotClass):
         elif not event.new:
             self.overplotted_coordinates = []
         self._update_image()
+
+    def _change_euclid_environment(self, event):
+        self.environment = event.new
+        if self.environment in  ["IDR", "OTF", "REG"]:
+            if os.path.isfile("euclid_credentials.login"):
+                print("I found the credential file")
+                self.euclid_object.change_environment(environment=self.environment,
+                                                      user = None, password = None, 
+                                                      credentials_filepath = "euclid_credentials.login")
+                
+            else:
+                user = config.settings.get("EuclidAccountUser", None)
+                password = config.settings.get("EuclidAccountUser", None)
+                if (user is None) or (password is None):
+                    self.login_column.visible = True
+                else:
+                    self.euclid_object.change_environment(environment=self.environment,
+                                                      user = user, password = password)
+        else:
+            self.euclid_object.change_environment(environment=self.environment)        
+
+
+    def _confirm_login_credentials_cb(self, event):
+        self.login_column.visible = False
+        config.settings["EuclidAccountUser"] = self.user_input.value
+        config.settings["EuclidAccountPassword"] = self.password_input.value
+        self.euclid_object.change_environment(environment=self.environment,
+                                                      user = config.settings["EuclidAccountUser"], 
+                                                      passwsord = config.settings["EuclidAccountPassword"])
+
+
 
     def get_plot_scale(self):
         bar_length_arcsecond = self.bar_length_pixels * self.euclid_object.arcsec_per_pix[self.filter]
@@ -437,7 +506,9 @@ class EuclidPlotClass(CustomPlotClass):
         if not self.euclid_object.has_coverage:
             print("The Source is not contained in Euclid mocs")
             self.message_pane.object = "##The source is not in the Euclid covered area"
-            self.figure.object = hv.Image(np.zeros((10,10)))
+            self.figure.object = hv.Image(np.zeros((10,10)),  active_tools =[], toolbar=None,
+                                            padding = 0,border = 0,framewise = True, xaxis=None, 
+                                         yaxis=None, cmap = "grey")
 
         shared_data.publish(self.panel_id, "EuclidCutout_running", True)
  
@@ -447,7 +518,9 @@ class EuclidPlotClass(CustomPlotClass):
             if result is None:
                 self.message_pane.object = "## The Euclid cutout query failed"
                 self.message_pane.visible = True #probably already visible
-                self.figure.object = hv.Image(np.zeros((10,10)))
+                self.figure.object = hv.Image(np.zeros((10,10)),  active_tools =[], toolbar=None,
+                                            padding = 0,border = 0,framewise = True, xaxis=None, 
+                                         yaxis=None, cmap = "grey")
                 return
 
             self.overplot_coords_widget.value = False
@@ -624,7 +697,6 @@ class SpectrumPlotClass(CustomPlotClass):
          self.max_separation_input.value = new_separation
 
 
-
     @param.depends("stage")
     def mypanel(self):
         if self.stage == "column_selection":
@@ -646,7 +718,9 @@ class SEDPlotClass(CustomPlotClass):
         self.src.on_change("data", self._src_callback)
 
     def _change_source_cb(self, attr, old, new):
+        print("enterd first cb")
         if self.stage == "plot":
+            print("now i am calling _update_plot")
             self._update_plot(new)
     
     
@@ -954,13 +1028,88 @@ class SEDPlotClass(CustomPlotClass):
                                                skippable=True)
         else:
             return self.plot_panel()
+
+class RadioClass(CustomPlotClass):
+    
+    def __init__(self, data, src, close_button, extra_features, dataset):
+        super().__init__(data, src, close_button, extra_features)
+        self._src_callback = self._change_source_cb
+        self.src.on_change("data", self._src_callback)
+        self.dataset = dataset
+        self._initialize_source()
+        self.radius = 20
+
+    def _initialize_source(self):
+        self.ra, self.dec = self.get_ra_dec()
+        if (self.ra is None) or (self.dec is None):
+            self.message_pane.visible = True
+            self.message_pane.object = ["Missing Ra and dec"]   
+
+    def _change_source_cb(self, attr, old, new):
+        self._initialize_source()
+        self._run_radio(radius = self.radius)
+
+    def get_layout(self):
+        self._initialise_widgets()
+        self._run_radio(radius = self.radius)
+        return  pn.Column(self.message_pane, self.figure, self.plot_settings_panel, 
+                          scroll = True, sizing_mode = "stretch_both")
+
+    def _initialise_widgets(self):
+
+        self.radius_input = pn.widgets.FloatInput(name = "Radius [arcsec]", value = self.radius, 
+                                                  step = 1, start = 1, end = 100, max_width = 200,
+                                                  sizing_mode="stretch_both")
+        self.radius_input.param.watch(self._update_radius, "value")
         
+        self.plot_settings_panel = pn.Column(self.radius_input, 
+                                             scroll = True, visible = False)
+        
+    def _update_radius(self, event):
+        if event.new: 
+            self.radius = event.new
+            self._run_radio(radius = self.radius)
+        else:
+            print("Input a valid value for radius")
+
+    def _run_radio(self, radius = 20):
+        self.message_pane.visible = True
+        shared_data.publish(self.panel_id, f"Radio_running", True)
+
+        def callback(future_obj = None):
+            shared_data.publish(self.panel_id, "Radio_running", False)
+            print("I am calling the radio callback ")
+            result = future_obj.result() 
+            if result is None:
+                self.message_pane.object = f"## {self.dataset} cutout query failed"
+                self.message_pane.visible = True #probably already visible
+            elif result is not None:
+                self.figure.objects = [self.get_radio_figure(result)]
+
+        if self.dataset == "VLASS":
+            self.run_multithread(VLASS_cutout, 
+                             func_kwargs = {"ra" : self.ra, "dec" : self.dec,
+                                            "radius" : radius},
+                             callback=callback)
+        elif self.dataset == "LoTSS":
+            self.run_multithread(LoTSS_cutout, 
+                             func_kwargs = {"ra" : self.ra, "dec" : self.dec,
+                                            "radius" : self.radius},
+                             callback=callback)
 
     
-    
-
-
-
+    def get_radio_figure(self, data):
+        self.image_height, self.image_width,  = data.shape[:2]
+        bounds = (0, 0, self.image_height, self.image_width)
+        image = hv.Image(data[::-1,...], bounds=bounds).opts(
+                                         active_tools =[], toolbar=None,
+                                         padding = 0,
+                                         border = 0,
+                                         framewise = True,
+                                         xaxis=None, 
+                                         yaxis=None,
+                                         )
+        return image
 
     
     

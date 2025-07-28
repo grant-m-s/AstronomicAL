@@ -1,8 +1,10 @@
 from bokeh.models import ColumnDataSource
-
-import astronomicAL.config as config
 import panel as pn
 import param
+
+from astronomicAL.utils import load_config
+import astronomicAL.config as config
+
 
 
 class ParameterAssignment(param.Parameterized):
@@ -70,17 +72,19 @@ class ParameterAssignment(param.Parameterized):
         self.confirm_settings_button.on_click(self._confirm_settings_cb)
 
         self.extra_info_selector = pn.widgets.MultiChoice(
-            name="Extra Columns that will be shown in a table when inspecting a source:",
+            name="Columns shown when inspecting a source:",
             value=[],
             options=[],
-            max_width=700,
+            max_width=300,
+            sizing_mode = "stretch_both",
         )
 
         self.extra_images_selector = pn.widgets.MultiChoice(
-            name="Extra Columns containing image URLs that will be displayed when inspecting a source:",
+            name="Columns containing image URLs shown when inspecting a source:",
             value=[],
             options=[],
-            max_width=700,
+            max_width=300,
+            sizing_mode = "stretch_both",
         )
 
     def update_data(self, dataframe=None):
@@ -111,7 +115,7 @@ class ParameterAssignment(param.Parameterized):
                 self.param.label_column.objects = ["No Labels"] + cols
             else:
                 self.param.id_column.objects =  cols
-                self.param.label_column.objects = cols
+                self.param.label_column.objects =  cols
             
             self.param.id_column.default = cols[0]
             self.id_column = cols[0]
@@ -134,7 +138,8 @@ class ParameterAssignment(param.Parameterized):
         """
         self.label_strings_param = {}
         self.colours_param = {}
-        if self.label_column not in self.df.columns and self.label_column == "No Labels":
+
+        if (self.label_column not in self.df.columns) or (self.label_column == "No Labels"):
             self.labels = []
             config.settings["labels"] = self.labels
         else:
@@ -191,6 +196,11 @@ class ParameterAssignment(param.Parameterized):
 
     def _confirm_settings_cb(self, event):
         print("Saving settings...")
+        
+        if (self.label_column == "") or (self.id_column == ""):
+            print("Select valid label and ID columns")
+            return
+
         self.confirm_settings_button.name = "Assigning parameters..."
         self.confirm_settings_button.disabled = True
 
@@ -201,6 +211,15 @@ class ParameterAssignment(param.Parameterized):
 
         config.settings["extra_info_cols"] = self.extra_info_selector.value
         config.settings["extra_image_cols"] = self.extra_images_selector.value
+
+       
+        #if config.mode == "Exploring":
+        #    print("Exploration mode selected. Changing layout...")
+        #    load_config.create_exploring_layout(
+        #        config.react_template, 
+        #        filepath="astronomicAL/exploring_layout.json"
+        #    )
+
         self.confirm_settings_button.name = "Confirmed"
         self.ready = True
 
@@ -340,7 +359,10 @@ class ParameterAssignment(param.Parameterized):
                     pn.Row(self.param.id_column, max_width=150, max_height = 30),
                     pn.Row(self.param.label_column, max_width=150, max_height = 30),
                     max_width=600,
-                )
+                ),
+                sizing_mode = "stretch_both",
+                max_height = 900,
+                min_height = 700,
             )
 
             if len(self.colours_param.keys()) > 0:
@@ -372,9 +394,10 @@ class ParameterAssignment(param.Parameterized):
                         "**Choose which extra information you want to view when inspecting each source:**",
                         margin=0,
                         max_height=20,
+                        max_width=300,
                     )
                 )
-            layout.append(pn.Spacer(height=100))
+            layout.append(pn.Spacer(height=50))
             layout.append(
                 pn.layout.Tabs(
                     (
@@ -389,15 +412,13 @@ class ParameterAssignment(param.Parameterized):
                     )
                 )
 
-            layout.append(pn.Spacer(height=100))
+            layout.append(pn.Spacer(height=30))
 
             layout.append(
                 pn.Row(
                     self.confirm_settings_button,
                     )
                 )
-
-            layout.append(pn.Spacer(height=80))
 
             self.column[0] = layout
 

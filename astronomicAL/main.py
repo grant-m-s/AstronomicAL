@@ -16,7 +16,6 @@ hv.renderer("bokeh").webgl = True
 
 
 
-
 def export_fits_file_cb(event):
 
     list_ids = []
