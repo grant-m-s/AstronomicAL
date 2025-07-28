@@ -13,6 +13,7 @@ import pandas as pd
 import panel as pn
 import param
 import time
+import os
 
 
 class DataSelection(param.Parameterized):
@@ -129,7 +130,12 @@ class DataSelection(param.Parameterized):
 
     def _get_config_files(self):
         files = glob.glob("configs/*.json")
-        return files
+        exploring_file = "configs/exploring_default.json"
+        files = [f for f in files if f != exploring_file]
+        if self.mode == "Exploring" and os.path.exists(exploring_file):
+            files = [exploring_file] + sorted(files)     
+        return files 
+
 
     def _init_load_config_options(self):
         if self.mode == "AL":
@@ -148,7 +154,7 @@ class DataSelection(param.Parameterized):
         elif self.mode == "Exploring":
             options = [
                 "Only load layout. Let me choose all my own settings",
-                "Load all settings and begin labelling data.",
+                "Load all settings and begin exploring data.",
             ]
         else:
             options = []
@@ -178,7 +184,7 @@ class DataSelection(param.Parameterized):
         from astronomicAL.utils.load_config import (
             verify_import_config,
         )  # causes circular import error at top
-
+        
         has_error, error_message = verify_import_config(curr_config_file)
 
         if has_error:
@@ -191,10 +197,18 @@ class DataSelection(param.Parameterized):
             self.error_message = ""
             self.load_data_button_js.name = "Load Data"
             self.load_data_button_js.disabled = False
-
+        
         self.panel_col = self.panel()
 
         print(f"Config load level: {config.settings['config_load_level']}")
+
+    @param.depends("config_file", watch=True)
+    def update_available_loading_options(self):
+        if self.config_file.endswith("exploring_default.json"):
+            self.param.load_config_select.objects = ["", "Only load layout. Let me choose all my own settings"]
+        else:
+            self.param.load_config_select.objects = [""] + self._init_load_config_options()
+
 
     def get_dataframe_from_fits_file(self, filename, optimise_data=None):
         """Load data from FITS file into dataframe.

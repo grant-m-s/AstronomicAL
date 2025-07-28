@@ -10,7 +10,7 @@ models
 *.bak 
 *Euclid_and_Desi_reduced.fits
 *.DS_Store
-test_app.py
+*.login
 
 
 

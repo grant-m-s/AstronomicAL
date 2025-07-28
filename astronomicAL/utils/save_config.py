@@ -105,6 +105,8 @@ def save_config_file(layout_from_js, trigger_text, autosave=False, test=False):
     export_config["scale_data"] = config.settings["scale_data"]
     export_config["feature_generation"] = config.settings["feature_generation"]
     export_config["test_set_file"] = config.settings["test_set_file"]
+    export_config["ra_col_name"] = config.settings["ra_col_name"]
+    export_config["dec_col_name"] = config.settings["dec_col_name"]
 
     if "classifiers" not in config.settings.keys():
         config.settings["classifiers"] = {}

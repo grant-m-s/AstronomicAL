@@ -6,7 +6,7 @@ from io import BytesIO
 import numpy as np
 import pandas as pd
 from astropy import units as u
-from astroquery.esa.euclid import Euclid
+from astroquery.esa.euclid import EuclidClass, Euclid
 from astroquery.cadc import Cadc
 from astropy.io import fits
 from astropy.wcs import WCS
@@ -34,23 +34,45 @@ class EuclidCutoutsClass:
     
     def __init__(self, ra, dec, 
                  euclid_filters = ["VIS", "NIR_Y", "NIR_J", "NIR_H"],
+                 client = None, 
                  save_dir = "data/cutouts"):
+        
+        if client is None:
+            shared_data.set_data("Euclid_client", EuclidClass(environment="PDR"))
+            print("Initialized EuclidClass")
+            self.client = shared_data.get_data("Euclid_client")
+        else:
+            self.client = client
+
         self.coordinates = SkyCoord(ra, dec, unit = "degree", frame = "icrs")   
         self.euclid_filters = euclid_filters
         self.save_dir = save_dir
         if not os.path.isdir(self.save_dir):
             os.makedirs(self.save_dir)
 
+    def change_environment(self, environment, user = None, password = None, credentials_filepath = None):
+        """This function handles the change of the environment of the client EuclidClass
+            Note that at the moment there is no way to automatically recognize if the login failed"""
+        assert environment in ("PDR", "IDR", "OTF", "REG"), "environment must be  'PDR', 'IDR,, 'OTF', 'REG'"
+        shared_data.set_data("Euclid_client", EuclidClass(environment= environment))
+        self.client = shared_data.get_data("Euclid_client")
+        if environment != "PDR":
+            if credentials_filepath is not None:
+                self.client.login(user = None, password = None, credentials_file = credentials_filepath)
+            else:
+                self.client.login(user = user, password = password, credentials_file = None)
+
     
     def get_cone(self, initial_radius = 0.5*u.degree, async_job= False, verbose = True):
         tic = time.perf_counter()
-        job = Euclid.cone_search(self.coordinates, initial_radius, table_name = "sedm.mosaic_product", ra_column_name="ra",
+        job = self.client.cone_search(self.coordinates, initial_radius, table_name = "sedm.mosaic_product", ra_column_name="ra",
                                       dec_column_name="dec", columns="*", async_job= async_job)
         self.cone_results = job.get_results()
         toc = time.perf_counter()
         if verbose:
             print(f"Cone search required {toc-tic} seconds")
-        
+    
+    
     
     @staticmethod
     def get_info_cutout(cone_results, filter_name):
@@ -67,7 +89,7 @@ class EuclidCutoutsClass:
         else:
             fname = f"{fname}_{band}" #need a different fname in each of the bands
         output_file = os.path.join(self.save_dir, f"{fname}.fits")  #This is not unique, cutous might be overwritten
-        return Euclid.get_cutout(file_path=file_path, instrument=instrument, id=obs_id, 
+        return self.client.get_cutout(file_path=file_path, instrument=instrument, id=obs_id, 
                                 coordinate=self.coordinates, radius = self.cutout_radius, output_file=output_file)[0]
 
 
@@ -238,9 +260,9 @@ class EuclidCutoutsClass:
     def clean_space(self):
         """free quota of queries to Euclid Science Archibe by removing asinchronous jobs 
          It takes a couple of minutes"""
-        joblist = Euclid.list_async_jobs()
+        joblist = self.client.list_async_jobs()
         to_remove = [j.jobid for j in joblist]
-        Euclid.remove_jobs(to_remove)
+        self.client.remove_jobs(to_remove)
 
 
 
@@ -687,8 +709,14 @@ class SpectrumContainer:
 
 class EuclidSpectraClass(BaseSpectraClass):
 
-    def __init__(self, ra, dec, max_separation =1, sourceId = None):
+    def __init__(self, ra, dec, max_separation =1, sourceId = None, client = None):
         super().__init__(ra, dec, max_separation = max_separation, sourceId = sourceId)
+        if client is None:
+            shared_data.set_data("Euclid_client", EuclidClass(environment = "PDR"))
+            print("Initialized EuclidClass")
+            self.client = shared_data.get_data("Euclid_client")
+        else:
+            self.client = client
 
 
     def query_table(self, verbose = False):
@@ -715,7 +743,7 @@ class EuclidSpectraClass(BaseSpectraClass):
         #    #LEFT JOIN catalogue.spectro_zcatalog_spe_qso_candidates AS qso on spec.source_id = qso.object_id
 
         tic = time.perf_counter()
-        job = Euclid.launch_job(query)
+        job = self.client.launch_job(query)
         try:
             self.table_results = job.get_results()
             self.available_spectra = len(self.table_results)
@@ -850,6 +878,8 @@ def LoTSS_cutout(ra, dec, radius = 10, check_coverage = True):
 
 
 def VLASS_cutout(ra, dec, radius = 10, verbose = False, check_coverage = True):
+    import warnings
+    from bs4 import XMLParsedAsHTMLWarning
     if check_coverage:
         has_coverage = check_isin_survey(ra, dec, survey = "VLASS")
     else: 
@@ -857,6 +887,7 @@ def VLASS_cutout(ra, dec, radius = 10, verbose = False, check_coverage = True):
     if has_coverage:
         cadc = Cadc()
         coordinates = SkyCoord(ra*u.deg, dec*u.deg, frame = "icrs")
+        warnings.filterwarnings("ignore", category= XMLParsedAsHTMLWarning)
         tic = time.perf_counter()
         query_results = cadc.query_region(coordinates = coordinates, radius = radius*u.arcsec, 
                                         collection = "VLASS")

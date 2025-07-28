@@ -30,7 +30,6 @@ class ExploringSettings(param.Parameterized):
         assigned.
 
     """
-
     def __init__(self, close_button, mode):
 
         self.df = None
@@ -59,8 +58,8 @@ class ExploringSettings(param.Parameterized):
         self.feature_selector._search[True].max_width = 300
         self.feature_selector._search[False].max_width = 300
 
-        self.feature_selector._lists[True].width = 500
-        self.feature_selector._lists[False].width = 500
+        self.feature_selector._lists[True].width = 600
+        self.feature_selector._lists[False].width = 600
 
         self.feature_selector._buttons[True].max_width = 50
         self.feature_selector._buttons[False].max_width = 50
@@ -68,8 +67,8 @@ class ExploringSettings(param.Parameterized):
         self.feature_selector._buttons[True].max_height = 30
         self.feature_selector._buttons[False].max_height = 30
 
-        self.feature_selector._buttons[True].margin = (50, 20, 0, 20)
-        self.feature_selector._buttons[False].margin = (10, 20, 0, 20)
+        self.feature_selector._buttons[True].margin = (50, 10, 0, 10)
+        self.feature_selector._buttons[False].margin = (10, 10, 0, 10)
 
         self.feature_selector._composite[:] = [
             self.feature_selector._unselected,
@@ -87,7 +86,7 @@ class ExploringSettings(param.Parameterized):
             value=[],
             options=[],
             width=500,
-            max_width=500,
+            max_width=600,
             # sizing_mode="fixed",
         )
 
@@ -99,15 +98,6 @@ class ExploringSettings(param.Parameterized):
             options=list(feature_generation.get_oper_dict().keys()),
             max_height=30,
         )
-
-        #self.feature_generator_number = pn.widgets.IntInput(
-        #    name="How many features to combine?",
-        #    value=2,
-        #    step=1,
-        #    start=2,
-        #    end=5,
-        #    max_height=50,
-        #)
 
         self._add_feature_generator_button = pn.widgets.Button(name=">>", max_width=80)
         self._add_feature_generator_button.on_click(self._add_feature_selector_cb)
@@ -122,14 +112,13 @@ class ExploringSettings(param.Parameterized):
             name="",
             index=False,
         )
-
-        self.default_x_variable = pn.widgets.Select(
-            name="Default x variable", options=[]
+        self.ra_column_selector = pn.widgets.Select(
+            name="Column with RA values", options=[], max_height = 30
         )
-        self.default_y_variable = pn.widgets.Select(
-            name="Default y variable", options=[]
+        self.dec_column_selector = pn.widgets.Select(
+            name="Column with Dec values", options=[], max_height = 30
         )
-
+        
         self.confirm_settings_button = pn.widgets.Button(
             name="Confirm Settings", button_type="primary"
         )
@@ -138,16 +127,11 @@ class ExploringSettings(param.Parameterized):
 
 
 
-
-
     def _verify_valid_selection_cb(self, event):
 
         selected_features = self.feature_selector.value
 
-
         confirm_settings = False
-
-
 
         if len(selected_features) < 2:
             confirm_settings = True
@@ -158,8 +142,6 @@ class ExploringSettings(param.Parameterized):
 
         self.confirm_settings_button.disabled = confirm_settings
        
-        self._update_default_var_lists()
-
         self.panel()
 
     def update_data(self, dataframe=None):
@@ -190,6 +172,10 @@ class ExploringSettings(param.Parameterized):
                 pass 
 
             self.feature_selector.options = features
+            self.ra_column_selector.options = features
+            self.dec_column_selector.options = features
+    
+
 
     def _add_feature_selector_cb(self, event):
 
@@ -200,48 +186,18 @@ class ExploringSettings(param.Parameterized):
             self._feature_generator_dataframe.object = pd.DataFrame(
                 [i[0] for i in self.feature_generator_selected], columns=["oper"])
 
-        self._update_default_var_lists()
 
-
-    def _update_default_var_lists(self):
-
-        selected_features = self.feature_selector.value
-
-        config.settings["features_for_training"] = selected_features
-
-        if selected_features == []:
-            return
-        else:
-            oper_dict = feature_generation.get_oper_dict()
-
-            for oper, n in self.feature_generator_selected:
-
-                _, generated_features = oper_dict[oper](
-                    pd.DataFrame(columns=selected_features), n
-                )
-                selected_features = selected_features + generated_features
-
-        self.default_x_variable.options = selected_features
-        self.default_y_variable.options = selected_features
 
     def _remove_feature_selector_cb(self, event):
         self.feature_generator_selected = self.feature_generator_selected[:-1]
         self._feature_generator_dataframe.object = pd.DataFrame(
              [i[0] for i in self.feature_generator_selected], columns=["oper"])
         
-        self._update_default_var_lists()
+
 
     def get_default_variables(self):
-        x_var = self.default_x_variable.value
-        y_var = self.default_y_variable.value
-        if x_var == y_var:
-            print("X and Y variables cannot be the same, using the next available option")   #TODO Print on the dashboard rather than in terminal
-            if len(self.default_x_variable.options) > 1:
-                for option in self.default_x_variable.options:
-                    if option != x_var:
-                        y_var = option
-                        break
-    
+        x_var = self.feature_selector.value[0]
+        y_var = self.feature_selector.value[1]
         return (x_var, y_var)
 
 
@@ -261,13 +217,16 @@ class ExploringSettings(param.Parameterized):
         config.settings["feature_generation"] = self.feature_generator_selected
         config.settings["test_set_file"] = False
         config.settings["confirmed"] = True
+        config.settings["ra_col_name"] = self.ra_column_selector.value
+        config.settings["dec_col_name"] = self.dec_column_selector.value
+
         if "save_button" in config.settings.keys():
             config.settings["save_button"].disabled = False
 
         self.completed = True
         self.close_button.disabled = False
         self.close_button.button_type = "success"
-
+        
         self.panel()
 
     def get_df(self):
@@ -327,10 +286,8 @@ class ExploringSettings(param.Parameterized):
                     self._feature_generator_dataframe,
                    sizing_mode="stretch_width",
                 ),
-                pn.Row(
-                    self.default_x_variable,
-                    self.default_y_variable,
-                ),
+                pn.Row(self.ra_column_selector,
+                       self.dec_column_selector),
                 pn.Row(self.confirm_settings_button, max_height=30),
                 pn.Row(pn.Spacer(height=30)),
             )
