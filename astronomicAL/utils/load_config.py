@@ -217,6 +217,10 @@ def update_config_settings(imported_config):
             for i in imported_config["label_colours"]:
                 label_colours[int(i)] = imported_config["label_colours"][i]
             config.settings[key] = label_colours
+        elif key == "bands_used_SED":
+            for k, value in imported_config[key].items():
+                config.settings[k] = value
+
         else:
             config.settings[key] = imported_config[key]
 

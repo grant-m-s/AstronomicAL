@@ -706,11 +706,11 @@ class SpectrumPlotClass(CustomPlotClass):
         
 
 class SEDPlotClass(CustomPlotClass):
-    """A class used to plot the Broadband SED of the selected source. By default all fluxes are 
-       assumed to be either in magnitudes or microJy"""
+    """A class used to plot the Broadband SED of the selected source. At the moment all fluxes should 
+    have the same units"""
 
-    stage = param.ObjectSelector(default="filter_selection", objects=["filter_selection", "column_selection_filters",
-                                                                      "column_selection_errors", "plot"])
+    stage = param.ObjectSelector(default= "filter_selection", objects=["filter_selection", "column_selection_filters",
+                                                            "column_selection_errors", "column_selection_band", "plot"])
 
     def __init__(self, data, src, close_button, extra_features):
         super().__init__(data, src, close_button, extra_features)
@@ -863,6 +863,38 @@ class SEDPlotClass(CustomPlotClass):
         self.fwhm = np.array([self.filter_data[band]["FWHM"] for band in self.bands_to_plot]).flatten()
         self.fwhm = np.where(np.logical_and(np.isfinite(self.fwhm), self.fwhm>0), self.fwhm, np.nan) #avoid potential issues
 
+    
+    def units_selection_panel(self, columns_to_select, skippable = False):
+        settings_grid = pn.GridBox(ncols=3, sizing_mode = "stretch_width", scroll = True)  
+        options = ["AB magnitudes", "milliJy", "microJy", "nanoJy", "cgs (erg/s/Hz)"]  
+        submit_button = pn.widgets.Button(name='Confirm', button_type='primary', max_height=120)
+        submit_button.on_click(self._submit_button_cb)
+        
+        skip_button = pn.widgets.Button(name='Skip', button_type='primary', max_height=120)
+        skip_button.on_click(self._skip_button_cb)
+        if not skippable:
+            skip_button.disabled = True
+        for col in columns_to_select:
+            select_widget = pn.widgets.Select(name= col, options=options, max_height=120, sizing_mode = "stretch_width")
+            settings_grid.append(select_widget)
+            self.select_widgets[col] = select_widget
+
+        def change_all_selections(event):
+            value = event.new
+            for col in columns_to_select:
+                self.select_widgets[col].value = value
+
+        master_select_widget = pn.widgets.Select(name= "Apply same units to all columns", options=options, max_height=120, sizing_mode = "stretch_width")
+        master_select_widget.param.watch(change_all_selections, "value")
+        
+    
+        return pn.Card(pn.Column(master_select_widget,settings_grid, scroll = True),
+                       header = pn.Row(pn.Spacer(width=25), self.close_button, skip_button, submit_button),
+                       sizing_mode="stretch_both", scroll=True, collapsible = False, min_height = 300 )
+    
+    
+
+
 
     def get_fluxes_from_selected_source(self):
         selected_source = self.get_selected_source()
@@ -881,7 +913,7 @@ class SEDPlotClass(CustomPlotClass):
         self._initialize_settings_panel()
         self.flux, self.flux_err = self.get_fluxes_from_selected_source()
         self.clean_fluxes()
-        y, y_err = self.convert_to_microjy(self.flux, self.flux_err, starting_unit=self.unit_selector.value)
+        y, y_err = self.convert_to_microjy(self.flux, self.flux_err,  band_units=self.unit_selector.value)
         self.figure.object = self.plot_SED(self.wavlen, y, y_err, self.fwhm)
         self.message_pane.visible = False
         return pn.Column(self.message_pane, self.figure, self.plot_settings_panel, scroll = True, sizing_mode = "stretch_both")
@@ -968,8 +1000,6 @@ class SEDPlotClass(CustomPlotClass):
         fig.add_layout(mag_axis, 'right')
 
 
-
-    
     @staticmethod
     def mag_to_flux(mag, err_mag):
         """Converts AB magnitudes in flux densities in microJy"""    
@@ -985,17 +1015,31 @@ class SEDPlotClass(CustomPlotClass):
         return mag, err_mag
     
     
-    def convert_to_microjy(self, flux, err_flux, starting_unit):
+    def convert_to_microjy(self, flux, err_flux, band_units):
+        """Converts everything in microJy.
+        band_units = str or list of strings with the same length of flux. If a single string is passed
+                    all fluxes are converted assuming the same starting unit
+        """
         conversion_dict = {"AB magnitudes" : lambda f, e : self.mag_to_flux(f,e),
                            "milliJy" : lambda f, e : (f * 1000, e * 1000),
                            "microJy" : lambda f, e : (f,e),
                            "nanoJy"  : lambda f, e : (f / 1000, e / 1000),
                            "cgs (erg/s/Hz)" : lambda f, e : (f * 1e23, e * 1e23)
         }
-        if starting_unit not in conversion_dict:
-            raise KeyError(f"Unrecognized unit {starting_unit}")
-        
-        return conversion_dict[starting_unit](flux, err_flux)
+        if isinstance(band_units, str):
+            if band_units not in conversion_dict:
+                raise KeyError(f"Unrecognized unit {band_units}")
+            return conversion_dict[band_units](flux, err_flux)
+        else:
+            flux_converted =[]
+            err_converted = []
+            for i, unit in enumerate(band_units):
+                if unit not in conversion_dict:
+                    raise KeyError(f"Unrecognized unit {unit}")
+                f, e = conversion_dict[unit](flux[i], err_flux[i])
+                flux_converted.append(f)
+                err_converted.append(e)
+            return np.array(flux_converted), np.array(err_converted)
                            
     def _initialize_settings_panel(self):
         units = ["AB magnitudes", "milliJy", "microJy", "nanoJy", "cgs (erg/s/Hz)"]                                                                            
@@ -1007,7 +1051,7 @@ class SEDPlotClass(CustomPlotClass):
     def _update_plot(self, event):
         self.flux, self.flux_err = self.get_fluxes_from_selected_source()
         self.clean_fluxes()
-        y, y_err = self.convert_to_microjy(self.flux, self.flux_err, starting_unit=self.unit_selector.value)
+        y, y_err = self.convert_to_microjy(self.flux, self.flux_err, band_units=self.unit_selector.value)
         self.figure.object = self.plot_SED(self.wavlen, y, y_err, self.fwhm)
         self.message_pane.visible = False
         
@@ -1060,7 +1104,7 @@ class RadioClass(CustomPlotClass):
 
         self.radius_input = pn.widgets.FloatInput(name = "Radius [arcsec]", value = self.radius, 
                                                   step = 1, start = 1, end = 100, max_width = 200,
-                                                  sizing_mode="stretch_both")
+                                                  sizing_mode="stretch_both", max_height =30)
         self.radius_input.param.watch(self._update_radius, "value")
         
         self.plot_settings_panel = pn.Column(self.radius_input, 
@@ -1085,9 +1129,13 @@ class RadioClass(CustomPlotClass):
                 self.message_pane.object = f"## {self.dataset} cutout query failed"
                 self.message_pane.visible = True #probably already visible
             elif result is not None:
-                self.figure.objects = [self.get_radio_figure(result)]
+                print("i am obtaining the image")
+                print(result.shape)
+                self.figure.object = self.get_radio_figure(result)
+                self.message_pane.visible = False
 
         if self.dataset == "VLASS":
+            print("I am running VLASS")
             self.run_multithread(VLASS_cutout, 
                              func_kwargs = {"ra" : self.ra, "dec" : self.dec,
                                             "radius" : radius},

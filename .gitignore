@@ -12,6 +12,7 @@ models
 *.DS_Store
 *.login
 data/EDFN_DESI.fits
+data/EDFN-DESI.fits
 
 
 
