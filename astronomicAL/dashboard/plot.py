@@ -34,7 +34,7 @@ class BasePlotClass(param.Parameterized):
 
     def _toggle_settings_panel(self, event):
         self.settings_panel.visible = not self.settings_panel.visible
-        self.settings_button.name = "Settings ▴" if self.settings_panel.visible else "Settings ▾"
+        self.settings_button.name = "Close Settings" if self.settings_panel.visible else "Open Settings"
 
     def get_variable_list(self, excluded_columns = ["id_col", "ra_dec", "label_col"]):
         """Returns the list of options used inside `X_variable` or `Y_variable`.
@@ -195,6 +195,8 @@ class ScatterPlotDashboard(BasePlotClass):
                      nonselection_alpha=0.4,
                      logx = self.log_xscale,
                      logy = self.log_yscale,
+                     xlabel=self.X_variable,
+                     ylabel=self.Y_variable,
                      color=color,)
             
             sel_stream = streams.Selection1D(source=points)
@@ -272,7 +274,9 @@ class ScatterPlotDashboard(BasePlotClass):
                 fill_color="black",
                 marker="circle",
                 size=10,
-                active_tools=[])
+                active_tools=[],
+                logx = self.log_xscale,
+                logy = self.log_yscale)
             return selected_plot
         
 

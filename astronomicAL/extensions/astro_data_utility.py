@@ -426,7 +426,7 @@ class BaseSpectraClass:
                     continue
                 ax.axvline(obs_wav, c = 'r', lw = 0.5, ls = ':')
                 if annotate_emlines:
-                    ax.text(obs_wav, 0.8, name, rotation = 90, transform = transform, fontsize = 10)
+                    ax.text(obs_wav, 0.8, name, rotation = 90, transform = transform, fontsize = 12)
         
         if plot_abslines and np.isfinite(redshift):
             if not hasattr(self, "absline_table"):
@@ -438,7 +438,7 @@ class BaseSpectraClass:
                     continue
                 ax.axvline(obs_wav, c = 'b', lw = 0.5, ls = ':')
                 if annotate_abslines:
-                    ax.text(obs_wav, 0.2, name, rotation = 90, transform = transform, fontsize = 10)
+                    ax.text(obs_wav, 0.2, name, rotation = 90, transform = transform, fontsize = 12)
         
         
         ax.set_xlabel(r'$\lambda_{obs}~[\AA]$', fontsize = 15)
@@ -452,6 +452,7 @@ class BaseSpectraClass:
                          plot_abslines=True, annotate_abslines=True,
                          plot_mask = True,
                          show_xlabel=True, show_ylabel=True,
+                         plot_info = True,
                          model_kwargs = {"line_width" : 2, "color" : "red"},
                          smoothed_kwargs = {"line_width" : 1, "color" : "black"},
                          **kwargs):
@@ -468,16 +469,16 @@ class BaseSpectraClass:
 
 
         if plot_lines == "class":
-            is_extragal = self.spectra[idx].spectype == "GALAXY" or self.spectra[idx].spectype == "QSO"
+            is_extragal = self.spectra[idx].spectype.casefold() in ["galaxy", "qso"]
             plot_emlines = is_extragal and plot_abslines
-            plot_abslines = self.spectra[idx].spectype == "STAR" and plot_abslines
+            plot_abslines = self.spectra[idx].spectype.casefold() == "star" and plot_abslines
         
         elif not plot_lines:
             plot_abslines = False
             plot_emlines = False
 
-        flux_curve = hv.Curve((wavlen, flux)).opts(color='grey', line_width=0.3)
-        smoothed_curve = hv.Curve((wavlen, smoothed)).opts(**smoothed_kwargs)
+        flux_curve = hv.Curve((wavlen, flux), label = "Flux").opts(color='grey', line_width=0.3)
+        smoothed_curve = hv.Curve((wavlen, smoothed), label = "Smoothed Flux").opts(**smoothed_kwargs)
 
         if plot_mask:
             start_idx, end_idx = self.find_masked_regions(mask = self.spectra[idx].mask, min_width=5)
@@ -489,13 +490,13 @@ class BaseSpectraClass:
         
         if plot_model:
             model = self.spectra[idx].model
-            model_curve = hv.Curve((wavlen, model)).opts(**model_kwargs)
+            model_curve = hv.Curve((wavlen, model), label = "Model").opts(**model_kwargs)
             overlays.append(model_curve)
         
-        ymin, ymax = np.min(smoothed), np.max(smoothed)
+        ymin, ymax = np.nanmin(smoothed), np.nanmax(smoothed)
         ymin = ymin / 3 if ymin >= 0 else ymin * 1.5
         ymax = ymax * 1.5 if ymax >= 0 else ymax / 3 ##Sometimes Euclid Fluxes are negative
-        xmin, xmax =  xmin, xmax = np.min(wavlen), np.max(wavlen)
+        xmin, xmax = np.min(wavlen), np.max(wavlen)
     
         if plot_emlines and np.isfinite(redshift):
             if not hasattr(self, "emline_table"):
@@ -503,9 +504,9 @@ class BaseSpectraClass:
             obs_wav = self.emline_table["wave_vac"] * (redshift +1)
             logic = np.logical_and(obs_wav >= xmin, obs_wav <= xmax)
             obs_wav = obs_wav[logic]
-            overlays.append(hv.VLines(obs_wav).opts(color='red', line_width=0.5, line_dash='dotted'))
+            overlays.append(hv.VLines(obs_wav).opts(color='red', line_width=1, line_dash='dotted'))
             if annotate_emlines:
-                y = 0.8 * ymax *np.ones_like(obs_wav)
+                y = (ymin + 0.8 * (ymax-ymin)) * np.ones_like(obs_wav)
                 names = self.emline_table["Name"][logic].astype(str)
                 overlays.append(hv.Labels((obs_wav, y,  names), vdims = "names").opts(
                                        text_font_size='8pt', text_color = "black"))
@@ -516,12 +517,19 @@ class BaseSpectraClass:
             obs_wav = self.absline_table["wave_vac"] * (redshift +1)
             logic = np.logical_and(obs_wav >= xmin, obs_wav <= xmax)
             obs_wav = obs_wav[logic]
-            overlays.append(hv.VLines(obs_wav).opts(color='blue', line_width=0.5, line_dash='dotted'))
+            overlays.append(hv.VLines(obs_wav).opts(color='blue', line_width=1, line_dash='dotted'))
             if annotate_abslines:
-                y = 0.2 * ymax *np.ones_like(obs_wav)
+                y = (ymin + 0.8 * (ymax-ymin)) * np.ones_like(obs_wav)
                 names = self.absline_table["Name"][logic].astype(str)
                 overlays.append(hv.Labels((obs_wav, y,  names), vdims = "names").opts(
                                         text_font_size='8pt', text_color = "black"))
+        if plot_info:
+           spectype = self.spectra[idx].spectype
+           if np.isfinite(redshift) and len(spectype)>0:
+               y = (ymin + 0.1 * (ymax-ymin)) 
+               x = (xmin + 0.8 * (xmax-xmin)) 
+               text = f"z = {np.round(redshift,4)}, Type = {spectype.upper()}"
+               overlays.append(hv.Text(x, y, text).opts(text_font_size = "15pt", text_color = "black"))
         
         xlabel = r'$$ \lambda_{obs} ~{Å} $$' if show_xlabel else ''
         ylabel = r'$$ F_{\lambda}~[10^{-17}~erg~s^{-1}~cm^{-2}~{Å}^{-1}] $$' if show_ylabel else ''
@@ -534,7 +542,8 @@ class BaseSpectraClass:
                     xlim=(xmin, xmax * 1.02),
                     ylim=(ymin, ymax),
                     active_tools=[],
-                    show_legend=False,
+                    show_legend=True,
+                    legend_position = 'bottom_left',
                     **kwargs,
                     )
                 )
@@ -721,7 +730,7 @@ class EuclidSpectraClass(BaseSpectraClass):
 
     def query_table(self, verbose = False):
         query = f"""SELECT TOP 400
-                        spec.file_name, spec.file_path, spec.source_id, spec.spectra_source_oid, spec.ra_obj, spec.dec_obj,
+                    spec.file_name, spec.file_path, spec.source_id, spec.spectra_source_oid, spec.ra_obj, spec.dec_obj,
                     DISTANCE(spec.ra_obj, spec.dec_obj, {self.ra}, {self.dec})*3600 AS separation
                     FROM spectra_source AS spec
                     WHERE DISTANCE(ra_obj, dec_obj, {self.ra}, {self.dec}) < {self.max_separation}
@@ -820,6 +829,64 @@ class EuclidSpectraClass(BaseSpectraClass):
         toc = time.perf_counter()
         if verbose:
             print(f"Retrieving Euclid spectra required {toc-tic} seconds")
+
+    
+    def query_specz_table(self, verbose = False):
+        """It queries the table with fitted specz and classification. If classification == "star", redshift is set to 0,
+         else the one derived from galaxies with the highest probability is used. QSO redshift not available at the moment"""
+
+        if self.spectra is not None:
+            sourceid_list = [spectrum.sourceId for spectrum in self.spectra]
+            query = f"""SELECT 
+                    class.object_id, class.spe_class, gal.spe_z AS gal_z, gal.spe_z_prob
+                    FROM catalogue.spectro_zcatalog_spe_classification as class
+                    LEFT JOIN catalogue.spectro_zcatalog_spe_galaxy_candidates AS gal 
+                    ON class.object_id = gal.object_id
+                    WHERE class.object_id IN {tuple(sourceid_list)}
+                    """
+           
+            tic = time.perf_counter()
+            job = self.client.launch_job(query)
+            try:
+                self.specz_results = job.get_results()
+                #keeping only galaxy redshift with highest probability, reordering to match the sourceid_list
+                self.specz_table = (self.specz_results.to_pandas().sort_values(["object_id", "spe_z_prob"], 
+                                                                   ascending=[True, False]).drop_duplicates("object_id"))
+                self.specz_table= self.specz_table.set_index("object_id").reindex(sourceid_list).reset_index()
+                
+                self.specz_table['redshift'] = np.select([self.specz_table["spe_class"] == "galaxy",
+                                                                    self.specz_table["spe_class"] == "qso",
+                                                                    self.specz_table["spe_class"].isna()],
+                                                                   [self.specz_table["gal_z"],
+                                                                    np.nan,
+                                                                    np.nan], 
+                                                                    default=0)
+
+            except AttributeError:
+                self.specz_table = None
+            
+            toc = time.perf_counter()
+            if verbose:
+                print(f"Querying Euclid spectroscopic redshift table required {toc-tic} seconds")
+    
+    def _update_info_spectra(self, attribute, values):
+        """Update the attributes of spectra in self.spectra. Same as _add_info_spectra but more general"""
+        if hasattr(values, "__len__") and (not isinstance(values, str)) and (len(values) == self.available_spectra):
+            for spectrum, value in zip(self.spectra, values):
+                spectrum.set_attribute(attribute, value)
+        else:
+            if hasattr(values, "__len__") and not isinstance(values, str) and len(values) == 1:
+                value = values[0]  
+            else:
+                value = values  # scalar or string
+            for spectrum in self.spectra:
+                spectrum.set_attribute(attribute, value)
+        
+    def update_info_from_query(self):
+        for attribute in ["spectype", "redshift"]:
+            col_name = "spe_class" if attribute == "spectype" else attribute 
+            self._update_info_spectra(attribute, self.specz_table[col_name].values)
+   
     
     def get_spectra(self, max_separation = None, return_object = False):
         """Call all methods to get spectra

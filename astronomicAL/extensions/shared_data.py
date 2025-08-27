@@ -132,4 +132,3 @@ class SharedDataManager:
     
 shared_data = SharedDataManager(is_global = True)
 shared_data.set_data("Euclid_radius",  config.settings.get('Euclid_radius', 5.0))
-

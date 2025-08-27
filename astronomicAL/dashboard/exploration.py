@@ -21,6 +21,7 @@ class ExplorationDashboard(param.Parameterized):
         super().__init__(**params)
         self.src = src
         self.df = df
+        self._running_panels = set() #elements of the set indicate the panel currently using multithreading
         self.visited_indices = [self.index]  
         self.panel_id = str(uuid.uuid4()) 
         self.current_position = 0 
@@ -119,15 +120,21 @@ class ExplorationDashboard(param.Parameterized):
                print(f"There are {N_matches} sources containing the provided sourceId, be more specific") 
 
     
-    def _multithread_running_cb(self, is_running):
-        self.prev_button.disabled = is_running
-        self.next_button.disabled = is_running
+    def _multithread_running_cb(self, is_running, panel_name):
+        if is_running:
+            self._running_panels.add(panel_name)
+        else:
+            self._running_panels.discard(panel_name)
+        any_running = bool(self._running_panels)
+        self.prev_button.disabled = any_running
+        self.next_button.disabled = any_running
        
     def _subscribe_to_shared(self):
         panels_using_multithread = ["EuclidCutout", "EuclidSpec", "DESI", "SDSS", "VLASS", "LoTSS"]
         for panel in panels_using_multithread:
-            shared_data.replace_subscribe(self.panel_id, f"{panel}_running", self._multithread_running_cb)
-        shared_data.replace_subscribe(self.panel_id, "selected_sourceid", self._plot_selected_src_cb)
+            shared_data.replace_subscribe(self.panel_id, f"{panel}_running", 
+                                          lambda is_running, panel_name=panel: self._multithread_running_cb(is_running, panel_name))
+        shared_data.replace_subscribe(self.panel_id, "selected_sourceid", self._selected_src_from_plot_cb)
          
     def _update_navigation_flags(self):
         self.prev_button.disabled = self.current_position == 0
@@ -149,7 +156,7 @@ class ExplorationDashboard(param.Parameterized):
             return  pd.DataFrame(cols, columns=["Column"])
     
 
-    def _plot_selected_src_cb(self, sourceid):
+    def _selected_src_from_plot_cb(self, sourceid):
         self.sourceid_input.param.unwatch(self.sourceid_watcher)
         self.sourceid_input.value = sourceid
         self.sourceid_watcher = self.sourceid_input.param.watch(self._sourceid_input_cb, "value", onlychanged=False)
@@ -203,7 +210,6 @@ class ExplorationDashboard(param.Parameterized):
     
 
     def _add_ra_dec_col(self, df):
-
         new_df = df
 
         ra_col_name = config.settings["ra_col_name"]
@@ -212,7 +218,6 @@ class ExplorationDashboard(param.Parameterized):
         new_df["ra_dec"] = df[ra_col_name].astype(str) + "," + df[dec_col_name].astype(str)
       
         return new_df
-
 
     def _preprocess_data(self):
         """Process all the data according to the config file. In exploring panel it just"
@@ -243,5 +248,4 @@ class ExplorationDashboard(param.Parameterized):
             
     def cleanup_panel_plot(self):
         self.remove_shared_data()
-
 

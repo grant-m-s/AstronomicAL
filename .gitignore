@@ -13,6 +13,7 @@ models
 *.login
 data/EDFN_DESI.fits
 data/EDFN-DESI.fits
+data_cutouts
 
 
 

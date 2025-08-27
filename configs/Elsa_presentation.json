@@ -37,14 +37,14 @@
             "y": 4,
             "w": 4,
             "h": 4,
-            "contents": "Menu"
+            "contents": "Euclid Spectra"
         },
         "5": {
             "x": 8,
             "y": 4,
             "w": 4,
             "h": 4,
-            "contents": "Menu"
+            "contents": "DESI Spectra"
         }
     },
     "id_col": "object_id_euclid",
@@ -90,12 +90,12 @@
     "dec_col_name": "declination_euclid",
     "bands_used_SED": {
         "u": "flux_u_ext_megacam_2fwhm_aper_euclid",
-        "g": "flux_g_hsc_total_2fwhm_euclid",
+        "g": "flux_g_ext_hsc_2fwhm_aper_euclid",
         "r": "flux_r_ext_megacam_2fwhm_aper_euclid",
         "i": "flux_i_ext_panstarrs_2fwhm_aper_euclid",
         "z": "flux_z_ext_hsc_2fwhm_aper_euclid",
         "VIS": "flux_vis_2fwhm_aper_euclid",
-        "NISP.Y": "flux_y_total_2fwhm_euclid",
+        "NISP.Y": "flux_y_2fwhm_aper_euclid",
         "NISP.J": "flux_j_2fwhm_aper_euclid",
         "NISP.H": "flux_h_2fwhm_aper_euclid",
         "err_u": "fluxerr_u_ext_megacam_2fwhm_aper_euclid",

@@ -123,6 +123,7 @@ def verify_import_config(curr_config_file):
                 has_error = True
                 error_message += f"The dataset is missing these columns:\n\n{wrong_cols}\n\n **[Rerun astronomicAL and assign the settings yourself or manually edit `{filename}`, replacing the missing columns]**\n\n\n"
                 error_message += "\n\n-------------------------------\n\n"
+        
         if "feature_generation" not in missing_settings:
             opers = list(get_oper_dict().keys())
             missing_opers = []
@@ -159,6 +160,7 @@ def verify_import_config(curr_config_file):
                 has_error = True
                 error_message += f"AstronomicAL is missing the following plots in `extensions/extension_plots.py`:\n\n{missing_contents}\n\n **[If they have not been uploaded to the astronomicAL repo you may need to contact the researcher who uploaded the config for the correct code]**\n\n\n"
                 error_message += "\n\n-------------------------------\n\n"
+        
         if "classifiers" in list(curr_config_file.keys()):
             clfs = list(get_classifiers().keys())
 
@@ -197,6 +199,41 @@ def verify_import_config(curr_config_file):
                     has_error = True
                     error_message += f"AstronomicAL is missing the following test set file:\n\n `data/test_set.json` \n\n **[Your configuration file states it uses this file to create a verified test set. Change flag `test_file_set` to `false` in your config file to create a test set from the data (Classifier performance may be affected from previously stated results)]**\n\n\n"
                     error_message += "\n\n-------------------------------\n\n"
+        
+        ###Check SED options
+        if "bands_used_SED" in curr_config_file:
+            if curr_config_file["bands_used_SED"]:
+                if not isinstance(curr_config_file["bands_used_SED"], dict):
+                    has_error = True
+                    error_message += f"""Wrong format for \n\n 'bands_used_SED' \n\n 
+                                     **[It needs to be a dictionary with bands as keys and assoictaed columns as values]**\n\n\n"""
+                    error_message += "\n\n-------------------------------\n\n"
+                try:
+                    filepath =  "data/sed_data/photometric_bands.json"
+                    with open(filepath, 'r') as f:
+                        filter_data = json.load(f)
+                    
+                    missing_bands, missing_cols = [], []
+                    for band, col in curr_config_file["bands_used_SED"].items():
+                        if ("err_" not in band) and (band not in filter_data):
+                            missing_bands.append(band)
+                        if col not in table.colnames:
+                            missing_cols.append(col)
+                    if len(missing_cols) > 0:
+                        has_error = True
+                        error_message += f"The dataset is missing these columns:\n\n{missing_cols}\n\n **[Rerun astronomicAL and assign the settings yourself or manually edit `{filename}`, replacing the missing columns]**\n\n\n"
+                        error_message += "\n\n-------------------------------\n\n"
+                    if len(missing_bands) > 0:
+                        has_error = True
+                        error_message += f"The photometric file is missing these bands:\n\n{missing_bands}\n\n **[Rerun astronomicAL and assign the settings yourself or manually edit `data/sed_data/photometric_bands.json`, adding the missing bands]**\n\n\n"
+                        error_message += "\n\n-------------------------------\n\n"
+
+                except FileNotFoundError:
+                    has_error = True
+                    error_message += f"""AstronomicAL is missing the following file:\n\n `data/sed_data/photometric_bands.json` \n\n 
+                                     **[This file is needed to load information about filters in SED plot]**\n\n\n"""
+                    error_message += "\n\n-------------------------------\n\n"
+
     if has_error:
         error_message = (
             "**Unable to import file due to the following errors:**\n\n\n\n"
@@ -218,8 +255,9 @@ def update_config_settings(imported_config):
                 label_colours[int(i)] = imported_config["label_colours"][i]
             config.settings[key] = label_colours
         elif key == "bands_used_SED":
-            for k, value in imported_config[key].items():
-                config.settings[k] = value
+            config.settings[key] = imported_config[key]
+            #for k, value in imported_config[key].items():
+              #config.settings[k] = value
 
         else:
             config.settings[key] = imported_config[key]
@@ -328,6 +366,9 @@ def create_default_layout(react):
     return react
 
 
+
+
+
 def create_exploring_layout(react, filepath = "astronomicAL/exploring_layout.json"):
     """
     Creates aa different react template if Exploring mode is chosen
@@ -368,4 +409,3 @@ def create_exploring_layout(react, filepath = "astronomicAL/exploring_layout.jso
     
     return react
     
-
