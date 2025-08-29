@@ -134,8 +134,8 @@ class EuclidCutoutsClass:
         
         ref_wcs = self.wcs[reference]  
         ref_shape = self.data[reference].shape
-        self.arcsec_per_pix |= {"stacked" : self.arcsec_per_pix[reference]}
-        self.wcs  |= {"stacked" : ref_wcs} 
+        self.arcsec_per_pix |= {"Color" : self.arcsec_per_pix[reference]}
+        self.wcs  |= {"Color" : ref_wcs} 
         
         self.reprojected_data = {}
         for band in self.euclid_filters:
@@ -177,7 +177,7 @@ class EuclidCutoutsClass:
         for band in self.euclid_filters:
             self.plot_data[band] =  self.transform_image(self.data[band], stretch = stretch, interval = interval)
         
-        self.plot_data["stacked"] = self.stack_cutouts(r_img = "NIR_H", g_img = "NIR_Y", b_img = "VIS", stretch=stretch,
+        self.plot_data["Color"] = self.stack_cutouts(r_img = "NIR_H", g_img = "NIR_Y", b_img = "VIS", stretch=stretch,
                                                        interval = interval)
          
  
@@ -195,12 +195,12 @@ class EuclidCutoutsClass:
 
         
     
-    def _convert_overplot_coordinates(self, filtro = "stacked", dataset = "default"):
+    def _convert_overplot_coordinates(self, filtro = "Color", dataset = "default"):
         """
         Converts the stored coordinates into pixel coordinates for a given filter.
         Returnz a list of (x,y) poais of pixel coordinates
         Parameters:
-        filtro : str, WCS key (default is "stacked")
+        filtro : str, WCS key (default is "Color")
         dataset : str, datasets coordinates to be transformed into pixels
         """
         if hasattr(self, "overplot_coordinates"):
@@ -214,7 +214,7 @@ class EuclidCutoutsClass:
         return []
     
 
-    def world_2_pix(self, ra, dec, filtro = "stacked"):
+    def world_2_pix(self, ra, dec, filtro = "Color"):
         """
         Same as _convert_overplot_coordinates but for external coordinates
         """
@@ -223,7 +223,7 @@ class EuclidCutoutsClass:
         return list(zip(x_pix, y_pix))
         
         
-    def get_final_cutout(self, radius, stretch =  "Linear", filtro = "stacked", reference = "VIS", 
+    def get_final_cutout(self, radius, stretch =  "Linear", filtro = "Color", reference = "VIS", 
                          verbose = False,
                          return_object = False) :
         """
@@ -286,7 +286,7 @@ class EuclidCutoutsClass:
         zoom_factors = (height / new_height, width / new_width) if image.ndim == 2 else (height / new_height, width / new_width, 1)
         #return zoom(cropped_image, zoom_factors, order=zooming_order)
     
-    def get_scaled_cutout(self, scale, same_shape = True, zooming_order = 1, verbose = False, filtro = "stacked"):
+    def get_scaled_cutout(self, scale, same_shape = True, zooming_order = 1, verbose = False, filtro = "Color"):
         """here scale refers to the current scaled image"""
 
         tic = time.perf_counter()

@@ -212,14 +212,6 @@ class ParameterAssignment(param.Parameterized):
         config.settings["extra_info_cols"] = self.extra_info_selector.value
         config.settings["extra_image_cols"] = self.extra_images_selector.value
 
-       
-        #if config.mode == "Exploring":
-        #    print("Exploration mode selected. Changing layout...")
-        #    load_config.create_exploring_layout(
-        #        config.react_template, 
-        #        filepath="astronomicAL/exploring_layout.json"
-        #    )
-
         self.confirm_settings_button.name = "Confirmed"
         self.ready = True
 

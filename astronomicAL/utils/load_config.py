@@ -200,40 +200,9 @@ def verify_import_config(curr_config_file):
                     error_message += f"AstronomicAL is missing the following test set file:\n\n `data/test_set.json` \n\n **[Your configuration file states it uses this file to create a verified test set. Change flag `test_file_set` to `false` in your config file to create a test set from the data (Classifier performance may be affected from previously stated results)]**\n\n\n"
                     error_message += "\n\n-------------------------------\n\n"
         
-        ###Check SED options
-        if "SED_bands" in curr_config_file:
-            if curr_config_file["SED_bands"]:
-                if not isinstance(curr_config_file["SED_bands"], dict):
-                    has_error = True
-                    error_message += f"""Wrong format for \n\n 'SED_bands' \n\n 
-                                     **[It needs to be a dictionary with bands as keys and assoictaed columns as values]**\n\n\n"""
-                    error_message += "\n\n-------------------------------\n\n"
-                try:
-                    filepath =  "data/sed_data/photometric_bands.json"
-                    with open(filepath, 'r') as f:
-                        filter_data = json.load(f)
-                    
-                    missing_bands, missing_cols = [], []
-                    for band, col in curr_config_file["SED_bands"].items():
-                        if ("err_" not in band) and (band not in filter_data):
-                            missing_bands.append(band)
-                        if col not in table.colnames:
-                            missing_cols.append(col)
-                    if len(missing_cols) > 0:
-                        has_error = True
-                        error_message += f"The dataset is missing these columns:\n\n{missing_cols}\n\n **[Rerun astronomicAL and assign the settings yourself or manually edit `{filename}`, replacing the missing columns]**\n\n\n"
-                        error_message += "\n\n-------------------------------\n\n"
-                    if len(missing_bands) > 0:
-                        has_error = True
-                        error_message += f"The photometric file is missing these bands:\n\n{missing_bands}\n\n **[Rerun astronomicAL and assign the settings yourself or manually edit `data/sed_data/photometric_bands.json`, adding the missing bands]**\n\n\n"
-                        error_message += "\n\n-------------------------------\n\n"
-
-                except FileNotFoundError:
-                    has_error = True
-                    error_message += f"""AstronomicAL is missing the following file:\n\n `data/sed_data/photometric_bands.json` \n\n 
-                                     **[This file is needed to load information about filters in SED plot]**\n\n\n"""
-                    error_message += "\n\n-------------------------------\n\n"
-
+        has_error, error_message = verify_SED_config(curr_config_file, table,  has_error, error_message) #checking in separate function for code readibility
+        has_error, error_message = verify_euclid_cutout_config(curr_config_file, has_error, error_message)
+    
     if has_error:
         error_message = (
             "**Unable to import file due to the following errors:**\n\n\n\n"
@@ -254,11 +223,6 @@ def update_config_settings(imported_config):
             for i in imported_config["label_colours"]:
                 label_colours[int(i)] = imported_config["label_colours"][i]
             config.settings[key] = label_colours
-        elif key == "SED_bands":
-            config.settings[key] = imported_config[key]
-            #for k, value in imported_config[key].items():
-              #config.settings[k] = value
-
         else:
             config.settings[key] = imported_config[key]
 
@@ -369,43 +333,111 @@ def create_default_layout(react):
 
 
 
-def create_exploring_layout(react, filepath = "astronomicAL/exploring_layout.json"):
-    """
-    Creates aa different react template if Exploring mode is chosen
-    Parameters
-        ----------
-    react : pn.template.ReactTemplate
-        The react template instance to populate.
-    filepath : str
-        The path to the exploration layout JSON file
-    """
-    if not os.path.isfile(filepath):
-        print(f"I did not find the Exploring layout at {filepath}. Loading default layout.")
-        return create_default_layout(react)
-    
-    with open(filepath) as layout_file:
-        exploring_config = json.load(layout_file)
+def verify_SED_config(curr_config_file, table,  has_error, error_message):
+    if "SED_bands" in curr_config_file:
+        config_dict = curr_config_file["SED_bands"]
+        if config_dict:
+            if not isinstance(config_dict, dict):
+                error_message += f"""Wrong format for \n\n 'SED_bands' \n\n 
+                                     **[It needs to be a dictionary with bands as keys and assoictaed columns as values]**\n\n\n"""
+                error_message += "\n\n-------------------------------\n\n"
+                
+                return has_error, error_message
+            try:
+                filepath =  "data/sed_data/photometric_bands.json"
+                with open(filepath, 'r') as f:
+                    filter_data = json.load(f)
 
-    react.main.objects.clear() 
-    config.dashboards = {}
+                missing_bands, missing_cols = [], []
+                for band, col in config_dict.items():
+                    if ("err_" not in band) and (band not in filter_data):
+                        missing_bands.append(band)
+                    if col not in table.colnames:
+                        missing_cols.append(col)
+                if len(missing_cols) > 0:
+                    has_error = True
+                    error_message += f"The dataset is missing these columns:\n\n{missing_cols}\n\n **[Rerun astronomicAL and assign the settings yourself or manually edit `{filename}`, replacing the missing columns]**\n\n\n"
+                    error_message += "\n\n-------------------------------\n\n"
+                if len(missing_bands) > 0:
+                        has_error = True
+                        error_message += f"The photometric file is missing these bands:\n\n{missing_bands}\n\n **[Rerun astronomicAL and assign the settings yourself or manually edit `data/sed_data/photometric_bands.json`, adding the missing bands]**\n\n\n"
+                        error_message += "\n\n-------------------------------\n\n"
+                        
+            except FileNotFoundError:
+                    has_error = True
+                    error_message += f"""AstronomicAL is missing the following file:\n\n `data/sed_data/photometric_bands.json` \n\n 
+                                     **[This file is needed to load information about filters in SED plot]**\n\n\n"""
+                    error_message += "\n\n-------------------------------\n\n"
+                    return has_error, error_message
+    return has_error, error_message
 
-    if "layout" not in exploring_config:
-        print(f"Error: The file '{filepath}' is missing the required 'layout' key.")
-        return react
-    
-    layout = exploring_config["layout"]
-    
-    for p, panel in layout.items():
-        start_row = panel["y"]
-        end_row = panel["y"] + panel["h"]
-        start_col = panel["x"]
-        end_col = panel["x"] + panel["w"]
 
-        contents = panel.get("contents", "Menu")
+def verify_euclid_cutout_config(curr_config_file, has_error, error_message):
+    if "Euclid_cutout_settings" in curr_config_file:
+        config_dict = curr_config_file["Euclid_cutout_settings"]
+        if config_dict:
+            if not isinstance(config_dict, dict):
+                error_message += f"""Wrong format for \n\n 'Euclid_cutout_settings' \n\n 
+                                     **[It needs to be a dictionary]**\n\n\n"""
+                error_message += "\n\n-------------------------------\n\n"
+                return has_error, error_message
+        
+            validation_rules = {
+                "filter": {
+                          "valid": {"VIS", "NIR_Y", "NIR_J", "NIR_H", "Color"},
+                          "error": "Available filters: `VIS`, `NIR_Y`, `NIR_J`, `NIR_H`, or `Color`"
+                          },
+                "radius": {
+                          "check": lambda r: isinstance(r, (int, float)) and 1 < r <= 100,
+                          "error": "radius must be a number with `1 < radius ≤ 100`"
+                          },
+                "stretching":{
+                               "valid" : {"Linear", "Sqrt", "Log", "Asinh", "PowerLaw"},
+                               "error": "Available stretchings: `Linear`, `Sqrt`, `Log`, `Asinh`, `PowerLaw`"
+                            },
+                "scaling": {  
+                          "check": lambda x: (isinstance(x, (list, tuple))
+                                              and len(x) == 2
+                                              and all(isinstance(v, (int, float)) for v in x)
+                                              and 0 <= x[0] < x[1] <= 1),
+                          "error": "scaling must be a list or tuple of `two ordered numbers between 0 and 1`"
+                           },
+                "source_coordinates": {
+                                       "valid" : {True, False},
+                                       "error" : "Available source_coordinates values: `true`, `false`"
+                                       }          
+                }
+            wrong_keys = [i for i in config_dict if i not in validation_rules]
+            if wrong_keys:
+                has_error = True
+                error_message += f""""`Euclid_cutout_settings` has the following wrong keys {wrong_keys}  \n\n 
+                                     **[Allowed keys are {list(validation_rules.keys())}]**\n\n\n"""
+                error_message += "\n\n-------------------------------\n\n"
+            
+            for key, rule in validation_rules.items():
+                if key not in config_dict:
+                    continue
+                value = config_dict[key]
+                if "valid" in rule and value not in rule["valid"]:
+                    has_error = True
+                    error_message += (
+                    f"Wrong {key} specified: {value}\n\n**[{rule['error']}]**\n\n\n"
+                    "\n\n-------------------------------\n\n")
 
-        new_plot = Dashboard(src=config.source, contents=contents)
-        config.dashboards[p] = new_plot
-        react.main[start_row:end_row, start_col:end_col] = new_plot.panel()
+                elif "check" in rule and not rule["check"](value):
+                    has_error = True
+                    error_message += (
+                    f"Wrong {key} specified: {value}\n\n**[{rule['error']}]**\n\n\n"
+                    "\n\n-------------------------------\n\n"
+                    )
+    return has_error, error_message
+
+
+
+
     
-    return react
-    
+
+
+
+
+

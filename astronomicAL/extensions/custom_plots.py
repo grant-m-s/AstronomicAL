@@ -43,7 +43,7 @@ def get_customplot_dict():
                                                             extra_features=[], dataset="SDSS"),
 
         "BroadBand SED"  : lambda data, src, close_button : SEDPlotClass(data, src, close_button,
-                                                            extra_features=["Do not skip to Plot stage"]),
+                                                            extra_features=[]),
         
         "VLASS Cutout"  : lambda data, src, close_button : RadioClass(data, src, close_button,
                                                             extra_features=[], dataset="VLASS"),
@@ -58,11 +58,11 @@ def get_customplot_dict():
 
 class CustomPlotClass(param.Parameterized):
 
-    available_stages = ["columns_selection","plot"]
+    available_stages = ["columns_selection", "plot"]
 
     stage = param.ObjectSelector(default="columns_selection", objects = available_stages)
     
-    def __init__(self, data, src, close_button, extra_features):
+    def __init__(self, data, src, close_button, extra_features, ready_stage = "plot"):
         super().__init__()
         self.df = data
         self.src = src
@@ -70,7 +70,11 @@ class CustomPlotClass(param.Parameterized):
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
         self.close_button = close_button
         self.panel_id = str(uuid.uuid4()) 
-        self._get_unknown_columns(self.extra_features)
+        if self.extra_features:
+            self._get_unknown_columns(columns_needed = self.extra_features)
+            self._change_state_if_unknown_columns(ready_stage=ready_stage)
+        else:
+            self.stage = ready_stage
         self.figure = pn.pane.HoloViews(sizing_mode="stretch_both")
         self.message_pane = pn.pane.Markdown("## Loading...", sizing_mode="stretch_both", max_height = 30)
         self.plot_settings_button = pn.widgets.Button(name="Open Settings", button_type="primary", max_height = 40, max_width=100, sizing_mode="stretch_both" )
@@ -155,7 +159,6 @@ class CustomPlotClass(param.Parameterized):
         return cols
 
 
-
     def _get_selection_widgets_grid(self, columns_to_select, options = None, allowed_types = None):
         settings_grid = pn.GridBox(ncols=3, sizing_mode = "stretch_width", scroll = True)  
         self.select_widgets = {}
@@ -191,26 +194,18 @@ class CustomPlotClass(param.Parameterized):
                                 sizing_mode="stretch_both", scroll=True, collapsible = False, min_height = 300 )
 
     
-    def _get_unknown_columns(self, columns_needed, change_stage = False,
-                            settings_key = None,
-                            unknown_stage  = "columns_selection",
-                            ready_stage = "plot"):
+    def _get_unknown_columns(self, columns_needed, settings_key = None):
+        
         """
         Check if required columns exist in config.settings or config.main_df.
 
         columns_needed : list
             Columns that are required.
-        change_stage : bool, optional
-            Change stage when unknown columns are found (default: False).
         settings_key : str or None, optional
             If provided, checks within config.settings[settings_key].keys().
             Otherwise, checks directly against config.settings.
-        unknown_stage : str, optional
-            Stage to set if unknown columns are present (default: 'columns_selection').
-        ready_stage : str, optional
-            Stage to set if all columns are known (default: 'plot').
         """
-        
+
         current_cols = getattr(config.main_df, "columns", [])
         self.unknown_columns = []
 
@@ -229,12 +224,25 @@ class CustomPlotClass(param.Parameterized):
                 else:
                     settings_dict[col] = col
                             
-        if self.unknown_columns:
-            if change_stage and (self.stage != unknown_stage):
+    def _change_state_if_unknown_columns(self,  unknown_stage  = "columns_selection",
+                                          ready_stage = "plot"):
+        """ Manages  the change of stage depending on the presence or not of unknown_columns.
+        
+        unknown_stage : str, optional
+            Stage to set if unknown columns are present (default: 'columns_selection').
+        ready_stage : str, optional
+            Stage to set if all columns are known (default: 'plot').
+        
+        """
+        if hasattr(self, "unknown_columns"):
+            if self.unknown_columns:
                 self.stage = unknown_stage
+            else:
+                self.stage = ready_stage
         else:
-            self.stage = ready_stage
+            print("The unknown_columns attribute was not initialized, not changing Stage")
     
+
     
     def run_multithread(self, function, func_kwargs=None, callback=None, allowed_exceptions=(Exception,)):
         if func_kwargs is None:
@@ -261,11 +269,11 @@ class CustomPlotClass(param.Parameterized):
     
     @staticmethod
     def get_empty_image():
-        """Just a white image to update the previous one if the query fails"""
+        """Returns a completely white image to update the previous one if the query fails"""
         return hv.Image(np.ones((10,10))).opts(active_tools =[], 
                                             clim = (0,1), toolbar=None,
                                             padding = 0,border = 0,framewise = True, xaxis=None, 
-                                         yaxis=None, cmap = "grey")
+                                            yaxis=None, cmap = "grey")
     
     def remove_shared_data(self):
         """Removes subscriptions and published data from the shared data"""
@@ -336,9 +344,11 @@ class EuclidPlotClass(CustomPlotClass):
         super().__init__(data, src, close_button, extra_features)
         self._src_callback = self._change_source_cb
         self.src.on_change("data", self._src_callback)
+        self._initialize_settings_dictionary()
+
         self.euclid_pane = pn.pane.HoloViews(width=400, height=400) #euclid_pane = Euclid cutout, figure = euclid_pane+overplotted_coordinates
-        self.filter = "stacked"
-        self.radius = shared_data.get_data("Euclid_radius", 5.0)
+        self.filter = self._get_from_settings_dictionary("filter", "Color")
+        self.radius = self._get_from_settings_dictionary("radius", 5.0)
         
    
     def _change_source_cb(self, attr, old, new):
@@ -352,6 +362,33 @@ class EuclidPlotClass(CustomPlotClass):
         self._run_euclid()
         return  pn.Column(self.message_pane, self.figure, self.plot_settings_panel, 
                           scroll = True, sizing_mode = "stretch_both")
+    
+
+    def _initialize_settings_dictionary(self):
+        euclid_settings = config.settings.setdefault("Euclid_cutout_settings", {})
+        
+        default_values = { "filter" : "Color",
+                           "radius" : 5.0,
+                           "stretching" : "Linear",
+                           "scaling" : (0,1),
+                           "source_coordinates" : False,
+                        }
+        for key, value in default_values.items():
+            if key not in euclid_settings:
+                self._update_settings_dictionary(key, value)
+
+    
+    @staticmethod
+    def _get_from_settings_dictionary(key, default):
+        value = config.settings["Euclid_cutout_settings"].get(key, default)
+        if key == "scaling":
+            value = tuple(value)
+        return value
+    
+    @staticmethod
+    def _update_settings_dictionary(key, value):
+        config.settings["Euclid_cutout_settings"][key] = value
+        
 
     def _initialise_euclid_object(self):
         self.ra, self.dec = self.get_ra_dec()
@@ -374,23 +411,25 @@ class EuclidPlotClass(CustomPlotClass):
 
         self.stretching_input = pn.widgets.Select(name = "Stretching function", 
                                                 options=  ['Linear', 'Sqrt', 'Log', 'Asinh', 'PowerLaw'],
-                                                value = "Linear",
+                                                value = self._get_from_settings_dictionary("stretching", "Linear"),
                                                 sizing_mode = "stretch_both")
         self.stretching_input.param.watch(self._update_stretching, "value")
 
         self.contrast_scaler = pn.widgets.RangeSlider(name = "Image scaling", 
-                                                    start = 0, end = 1, value = (0,1), step = 0.004, 
-                                                    sizing_mode = "stretch_both")
+                                                     start = 0, end = 1, step = 0.004, 
+                                                     value = self._get_from_settings_dictionary("scaling", (0,1)),
+                                                     sizing_mode = "stretch_both")
         self.contrast_scaler.param.watch(self._update_intensity_scaling, "value")  
 
         self.filter_input = pn.widgets.Select(name = "Euclid Filter", 
                                               options =  {"VIS" : "VIS", 'Y' : "NIR_Y", 'J' : "NIR_J", 
-                                                        'H' : "NIR_H", 'Color' : "stacked"},
-                                                        value  = "stacked",
+                                                        'H' : "NIR_H", 'Color' : "Color"},
+                                                        value  = self.filter,
                                                 sizing_mode = "stretch_both")
         self.filter_input.param.watch(self._update_filter, "value")
         
-        self.overplot_source_coords_widget = pn.widgets.Checkbox(name = "Source Coordinates")
+        self.overplot_source_coords_widget = pn.widgets.Checkbox(name = "Source Coordinates",
+                                                                 value = self._get_from_settings_dictionary("source_coordinates", "False"))
         self.overplot_source_coords_widget.param.watch(self._overplot_source_coordinates_callback, "value")
 
         self.overplot_coords_widget = pn.widgets.Checkbox(name = "Spectrum Coordinates")
@@ -428,12 +467,11 @@ class EuclidPlotClass(CustomPlotClass):
                                              self.login_column, 
                                              scroll = True, visible = False)
         
-
-
      
     def _update_radius(self, event):
         if event.new: #avoid passing None
             self.radius = event.new
+            self._update_settings_dictionary("radius", self.radius)
             shared_data.publish(self.panel_id, "Euclid_radius", self.radius)
             self._run_euclid()
         else:
@@ -447,24 +485,28 @@ class EuclidPlotClass(CustomPlotClass):
 
     def _update_intensity_scaling(self, event):
         low, high = event.new
+        self._update_settings_dictionary("scaling", (low, high))
         scaled_image = self.change_intensity_range(self.euclid_object.plot_data[self.filter], 
                                                    low, high)
         self.get_euclid_figure(scaled_image, show_coordinates= self.overplot_source_coords_widget.value)
         self._update_image()
     
     def _overplot_source_coordinates_callback(self, event):
+        self._update_settings_dictionary("source_coordinates", event.new)
         self.get_euclid_figure(self.euclid_object.plot_data[self.filter], 
                                show_coordinates=event.new)
         self._update_image()
 
     def _update_filter(self, event):
         self.filter = event.new
+        self._update_settings_dictionary("filter", self.filter)
         self.get_euclid_figure(self.euclid_object.plot_data[self.filter],
                                show_coordinates= self.overplot_source_coords_widget.value)
         self._update_image()
         
     def _update_stretching(self, event):
         stretch = event.new
+        self._update_settings_dictionary("stretching", stretch)
         self.euclid_object.get_plot_data(stretch = stretch)
         self.get_euclid_figure(self.euclid_object.plot_data[self.filter], show_coordinates= self.overplot_source_coords_widget.value)
         self._update_image()
@@ -563,7 +605,6 @@ class EuclidPlotClass(CustomPlotClass):
         self.euclid_object.change_environment(environment=self.environment,
                                                       user = config.settings["EuclidAccountUser"], 
                                                       passwsord = config.settings["EuclidAccountPassword"])
-
 
 
     def get_plot_scale(self):
@@ -703,7 +744,6 @@ class SpectrumPlotClass(CustomPlotClass):
         return pn.Column(self.message_pane, self.figure, self.plot_settings_panel,  scroll = True)
     
     def _change_source_cb(self, attr, old, new):
-        #TODO maybe add a method to reload the same object
         if self.stage == "plot":
             self._initialize_spectrum_object()
             self._run_spectrum()
@@ -718,9 +758,8 @@ class SpectrumPlotClass(CustomPlotClass):
         self.max_separation = shared_data.get_data("Euclid_radius", 0.5)
 
         if self.from_sourceId:
-            self.selected_source = self.get_selected_source()
             try:
-                self.sourceId = int(self.selected_source[config.settings[f"{self.dataset}_TargetID"]].iloc[0])
+                self.sourceId = int(self.get_value_from_df(config.settings[f"{self.dataset}_TargetID"]))
                 self.ra, self.dec = None, None
             except KeyError:
                 raise KeyError("Missing column with target ID")
@@ -786,8 +825,8 @@ class SpectrumPlotClass(CustomPlotClass):
                                                           step = 0.5, start = 1, end = 100, max_width = 200, max_height = 40,
                                                           sizing_mode="stretch_both")
         self.link_to_cutout_checkbox = pn.widgets.Checkbox(name = "Use radius from Euclid cutout",  value = False, align = "center")
-        self.max_separation_input.disabled = (self.chosen_mode == "Use TargetId")
-        self.link_to_cutout_checkbox.disabled = (self.chosen_mode == "Use TargetId")
+        self.max_separation_input.disabled = (self.chosen_mode == self.mode_options[0])
+        self.link_to_cutout_checkbox.disabled = (self.chosen_mode == self.mode_options[0])
 
         self.plot_lines_checkbox = pn.widgets.Checkbox(name = "Plot Emission/Absorption Lines positions",  value = not self._is_euclid_spec, align = "center")
         self.plot_lines_checkbox.disabled = self._is_euclid_spec
@@ -799,7 +838,7 @@ class SpectrumPlotClass(CustomPlotClass):
         self.redshift_column_selector  = pn.widgets.Select(name = "Redshift Column", align = "center", 
                                                            options = ["None"] + self.get_column_list(allowed_types=["float"]),
                                                            value = "None",
-                                                         max_width = 200, max_height = 40, sizing_mode="stretch_both")
+                                                           max_width = 200, max_height = 40, sizing_mode="stretch_both")
         self.redshift_input.disabled = not self._is_euclid_spec
         self.query_redshift_button.disabled = not self._is_euclid_spec
         self.redshift_column_selector.disabled = not self._is_euclid_spec
@@ -830,7 +869,9 @@ class SpectrumPlotClass(CustomPlotClass):
             self.chosen_mode = event.new
             self.link_to_cutout_checkbox.disabled = True
             self.max_separation_input.disabled = True
-            self._get_unknown_columns([f"{self.dataset}_TargetID"], change_stage=True)
+            self._get_unknown_columns([f"{self.dataset}_TargetID"])
+            self._change_state_if_unknown_columns()
+        
         elif event.new == "Cone Search":
             self.from_sourceId = False
             self.chosen_mode = event.new
@@ -914,7 +955,7 @@ class SEDPlotClass(CustomPlotClass):
     stage = param.ObjectSelector(default = available_stages[0], objects=available_stages)
 
     def __init__(self, data, src, close_button, extra_features):
-        super().__init__(data, src, close_button, extra_features)
+        super().__init__(data, src, close_button, extra_features, ready_stage = "filters_selection")
         self._src_callback = self._change_source_cb
         self.src.on_change("data", self._src_callback)
         self.conversion_dictionary = {"AB magnitudes" : lambda f, e : self.mag_to_flux(f,e),
@@ -962,7 +1003,7 @@ class SEDPlotClass(CustomPlotClass):
         for band, info in self.filter_data.items():
             checkbox, tooltip_icon = self.create_checkbox_tooltip(band, info["name"], 
                                                                   info["wavelength"], info["FWHM"],
-                                                                   value = band in config.settings["bands_used_SED"])
+                                                                   value = band in config.settings["SED_bands"])
             self.checkbox_group.append(pn.Row(checkbox, tooltip_icon, align='center'))
             self.checkboxes[band] = checkbox
 
@@ -1037,9 +1078,12 @@ class SEDPlotClass(CustomPlotClass):
 
     def _filters_selection_continue_cb(self):
         self.bands_to_plot = [band for band in self.checkboxes.keys() if  self.checkboxes[band].value]
-        self.error_bands_to_plot = [f"err_{band}" for band in self.bands_to_plot]
-        self._get_unknown_columns(self.bands_to_plot+self.error_bands_to_plot, ready_stage=self.available_stages[3],
-                                 change_stage=True)
+        if self.bands_to_plot:
+            self.error_bands_to_plot = [f"err_{band}" for band in self.bands_to_plot]
+            self._get_unknown_columns(self.bands_to_plot+self.error_bands_to_plot, settings_key = "SED_bands")
+            self._change_state_if_unknown_columns(unknown_stage = self.available_stages[1],
+                                                  ready_stage = self.available_stages[3])
+        print("Select at least one band to plot")
 
 
     def _columns_selection_continue_cb(self):

@@ -88,6 +88,16 @@
     "test_set_file": false,
     "ra_col_name": "right_ascension_euclid",
     "dec_col_name": "declination_euclid",
+    "Euclid_cutout_settings": {
+        "filter": "Color",
+        "radius": 10.0,
+        "stretching": "Linear",
+        "scaling": [
+            0,
+            0.85
+        ],
+        "source_coordinates": false
+    },
     "SED_bands": {
         "u": "flux_u_ext_megacam_2fwhm_aper_euclid",
         "g": "flux_g_ext_hsc_2fwhm_aper_euclid",

@@ -917,7 +917,7 @@ class EuclidPanelManager:
 
     def _update_intensity_scaling(self, event):
         low, high = event.new
-        scaled_image = self.change_intensity_range(self.euclid_object.reprojected_data["stacked"], 
+        scaled_image = self.change_intensity_range(self.euclid_object.reprojected_data["Color"], 
                                                    low, high)
         
         self.get_euclid_figure(scaled_image)
@@ -927,7 +927,7 @@ class EuclidPanelManager:
     def _update_stretching(self, event):
         stretch = event.new
         self.euclid_object.stack_cutouts(stretch = stretch)
-        self.get_euclid_figure(self.euclid_object.reprojected_data["stacked"])
+        self.get_euclid_figure(self.euclid_object.reprojected_data["Color"])
         self._update_image()
 
     
@@ -969,7 +969,7 @@ class EuclidPanelManager:
                     self.overplotted_coordinates = []
                     for i, (x, y) in enumerate(self.euclid_object.world_2_pix(ra =  self.stored_spectrum_coordinates[dataset]["ra"],
                                                                               dec = self.stored_spectrum_coordinates[dataset]["dec"],
-                                                                              filtro = "stacked" )):
+                                                                              filtro = "Color" )):
 
                         if (0 <= x < self.image_width) and (0 <= y < self.image_height):
                             self.overplotted_coordinates.append(hv.Points([(x,y)]).opts(
@@ -997,7 +997,7 @@ class EuclidPanelManager:
 
         
     def get_plot_scale(self):
-        bar_length_arcsecond = self.bar_length_pixels * self.euclid_object.arcsec_per_pix["stacked"]
+        bar_length_arcsecond = self.bar_length_pixels * self.euclid_object.arcsec_per_pix["Color"]
         return bar_length_arcsecond
 
     
@@ -1047,7 +1047,7 @@ class EuclidPanelManager:
             self.contrast_scaler.value = (0,1)
         
         self.overplot_coords_widget.value = False
-        self.get_euclid_figure(self.euclid_object.reprojected_data["stacked"])                                                                        
+        self.get_euclid_figure(self.euclid_object.reprojected_data["Color"])                                                                        
  
 
     def _subscribe_to_shared(self):
