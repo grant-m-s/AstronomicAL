@@ -88,7 +88,7 @@
     "test_set_file": false,
     "ra_col_name": "right_ascension_euclid",
     "dec_col_name": "declination_euclid",
-    "bands_used_SED": {
+    "SED_bands": {
         "u": "flux_u_ext_megacam_2fwhm_aper_euclid",
         "g": "flux_g_ext_hsc_2fwhm_aper_euclid",
         "r": "flux_r_ext_megacam_2fwhm_aper_euclid",

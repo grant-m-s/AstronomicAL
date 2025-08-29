@@ -192,30 +192,49 @@ class CustomPlotClass(param.Parameterized):
 
     
     def _get_unknown_columns(self, columns_needed, change_stage = False,
-                            check_key = "default",
+                            settings_key = None,
                             unknown_stage  = "columns_selection",
                             ready_stage = "plot"):
         """
         Check if required columns exist in config.settings or config.main_df.
-        columns_needed : list, Columns that are required.
-        change_stage : bool, optional, change stage when unknown columns are found
-        unknown_stage : str, optional, stage to set if unknown columns are present (default 'columns_selection').
-        ready_stage : str, optional, stage to set if all columns are known 
+
+        columns_needed : list
+            Columns that are required.
+        change_stage : bool, optional
+            Change stage when unknown columns are found (default: False).
+        settings_key : str or None, optional
+            If provided, checks within config.settings[settings_key].keys().
+            Otherwise, checks directly against config.settings.
+        unknown_stage : str, optional
+            Stage to set if unknown columns are present (default: 'columns_selection').
+        ready_stage : str, optional
+            Stage to set if all columns are known (default: 'plot').
         """
-        current_cols = config.main_df.columns
+        
+        current_cols = getattr(config.main_df, "columns", [])
         self.unknown_columns = []
+
+        if settings_key is not None:
+            if settings_key not in config.settings:
+                config.settings[settings_key] = {}
+            settings_dict = config.settings[settings_key]
+        else:
+            settings_dict = config.settings
+
         for col in columns_needed:
-            if col not in list(config.settings.keys()):
+            if col not in settings_dict:
                 print(f"{col} not in config")
                 if col not in current_cols:
                     self.unknown_columns.append(col)
                 else:
-                    config.settings[col] = col
-        if len(self.unknown_columns) > 0:
+                    settings_dict[col] = col
+                            
+        if self.unknown_columns:
             if change_stage and (self.stage != unknown_stage):
                 self.stage = unknown_stage
         else:
             self.stage = ready_stage
+    
     
     def run_multithread(self, function, func_kwargs=None, callback=None, allowed_exceptions=(Exception,)):
         if func_kwargs is None:
@@ -1018,18 +1037,20 @@ class SEDPlotClass(CustomPlotClass):
 
     def _filters_selection_continue_cb(self):
         self.bands_to_plot = [band for band in self.checkboxes.keys() if  self.checkboxes[band].value]
-        config.settings["bands_to_plot_SED"] = self.bands_to_plot
         self.error_bands_to_plot = [f"err_{band}" for band in self.bands_to_plot]
         self._get_unknown_columns(self.bands_to_plot+self.error_bands_to_plot, ready_stage=self.available_stages[3],
                                  change_stage=True)
 
 
     def _columns_selection_continue_cb(self):
-        print(self.select_widgets)
+        
+        if "SED_bands" not in config.settings:
+            config.settings["SED_bands"] = {}
         for col, widget in self.select_widgets.items():
             selected_value = widget.value
             print(f"{col} --> {selected_value}")
-            config.settings[col] = selected_value
+            config.settings["SED_bands"][col] = selected_value
+
         current_idx = self.available_stages.index(self.stage)
         print(f"Moving to stage {current_idx + 1}, i.e. {self.available_stages[current_idx + 1]}")
         self.stage = self.available_stages[current_idx + 1]
@@ -1072,11 +1093,11 @@ class SEDPlotClass(CustomPlotClass):
 
     def get_fluxes_from_selected_source(self):
         selected_source = self.get_selected_source()
-        flux = selected_source[[config.settings[col] for col in self.bands_to_plot]].to_numpy().flatten()
+        flux = selected_source[[config.settings["SED_bands"][col] for col in self.bands_to_plot]].to_numpy().flatten()
         flux_err = []
         for col in  self.error_bands_to_plot:
             try:
-                flux_err.append(selected_source[config.settings[col]].iloc[0])
+                flux_err.append(selected_source[config.settings["SED_bands"][col]].iloc[0])
             except KeyError:
                 flux_err.append(np.nan)
         return flux, np.array(flux_err).flatten()
@@ -1134,7 +1155,6 @@ class SEDPlotClass(CustomPlotClass):
         is_upper_limit = err_y < 0
         has_larger_errors = err_y > y #These could also be considered a upper limits...
         good_measure = np.logical_and(~is_upper_limit, ~has_larger_errors)
-    
     
         ybars = hv.ErrorBars((x[good_measure ], y[good_measure ], err_y[good_measure ], err_y[good_measure ]), kdims='wavelength', vdims=["Flux", "yneg", "ypos"]).opts(
                 color="black", line_width = 1.5, active_tools =[])

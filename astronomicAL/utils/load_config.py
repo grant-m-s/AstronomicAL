@@ -201,11 +201,11 @@ def verify_import_config(curr_config_file):
                     error_message += "\n\n-------------------------------\n\n"
         
         ###Check SED options
-        if "bands_used_SED" in curr_config_file:
-            if curr_config_file["bands_used_SED"]:
-                if not isinstance(curr_config_file["bands_used_SED"], dict):
+        if "SED_bands" in curr_config_file:
+            if curr_config_file["SED_bands"]:
+                if not isinstance(curr_config_file["SED_bands"], dict):
                     has_error = True
-                    error_message += f"""Wrong format for \n\n 'bands_used_SED' \n\n 
+                    error_message += f"""Wrong format for \n\n 'SED_bands' \n\n 
                                      **[It needs to be a dictionary with bands as keys and assoictaed columns as values]**\n\n\n"""
                     error_message += "\n\n-------------------------------\n\n"
                 try:
@@ -214,7 +214,7 @@ def verify_import_config(curr_config_file):
                         filter_data = json.load(f)
                     
                     missing_bands, missing_cols = [], []
-                    for band, col in curr_config_file["bands_used_SED"].items():
+                    for band, col in curr_config_file["SED_bands"].items():
                         if ("err_" not in band) and (band not in filter_data):
                             missing_bands.append(band)
                         if col not in table.colnames:
@@ -254,7 +254,7 @@ def update_config_settings(imported_config):
             for i in imported_config["label_colours"]:
                 label_colours[int(i)] = imported_config["label_colours"][i]
             config.settings[key] = label_colours
-        elif key == "bands_used_SED":
+        elif key == "SED_bands":
             config.settings[key] = imported_config[key]
             #for k, value in imported_config[key].items():
               #config.settings[k] = value
