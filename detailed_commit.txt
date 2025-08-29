@@ -1,0 +1,102 @@
+Extra packages required
+astroquery
+reproject
+mocpy
+astro-datalab (to be pip installed at the beginning due to its strict requirements)
+sparclclient
+
+
+AT THE MOMENT THE SELECTED_SOURCE PANEL DOES NOT WORKS. 
+It is trying to import functions form dashboard.astro_cutouts which doesn't exist anymore.
+Most of the functions/classes are just available in astro_data_utility.py but they have different names and sometimes different logic.
+I need to rethink about the selected source panel and what showing there now that all images are shown as Basic Plots.
+
+Added files
+----------------------------------------
+-astro_data_utility.py in astronomicAL/extensions
+It includes the classes/functions to deal with astronomical data. 
+
+EuclidCutoutClass():
+Class to deal with retrieving images from Euclid Science Archive.
+The basic flow is as follows: 
+1)Given ra, dec and filter, query for a table listing the names of the images covering that region.
+   Note that these images are huge
+2)Query the obtained images and download cutouts of the required size
+3)Project cutouts to the same WCS, apply stretchings and stack them to get a color image
+
+
+DESISpectraClass():
+Class to deal with retrieving DESI and SDSS spectra
+The basic flow is as follows: 
+1)Given ra and dec, do a SQL query to get the names of all the available spectra within a certain distance
+2)Query the first (i.e. the closest) of the available spectra returned from the SQL query
+3)Do some things with the spectrum, i.e. smooth it with a top-hat or gaussian kernel for better graphics
+
+The class allows for a specID to be passed in the __init__ function (default is None). If this happen step 1 is skipped and it is queried the spectrum with the given ID
+
+The class also has some methods for plotting the spectra, such as loading Sotiria's tables with emission and absorption lines.
+
+
+LoTSS_cutout, VLASS_cutout:
+Functions which return radio images given ra and dec. Using them should be avoided as they are slow/with limited sky coverage
+
+check_isin_survey:
+A function which given ra, dec and name of the survey loads the mocs file and returns True/False depending
+if the survey covers or not that region. Note that while for Euclid/VLASS/LoTSS a True result indicate that a cutout will be available,
+for DESI and SDSS it doesn't guarantee the existence of a spectrum as not all sources in the covered area have been targeted to get their spectra.
+mocs file are stored in the data/mocs directory. 
+------------------------------------------------
+-test.ipynb 
+just notebooks that I use to try what i'm doing
+--------------------------------------------------------
+
+Added functions:
+In plot.py
+HistoDashboard():
+Copy of Plotdashboard but for 1-variable histograms, offer some interactive buttons for controlling the number of bins, x and y scale.
+The returned plot can be either a holviews oa a matplotlib one. Currently returning the matplotlib one.
+TODO: adding separate histograms for separate labels (though if >2 labels are available histograms become a bit messy)
+
+
+In extension_plot.py
+
+DESI_spectrum_plot, SDSS_spectrum_plot: functions
+They just create an instance of DESISpectraClass() and call all its methods 
+to return a figure with the spectrum. All methods are called within the run_desi functions for multithreading
+purposes.
+They also call the _add_coordinates_to_data() to write on the main shared dataframe two columns with ra and dec of the retrieved spectra
+ 
+EuclidPanelManager: class
+This class just handles together the Euclid cutout and the various widgets available (radius, scaling, stretching).
+It returns a panel with the Euclid cutout + the widgets when used in the euclid_cutout_plot function.
+
+
+lotss_cutout_plot, VLASS_cutout_plot: 
+they just call the functions in astro_data_utility.py and return figures
+
+
+
+
+
+TODO LIST 
+-Improve graphics/sizing of panels widgets
+-Fix configuration file management
+-Add plot with multiple spectra
+-Have different basic plots share information between each other
+-Allow to pass basic plots clients for Euclid/Desi queries 
+-If possible, can we multithread the loading of the different plots? Most of the time to load a panel is just to 
+wait for a response about the query, maybe we can launch the query simultaneously.
+-Test possible breaks, i.e. querying ra and dec with no coverage/ wrong format etc...
+
+
+
+
+
+
+
+
+
+
+
+
+

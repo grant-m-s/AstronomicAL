@@ -1,11 +1,28 @@
+
 # astronomicAL specific
-data
+data/cutouts
 models
+
+#Added by Ivano
+.venv*/
+*test.ipynb
+*.py.bak
+*.bak 
+*Euclid_and_Desi_reduced.fits
+*.DS_Store
+*.login
+data/EDFN_DESI.fits
+data/EDFN-DESI.fits
+data_cutouts
+
+
+
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
 *$py.class
+
 
 # C extensions
 *.so

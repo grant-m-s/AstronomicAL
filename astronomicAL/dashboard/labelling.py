@@ -18,6 +18,29 @@ from holoviews.operation.datashader import (
     datashade,
     dynspread,
 )
+hv.extension('bokeh', logo=False)
+
+
+#This serves to avoid the rangeupdate error which occurs every time the selected source
+#changes. The problem is probably arising from datashade + dynspread but i could not solve it if not
+#by directly removing the calls to datashade. I just copied this
+#snippet of code and it should be deleted and the problem fixed, but for the moment it is useful 
+#as it avoids having the terminal filled with error messages
+import holoviews.plotting.bokeh.callbacks
+original_initialize = holoviews.plotting.bokeh.callbacks.Callback.initialize
+
+def safe_initialize(self, plot_id=None):
+    try:
+        return original_initialize(self, plot_id)
+    except KeyError as e:
+        if 'rangesupdate' in str(e):
+            print(f"Warning: Skipping unsupported event: {e}")
+            return
+        else:
+            raise e
+
+holoviews.plotting.bokeh.callbacks.Callback.initialize = safe_initialize
+
 
 
 class LabellingDashboard(param.Parameterized):
@@ -58,6 +81,8 @@ class LabellingDashboard(param.Parameterized):
 
         self._update_variable_lists()
         self.select_random_point()
+        
+        
 
     def _construct_panel(self):
 
@@ -202,9 +227,9 @@ class LabellingDashboard(param.Parameterized):
                     & (self.region_criteria_df["value"] == updated_df["value"][0])
                 ]
                 if len(exists) == 0:
-                    self.region_criteria_df = self.region_criteria_df.append(
-                        updated_df, ignore_index=True
-                    )
+                    self.region_criteria_df = pd.concat([self.region_criteria_df,updated_df], 
+                                                        ignore_index=True
+                                                        )
                 else:
                     return
 
@@ -293,13 +318,15 @@ class LabellingDashboard(param.Parameterized):
         p = hv.Points(
             self.df,
             [x_var, y_var],
-        ).opts(active_tools=["pan", "wheel_zoom"])
-
+        ).opts(
+            #active_tools=["pan", "wheel_zoom"])
+        )
         sample_region = hv.Points(
             self.sample_region,
             [x_var, y_var],
-        ).opts(active_tools=["pan", "wheel_zoom"])
-
+        ).opts(
+            #active_tools=["pan", "wheel_zoom"])
+        )
         cols = list(self.df.columns)
 
         if len(self.src.data[cols[0]]) == 1:
@@ -311,7 +338,7 @@ class LabellingDashboard(param.Parameterized):
             fill_color="black",
             marker="circle",
             size=10,
-            active_tools=["pan", "wheel_zoom"],
+            #active_tools=["pan", "wheel_zoom"],
         )
 
         color_key = config.settings["label_colours"]
@@ -363,9 +390,11 @@ class LabellingDashboard(param.Parameterized):
             ).opts(
                 xlim=(min_x, max_x),
                 ylim=(min_y, max_y),
-                responsive=True,
+                #responsive=True,
                 alpha=0.5,
-                shared_axes=False,
+                #shared_axes=False,
+                framewise=False,        
+                axiswise=False,         
             ),
             threshold=0.3,
             how="over",
@@ -381,18 +410,21 @@ class LabellingDashboard(param.Parameterized):
             ).opts(
                 xlim=(min_x, max_x),
                 ylim=(min_y, max_y),
-                responsive=True,
-                shared_axes=False,
+                #responsive=True,
+                #shared_axes=False,
+                framewise=False,        
+                axiswise=False, 
             ),
             threshold=0.7,
             how="saturate",
         )
         plot = (all_points * sample_region_plot * selected_plot).opts(
-            shared_axes=False,
+            #shared_axes=False,
         )
 
         return plot
-
+    
+    
     def _assign_label_cb(self, event):
         print("_assign_label_cb")
 
@@ -433,7 +465,7 @@ class LabellingDashboard(param.Parameterized):
 
     def select_random_point(self):
 
-        inside_region = list(self.sample_region[config.settings["id_col"]].values)
+        inside_region = list(self.get_id(df =self.sample_region).values)
 
         if len(inside_region) == 0:
             self.region_message = "No Matching Sources!"
@@ -443,11 +475,13 @@ class LabellingDashboard(param.Parameterized):
         else:
             self.region_message = f"{len(inside_region)} Matching Sources"
 
-        selected = random.choice(
-            list(self.sample_region[config.settings["id_col"]].values)
-        )
-        selected_source = self.df[self.df[config.settings["id_col"]] == selected]
+        selected = random.choice(inside_region)
+        
+        
+        selected_source = self.df[self.get_id() == selected]
         selected_dict = selected_source.to_dict("list")
+        if config.settings["id_col"] not in selected_dict:
+            selected_dict[config.settings["id_col"]] = selected
 
         self.src.data = selected_dict
         self.assign_label_group.value = "Unsure"
@@ -476,8 +510,11 @@ class LabellingDashboard(param.Parameterized):
 
         if updated is not None:
 
-            selected_source = self.df[self.df[config.settings["id_col"]] == updated]
+            selected_source = self.df[self.get_id() == updated]
             selected_dict = selected_source.to_dict("list")
+            if config.settings["id_col"] not in selected_dict:
+                selected_dict[config.settings["id_col"]] = updated
+
             self.assign_label_group.value = config.settings["labels_to_strings"][
                 f"{self.labels[updated]}"
             ]
@@ -485,20 +522,30 @@ class LabellingDashboard(param.Parameterized):
             self.src.data = selected_dict
 
     def get_current_index_in_labelled_data(self):
-
-        total = len(self.labels.keys())
-
-        if len(self.src.data[config.settings["id_col"]]) > 0:
-            if self.src.data[config.settings["id_col"]][0] in list(self.labels.keys()):
-                index = list(self.labels.keys()).index(
-                    self.src.data[config.settings["id_col"]][0]
+        id_col = config.settings["id_col"]
+        labelled_keys = list(self.labels.keys())
+        total = len(labelled_keys)
+        if id_col in self.src.data and len(self.src.data[id_col]) > 0:
+            if self.src.data[id_col][0] in list(self.labels.keys()):
+                index = labelled_keys .index(
+                    self.src.data[id_col][0]
                 )
             else:
                 index = total
         else:
             index = "-"
-
         return index
+    
+    def get_id(self, df = None):
+        id_col = config.settings["id_col"]
+        target_df = self.df if df is None else df
+
+        if id_col == "Use Index":
+            return pd.Series(target_df.index, index=target_df.index)
+        else:
+            if id_col not in target_df.columns:
+                raise KeyError(f"ID column '{id_col}' not found in DataFrame.")
+            return target_df[id_col]
 
     def _reset_index_buttons(self):
         self.first_labelled_button.disabled = False
@@ -648,6 +695,7 @@ class LabellingDashboard(param.Parameterized):
             collapsible=False,
             sizing_mode="stretch_both",
         )
-        print(self.row)
-
         return self.row
+
+
+

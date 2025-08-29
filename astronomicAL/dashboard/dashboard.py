@@ -1,10 +1,11 @@
 from astronomicAL.dashboard.active_learning import ActiveLearningDashboard
 from astronomicAL.dashboard.labelling import LabellingDashboard
+from astronomicAL.dashboard.exploration import ExplorationDashboard
 from astronomicAL.dashboard.menu import MenuDashboard
-from astronomicAL.dashboard.plot import PlotDashboard
+from astronomicAL.dashboard.plot import HistoDashboard, ScatterPlotDashboard
 from astronomicAL.dashboard.selected_source import SelectedSourceDashboard
 from astronomicAL.dashboard.settings_dashboard import SettingsDashboard
-from astronomicAL.extensions import extension_plots
+from astronomicAL.extensions import extension_plots, custom_plots
 from bokeh.models import ColumnDataSource
 
 import astronomicAL.config as config
@@ -41,22 +42,26 @@ class Dashboard(param.Parameterized):
 
     contents = param.String()
 
-    def __init__(self, src, contents="Menu"):
+    def __init__(self, src, contents= "Menu"):
         super(Dashboard, self).__init__()
 
         self.src = src
         self.src.on_change("data", self._update_extension_plots_cb)
         self.row = pn.Row(pn.pane.Str("loading"))
         self.df = config.main_df
-
+        self.current_extension_plot = None
+        
         self._close_button = pn.widgets.Button(name="Close", max_width=100)
         self._close_button.on_click(self._close_button_cb)
-
+        
         self._submit_button = pn.widgets.Button(name="Submit Column Names")
         self._submit_button.on_click(self._submit_button_cb)
-
+        
+        self.plot_dict = extension_plots.get_plot_dict()
+        self.cust_plot_dict = custom_plots.get_customplot_dict()
         self.contents = contents
-
+        
+ 
     def _submit_button_cb(self, event):
         self._submit_button.name = "Loading Plot..."
         self._submit_button.disabled = True
@@ -73,16 +78,28 @@ class Dashboard(param.Parameterized):
         self._update_contents()
 
     def _close_button_cb(self, event):
+        self._cleanup_current_extension_plot()
         self.contents = "Menu"
+    
 
     def _update_extension_plots_cb(self, attr, old, new):
-        plot_dict = extension_plots.get_plot_dict()
-        if self.contents in list(plot_dict.keys()):
-            self.panel_contents = plot_dict[self.contents].plot(self._submit_button)(
+        if self.contents in list(self.plot_dict.keys()):
+            self.current_extension_plot = self.plot_dict[self.contents]
+            self.panel_contents = self.plot_dict[self.contents].plot(self._submit_button)(
                 config.main_df, self.src
             )
             self.panel()
 
+    
+    def _cleanup_current_extension_plot(self):
+        if self.current_extension_plot and hasattr(self.current_extension_plot, 'cleanup_panel_plot'):
+            self.current_extension_plot.cleanup_panel_plot()
+        
+        elif hasattr(self.panel_contents, "cleanup_panel_plot"):
+            self.panel_contents.cleanup_panel_plot()
+        self.current_extension_plot = None
+            
+            
     @param.depends("contents", watch=True)
     def _update_contents(self):
 
@@ -100,17 +117,27 @@ class Dashboard(param.Parameterized):
             self.df = config.main_df
             self.panel_contents = ActiveLearningDashboard(self.src, self.df)
 
+        elif self.contents == "Histogram Plot":
+            if not config.settings["confirmed"]:
+                self.contents = "Menu"
+                print("Please Complete Settings before accessing this view.")
+                return
+            self.panel_contents = HistoDashboard(self.src, self._close_button)
+        
         elif self.contents == "Basic Plot":
             if not config.settings["confirmed"]:
                 self.contents = "Menu"
                 print("Please Complete Settings before accessing this view.")
                 return
-            self.panel_contents = PlotDashboard(self.src, self._close_button)
+            self.panel_contents = ScatterPlotDashboard(self.src, self._close_button)
 
         elif self.contents == "Labelling":
-
             self.df = config.main_df
             self.panel_contents = LabellingDashboard(self.src, self.df)
+        
+        elif self.contents == "Exploring":
+            self.df = config.main_df
+            self.panel_contents = ExplorationDashboard(self.src, self.df)
 
         elif self.contents == "Selected Source Info":
             if not config.settings["confirmed"]:
@@ -118,9 +145,17 @@ class Dashboard(param.Parameterized):
                 print("Please Complete Settings before accessing this view.")
                 return
             self.panel_contents = SelectedSourceDashboard(self.src, self._close_button)
+        
+        elif self.contents in self.cust_plot_dict:
+            if not config.settings["confirmed"]:
+                self.contents = "Menu"
+                print("Please Complete Settings before accessing this view.")
+                return
+            self.panel_contents = self.cust_plot_dict[self.contents](config.main_df, self.src, self._close_button)
+        
         else:
-            self.plot_dict = extension_plots.get_plot_dict()
-            self.panel_contents = self.plot_dict[self.contents].plot(
+            self.current_extension_plot = self.plot_dict[self.contents]
+            self.panel_contents = self.current_extension_plot.plot(
                 self._submit_button
             )(config.main_df, self.src)
 
@@ -154,6 +189,8 @@ class Dashboard(param.Parameterized):
         """
         if hasattr(self.panel_contents, "panel"):
             self.row[0] = self.panel_contents.panel()
+        elif hasattr(self.panel_contents, "mypanel"):
+            self.row[0] = self.panel_contents.mypanel
         else:
             self.row[0] = pn.Card(
                 self.panel_contents,
@@ -164,3 +201,4 @@ class Dashboard(param.Parameterized):
         print("self.row dashboard:", self.row)
 
         return self.row
+    

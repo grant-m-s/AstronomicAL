@@ -10,8 +10,10 @@ import panel as pn
 import pandas as pd
 import time
 
+pn.extension()   
 hv.extension("bokeh")
 hv.renderer("bokeh").webgl = True
+
 
 
 def export_fits_file_cb(event):
@@ -85,19 +87,19 @@ if os.path.isfile(config.layout_file):
 else:
     react = load_config.create_default_layout(react)
 
-# export_fits_file_button = pn.widgets.Button(
-#     name="Export Labelled Data to Fits File", disabled=False
-# )
+export_fits_file_button = pn.widgets.Button(
+    name="Export Labelled Data to Fits File", disabled=False
+)
 
-# export_fits_file_button.on_click(export_fits_file_cb)
+export_fits_file_button.on_click(export_fits_file_cb)
 
 
-# react.header.append(
-#     pn.Row(
-#         config.get_save_layout_button(config.settings["confirmed"], True),
-#         export_fits_file_button,
-#     )
-# )
+react.header.append(
+    pn.Row(
+        config.get_save_layout_button(config.settings["confirmed"], True),
+        export_fits_file_button,
+    )
+)
 
 react.servable()
 

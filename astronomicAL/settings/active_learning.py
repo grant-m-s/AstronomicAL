@@ -156,10 +156,10 @@ class ActiveLearningSettings(param.Parameterized):
         )
         self._remove_feature_generator_button.on_click(self._remove_feature_selector_cb)
 
-        self._feature_generator_dataframe = pn.widgets.DataFrame(
+        self._feature_generator_dataframe = pn.pane.DataFrame(
             pd.DataFrame(self.feature_generator_selected, columns=["oper", "n"]),
             name="",
-            show_index=False,
+            index=False,
         )
 
         self.default_x_variable = pn.widgets.Select(
@@ -285,6 +285,10 @@ class ActiveLearningSettings(param.Parameterized):
         """
         if dataframe is not None:
             self.df = dataframe
+            #if self.df.columns.duplicated().any():     
+            #    duplicates = self.df.columns[self.df.columns.duplicated()].tolist()
+            #    self.df = self.df.loc[:, ~self.df.columns.duplicated()]
+            #    print(f"Removed columns with duplicate column names: {duplicates}")
 
         if self.df is not None:
 
@@ -311,14 +315,16 @@ class ActiveLearningSettings(param.Parameterized):
         ]
 
         if new_feature_generator not in self.feature_generator_selected:
+            print("doing the correct thing")
             self.feature_generator_selected.append(
                 [self.feature_generator.value, self.feature_generator_number.value]
             )
-            self._feature_generator_dataframe.value = pd.DataFrame(
+            self._feature_generator_dataframe.object = pd.DataFrame(
                 self.feature_generator_selected, columns=["oper", "n"]
             )
 
         self._update_default_var_lists()
+
 
     def _update_default_var_lists(self):
 
@@ -329,7 +335,6 @@ class ActiveLearningSettings(param.Parameterized):
         if selected_features == []:
             return
         else:
-
             oper_dict = feature_generation.get_oper_dict()
 
             for generator in self.feature_generator_selected:
@@ -341,24 +346,36 @@ class ActiveLearningSettings(param.Parameterized):
                     pd.DataFrame(columns=selected_features), n
                 )
                 selected_features = selected_features + generated_features
-
+            #selected_features = list(dict.fromkeys(selected_features)) # Removes duplicates (currently the same operation can be performed more than once)
+            
+        
         self.default_x_variable.options = selected_features
         self.default_y_variable.options = selected_features
 
     def _remove_feature_selector_cb(self, event):
         self.feature_generator_selected = self.feature_generator_selected[:-1]
-        self._feature_generator_dataframe.value = pd.DataFrame(
+        self._feature_generator_dataframe.object = pd.DataFrame(
             self.feature_generator_selected, columns=["oper", "n"]
         )
 
         self._update_default_var_lists()
 
     def get_default_variables(self):
+        x_var = self.default_x_variable.value
+        y_var = self.default_y_variable.value
+        if x_var == y_var:
+            print("X and Y variables cannot be the same, using the next available option")   #TODO Print on the dashboard rather than in terminal
+            if len(self.default_x_variable.options) > 1:
+                for option in self.default_x_variable.options:
+                    if option != x_var:
+                        y_var = option
+                        break
+    
+        return (x_var, y_var)
 
-        return (
-            self.default_x_variable.value,
-            self.default_y_variable.value,
-        )
+
+
+      
 
     def _confirm_settings_cb(self, event):
         print("Saving settings...")
@@ -428,6 +445,7 @@ class ActiveLearningSettings(param.Parameterized):
             settings Dashboard.
 
         """
+        
         if self.completed:
             self.column[0] = pn.pane.Str("Settings Saved.")
 
@@ -470,7 +488,7 @@ class ActiveLearningSettings(param.Parameterized):
                         self._remove_feature_generator_button,
                     ),
                     self._feature_generator_dataframe,
-                    sizing_mode="stretch_width",
+                   sizing_mode="stretch_width",
                 ),
                 pn.Row(
                     self.default_x_variable,

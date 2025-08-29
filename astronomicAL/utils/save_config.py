@@ -7,7 +7,7 @@ import numpy as np
 
 save_layout_js_cb = """
 function FindReact(dom, traverseUp = 0) {
-const key = Object.keys(dom).find(key=>key.startsWith("__reactInternalInstance$"));
+const key = Object.keys(dom).find(key=>key.startsWith("__reactFiber$"));
 const domFiber = dom[key];
 if (domFiber == null) return null;
 
@@ -105,6 +105,20 @@ def save_config_file(layout_from_js, trigger_text, autosave=False, test=False):
     export_config["scale_data"] = config.settings["scale_data"]
     export_config["feature_generation"] = config.settings["feature_generation"]
     export_config["test_set_file"] = config.settings["test_set_file"]
+    export_config["ra_col_name"] = config.settings["ra_col_name"]
+    export_config["dec_col_name"] = config.settings["dec_col_name"]
+
+    for i in layout:
+        curr_contents = config.dashboards[i].contents
+        if curr_contents == "BroadBand SED":
+            export_config["bands_used_SED"] = {
+                col: config.settings[col] for col in config.settings["bands_to_plot_SED"]}
+            err_bands = [f"err_{band}" for band in config.settings["bands_to_plot_SED"]]
+            export_config["bands_used_SED"] |= {
+                col: config.settings[col] for col in err_bands}
+        #here i am saving only the association between the columns and the bands, not all the SED
+        #settings
+
 
     if "classifiers" not in config.settings.keys():
         config.settings["classifiers"] = {}
@@ -114,15 +128,15 @@ def save_config_file(layout_from_js, trigger_text, autosave=False, test=False):
     if autosave:
         print("AUTOSAVING...")
         with open("configs/autosave.json", "w") as fp:
-            json.dump(export_config, fp, cls=NumpyEncoder)
+            json.dump(export_config, fp, cls=NumpyEncoder, indent=4)
     elif test:
         with open(f"configs/config_export.json", "w") as fp:
-            json.dump(export_config, fp, cls=NumpyEncoder)
+            json.dump(export_config, fp, cls=NumpyEncoder, indent=4)
     else:
         now = datetime.now()
-        dt_string = now.strftime("%Y%m%d_%H:%M:%S")
+        dt_string = now.strftime("%Y%m%d_%H%M%S")
         with open(f"configs/config_{dt_string}.json", "w") as fp:
-            json.dump(export_config, fp, cls=NumpyEncoder)
+            json.dump(export_config, fp, cls=NumpyEncoder, indent=4)
 
         print(f"Final Export Config Settings: {export_config}")
         print(f"Config File saved to: configs/config_{dt_string}.json")

@@ -9,6 +9,7 @@ def get_oper_dict():
     oper = {
         "subtract (a-b)": subtract,
         "add (a+b)": add,
+        "color (-2.5log(a/b))" : color,
         "multiply (a*b)": multiply,
         "divide (a/b)": divide,
     }
@@ -29,11 +30,7 @@ def add(df, n):
     generated_features = []
 
     for comb in combs:
-        col = ""
-        for i in range(n):
-            col = col + f"{comb[i]}"
-            if i != (n - 1):
-                col = col + "+"
+        col = "+".join(comb)
         generated_features.append(col)
         if col not in cols:
             for i in range(n):
@@ -56,11 +53,7 @@ def subtract(df, n):
     cols = list(df.columns)
     generated_features = []
     for comb in combs:
-        col = ""
-        for i in range(n):
-            col = col + f"{comb[i]}"
-            if i != (n - 1):
-                col = col + "-"
+        col = "-".join(comb)
         generated_features.append(col)
         if col not in cols:
             for i in range(n):
@@ -83,11 +76,7 @@ def multiply(df, n):
     cols = list(df.columns)
     generated_features = []
     for comb in combs:
-        col = ""
-        for i in range(n):
-            col = col + f"{comb[i]}"
-            if i != (n - 1):
-                col = col + "*"
+        col = "*".join(comb)
         generated_features.append(col)
         if col not in cols:
             for i in range(n):
@@ -110,11 +99,7 @@ def divide(df, n):
     cols = list(df.columns)
     generated_features = []
     for comb in combs:
-        col = ""
-        for i in range(n):
-            col = col + f"{comb[i]}"
-            if i != (n - 1):
-                col = col + "/"
+        col = "/".join(comb)
         generated_features.append(col)
         if col not in cols:
             for i in range(n):
@@ -122,5 +107,30 @@ def divide(df, n):
                     df[col] = df[comb[i]]
                 else:
                     df[col] = df[col] / df[comb[i]]
+
+    return df, generated_features
+
+
+
+def color(df, n):
+    if n > 2:
+        print("It doesn't really make sense,,,")
+    
+    np.random.seed(0)
+
+    bands = config.settings["features_for_training"]
+
+    combs = list(combinations(bands, n))
+
+    generated_features = []
+    for comb in combs:
+        col = "-".join(comb)
+        generated_features.append(col)
+        if col not in df.columns:
+            for i in range(n):
+                if i == 0:
+                    df[col] = df[comb[i]]
+                else:
+                    df[col] = -2.5*np.log10(df[col]/df[comb[i]])
 
     return df, generated_features

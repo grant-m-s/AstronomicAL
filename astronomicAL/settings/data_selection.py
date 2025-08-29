@@ -13,6 +13,7 @@ import pandas as pd
 import panel as pn
 import param
 import time
+import os
 
 
 class DataSelection(param.Parameterized):
@@ -129,7 +130,12 @@ class DataSelection(param.Parameterized):
 
     def _get_config_files(self):
         files = glob.glob("configs/*.json")
-        return files
+        exploring_file = "configs/exploring_default.json"
+        files = [f for f in files if f != exploring_file]
+        if self.mode == "Exploring" and os.path.exists(exploring_file):
+            files = [exploring_file] + sorted(files)     
+        return files 
+
 
     def _init_load_config_options(self):
         if self.mode == "AL":
@@ -143,6 +149,12 @@ class DataSelection(param.Parameterized):
             options = [
                 "Only load layout. Let me choose all my own settings",
                 "Load all settings and begin labelling data.",
+            ]
+        
+        elif self.mode == "Exploring":
+            options = [
+                "Only load layout. Let me choose all my own settings",
+                "Load all settings and begin exploring data.",
             ]
         else:
             options = []
@@ -172,7 +184,7 @@ class DataSelection(param.Parameterized):
         from astronomicAL.utils.load_config import (
             verify_import_config,
         )  # causes circular import error at top
-
+        
         has_error, error_message = verify_import_config(curr_config_file)
 
         if has_error:
@@ -185,10 +197,18 @@ class DataSelection(param.Parameterized):
             self.error_message = ""
             self.load_data_button_js.name = "Load Data"
             self.load_data_button_js.disabled = False
-
+        
         self.panel_col = self.panel()
 
         print(f"Config load level: {config.settings['config_load_level']}")
+
+    @param.depends("config_file", watch=True)
+    def update_available_loading_options(self):
+        if self.config_file.endswith("exploring_default.json"):
+            self.param.load_config_select.objects = ["", "Only load layout. Let me choose all my own settings"]
+        else:
+            self.param.load_config_select.objects = [""] + self._init_load_config_options()
+
 
     def get_dataframe_from_fits_file(self, filename, optimise_data=None):
         """Load data from FITS file into dataframe.
@@ -265,21 +285,17 @@ class DataSelection(param.Parameterized):
     def add_ra_dec_col(self, df):
 
         new_df = df
-        has_loc = True
-        ra = None
-        dec = None
-        for col in list(new_df.columns):
-            if col.upper() == "RA":
-                ra = col
-            if col.upper() == "DEC":
-                dec = col
 
-        if (ra is None) or (dec is None):
-            has_loc = False
+        #we should add this option at some point in the config/settings pipeline
+        ra_col_name = config.settings.get("ra_col_name", "ra")
+        dec_col_name = config.settings.get("dec_col_name", "dec")
 
+        has_loc = (ra_col_name in list(new_df.columns)) and (dec_col_name in list(new_df.columns))
+ 
         if has_loc:
-
-            new_df["ra_dec"] = df[ra].astype(str) + "," + df[dec].astype(str)
+           new_df["ra_dec"] = df[ra_col_name].astype(str) + "," + df[dec_col_name].astype(str)
+        else:
+            print("Columns selected as Ra and Dec are not in the table")
 
         return new_df
 

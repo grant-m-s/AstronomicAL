@@ -57,6 +57,8 @@ def _save_layout_button_rename():
 
 def _save_layout_button_cb(event):
     Process(target=_save_layout_button_rename).start()
+    
+
 
 
 layout_file = "astronomicAL/layout.json"
