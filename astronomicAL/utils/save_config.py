@@ -112,10 +112,18 @@ def save_config_file(layout_from_js, trigger_text, autosave=False, test=False):
         curr_contents = config.dashboards[i].contents
         if curr_contents == "BroadBand SED":
             export_config["SED_bands"] = config.settings["SED_bands"]
-            #here i should also save the units of the bands
+            export_config["SED_units"] = config.settings["SED_units"]
+        
         elif curr_contents == "Euclid Cutout":
             export_config["Euclid_cutout_settings"] = config.settings["Euclid_cutout_settings"]
-    
+        
+        elif curr_contents == "Basic Plot":
+            export_config["Scatter_plot_settings"] = config.settings["Scatter_plot_settings"]
+
+        elif curr_contents == "Histogram Plot":
+            export_config["Histogram_plot_settings"] = config.settings["Histogram_plot_settings"]
+
+
     if "classifiers" not in config.settings.keys():
         config.settings["classifiers"] = {}
 

@@ -16,10 +16,10 @@ import param
 import uuid
 import matplotlib.pyplot as plt
 import concurrent.futures 
-import pandas.api.types as pdt
 from bokeh.document import without_document_lock
 from bokeh.models import  NormalHead
 from bokeh.models import Range1d, LinearAxis
+from astronomicAL.utils.optimise import matches_type
 from astronomicAL.extensions.shared_data import shared_data
 from astronomicAL.extensions.astro_data_utility import DESISpectraClass, EuclidCutoutsClass, EuclidSpectraClass
 from astronomicAL.extensions.astro_data_utility import VLASS_cutout, LoTSS_cutout
@@ -125,11 +125,13 @@ class CustomPlotClass(param.Parameterized):
     
     def get_column_list(self, excluded_columns = ["id_col", "ra_dec", "label_col"],
                               excluded_types = ["object"], allowed_types = None):
-        """Returns the list of columns used for panel.widgets.Selector according to their type
-        allowed_types : list ["float", "numeric", "int"] """
-
-        if allowed_types is None:  
-            allowed_types = []
+        """
+        Returns the list of columns used for panel.widgets.Selector according to their type
+        -----
+        excluded_columns : list of columns which are removed regardless of their type
+        allowed_types : list ["float", "numeric", "int"], if not None, only columns with this type are kept
+        excluded_types = list ["float", "object"] list, columns with this types are removed
+        """
 
         cols = list(self.df.columns)
         
@@ -138,36 +140,25 @@ class CustomPlotClass(param.Parameterized):
             if col_name in cols:
                cols.remove(col_name)
         
-        def matches_type(dtype, type_list):
-            """Check if a dtype matches any keyword in type_list"""
-            for t in type_list:
-                if t == "float" and (pdt.is_float_dtype(dtype)):
-                    return True
-                if t == "int" and (pdt.is_integer_dtype(dtype)):
-                    return True
-                if t == "number" and (pdt.is_numeric_dtype(dtype)):
-                    return True
-                if t == "object" and (pdt.is_object_dtype(dtype)):
-                    return True
-            return False
-
         if allowed_types:
             cols = [col for col in cols if matches_type(self.df[col].dtype, allowed_types)]
-        
-        cols = [col for col in cols if not matches_type(self.df[col].dtype, excluded_types)]
-
+        if excluded_types:
+            cols = [col for col in cols if not matches_type(self.df[col].dtype, excluded_types)]
         return cols
 
 
-    def _get_selection_widgets_grid(self, columns_to_select, options = None, allowed_types = None):
+    def _get_selection_widgets_grid(self, columns_to_select, default_values = None, 
+                                    options = None, allowed_types = None):
         settings_grid = pn.GridBox(ncols=3, sizing_mode = "stretch_width", scroll = True)  
         self.select_widgets = {}
         if options is None:
             options = self.get_column_list(excluded_columns = ["ra_dec", "label_col"],
                               excluded_types = ["object"], allowed_types = allowed_types)
         if len(columns_to_select) > 0:
-            for col in columns_to_select:
+            for i, col in enumerate(columns_to_select):
                 select_widget = pn.widgets.Select(name= col, options=options, max_height=120, sizing_mode = "stretch_width")
+                if (default_values is not None) and (i < len(default_values)):
+                    select_widget.value = default_values[i]
                 settings_grid.append(select_widget)
                 self.select_widgets[col] = select_widget
         return settings_grid
@@ -205,7 +196,6 @@ class CustomPlotClass(param.Parameterized):
             If provided, checks within config.settings[settings_key].keys().
             Otherwise, checks directly against config.settings.
         """
-
         current_cols = getattr(config.main_df, "columns", [])
         self.unknown_columns = []
 
@@ -388,6 +378,8 @@ class EuclidPlotClass(CustomPlotClass):
     @staticmethod
     def _update_settings_dictionary(key, value):
         config.settings["Euclid_cutout_settings"][key] = value
+
+    
         
 
     def _initialise_euclid_object(self):
@@ -726,7 +718,7 @@ class SpectrumPlotClass(CustomPlotClass):
 
     def __init__(self, data, src, close_button, extra_features, dataset = "DESI"):
         super().__init__(data, src, close_button, extra_features)
-        self.figure = pn.Column(scroll = True, sizing_mode = "stretch_both")
+        self.figure = pn.Column(scroll = True, sizing_mode = "stretch_both", margin =(5, 20))
         self.dataset = dataset
         self._is_euclid_spec = self.dataset == "EuclidSpec" 
         self._src_callback = self._change_source_cb
@@ -958,6 +950,8 @@ class SEDPlotClass(CustomPlotClass):
         super().__init__(data, src, close_button, extra_features, ready_stage = "filters_selection")
         self._src_callback = self._change_source_cb
         self.src.on_change("data", self._src_callback)
+
+        ##Any changes here requires an update in load_config (verify_SED)
         self.conversion_dictionary = {"AB magnitudes" : lambda f, e : self.mag_to_flux(f,e),
                                       "milliJy" : lambda f, e : (f * 1000, e * 1000),
                                        "microJy" : lambda f, e : (f,e),
@@ -978,10 +972,11 @@ class SEDPlotClass(CustomPlotClass):
         submit_button = pn.widgets.Button(name='Confirm', button_type='primary', max_height=120)
         submit_button.on_click(self._submit_button_cb)
 
-        return pn.Card(pn.Row(pn.Column("## Available Bands", self.checkbox_pane, scroll = True),
-                        pn.Column(self.add_band_button, self.add_band_pane, scroll = True)),
-                        header = pn.Row(pn.Spacer(width=25), self.close_button, submit_button),
-                        sizing_mode="stretch_both",  scroll = True, collapsible = False, min_height = 300 )
+        return pn.Card(pn.Column( pn.pane.Markdown("## Select the bands to plot in the SED"),
+            pn.Row(pn.Column("## Available Bands", self.checkbox_pane, scroll = True),
+                   pn.Column(self.add_band_button, self.add_band_pane, scroll = True))),
+            header = pn.Row(pn.Spacer(width=25), self.close_button, submit_button),
+            sizing_mode="stretch_both",  scroll = True, collapsible = False, min_height = 300 )
 
 
     @staticmethod
@@ -1100,7 +1095,9 @@ class SEDPlotClass(CustomPlotClass):
         self.stage = self.available_stages[current_idx + 1]
 
     def _units_selection_continue_cb(self):
-        config.settings["band_units"] = {band: widget.value for band, widget in self.select_widgets.items()}
+        if "SED_units" not in config.settings:
+            config.settings["SED_units"] = {}
+        config.settings["SED_units"].update({band: widget.value for band, widget in self.select_widgets.items()})
         self.stage = "plot"
 
     def get_filter_information(self):
@@ -1111,7 +1108,6 @@ class SEDPlotClass(CustomPlotClass):
     def units_selection_panel(self, columns_to_select):
         available_units = list(self.conversion_dictionary.keys())
         settings_grid = self._get_selection_widgets_grid(columns_to_select, options = available_units)
-        
         submit_button = pn.widgets.Button(name='Confirm', button_type='primary', max_height=120)
         submit_button.on_click(self._submit_button_cb)
         skip_button = pn.widgets.Button(name='Skip', button_type='primary', max_height=120)
@@ -1133,7 +1129,12 @@ class SEDPlotClass(CustomPlotClass):
                                 header = pn.Row(pn.Spacer(width=25), self.close_button, skip_button, submit_button),
                                 sizing_mode="stretch_both", scroll=True, collapsible = False, min_height = 300 )
     
-
+    def _get_unknown_units(self):
+        """Return the list of bands for which the units are not present in the config file"""
+        if "SED_units" not in config.settings:
+           return list(self.bands_to_plot)
+        return [band for band in self.bands_to_plot if band not in 
+                config.settings["SED_units"]]
 
     def get_fluxes_from_selected_source(self):
         selected_source = self.get_selected_source()
@@ -1163,7 +1164,7 @@ class SEDPlotClass(CustomPlotClass):
         cleaned_err = []
 
         for band, f, e in zip(self.bands_to_plot, self.flux, self.flux_err):
-            unit = config.settings["band_units"][band]
+            unit = config.settings["SED_units"][band]
             if unit == "AB magnitudes":
                 if f > 40 or f < -40:
                    f, e = np.nan, np.nan
@@ -1266,7 +1267,7 @@ class SEDPlotClass(CustomPlotClass):
         flux_converted =[]
         err_converted = []
         for band, f ,e in zip(self.bands_to_plot, flux, err_flux):
-            unit = config.settings["band_units"][band]
+            unit = config.settings["SED_units"][band]
             try:
                 fc, ec = self.conversion_dictionary[unit](f, e)
                 flux_converted.append(fc)
@@ -1330,10 +1331,18 @@ class SEDPlotClass(CustomPlotClass):
                 self.stage = self.available_stages[3]
 
         elif self.stage == self.available_stages[3]:
-            return self.units_selection_panel(self.bands_to_plot)
-        
+            units_to_select = self._get_unknown_units()
+            if units_to_select:
+                return self.units_selection_panel(units_to_select)
+            else:
+                return self.plot_panel()
         else:
             return self.plot_panel()
+
+
+
+
+
 
 
 class RadioClass(CustomPlotClass):
@@ -1408,7 +1417,6 @@ class RadioClass(CustomPlotClass):
                                             "radius" : self.radius},
                              callback=callback)
 
-    
     def get_radio_figure(self, data):
         self.image_height, self.image_width,  = data.shape[:2]
         bounds = (0, 0, self.image_height, self.image_width)

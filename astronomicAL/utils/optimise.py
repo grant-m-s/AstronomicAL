@@ -1,4 +1,5 @@
 import pandas as pd
+import pandas.api.types as pdt
 
 # Following optimisation functions credited to:
 # https://medium.com/bigdatarepublic/advanced-pandas-optimize-speed-and-memory-a654b53be6c2
@@ -27,3 +28,22 @@ def optimise_objects(df):
 
 def optimise(df):
     return optimise_floats(optimise_ints(optimise_objects(df)))
+
+
+
+
+########### Maybe this is not the best place where to define this function but here we are also dealing with column type
+
+def matches_type(dtype, type_list):
+    """Check if a dtype matches any keyword in type_list"""
+    for t in type_list:
+        if t == "float" and (pdt.is_float_dtype(dtype)):
+            return True
+        if t == "int" and (pdt.is_integer_dtype(dtype)):
+            return True
+        if t == "number" and (pdt.is_numeric_dtype(dtype)):
+            return True
+        if t == "object" and (pdt.is_object_dtype(dtype)):
+            return True
+    return False
+

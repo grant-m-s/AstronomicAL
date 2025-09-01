@@ -14,6 +14,7 @@ import panel as pn
 import param
 
 import astronomicAL.config as config
+from astronomicAL.utils.optimise import matches_type
 from astronomicAL.extensions.shared_data import shared_data
 
 
@@ -35,29 +36,32 @@ class BasePlotClass(param.Parameterized):
     def _toggle_settings_panel(self, event):
         self.settings_panel.visible = not self.settings_panel.visible
         self.settings_button.name = "Close Settings" if self.settings_panel.visible else "Open Settings"
-
-    def get_variable_list(self, excluded_columns = ["id_col", "ra_dec", "label_col"]):
-        """Returns the list of options used inside `X_variable` or `Y_variable`.
-        This method retrieves an up-to-date list of columns inside `df` to be assigned 
-        to param.X_variable or param.Y_variable
-        
-        Returns
-        -------
-        List of columns name 
-
+    
+    def get_column_list(self, excluded_columns = ["id_col", "ra_dec", "label_col"],
+                              excluded_types = ["object"], allowed_types = None):
         """
-        self.update_df()
-        cols = list(self.df.columns)
+        Returns the list of columns used for panel.widgets.Selector according to their type
+        -----
+        excluded_columns : list of columns which are removed regardless of their type
+        allowed_types : list ["float", "numeric", "int"], if not None, only columns with this type are kept
+        excluded_types = list ["float", "object"] list, columns with this types are removed
 
+        It is a bit tricky, in the sense that if you pass an empty/None allowed_types, all types are kept
+        """
+
+        cols = list(self.df.columns)
+        
         for excluded_col in excluded_columns:
             col_name = config.settings.get(excluded_col, excluded_col)
             if col_name in cols:
                cols.remove(col_name)
         
-        cols = [col for col in cols if self.df[col].dtype != "object"]
-
+        if allowed_types:
+            cols = [col for col in cols if matches_type(self.df[col].dtype, allowed_types)]
+        if excluded_types:
+            cols = [col for col in cols if not matches_type(self.df[col].dtype, excluded_types)]
         return cols
-    
+
     def get_id(self):
         id_col = config.settings["id_col"]
         if id_col == "Use Index":
@@ -65,8 +69,17 @@ class BasePlotClass(param.Parameterized):
         else:
             ids = self.df[id_col].values
         return ids
-        
     
+    def _initialize_settings_dictionary(self, key_name, default_values):
+        """
+        key_name = 'Histogram_plot_settings' or 'Scatter_plot_settings'
+        default_values = Dictionary with key-values to be used as default ones
+        """
+        settings_dict = config.settings.setdefault(key_name, {})
+        for key, value in default_values.items():
+            if key not in settings_dict:
+                settings_dict[key] = value
+
     def remove_shared_data(self):
         """Removes subscriptions and published data from the shared data"""
         shared_data.cleanup_extension_panel(self.panel_id)
@@ -109,7 +122,7 @@ class ScatterPlotDashboard(BasePlotClass):
     Y_variable = param.Selector(objects=["1"], default="1", doc="Selection box for the Y axis of the plot.")
     log_xscale = param.Boolean(default=False, doc = "Use log for x axis")
     log_yscale = param.Boolean(default=False, doc = "Use log for y axis")
-    label_selector = param.ListSelector(default=["All"], objects=["All"], doc="Labels to plot")
+    label_selector = param.ListSelector(default=["All"], objects=["All"], doc= "Labels to plot")
     plot_mode = param.Selector(default="tap", objects=["tap", "rasterized"], doc= "Plot Mode")
     
 
@@ -118,7 +131,17 @@ class ScatterPlotDashboard(BasePlotClass):
         super().__init__(src, close_button)
         self._src_callback = self._change_source_cb
         self.src.on_change("data", self._src_callback)
-        self.update_variable_lists(excluded_columns = ["id_col", "label_col", "ra_dec"])
+
+        self._initialize_settings_dictionary(key_name = "Scatter_plot_settings",
+                                             default_values =  {
+                                             "X_variable" : config.settings["default_vars"][0],
+                                             "Y_variable" : config.settings["default_vars"][1],
+                                             "log_x" : False,
+                                             "log_y" : False,
+                                             "labels" : ["All"],
+                                             "mode" : "tap"})
+
+        self._initialize_param_objects(excluded_columns = ["id_col", "label_col", "ra_dec"])
         
         self.settings_panel = pn.Column(
             pn.Param(
@@ -136,17 +159,39 @@ class ScatterPlotDashboard(BasePlotClass):
             visible=False,
             margin=(10, 0, 0, 0)
         )
-
-
-
-    def update_variable_lists(self, excluded_columns = ["id_col", "label_col", "ra_dec"] ):
-        self.param.X_variable.objects = self.get_variable_list(excluded_columns=excluded_columns)
-        self.param.Y_variable.objects = self.get_variable_list(excluded_columns=excluded_columns)
-        self.param.X_variable.default = config.settings["default_vars"][0]
-        self.param.Y_variable.default = config.settings["default_vars"][1]
-        self.X_variable = config.settings["default_vars"][0]
-        self.Y_variable = config.settings["default_vars"][1]
+    
+ 
+    def _initialize_param_objects(self, excluded_columns = ["id_col", "label_col", "ra_dec"] ):
+        available_columns = self.get_column_list(excluded_columns = excluded_columns)
+        self.param.X_variable.objects = available_columns
+        self.param.Y_variable.objects = available_columns
         self.param.label_selector.objects = ["All"] + list(config.settings["strings_to_labels"].keys())
+
+        self.param.update(
+                    X_variable = self._get_from_settings_dictionary("X_variable", config.settings["default_vars"][0]),
+                    Y_variable = self._get_from_settings_dictionary("Y_variable", config.settings["default_vars"][1]),
+                    label_selector = self._get_from_settings_dictionary("label", ['All']),
+                    log_xscale = self._get_from_settings_dictionary("log_x", False),
+                    log_yscale = self._get_from_settings_dictionary("log_y", False),
+                    plot_mode = self._get_from_settings_dictionary("mode", "tap"),
+                )
+
+    @staticmethod  
+    def _get_from_settings_dictionary(key, default):
+        value = config.settings["Scatter_plot_settings"].get(key, default)
+        return value
+    
+    
+    def _update_all_settings_dictionary(self):
+        new_values =  {"X_variable" : self.X_variable,
+                       "Y_variable" : self.Y_variable,
+                       "log_x" : self.log_xscale,
+                       "log_y" : self.log_yscale,
+                       "labels" : self.label_selector,
+                       "mode" : self.plot_mode,
+        }
+        config.settings["Scatter_plot_settings"].update(new_values)
+
 
     def _change_source_cb(self, attr, old, new):
         selected_src_plot = self.plot_selected(self.X_variable, self.Y_variable)
@@ -171,6 +216,7 @@ class ScatterPlotDashboard(BasePlotClass):
                    "log_yscale", "plot_mode",
                    watch=True)
     def _update_plot(self):
+        self._update_all_settings_dictionary()
         self.main_plot = self.plot()
         selected_src_plot = self.plot_selected(self.X_variable, self.Y_variable)
         if selected_src_plot is not None:
@@ -316,7 +362,20 @@ class HistoDashboard(BasePlotClass):
         super().__init__(src, close_button)
         self._src_callback = self._change_source_cb
         self.src.on_change("data", self._src_callback)
-        self.update_variable_lists(excluded_columns = ["id_col", "ra_dec"])
+        
+        self._initialize_settings_dictionary(key_name = "Histogram_plot_settings",
+                                             default_values =  {
+                                             "X_variable" : config.settings["default_vars"][0],
+                                             "log_x" : False,
+                                             "log_y" : False,
+                                             "density" : False,
+                                             "cumulative" : False,
+                                             "Nbins" : 10,
+                                             "range" : (-np.inf, np.inf),
+                                             "labels" : ["All"],
+                                             })
+
+        self._initialize_param_objects(excluded_columns = ["id_col", "ra_dec"])
 
         self.settings_panel = pn.Column(
             pn.Param(
@@ -338,17 +397,44 @@ class HistoDashboard(BasePlotClass):
             margin=(10, 0, 0, 0)
         )
     
-
-    def update_variable_lists(self, excluded_columns = ["id_col", "ra_dec"] ):
-        self.param.X_variable.objects = self.get_variable_list(excluded_columns=excluded_columns)
-        self.param.X_variable.default = config.settings["default_vars"][0]
-        self.X_variable = config.settings["default_vars"][0]
+        
+    def _initialize_param_objects(self, excluded_columns = ["id_col", "ra_dec"] ):
+        self.param.X_variable.objects = self.get_column_list(excluded_columns=excluded_columns)
         self.param.label_selector.objects = ["All"] + list(config.settings["strings_to_labels"].keys())
+        
+        self.param.update(
+                    X_variable = self._get_from_settings_dictionary("X_variable", config.settings["default_vars"][0]),
+                    label_selector = self._get_from_settings_dictionary("label", ['All']),
+                    log_xscale = self._get_from_settings_dictionary("log_x", False),
+                    log_yscale = self._get_from_settings_dictionary("log_y", False),
+                    cumulative = self._get_from_settings_dictionary("cumulative", False),
+                    density = self._get_from_settings_dictionary("density", False),
+                    Nbins = self._get_from_settings_dictionary("Nbins", 10),
+                    range_min = self._get_from_settings_dictionary("range", (-np.inf, np.inf))[0],
+                    range_max = self._get_from_settings_dictionary("range", (-np.inf, np.inf))[1],
+                    )
 
     def _change_source_cb(self, attr, old, new):
         selected_src_plot = self.plot_selected(self.X_variable)
         if selected_src_plot is not None:
             self.figure.object = hv.Overlay(self.main_plot + selected_src_plot).collate()
+
+    @staticmethod
+    def _get_from_settings_dictionary(key, default):
+        value = config.settings["Histogram_plot_settings"].get(key, default)
+        return value
+    
+    def _update_all_settings_dictionary(self):
+        new_values =  {"X_variable" : self.X_variable,
+                       "log_x" : self.log_xscale,
+                       "log_y" : self.log_yscale,
+                       "labels" : self.label_selector,
+                       "cumulative" : self.cumulative,
+                       "density" : self.density,
+                       "Nbins" : self.Nbins,
+                       "range" : (self.range_min, self.range_max),
+        }
+        config.settings["Histogram_plot_settings"].update(new_values)
 
 
     @param.depends(
@@ -356,6 +442,7 @@ class HistoDashboard(BasePlotClass):
         "Nbins", "range_min", "range_max", "label_selector",
         watch = True)
     def _update_plot(self):
+        self._update_all_settings_dictionary()
         self.main_plot = self.plot_hv()
         selected_src_plot = self.plot_selected(self.X_variable)
         if selected_src_plot is not None:
@@ -502,9 +589,11 @@ class HistoDashboard(BasePlotClass):
                                 collapsible=False,
                                 sizing_mode="stretch_both",
                         )
+    
 
 
 
+###### imported in labelling.py 
 class PlotDashboard(param.Parameterized):
     """A Dashboard used for rendering dynamic plots of the data.
 
