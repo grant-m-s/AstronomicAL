@@ -188,6 +188,7 @@ class DataSelection(param.Parameterized):
         has_error, error_message = verify_import_config(curr_config_file)
 
         if has_error:
+            config.settings = {} # empty all assigned configurations parameters
             print(f"has error - {error_message}")
             self.error_message = error_message
             self.load_data_button_js.name = "Unable to load config"

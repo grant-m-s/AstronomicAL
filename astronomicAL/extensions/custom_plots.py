@@ -16,6 +16,7 @@ import param
 import uuid
 import matplotlib.pyplot as plt
 import concurrent.futures 
+from panel.io import save
 from bokeh.document import without_document_lock
 from bokeh.models import  NormalHead
 from bokeh.models import Range1d, LinearAxis
@@ -31,7 +32,7 @@ def get_customplot_dict():
     plot_dict = {
         
         "Euclid Cutout" : lambda data, src, close_button : EuclidPlotClass(data, src, close_button,
-                                                            extra_features=[]),
+                                                           extra_features=[]),
 
         "DESI Spectra"  : lambda data, src, close_button : SpectrumPlotClass(data, src, close_button,
                                                             extra_features=[], dataset="DESI"), 
@@ -62,7 +63,9 @@ class CustomPlotClass(param.Parameterized):
 
     stage = param.ObjectSelector(default="columns_selection", objects = available_stages)
     
-    def __init__(self, data, src, close_button, extra_features, ready_stage = "plot"):
+    def __init__(self, data, src, close_button, extra_features, 
+                 panel_name = "custom_plot",
+                 ready_stage = "plot"):
         super().__init__()
         self.df = data
         self.src = src
@@ -70,6 +73,7 @@ class CustomPlotClass(param.Parameterized):
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
         self.close_button = close_button
         self.panel_id = str(uuid.uuid4()) 
+        self.panel_name = panel_name
         if self.extra_features:
             self._get_unknown_columns(columns_needed = self.extra_features)
             self._change_state_if_unknown_columns(ready_stage=ready_stage)
@@ -232,6 +236,16 @@ class CustomPlotClass(param.Parameterized):
         else:
             print("The unknown_columns attribute was not initialized, not changing Stage")
     
+    def _save_panel(self, fname, directory_path = "data/saved_sources"):
+        if hasattr(self, "_get_figure_for_saving"):
+            fig = self._get_figure_for_saving()
+            if fig is not None:
+                fname = f"{self.panel_name}.png"
+                os.makedirs(directory_path, exist_ok=True)
+                filename = os.path.join(directory_path,fname)
+                fig.savefig(filename)
+                print(f"Saved in {filename}")
+                plt.close(fig)
 
     
     def run_multithread(self, function, func_kwargs=None, callback=None, allowed_exceptions=(Exception,)):
@@ -331,7 +345,7 @@ class CustomPlotClass(param.Parameterized):
 
 class EuclidPlotClass(CustomPlotClass):
     def __init__(self, data, src, close_button, extra_features ):
-        super().__init__(data, src, close_button, extra_features)
+        super().__init__(data, src, close_button, extra_features, panel_name= "Euclid_Cutout")
         self._src_callback = self._change_source_cb
         self.src.on_change("data", self._src_callback)
         self._initialize_settings_dictionary()
@@ -380,7 +394,21 @@ class EuclidPlotClass(CustomPlotClass):
         config.settings["Euclid_cutout_settings"][key] = value
 
     
-        
+    def _get_figure_for_saving(self):
+        """Method which is called by _save_panel to create a matplotlib image and 
+           save it """
+        fig = None 
+        if hasattr(self.euclid_object, "plot_data"): 
+            try:
+                low, high = self.contrast_scaler.value
+                scaled_image =  self.change_intensity_range(self.euclid_object.plot_data[self.filter],
+                                                            low, high)
+                fig = self.get_euclid_figure(scaled_image, show_scale = True,
+                                             show_coordinates = self.overplot_source_coords_widget.value,
+                                             show_spectra_coordinates = self.overplot_coords_widget.value)
+            except KeyError:
+                pass
+        return fig 
 
     def _initialise_euclid_object(self):
         self.ra, self.dec = self.get_ra_dec()
@@ -449,14 +477,16 @@ class EuclidPlotClass(CustomPlotClass):
 
         self.login_column = pn.Column(self.user_input, self.password_input, self.confirm_login_button, visible = False)
 
-        
-        
+        self.test_button =  pn.widgets.Button(name = "SAVE", sizing_mode = "stretch_both", max_height = 30, 
+                                                       max_width = 80, button_type= "primary")
+        self.test_button.on_click(self._save_panel)
         
         self.plot_settings_panel = pn.Column(self.contrast_scaler, self.radius_input, self.stretching_input, 
                                              self.filter_input,
                                              pn.Row(self.overplot_source_coords_widget,self.overplot_coords_widget), 
                                              self.environment_input, 
                                              self.login_column, 
+                                             self.test_button,
                                              scroll = True, visible = False)
         
      
@@ -480,19 +510,19 @@ class EuclidPlotClass(CustomPlotClass):
         self._update_settings_dictionary("scaling", (low, high))
         scaled_image = self.change_intensity_range(self.euclid_object.plot_data[self.filter], 
                                                    low, high)
-        self.get_euclid_figure(scaled_image, show_coordinates= self.overplot_source_coords_widget.value)
+        self.get_euclid_figure_hv(scaled_image, show_coordinates= self.overplot_source_coords_widget.value)
         self._update_image()
     
     def _overplot_source_coordinates_callback(self, event):
         self._update_settings_dictionary("source_coordinates", event.new)
-        self.get_euclid_figure(self.euclid_object.plot_data[self.filter], 
+        self.get_euclid_figure_hv(self.euclid_object.plot_data[self.filter], 
                                show_coordinates=event.new)
         self._update_image()
 
     def _update_filter(self, event):
         self.filter = event.new
         self._update_settings_dictionary("filter", self.filter)
-        self.get_euclid_figure(self.euclid_object.plot_data[self.filter],
+        self.get_euclid_figure_hv(self.euclid_object.plot_data[self.filter],
                                show_coordinates= self.overplot_source_coords_widget.value)
         self._update_image()
         
@@ -500,7 +530,7 @@ class EuclidPlotClass(CustomPlotClass):
         stretch = event.new
         self._update_settings_dictionary("stretching", stretch)
         self.euclid_object.get_plot_data(stretch = stretch)
-        self.get_euclid_figure(self.euclid_object.plot_data[self.filter], show_coordinates= self.overplot_source_coords_widget.value)
+        self.get_euclid_figure_hv(self.euclid_object.plot_data[self.filter], show_coordinates= self.overplot_source_coords_widget.value)
         self._update_image()
 
     
@@ -544,7 +574,7 @@ class EuclidPlotClass(CustomPlotClass):
                     label = "Euclid Spectra" if dataset == "EuclidSpec" else f"{dataset} Spectra"
                     for i, (x, y) in enumerate(self.euclid_object.world_2_pix(ra =  self.stored_spectrum_coordinates[dataset]["ra"],
                                                                               dec = self.stored_spectrum_coordinates[dataset]["dec"],
-                                                                              filtro = self.filter)):
+                                                                              filtro = self.filter, zipped = True)):
                         if (0 <= x < self.image_width) and (0 <= y < self.image_height):
                             points = hv.Points([(x,y)], label = label if i == 0 else "")
                             points = points.opts(color = colors(i),
@@ -595,8 +625,8 @@ class EuclidPlotClass(CustomPlotClass):
         config.settings["EuclidAccountUser"] = self.user_input.value
         config.settings["EuclidAccountPassword"] = self.password_input.value
         self.euclid_object.change_environment(environment=self.environment,
-                                                      user = config.settings["EuclidAccountUser"], 
-                                                      passwsord = config.settings["EuclidAccountPassword"])
+                                                user = config.settings["EuclidAccountUser"], 
+                                                passwsord = config.settings["EuclidAccountPassword"])
 
 
     def get_plot_scale(self):
@@ -604,7 +634,7 @@ class EuclidPlotClass(CustomPlotClass):
         return bar_length_arcsecond
 
     
-    def get_euclid_figure(self, data, show_coordinates = False, show_scale = True):
+    def get_euclid_figure_hv(self, data, show_coordinates = False, show_scale = True):
         
         self.image_height, self.image_width,  = data.shape[:2]
         bounds = (0, 0, self.image_height, self.image_width)
@@ -645,7 +675,7 @@ class EuclidPlotClass(CustomPlotClass):
         
         if show_coordinates:
             label = f"{np.round(self.ra,3)}, {np.round(self.dec,3)}"
-            (x, y) = self.euclid_object.world_2_pix(ra = [self.ra], dec = [self.dec], filtro=self.filter)[0]
+            x, y = self.euclid_object.world_2_pix(ra = self.ra, dec = self.dec, filtro=self.filter, zipped = False)
             if (0 <= x < self.image_width) and (0 <= y < self.image_height):
                 points = hv.Points([(x,y)], label = label)
                 points = points.opts(color = "blue",
@@ -680,9 +710,9 @@ class EuclidPlotClass(CustomPlotClass):
             if self.contrast_scaler.value != (0,1):
                 low, high =  self.contrast_scaler.value
                 scaled_image = self.change_intensity_range(self.euclid_object.plot_data[self.filter], low, high)
-                self.get_euclid_figure(scaled_image, show_coordinates = self.overplot_source_coords_widget.value)
+                self.get_euclid_figure_hv(scaled_image, show_coordinates = self.overplot_source_coords_widget.value)
             else:
-                self.get_euclid_figure( self.euclid_object.plot_data[self.filter], show_coordinates= self.overplot_source_coords_widget.value)
+                self.get_euclid_figure_hv( self.euclid_object.plot_data[self.filter], show_coordinates= self.overplot_source_coords_widget.value)
             self._update_image()
             self.message_pane.visible = False
      
@@ -692,7 +722,57 @@ class EuclidPlotClass(CustomPlotClass):
                               "filtro" : self.filter_input.value,
                               "reference" : "VIS", "verbose" : True, "return_object" : True}, 
                               callback = callback)
+    
+
+
+
+
+    def get_euclid_figure(self, data, show_coordinates = False, show_scale = True,
+                          show_spectra_coordinates = False):
+        """Fuction to have the plot in matplotlib in order to be saved.
+           Less general than get_euclid_figure_hv as in this case coordinates are overplotted on the same axis
+           returns the fig to be saved
+        """
+        image_height, image_width = data.shape[:2]
+        fig, ax = plt.subplots(figsize = (6,6))
+        ax.imshow(data, origin = "lower", cmap = "gray")
+
+        if show_scale:
+            bar_length_pixels = image_width * 0.2  #always shows a bar 1/5 of the plot 
+            x0, y0 = 0.1*image_width, 0.1*image_height
+            x1 = x0 + bar_length_pixels 
+            ax.plot([x0, x1], [y0, y0], color='red', lw=3)
+            ax.text(x=(x0 + x1)/2, y = y0 + y0/2,
+                    s = f'{self.get_plot_scale():.1f}"', color = "red",
+                    ha = 'center',va = 'bottom', fontsize=14)
+
+        if show_coordinates:
+            label = f"{np.round(self.ra,3)}, {np.round(self.dec,3)}"
+            x, y = self.euclid_object.world_2_pix(ra = self.ra, dec = self.dec, filtro=self.filter, zipped = False)
+            if (0 <= x < image_width) and (0 <= y < image_height):
+                ax.scatter(x,y, s = 130, label = label, c = "blue", marker = "+")
+               
+        if show_spectra_coordinates:
+            if hasattr(self, "stored_spectrum_coordinates"):
+                for dataset in self.stored_spectrum_coordinates:
+                    N = len(self.stored_spectrum_coordinates[dataset]["ra"])
+                    colors = plt.get_cmap("gist_rainbow", max(N,2))(np.arange(N))
+                    marker = "+" if dataset == "DESI" else "x" #TODO improve
+                    label = "Euclid Spectra" if dataset == "EuclidSpec" else f"{dataset} Spectra"
+                    x, y = self.euclid_object.world_2_pix(ra = self.stored_spectrum_coordinates[dataset]["ra"],
+                                                          dec = self.stored_spectrum_coordinates[dataset]["dec"],
+                                                          filtro = self.filter, zipped = False)
+                    x = np.where((0 <= x) & (x < image_width), x, np.nan)
+                    y = np.where((0 <= y) & (y < image_height), y, np.nan)
+                    ax.scatter(x,y, color = colors, label = label, marker = marker, s =100)
         
+        _, labels = ax.get_legend_handles_labels()
+        if labels:  
+            ax.legend()
+        ax.axis("off")
+        fig.subplots_adjust(left=0.0, right=1, top=1, bottom=0)
+        return fig
+               
     
     def _subscribe_to_shared(self):
         """It manages all the subscriptions to the shared dictionary. not very flexible but it works"""
@@ -717,7 +797,8 @@ class SpectrumPlotClass(CustomPlotClass):
     
 
     def __init__(self, data, src, close_button, extra_features, dataset = "DESI"):
-        super().__init__(data, src, close_button, extra_features)
+        super().__init__(data, src, close_button, extra_features,
+                         panel_name= f"{dataset}_spectrum")
         self.figure = pn.Column(scroll = True, sizing_mode = "stretch_both", margin =(5, 20))
         self.dataset = dataset
         self._is_euclid_spec = self.dataset == "EuclidSpec" 
@@ -947,7 +1028,8 @@ class SEDPlotClass(CustomPlotClass):
     stage = param.ObjectSelector(default = available_stages[0], objects=available_stages)
 
     def __init__(self, data, src, close_button, extra_features):
-        super().__init__(data, src, close_button, extra_features, ready_stage = "filters_selection")
+        super().__init__(data, src, close_button, extra_features, panel_name= "SED",
+                         ready_stage = "filters_selection")
         self._src_callback = self._change_source_cb
         self.src.on_change("data", self._src_callback)
 
@@ -1338,10 +1420,6 @@ class SEDPlotClass(CustomPlotClass):
                 return self.plot_panel()
         else:
             return self.plot_panel()
-
-
-
-
 
 
 

@@ -227,7 +227,6 @@ def update_config_settings(imported_config):
             config.settings[key] = label_colours
         else:
             config.settings[key] = imported_config[key]
-
     config.settings["confirmed"] = True
 
 

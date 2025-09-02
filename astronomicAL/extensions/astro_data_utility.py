@@ -5,6 +5,7 @@ import concurrent.futures
 from io import BytesIO
 import numpy as np
 import pandas as pd
+import warnings
 from astropy import units as u
 from astroquery.esa.euclid import EuclidClass, Euclid
 from astroquery.cadc import Cadc
@@ -183,7 +184,7 @@ class EuclidCutoutsClass:
  
     def _add_overplot_coordinates(self, ra, dec, dataset = "default"):
         """
-        Creates a dictionary to store coordinates from different dataset which can
+        Creates a dictionary to store coordinates from different datasets which can
         be then overplotted n the cutout.
         Parameters:
         ra, dec: float or list of floats, icrs coordinates
@@ -195,32 +196,34 @@ class EuclidCutoutsClass:
 
         
     
-    def _convert_overplot_coordinates(self, filtro = "Color", dataset = "default"):
+    def _convert_overplot_coordinates(self, filtro = "Color", dataset = "default", zipped = True):
         """
         Converts the stored coordinates into pixel coordinates for a given filter.
-        Returnz a list of (x,y) poais of pixel coordinates
+        If zipped == True returns a list of (x,y) poais of pixel coordinates
+        otherwise returns x and y 
         Parameters:
         filtro : str, WCS key (default is "Color")
         dataset : str, datasets coordinates to be transformed into pixels
         """
-        if hasattr(self, "overplot_coordinates"):
-            coords = SkyCoord(ra = self.overplot_coordinates[dataset]["ra"],
-                             dec = self.overplot_coordinates[dataset]["dec"],
-                            unit="deg", frame="icrs")
-            x_pix, y_pix = self.wcs[filtro].world_to_pixel(coords)
-            return list(zip(x_pix, y_pix))
-        
-        print("No stored coordinates")
-        return []
+        if not hasattr(self, "overplot_coordinates"):
+            warnings.warn("No stored coordinates", UserWarning)
+            return [] if zipped else (None, None)
+
+        coords = SkyCoord(ra = self.overplot_coordinates[dataset]["ra"],
+                          dec = self.overplot_coordinates[dataset]["dec"],
+                          unit="deg", frame="icrs")
+        x_pix, y_pix = self.wcs[filtro].world_to_pixel(coords)
+        return list(zip(x_pix, y_pix)) if zipped else (x_pix, y_pix)
+            
     
 
-    def world_2_pix(self, ra, dec, filtro = "Color"):
+    def world_2_pix(self, ra, dec, filtro = "Color", zipped = True):
         """
         Same as _convert_overplot_coordinates but for external coordinates
         """
         coords = SkyCoord(ra = ra, dec = dec, unit="deg", frame="icrs")
         x_pix, y_pix = self.wcs[filtro].world_to_pixel(coords)
-        return list(zip(x_pix, y_pix))
+        return list(zip(x_pix, y_pix)) if zipped else (x_pix, y_pix)
         
         
     def get_final_cutout(self, radius, stretch =  "Linear", filtro = "Color", reference = "VIS", 
@@ -381,12 +384,16 @@ class BaseSpectraClass:
         return mask_start_idx[select], mask_end_idx[select]
 
     
-    def plot_spectrum(self,  ax, idx = 0, plot_model = True, 
-                      plot_emlines = True, annotate_emlines = True,  
-                      plot_abslines = True, annotate_abslines = True,
+    def plot_spectrum(self, ax, idx=0, plot_model=True, 
+                      plot_lines = 'class',
+                      plot_emlines=True, annotate_emlines=True,
+                      plot_abslines=True, annotate_abslines=True,
                       plot_mask = True,
-                      set_ylabel = True, model_kwargs = {"lw" : 2, "color" : "r"},
-                      smoothed_kwargs = {"lw" : 1, "color" : "k"}):
+                      show_xlabel=True, show_ylabel=True,
+                      plot_info = True,
+                      model_kwargs = {"line_width" : 2, "color" : "red"},
+                      smoothed_kwargs = {"line_width" : 1, "color" : "black"},
+                      ):
         
         """This only plots one spectrum. Ideally all plotting routines should be outside of this 
            class. However having on plot routine is useful for managing em/abs lines and the different 
@@ -400,51 +407,71 @@ class BaseSpectraClass:
         smoothed = self.smoothed_fluxes[idx]
         redshift = self.spectra[idx].redshift
         
-        ax.plot(wavlen, flux, c = 'grey', lw = 0.1)
-        ax.plot(wavlen, smoothed, **smoothed_kwargs)
+        if plot_lines == "class":
+            is_extragal = self.spectra[idx].spectype.casefold() in ["galaxy", "qso"]
+            plot_emlines = is_extragal and plot_abslines
+            plot_abslines = self.spectra[idx].spectype.casefold() == "star" and plot_abslines
+        
+        elif not plot_lines:
+            plot_abslines = False
+            plot_emlines = False
+        
+        ax.plot(wavlen, flux, c = 'grey', lw = 0.3, lable = "Flux")
+        ax.plot(wavlen, smoothed, **smoothed_kwargs, label = "Smoothed Flux" )
+
+        if plot_mask:
+            start_idx, end_idx = self.find_masked_regions(mask = self.spectra[idx].mask, min_width=5)
+            for s_idx, e_idx in zip(start_idx, end_idx):
+                ax.axvspan(wavlen[s_idx], wavlen[e_idx], facecolor = "lightgrey", edgecolor = "none");
         
         if plot_model:
-            ax.plot(wavlen, self.spectra[idx].model, **model_kwargs)
+            ax.plot(wavlen, self.spectra[idx].model, **model_kwargs, label = "Model")
         
-        ymin, ymax = np.min(smoothed),  np.max(smoothed)*1.5
-        #sometimes ymin is < 0 so by dividing we are cutting out part of the spectrum
-        ymin = ymin/3 if ymin >=0 else ymin*1.5
-        xmin, xmax = np.min(wavlen), np.max(wavlen) 
-        ax.set_ylim(ymin, ymax)
-        ax.set_xlim(xmin, xmax*1.02)
-        ax.set_xscale('log')
-    
+        ymin, ymax = np.nanmin(smoothed), np.nanmax(smoothed)
+        ymin = ymin / 3 if ymin >= 0 else ymin * 1.5
+        ymax = ymax * 1.5 if ymax >= 0 else ymax / 3 ##Sometimes Euclid Fluxes are negative
+        xmin, xmax = np.min(wavlen), np.max(wavlen)
+        
         if plot_emlines and np.isfinite(redshift):
             if not hasattr(self, "emline_table"):
                 self.get_emline_table()
-            transform = transforms.blended_transform_factory(ax.transData, ax.transAxes)
-            for name, wav in zip(self.emline_table["Name"],self.emline_table["wave_vac"]):
-                obs_wav = wav*(redshift+1)
-                if obs_wav > xmax:
-                    break
-                elif obs_wav < xmin:
-                    continue
-                ax.axvline(obs_wav, c = 'r', lw = 0.5, ls = ':')
-                if annotate_emlines:
-                    ax.text(obs_wav, 0.8, name, rotation = 90, transform = transform, fontsize = 12)
-        
+            obs_wav = self.emline_table["wave_vac"] * (redshift +1)
+            logic = np.logical_and(obs_wav >= xmin, obs_wav <= xmax)
+            obs_wav = obs_wav[logic]
+            ax.vlines(obs_wav, ymin, ymax, color="r", lw =1, ls ="dotted")
+          
+            if annotate_emlines:
+                y = (ymin + 0.8 * (ymax-ymin)) 
+                names = self.emline_table["Name"][logic].astype(str)
+                for wav, name in zip(obs_wav, names):
+                    ax.text(wav, y,  name, fontsize = 8, color = "k")
+                                   
+
         if plot_abslines and np.isfinite(redshift):
             if not hasattr(self, "absline_table"):
                 self.get_absline_table()
-            transform = transforms.blended_transform_factory(ax.transData, ax.transAxes)
-            for name, wav in zip(self.absline_table["Name"],self.absline_table["wave_vac"]):
-                obs_wav = wav*(redshift+1)
-                if (obs_wav > xmax) or (obs_wav < xmin):
-                    continue
-                ax.axvline(obs_wav, c = 'b', lw = 0.5, ls = ':')
-                if annotate_abslines:
-                    ax.text(obs_wav, 0.2, name, rotation = 90, transform = transform, fontsize = 12)
-        
-        
-        ax.set_xlabel(r'$\lambda_{obs}~[\AA]$', fontsize = 15)
-        if set_ylabel:
-            ax.set_ylabel(r'$F_{\lambda}~[10^{-17}~ergs~s^{-1}~cm^{-2}~{\AA}^{-1}]$', fontsize =12)
-    
+            obs_wav = self.absline_table["wave_vac"] * (redshift +1)
+            logic = np.logical_and(obs_wav >= xmin, obs_wav <= xmax)
+            obs_wav = obs_wav[logic]
+            ax.vlines(obs_wav, ymin, ymax, color="blue", lw =1, ls ="dotted")
+            if annotate_abslines:
+                y = (ymin + 0.8 * (ymax-ymin)) 
+                names = self.emline_table["Name"][logic].astype(str)
+                for wav, name in zip(obs_wav, names):
+                    ax.text(wav, y,  name, fontsize = 8, color = "k")
+        if plot_info:
+            spectype = self.spectra[idx].spectype
+            if np.isfinite(redshift) and len(spectype)>0:
+                y = (ymin + 0.1 * (ymax-ymin)) 
+                x = (xmin + 0.8 * (xmax-xmin)) 
+                text = f"z = {np.round(redshift,4)}, Type = {spectype.upper()}"
+                ax.text(x, y, text, fontsize =15, color = "k")
+
+        ax.set_xlabel(r'$$ \lambda_{obs} ~{Å} $$' if show_xlabel else '', fontsize = 15)
+        ax.set_ylabel(r'$$ F_{\lambda}~[10^{-17}~erg~s^{-1}~cm^{-2}~{Å}^{-1}] $$' if show_ylabel else '', fontsize = 15)
+        ax.set_xscale('log')
+        ax.legend(loc = "lower left")
+ 
     
     def plot_spectrum_hv(self, idx=0, plot_model=True, 
                          plot_lines = 'class',
@@ -570,6 +597,25 @@ class BaseSpectraClass:
         full_plot  = hv.Layout(hv_plots).cols(ncols)
         full_plot = full_plot.opts(opts.Layout(shared_axes=False))
         return full_plot
+    
+    
+    def plot_all_spectra(self, plot_lines = "class",
+                         plot_model = True,  cmap = "gist_rainbow", plot_mask = True):
+        N = self.available_spectra
+        colors = plt.get_cmap(cmap, max(N,2))
+        nrows, ncols = N, 1
+        ax_height = 5 #height of the single ax
+        ratio = 3.8 if N > 1 else 3.17 # width = ax_height*ratio
+        fig, axs = plt.subplots(nrows = nrows, ncols =ncols, figsize =(ratio*ax_height, N*ax_height))
+        for idx in range(N):
+            self.plot_spectrum(axs[idx], plot_lines = plot_lines, 
+                               plot_model = plot_model,
+                               plot_mask = plot_mask,
+                               model_kwargs = {"lw" : 2, "color" : colors(idx)},
+                               smoothed_kwargs = {"lw" : 1 if plot_model else 2, "color" :  "black" if plot_model else colors(idx)},
+                               )
+        return fig
+
 
 class DESISpectraClass(BaseSpectraClass):
     """
