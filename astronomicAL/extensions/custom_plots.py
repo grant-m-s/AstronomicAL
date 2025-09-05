@@ -15,9 +15,9 @@ import json
 import param
 import uuid
 import matplotlib.pyplot as plt
+from matplotlib.ticker import ScalarFormatter
 import concurrent.futures 
 from panel.io import save
-from bokeh.document import without_document_lock
 from bokeh.models import  NormalHead
 from bokeh.models import Range1d, LinearAxis
 from astronomicAL.utils.optimise import matches_type
@@ -74,6 +74,7 @@ class CustomPlotClass(param.Parameterized):
         self.close_button = close_button
         self.panel_id = str(uuid.uuid4()) 
         self.panel_name = panel_name
+        print(f"Creating a {self.panel_name} panel")
         if self.extra_features:
             self._get_unknown_columns(columns_needed = self.extra_features)
             self._change_state_if_unknown_columns(ready_stage=ready_stage)
@@ -126,6 +127,7 @@ class CustomPlotClass(param.Parameterized):
 
     def check_required_column(self, column):
         return column in list(self.df.columns)
+    
     
     def get_column_list(self, excluded_columns = ["id_col", "ra_dec", "label_col"],
                               excluded_types = ["object"], allowed_types = None):
@@ -236,18 +238,18 @@ class CustomPlotClass(param.Parameterized):
         else:
             print("The unknown_columns attribute was not initialized, not changing Stage")
     
-    def _save_panel(self, fname, directory_path = "data/saved_sources"):
-        if hasattr(self, "_get_figure_for_saving"):
-            fig = self._get_figure_for_saving()
-            if fig is not None:
-                fname = f"{self.panel_name}.png"
-                os.makedirs(directory_path, exist_ok=True)
-                filename = os.path.join(directory_path,fname)
-                fig.savefig(filename)
-                print(f"Saved in {filename}")
-                plt.close(fig)
+    def _save_panel(self, directory_path = "data/saved_sources"):
+        if self.stage == "plot":
+            try:
+               self._save_figure(directory_path = directory_path)
+            except AttributeError:
+                print(f"{self.panel_name} has no _save_panel_method")
+            try:
+                self._save_data_to_fits(directory_path = directory_path)
+            except AttributeError:
+                pass
 
-    
+            
     def run_multithread(self, function, func_kwargs=None, callback=None, allowed_exceptions=(Exception,)):
         if func_kwargs is None:
             func_kwargs = {}
@@ -394,21 +396,35 @@ class EuclidPlotClass(CustomPlotClass):
         config.settings["Euclid_cutout_settings"][key] = value
 
     
-    def _get_figure_for_saving(self):
-        """Method which is called by _save_panel to create a matplotlib image and 
-           save it """
-        fig = None 
-        if hasattr(self.euclid_object, "plot_data"): 
-            try:
-                low, high = self.contrast_scaler.value
-                scaled_image =  self.change_intensity_range(self.euclid_object.plot_data[self.filter],
-                                                            low, high)
-                fig = self.get_euclid_figure(scaled_image, show_scale = True,
-                                             show_coordinates = self.overplot_source_coords_widget.value,
-                                             show_spectra_coordinates = self.overplot_coords_widget.value)
-            except KeyError:
-                pass
-        return fig 
+    def _save_figure(self, directory_path = "data/saved_sources"):
+        try:
+            fname = f"{self.panel_name}.png"
+            filename = os.path.join(directory_path,fname)
+            low, high = self.contrast_scaler.value
+            scaled_image =  self.change_intensity_range(self.euclid_object.plot_data[self.filter],
+                                                        low, high)
+            fig = self.get_euclid_figure(scaled_image, show_scale = True,
+                                        show_coordinates = self.overplot_source_coords_widget.value,
+                                        show_spectra_coordinates = self.overplot_coords_widget.value)
+            fig.savefig(filename, bbox_inches = "tight")
+            plt.close(fig)
+        except FileNotFoundError:
+            print(f"Could not find the saving directory: {directory_path}")
+        except AttributeError as e:
+            print(e)
+        except KeyError as e:
+            print(f"Missing filter {e} in euclid_object.plot_data")
+
+
+    def _save_data_to_fits(self, directory_path = "data/saved_sources"):
+        try:
+            self.euclid_object.export_cutouts_to_fits(bands_to_export=[self.filter], 
+                                                      directory_path=directory_path)
+        except AttributeError:
+            pass
+        except FileNotFoundError:
+            print(f"Could not find the saving directory: {directory_path}")
+
 
     def _initialise_euclid_object(self):
         self.ra, self.dec = self.get_ra_dec()
@@ -477,19 +493,13 @@ class EuclidPlotClass(CustomPlotClass):
 
         self.login_column = pn.Column(self.user_input, self.password_input, self.confirm_login_button, visible = False)
 
-        self.test_button =  pn.widgets.Button(name = "SAVE", sizing_mode = "stretch_both", max_height = 30, 
-                                                       max_width = 80, button_type= "primary")
-        self.test_button.on_click(self._save_panel)
-        
         self.plot_settings_panel = pn.Column(self.contrast_scaler, self.radius_input, self.stretching_input, 
                                              self.filter_input,
                                              pn.Row(self.overplot_source_coords_widget,self.overplot_coords_widget), 
                                              self.environment_input, 
                                              self.login_column, 
-                                             self.test_button,
                                              scroll = True, visible = False)
         
-     
     def _update_radius(self, event):
         if event.new: #avoid passing None
             self.radius = event.new
@@ -724,9 +734,6 @@ class EuclidPlotClass(CustomPlotClass):
                               callback = callback)
     
 
-
-
-
     def get_euclid_figure(self, data, show_coordinates = False, show_scale = True,
                           show_spectra_coordinates = False):
         """Fuction to have the plot in matplotlib in order to be saved.
@@ -825,6 +832,31 @@ class SpectrumPlotClass(CustomPlotClass):
         if not self.from_sourceId:
             if not shared_data.is_subscribed(self.panel_id, "Euclid_radius"):
                shared_data.subscribe(self.panel_id, "Euclid_radius", self._update_max_separation)
+    
+    
+    def _save_figure(self, directory_path = "data/saved_sources"):
+        if self.spectrum_object.spectra is not None:
+            if self.redshift_column_selector.value != "None":
+                redshift_value = self.get_value_from_df(self.redshift_column_selector.value)
+                if redshift_value is not None:
+                    self.redshift_input.value = redshift_value
+            plot_model = False if self._is_euclid_spec else True
+            plot_lines = "class" if self.plot_lines_checkbox.value else False
+            try:
+                fname = f"{self.panel_name}.png"
+                filename = os.path.join(directory_path, fname)
+                fig = self.spectrum_object.plot_all_spectra(plot_model = plot_model, plot_lines = plot_lines)
+                fig.savefig(filename, bbox_inches = "tight")
+                plt.close(fig)
+            except FileNotFoundError:
+                print(f"Could not find the saving directory: {directory_path}")
+
+    def _save_data_to_fits(self, directory_path = "data/saved_sources"):
+        if self.spectrum_object.spectra is not None:
+            try:
+                self.spectrum_object.export_spectra_to_fits(fname = self.dataset, directory_path = directory_path)
+            except FileNotFoundError:
+                print(f"Could not find the saving directory: {directory_path}")
 
     def _initialize_spectrum_object(self):
         
@@ -1043,6 +1075,7 @@ class SEDPlotClass(CustomPlotClass):
 
     def _change_source_cb(self, attr, old, new):
         if self.stage == "plot":
+            print("in the right stage")
             self._update_plot(new)
     
     
@@ -1158,13 +1191,19 @@ class SEDPlotClass(CustomPlotClass):
         if self.bands_to_plot:
             self.error_bands_to_plot = [f"err_{band}" for band in self.bands_to_plot]
             self._get_unknown_columns(self.bands_to_plot+self.error_bands_to_plot, settings_key = "SED_bands")
-            self._change_state_if_unknown_columns(unknown_stage = self.available_stages[1],
-                                                  ready_stage = self.available_stages[3])
-        print("Select at least one band to plot")
-
+            if any(band in self.unknown_columns for band in self.bands_to_plot):
+                self.stage =  self.available_stages[1]
+            elif any(err in self.unknown_columns for err in self.error_bands_to_plot): 
+                self.stage =  self.available_stages[2]  
+            elif self._get_unknown_units():
+                self.stage =  self.available_stages[3] 
+            else:                                     
+                self.stage = "plot" ##awful but changing stage inside a @param.depends stage
+                                    ## was not a good idea 
+        else:
+            print("Please Select at least one band to plot")
 
     def _columns_selection_continue_cb(self):
-        
         if "SED_bands" not in config.settings:
             config.settings["SED_bands"] = {}
         for col, widget in self.select_widgets.items():
@@ -1173,9 +1212,19 @@ class SEDPlotClass(CustomPlotClass):
             config.settings["SED_bands"][col] = selected_value
 
         current_idx = self.available_stages.index(self.stage)
-        print(f"Moving to stage {current_idx + 1}, i.e. {self.available_stages[current_idx + 1]}")
-        self.stage = self.available_stages[current_idx + 1]
-
+        if current_idx == 1: 
+            if any(err in self.unknown_columns for err in self.error_bands_to_plot): 
+                    self.stage =  self.available_stages[2]  
+            elif self._get_unknown_units():
+                self.stage =  self.available_stages[3]
+            else:
+                self.stage = "plot"
+        else:
+            if self._get_unknown_units():
+                self.stage =  self.available_stages[3]
+            else:
+                self.stage = "plot" 
+        
     def _units_selection_continue_cb(self):
         if "SED_units" not in config.settings:
             config.settings["SED_units"] = {}
@@ -1234,14 +1283,14 @@ class SEDPlotClass(CustomPlotClass):
         self.get_filter_information()
         self._initialize_settings_panel()
         self.flux, self.flux_err = self.get_fluxes_from_selected_source()
-        self.clean_fluxes()
+        self.flux, self.flux_err = self.clean_fluxes()
         y, y_err = self.convert_to_microjy(self.flux, self.flux_err)
-        self.figure.object = self.plot_SED(self.wavlen, y, y_err, self.fwhm)
+        self.figure.object = self.plot_SED_hv(self.wavlen, y, y_err, self.fwhm)
         self.message_pane.visible = False
         return pn.Column(self.message_pane, self.figure, self.plot_settings_panel, scroll = True, sizing_mode = "stretch_both")
 
     def clean_fluxes(self):
-        """Removing missing/strange fluxes """
+        """It removes missing/stange fluxes"""
         cleaned_flux = []
         cleaned_err = []
 
@@ -1256,11 +1305,12 @@ class SEDPlotClass(CustomPlotClass):
             cleaned_flux.append(f)
             cleaned_err.append(e)
 
-        self.flux = np.array(cleaned_flux)
-        self.flux_err = np.array(cleaned_err)
+        return np.array(cleaned_flux), np.array(cleaned_err)
+        
     
     @staticmethod
-    def plot_SED(wavlen, flux, flux_err, fwhm, redshift=0, output_units = "fnu"):
+    def plot_SED_hv(wavlen, flux, flux_err, fwhm, redshift=0, output_units = "fnu",
+                    arrow_scale = 0.6):
 
         mask = np.logical_and(np.isfinite(wavlen), np.isfinite(flux))
         if np.sum(mask) < 1:
@@ -1281,19 +1331,19 @@ class SEDPlotClass(CustomPlotClass):
                                                                                                                    
         is_upper_limit = err_y < 0
         has_larger_errors = err_y > y #These could also be considered a upper limits...
-        good_measure = np.logical_and(~is_upper_limit, ~has_larger_errors)
+        good_measure = ~np.logical_or(is_upper_limit, has_larger_errors)
     
         ybars = hv.ErrorBars((x[good_measure ], y[good_measure ], err_y[good_measure ], err_y[good_measure ]), kdims='wavelength', vdims=["Flux", "yneg", "ypos"]).opts(
                 color="black", line_width = 1.5, active_tools =[])
         
     
-        arrow_length = 0.8 * y[has_larger_errors] #all arrows have the same length in logy scale
+        arrow_length = arrow_scale * y[has_larger_errors] #all arrows have the same length in logy scale
         larger_errors = hv.ErrorBars(
             (x[has_larger_errors], y[has_larger_errors], np.full(np.sum(has_larger_errors), arrow_length), err_y[has_larger_errors]),
             kdims='wavelength', vdims=["Flux", "yneg", "ypos"]).opts(color="black",lower_head = NormalHead(size=8),
                                                                      line_width = 1.5, active_tools =[])
      
-        arrow_length = 0.8* y[is_upper_limit] #all arrows have the same length in logy scale
+        arrow_length = arrow_scale * y[is_upper_limit] #all arrows have the same length in logy scale
         upper_limits = hv.ErrorBars(
             (x[is_upper_limit], y[is_upper_limit], np.full(np.sum(is_upper_limit), arrow_length), np.zeros(np.sum(is_upper_limit))),
             kdims='wavelength', vdims=["Flux", "yneg", "ypos"]).opts(color="black",lower_head = NormalHead(size=8),
@@ -1301,7 +1351,7 @@ class SEDPlotClass(CustomPlotClass):
         
     
         plot = scatter * xerrbars * ybars * upper_limits * larger_errors
-        xlabel = "Rest-Frame Wavelength" if redshift > 0 else "Observed Wavelength"
+        xlabel = r'$$ \lambda_{rest} ~[{Å}] $$' if redshift > 0 else r'$$ \lambda_{obs} ~[{Å}] $$'
         ylabel = "Flux [erg/s cm-2]" if output_units == "nufnu" else "Flux density [μJy]" 
         hooks = [] if output_units == "nufnu" else [SEDPlotClass.add_magnitude_axis]
 
@@ -1328,7 +1378,58 @@ class SEDPlotClass(CustomPlotClass):
         mag_axis = LinearAxis(y_range_name="mag", axis_label="AB Magnitude",
                               major_label_text_color="black", axis_label_text_color="black")
         fig.add_layout(mag_axis, 'right')
+    
+    @staticmethod
+    def plot_SED(wavlen, flux, flux_err, fwhm, redshift=0, output_units = "fnu",
+                 arrow_scale = 0.6):
+        
+        mask = np.logical_and(np.isfinite(wavlen), np.isfinite(flux))
+        if np.sum(mask) < 1:
+            return None
+        x = wavlen[mask] / (1 + redshift)
+        y = flux[mask]
+        err_y = flux_err[mask]
+        fwhm = fwhm[mask]
+        xmin, xmax = np.min(x), np.max(x)
+        ymin, ymax = np.min(y), np.max(y)
 
+        fig, ax = plt.subplots(figsize = (8,6))
+
+        is_upper_limit = err_y < 0
+        has_larger_errors = err_y > y #These could also be considered a upper limits...
+        good_measure = ~np.logical_or(is_upper_limit, has_larger_errors)
+    
+
+        ax.errorbar(x[good_measure], y[good_measure], yerr=err_y[good_measure], xerr= fwhm[good_measure]/2,  
+                    ls ="none",  ecolor ="k", markeredgecolor = "r" , marker = "o", markerfacecolor="none")
+        
+        arrow_length = arrow_scale * y[~good_measure]
+        ax.errorbar(x[~good_measure], y[~good_measure], yerr = arrow_length, xerr= fwhm[~good_measure]/2,  
+                    ls ="none",  ecolor ="k", markeredgecolor = "r" , marker = "o", markerfacecolor="none", uplims = True)
+        ax.errorbar(x[has_larger_errors], y[has_larger_errors], 
+                    yerr=np.vstack([np.zeros(np.sum(has_larger_errors)), err_y[has_larger_errors]]),  
+                    ls ="none",  ecolor ="k",  marker = "none")
+        
+        if output_units != "nufnu":
+            mag_ax = ax.secondary_yaxis("right", functions = (lambda x:  -2.5*np.log10(x) + 23.9,
+                                                  lambda x:  10**((23.9 - x)/2.5)))
+            mag_ax.set_ylabel("AB magnitudes", fontsize =12)
+            mag_ax.invert_yaxis()
+            mag_ax.yaxis.set_major_formatter(ScalarFormatter())
+            mag_ax.ticklabel_format(style='plain', axis='y')
+
+       
+
+        xlabel = r'$\lambda_{rest} ~[{Å}] $' if redshift > 0 else r'$\lambda_{obs} ~[{Å}]$'
+        ylabel = "Flux [erg/s cm-2]" if output_units == "nufnu" else "Flux density [μJy]" 
+        ax.set_xlabel(xlabel, fontsize =12)
+        ax.set_ylabel(ylabel, fontsize =12)
+        ax.set_xscale("log")
+        ax.set_yscale("log")
+        ax.set_xlim(xmin/2, xmax*2)
+        ax.set_ylim(ymin/3, ymax*3)
+
+        return fig
 
     @staticmethod
     def mag_to_flux(mag, err_mag):
@@ -1380,46 +1481,56 @@ class SEDPlotClass(CustomPlotClass):
 
     def _update_plot(self, event):
         self.flux, self.flux_err = self.get_fluxes_from_selected_source()
-        self.clean_fluxes()
+        self.flux, self.flux_err = self.clean_fluxes()
         y, y_err = self.convert_to_microjy(self.flux, self.flux_err)
-        y, y_err = self.convert_to_output_units(self.wavlen, y, y_err, output_units =self.unit_selector.value)
-        self.figure.object = self.plot_SED(self.wavlen, y, y_err, self.fwhm, output_units =self.unit_selector.value)
+        y, y_err = self.convert_to_output_units(self.wavlen, y, y_err, output_units = self.unit_selector.value)
+        self.figure.object = self.plot_SED_hv(self.wavlen, y, y_err, self.fwhm, output_units =self.unit_selector.value)
         self.message_pane.visible = False
         
-    
+
+    def _save_figure(self, directory_path = "data/saved_sources"):
+        y, y_err = self.convert_to_microjy(self.flux, self.flux_err) #Should already be clean
+        y, y_err = self.convert_to_output_units(self.wavlen, y, y_err, output_units = self.unit_selector.value)
+        fig = self.plot_SED(self.wavlen, y, y_err, self.fwhm, output_units = self.unit_selector.value)
+        if fig is not None:
+            try:
+                fname = f"{self.panel_name}.png"
+                filename = os.path.join(directory_path,fname)
+                fig.savefig(filename, bbox_inches = "tight")
+                plt.close(fig)
+            except FileNotFoundError:
+                print(f"Cold not find the saving directory: {directory_path}")     
+
     def plot_panel(self):
         self.layout = self.get_layout()
-        return pn.Card(self.layout, header = pn.Row(pn.Spacer(width=25,),self.close_button, self.plot_settings_button),
+        return pn.Card(self.layout, header = pn.Row(pn.Spacer(width=25,), self.close_button, self.plot_settings_button),
                        collapsible = False, sizing_mode="stretch_both", min_height =450,)  
+
 
     @param.depends("stage")
     def mypanel(self):
+
         if self.stage == self.available_stages[0]:
             return self.filters_selection_panel()
-        elif self.stage == self.available_stages[1]:
-            columns_to_select = [i for i in self.bands_to_plot if i in self.unknown_columns]
-            if len(columns_to_select) > 0:
-                return self.columns_selection_panel(columns_to_select, skippable=False, allowed_types = ["float"],
-                                            info_text= "## Select columns with flux values")
-            else:
-                self.stage = self.available_stages[2]
         
+        if self.stage == self.available_stages[1]:
+            columns_to_select = [i for i in self.bands_to_plot if i in self.unknown_columns]
+            return self.columns_selection_panel(columns_to_select, skippable=False, allowed_types = ["float"],
+                                        info_text= "## Select columns with flux values")
         elif self.stage == self.available_stages[2]:
             columns_to_select = [i for i in self.error_bands_to_plot if i in self.unknown_columns]
-            if len(columns_to_select) > 0:
-                return self.columns_selection_panel(columns_to_select, skippable=True, allowed_types = ["float"],
-                                        info_text= "## Select columns with flux error values")
-            else:
-                self.stage = self.available_stages[3]
-
+            return self.columns_selection_panel(columns_to_select, skippable=True, allowed_types = ["float"],
+                                    info_text= "## Select columns with flux error values")
         elif self.stage == self.available_stages[3]:
             units_to_select = self._get_unknown_units()
-            if units_to_select:
-                return self.units_selection_panel(units_to_select)
-            else:
-                return self.plot_panel()
+            return self.units_selection_panel(units_to_select)
         else:
+            print("moved to plot stage")
             return self.plot_panel()
+
+
+
+
 
 
 

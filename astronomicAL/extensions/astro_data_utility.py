@@ -48,8 +48,7 @@ class EuclidCutoutsClass:
         self.coordinates = SkyCoord(ra, dec, unit = "degree", frame = "icrs")   
         self.euclid_filters = euclid_filters
         self.save_dir = save_dir
-        if not os.path.isdir(self.save_dir):
-            os.makedirs(self.save_dir)
+        os.makedirs(self.save_dir, exist_ok = True)
 
     def change_environment(self, environment, user = None, password = None, credentials_filepath = None):
         """This function handles the change of the environment of the client EuclidClass
@@ -74,7 +73,6 @@ class EuclidCutoutsClass:
             print(f"Cone search required {toc-tic} seconds")
     
     
-    
     @staticmethod
     def get_info_cutout(cone_results, filter_name):
         line = cone_results[cone_results["filter_name"]==filter_name][0]
@@ -88,11 +86,10 @@ class EuclidCutoutsClass:
         if fname is None:
             fname = f"{obs_id}_{band}"
         else:
-            fname = f"{fname}_{band}" #need a different fname in each of the bands
-        output_file = os.path.join(self.save_dir, f"{fname}.fits")  #This is not unique, cutous might be overwritten
+            fname = f"{fname}_{band}" #Need a different fname in each of the bands
+        output_file = os.path.join(self.save_dir, f"{fname}.fits")  
         return self.client.get_cutout(file_path=file_path, instrument=instrument, id=obs_id, 
                                 coordinate=self.coordinates, radius = self.cutout_radius, output_file=output_file)[0]
-
 
     def get_cutouts(self, radius, verbose = False):
         
@@ -118,11 +115,12 @@ class EuclidCutoutsClass:
         self.data = {}
         self.wcs = {}
         self.arcsec_per_pix ={}
-        for band in self.cutouts_paths.keys():
+        for band in self.cutouts_paths:
+            
             with fits.open(self.cutouts_paths[band]) as hdul:
-                self.data |= {band : hdul[0].data}         #probably doesn't work in 3.8--> use .update
-                self.wcs  |= {band : WCS(hdul[0].header)}  #Required for stacking images}  
-                self.arcsec_per_pix  |= {band : np.abs(hdul[0].header["CD1_1"]*3600)}  
+                self.data[band] = hdul[0].data
+                self.wcs[band] = WCS(hdul[0].header)  
+                self.arcsec_per_pix[band] = np.abs(hdul[0].header["CD1_1"]*3600)
     
     
     
@@ -142,8 +140,6 @@ class EuclidCutoutsClass:
         for band in self.euclid_filters:
             reprojected, _ = reproject_interp((self.data[band], self.wcs[band]), ref_wcs, shape_out=ref_shape)
             self.reprojected_data |= {band : reprojected}
-        
-
     
     @staticmethod
     def transform_image(image, 
@@ -224,7 +220,26 @@ class EuclidCutoutsClass:
         coords = SkyCoord(ra = ra, dec = dec, unit="deg", frame="icrs")
         x_pix, y_pix = self.wcs[filtro].world_to_pixel(coords)
         return list(zip(x_pix, y_pix)) if zipped else (x_pix, y_pix)
-        
+    
+
+    def export_cutouts_to_fits(self, bands_to_export, directory_path = "data/saved_sources"):
+        """Saves the fits file, Fits file have already been downloaded/saved so it might actually be 
+            better to just copy them into the required directory.
+        """
+        for band in bands_to_export:
+            try:
+                with fits.open(self.cutouts_paths[band]) as hdul:
+                    data = hdul[0].data       
+                    header =hdul[0].header
+                hdu = fits.PrimaryHDU(data = data, header=header)
+                hdul = fits.HDUList([hdu])
+                
+                filename = f"{band}_cutout.fits"
+                hdul.writeto(os.path.join(directory_path, filename), overwrite=True)
+            except KeyError:
+                print("The required band is not available")
+            except OSError as e:
+                print(e)
         
     def get_final_cutout(self, radius, stretch =  "Linear", filtro = "Color", reference = "VIS", 
                          verbose = False,
@@ -253,7 +268,6 @@ class EuclidCutoutsClass:
             print(f"Cone search failed")
             if return_object:
                 return None
-
 
     def check_coverage(self, path = "data/mocs"):
         self.has_coverage = check_isin_survey(ra = self.coordinates.ra.value,
@@ -416,7 +430,7 @@ class BaseSpectraClass:
             plot_abslines = False
             plot_emlines = False
         
-        ax.plot(wavlen, flux, c = 'grey', lw = 0.3, lable = "Flux")
+        ax.plot(wavlen, flux, c = 'grey', lw = 0.3, label = "Flux")
         ax.plot(wavlen, smoothed, **smoothed_kwargs, label = "Smoothed Flux" )
 
         if plot_mask:
@@ -430,7 +444,7 @@ class BaseSpectraClass:
         ymin, ymax = np.nanmin(smoothed), np.nanmax(smoothed)
         ymin = ymin / 3 if ymin >= 0 else ymin * 1.5
         ymax = ymax * 1.5 if ymax >= 0 else ymax / 3 ##Sometimes Euclid Fluxes are negative
-        xmin, xmax = np.min(wavlen), np.max(wavlen)
+        xmin, xmax = np.nanmin(wavlen), np.nanmax(wavlen)
         
         if plot_emlines and np.isfinite(redshift):
             if not hasattr(self, "emline_table"):
@@ -463,13 +477,15 @@ class BaseSpectraClass:
             spectype = self.spectra[idx].spectype
             if np.isfinite(redshift) and len(spectype)>0:
                 y = (ymin + 0.1 * (ymax-ymin)) 
-                x = (xmin + 0.8 * (xmax-xmin)) 
+                x = (xmin + 0.6 * (xmax-xmin)) 
                 text = f"z = {np.round(redshift,4)}, Type = {spectype.upper()}"
                 ax.text(x, y, text, fontsize =15, color = "k")
 
-        ax.set_xlabel(r'$$ \lambda_{obs} ~{Å} $$' if show_xlabel else '', fontsize = 15)
-        ax.set_ylabel(r'$$ F_{\lambda}~[10^{-17}~erg~s^{-1}~cm^{-2}~{Å}^{-1}] $$' if show_ylabel else '', fontsize = 15)
+        ax.set_xlabel(r'$\lambda_{obs} ~[{Å}] $' if show_xlabel else '', fontsize = 15)
+        ax.set_ylabel(r'$ F_{\lambda}~[10^{-17}~erg~s^{-1}~cm^{-2}~{Å}^{-1}] $' if show_ylabel else '', fontsize = 15)
         ax.set_xscale('log')
+        ax.set_xlim(xmin, xmax * 1.02),
+        ax.set_ylim(ymin, ymax),
         ax.legend(loc = "lower left")
  
     
@@ -523,7 +539,7 @@ class BaseSpectraClass:
         ymin, ymax = np.nanmin(smoothed), np.nanmax(smoothed)
         ymin = ymin / 3 if ymin >= 0 else ymin * 1.5
         ymax = ymax * 1.5 if ymax >= 0 else ymax / 3 ##Sometimes Euclid Fluxes are negative
-        xmin, xmax = np.min(wavlen), np.max(wavlen)
+        xmin, xmax = np.nanmin(wavlen), np.nanmax(wavlen)
     
         if plot_emlines and np.isfinite(redshift):
             if not hasattr(self, "emline_table"):
@@ -554,11 +570,11 @@ class BaseSpectraClass:
            spectype = self.spectra[idx].spectype
            if np.isfinite(redshift) and len(spectype)>0:
                y = (ymin + 0.1 * (ymax-ymin)) 
-               x = (xmin + 0.8 * (xmax-xmin)) 
+               x = (xmin + 0.6 * (xmax-xmin)) 
                text = f"z = {np.round(redshift,4)}, Type = {spectype.upper()}"
                overlays.append(hv.Text(x, y, text).opts(text_font_size = "15pt", text_color = "black"))
         
-        xlabel = r'$$ \lambda_{obs} ~{Å} $$' if show_xlabel else ''
+        xlabel = r'$$ \lambda_{obs} ~[{Å}] $$' if show_xlabel else ''
         ylabel = r'$$ F_{\lambda}~[10^{-17}~erg~s^{-1}~cm^{-2}~{Å}^{-1}] $$' if show_ylabel else ''
 
         spectrum_overlay = hv.Overlay(overlays).opts(
@@ -600,7 +616,8 @@ class BaseSpectraClass:
     
     
     def plot_all_spectra(self, plot_lines = "class",
-                         plot_model = True,  cmap = "gist_rainbow", plot_mask = True):
+                         plot_model = True,  cmap = "gist_rainbow", 
+                         plot_mask = True):
         N = self.available_spectra
         colors = plt.get_cmap(cmap, max(N,2))
         nrows, ncols = N, 1
@@ -608,14 +625,42 @@ class BaseSpectraClass:
         ratio = 3.8 if N > 1 else 3.17 # width = ax_height*ratio
         fig, axs = plt.subplots(nrows = nrows, ncols =ncols, figsize =(ratio*ax_height, N*ax_height))
         for idx in range(N):
-            self.plot_spectrum(axs[idx], plot_lines = plot_lines, 
+            ax = axs[idx] if N>1 else axs
+            self.plot_spectrum(ax, plot_lines = plot_lines, 
                                plot_model = plot_model,
                                plot_mask = plot_mask,
                                model_kwargs = {"lw" : 2, "color" : colors(idx)},
                                smoothed_kwargs = {"lw" : 1 if plot_model else 2, "color" :  "black" if plot_model else colors(idx)},
                                )
         return fig
+        
+    def export_spectra_to_fits(self, fname,
+                               directory_path = "data/saved_sources"):
+        if self.available_spectra > 0:
+            hdus = [fits.PrimaryHDU()]
+            for spectrum in self.spectra:
+                wavlen = spectrum.wavelength
+                flux = spectrum.flux
+                model = spectrum.model if hasattr(spectrum, "model") else np.full_like(wavlen, np.nan)
+                mask = spectrum.mask 
 
+                cols = [fits.Column(name="wavlen", array=wavlen, format="E", unit = "ANG"),  
+                        fits.Column(name="flux", array=flux, format="E", unit = "1e-17"),
+                        fits.Column(name="model", array=model, format="E", unit = "1e-17"),
+                        fits.Column(name="mask", array=mask, format="L")]
+                hdu = fits.BinTableHDU.from_columns(cols)
+                hdu.header["SourceId"] = spectrum.sourceid
+                hdu.header["RA"] = spectrum.ra
+                hdu.header["DEC"] = spectrum.dec
+                hdu.header["redshift"] = spectrum.redshift
+                hdu.header["spectype"] = spectrum.spectype
+                hdus.append(hdu)
+            
+            fname = fname + ".fits"
+            filename = os.path.join(directory_path, fname)
+            hdulist = fits.HDUList(hdus)
+            hdulist.writeto(filename, overwrite = True)
+                
 
 class DESISpectraClass(BaseSpectraClass):
     """

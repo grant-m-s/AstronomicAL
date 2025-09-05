@@ -89,19 +89,28 @@ class ExplorationDashboard(param.Parameterized):
         if sourceid:
              self._find_from_id(self, sourceid)
 
-    def get_id(self):
+    def _get_id(self):
+        """Returns all ids in the table"""
         id_col = config.settings["id_col"]
         if id_col == "Use Index":
             return pd.Series(self.df.index, index=self.df.index)  # Ensures it's a Series
         else:
             return self.df[id_col]
+        
+    def _get_selected_id(self):
+        """Returns the sourceID for the selected source"""
+        id_col = config.settings["id_col"]
+        if len(self.src.data[id_col]) > 0:
+            return str(self.src.data[id_col][0])
+        
+    
 
     def _find_from_id(self, sourceid):
         sourceid = sourceid.strip() 
         try:
-            matches = self.get_id().str.contains(sourceid, case = True)
+            matches = self._get_id().str.contains(sourceid, case = True)
         except AttributeError:
-            matches = self.get_id().astype(str).str.contains(sourceid, case = True)
+            matches = self._get_id().astype(str).str.contains(sourceid, case = True)
         
         N_matches = matches.sum()
         if N_matches == 1:
@@ -110,7 +119,7 @@ class ExplorationDashboard(param.Parameterized):
             print("No matches found")
         else:
             #avoid cases where the exact Id is also contained in some other ids
-            exact_matches = self.get_id().astype(str) == sourceid
+            exact_matches = self._get_id().astype(str) == sourceid
             N_exact = exact_matches.sum()
             if N_exact == 1:
                 self.index = self.df[exact_matches].index[0]

@@ -4,6 +4,7 @@ import panel as pn
 from bokeh.models import ColumnDataSource, TextAreaInput
 from functools import partial
 import time
+import os
 
 initial_setup = True
 
@@ -18,7 +19,7 @@ def get_save_layout_button(enable_button, from_main):
         settings["save_button"] = pn.widgets.Button(
             name="Save Current Configuration", disabled=not (enable_button)
         )
-        layout_dict = {}
+        #layout_dict = {}
         text_area_input = TextAreaInput(value="")
         text_area_input.on_change(
             "value",
@@ -57,9 +58,28 @@ def _save_layout_button_rename():
 
 def _save_layout_button_cb(event):
     Process(target=_save_layout_button_rename).start()
-    
 
 
+def get_save_panel_data_button(enable_button):
+    save_panel_button = pn.widgets.Button(name="Export Panel Data", disabled = not enable_button, button_type = "default")
+    save_panel_button.on_click(save_panel_data_button_cb)
+    return save_panel_button
+
+
+def save_panel_data_button_cb(event):
+     """ Call the _save_panel method for all the panels which allow to save their stored plots and  fits file.
+         Currently it relies on Exploring or Labeling dashboards to being the first ones in order to create a folder with the sourceid name """
+     print("Calling the save button callback")
+     save_dir = "data/saved_sources"
+     sourceid = None                 
+     for dashboard_number, dashboard in dashboards.items():
+        if hasattr(dashboard.panel_contents, "_get_selected_id"):
+            sourceid = str(dashboard.panel_contents._get_selected_id())
+            main_dir = os.path.join(save_dir, sourceid)
+            os.makedirs(main_dir, exist_ok=True)
+        elif hasattr(dashboard.panel_contents, "_save_panel"):
+            dashboard.panel_contents._save_panel(directory_path = main_dir)
+                                          
 
 layout_file = "astronomicAL/layout.json"
 dashboards = {}
