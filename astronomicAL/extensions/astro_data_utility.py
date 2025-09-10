@@ -1,6 +1,7 @@
 import os
 import time
 import requests 
+from requests.exceptions import ReadTimeout, ConnectTimeout
 import concurrent.futures 
 from io import BytesIO
 import numpy as np
@@ -20,6 +21,7 @@ import mocpy
 
 from sparcl.client import SparclClient 
 from astronomicAL.extensions.shared_data import shared_data
+from astronomicAL.utils.error_tracker import ErrorTracker
 
 
 import matplotlib.transforms as transforms
@@ -44,11 +46,27 @@ class EuclidCutoutsClass:
             self.client = shared_data.get_data("Euclid_client")
         else:
             self.client = client
-
+        
+        self.moc = load_moc("Euclid_Q1")
+        self.error_tracker = ErrorTracker()
         self.coordinates = SkyCoord(ra, dec, unit = "degree", frame = "icrs")   
         self.euclid_filters = euclid_filters
         self.save_dir = save_dir
         os.makedirs(self.save_dir, exist_ok = True)
+
+    def reset_data(self, ra, dec):
+        self.coordinates = SkyCoord(ra, dec, unit = "degree", frame = "icrs")
+        self.error_tracker.reset()
+        self._remove_source_attributes()
+    
+    def _remove_source_attributes(self):
+        """Removes all attributes specific to a source"""
+        attributes = ["cone_results", "data", "wcs", "arcsec_per_pix", "reprojected_data",
+                      "plot_data", "overplot_coordinates"]
+        for attribute in attributes:
+            if hasattr(self, attribute):
+                delattr(self, attribute)
+
 
     def change_environment(self, environment, user = None, password = None, credentials_filepath = None):
         """This function handles the change of the environment of the client EuclidClass
@@ -64,14 +82,20 @@ class EuclidCutoutsClass:
 
     
     def get_cone(self, initial_radius = 0.5*u.degree, async_job= False, verbose = True):
-        tic = time.perf_counter()
-        job = self.client.cone_search(self.coordinates, initial_radius, table_name = "sedm.mosaic_product", ra_column_name="ra",
+        """Performs a cone search and retrieves a table with information about where the image
+           containing the source are stored"""
+        
+        try:
+            tic = time.perf_counter()
+            job = self.client.cone_search(self.coordinates, initial_radius, table_name = "sedm.mosaic_product", ra_column_name="ra",
                                       dec_column_name="dec", columns="*", async_job= async_job)
-        self.cone_results = job.get_results()
-        toc = time.perf_counter()
-        if verbose:
-            print(f"Cone search required {toc-tic} seconds")
-    
+            self.cone_results = job.get_results()
+            toc = time.perf_counter()
+            if verbose:
+                print(f"Cone search required {toc-tic} seconds")
+        except ConnectionError as e:
+            self.error_tracker.log_error(e, "Failed to connect to ESA Science Archive")
+        
     
     @staticmethod
     def get_info_cutout(cone_results, filter_name):
@@ -88,8 +112,12 @@ class EuclidCutoutsClass:
         else:
             fname = f"{fname}_{band}" #Need a different fname in each of the bands
         output_file = os.path.join(self.save_dir, f"{fname}.fits")  
-        return self.client.get_cutout(file_path=file_path, instrument=instrument, id=obs_id, 
-                                coordinate=self.coordinates, radius = self.cutout_radius, output_file=output_file)[0]
+        try:
+            return self.client.get_cutout(file_path=file_path, instrument=instrument, id=obs_id, 
+                                          coordinate=self.coordinates, radius = self.cutout_radius, 
+                                          output_file=output_file)[0]
+        except ConnectionError as e:
+             self.error_tracker.log_error(e, "Failed to connect to ESA Science Archive")
 
     def get_cutouts(self, radius, verbose = False):
         
@@ -109,21 +137,22 @@ class EuclidCutoutsClass:
         
         toc = time.perf_counter()
         if verbose:
-                print(f"Retrieving all cutouts requiered {toc-tic} seconds")
-        
+            print(f"Retrieving all cutouts requiered {toc-tic} seconds")
+
     def read_cutouts(self):
         self.data = {}
         self.wcs = {}
         self.arcsec_per_pix ={}
         for band in self.cutouts_paths:
-            
-            with fits.open(self.cutouts_paths[band]) as hdul:
-                self.data[band] = hdul[0].data
-                self.wcs[band] = WCS(hdul[0].header)  
-                self.arcsec_per_pix[band] = np.abs(hdul[0].header["CD1_1"]*3600)
-    
-    
-    
+            try:
+                with fits.open(self.cutouts_paths[band]) as hdul:
+                    self.data[band] = hdul[0].data
+                    self.wcs[band] = WCS(hdul[0].header)  
+                    self.arcsec_per_pix[band] = np.abs(hdul[0].header["CD1_1"]*3600)
+            except OSError as e:
+                self.error_tracker.log_error(e, "Downloaded Corrupted FITS file")
+                continue
+
     def reproject_cutouts(self, reference = "VIS"):
         """Aligns and resizes VIS and NISP images so that can be stacked
         Reference can be either the name of the filter or its index"""
@@ -211,7 +240,6 @@ class EuclidCutoutsClass:
         x_pix, y_pix = self.wcs[filtro].world_to_pixel(coords)
         return list(zip(x_pix, y_pix)) if zipped else (x_pix, y_pix)
             
-    
 
     def world_2_pix(self, ra, dec, filtro = "Color", zipped = True):
         """
@@ -241,41 +269,57 @@ class EuclidCutoutsClass:
             except OSError as e:
                 print(e)
         
-    def get_final_cutout(self, radius, stretch =  "Linear", filtro = "Color", reference = "VIS", 
+    def get_final_cutout(self, radius, 
+                         stretch =  "Linear", 
+                         filtro = "Color", 
+                         reference = "VIS", 
                          verbose = False,
-                         return_object = False) :
+                         return_object = False):
         """
-        This method just calls all the other methods to obtain cutouts which can be 
-        rendered in the Euclid Cutout extension plot panel. return_object = True serves to avoid race conditions 
-        in multithreading
+        Method which calls sequentially all the other methods to get a cutout. return_object returns 
+        the required cutout in addition to storing it as an attribute for multithread purposes.
         """
+        
+        self.error_tracker.reset()
+        if not check_isin_survey(ra = self.coordinates.ra.value,
+                                 dec = self.coordinates.dec.value,
+                                 moc  = self.moc):
+            self.error_tracker.log_error("Source not in the survey", 
+                                         "The selected source is outside the survey coverage area")
+            return None
+
         if not hasattr(self, "cone_results"):
             self.get_cone(verbose = verbose, async_job= False)
         
-        if len(self.cone_results) < 2:
-            print("Initial Cone Results failed, trying with a 1 deg^2 search radius")
+        if len(self.cone_results) <= 2:
+            if verbose:
+                print("Initial Cone Results failed, trying with a 1 deg^2 search radius")
             self.get_cone(initial_radius = 1*u.degree,  verbose = verbose, async_job= False)
         
-        if len(self.cone_results) > 2:
-            self.get_cutouts(radius = radius, verbose = verbose)
-            self.read_cutouts()
-            self.reproject_cutouts(reference = reference)
-            self.get_plot_data(stretch = stretch)
-            if return_object:
-                return self.plot_data[filtro]
+        if self.error_tracker.has_error:
+            return None
         
-        else:
-            print(f"Cone search failed")
-            if return_object:
-                return None
-
-    def check_coverage(self, path = "data/mocs"):
-        self.has_coverage = check_isin_survey(ra = self.coordinates.ra.value,
-                                              dec = self.coordinates.dec.value,
-                                            survey = "Euclid",  path = path)
+        elif len(self.cone_results) <= 2:
+            self.error_tracker.log_error(
+                                       "Cone search failed",
+                                       "No sources found within search radius")
+            return None
+        
+        self.get_cutouts(radius=radius, verbose=verbose)
+        if self.error_tracker.has_error:
+            return None
+        self.read_cutouts()
+        if self.error_tracker.has_error:
+            return None
+            
+        self.reproject_cutouts(reference=reference)
+        self.get_plot_data(stretch=stretch)
+        if return_object:
+            return self.plot_data.get(filtro, None)
+        
         
     def clean_space(self):
-        """free quota of queries to Euclid Science Archibe by removing asinchronous jobs 
+        """Free quota of queries to Euclid Science Archive by removing asinchronous jobs. 
          It takes a couple of minutes"""
         joblist = self.client.list_async_jobs()
         to_remove = [j.jobid for j in joblist]
@@ -337,11 +381,22 @@ class BaseSpectraClass:
     def __init__(self, ra, dec, max_separation = 1, sourceId = None):
         self.ra = ra
         self.dec = dec
+        self.error_tracker = ErrorTracker()
         self.max_separation = max_separation / 3600  # arcsec to deg
         self.spectra = None
-        self.available_spectra = 0
         self.sourceId = sourceId
+
+    def reset_data(self, ra, dec, max_separation = 1, sourceId = None):
+        self.ra = ra
+        self.dec = dec 
+        self.spectra = None
+        self.max_separation = max_separation / 3600
+        self.error_tracker.reset()
+        self._remove_source_attributes()
     
+    def _remove_source_attributes(self):
+        pass
+      
     def get_coordinates(self):
         if self.spectra is not None:
             ra = [getattr(spectrum, "ra", np.nan) for spectrum in self.spectra]
@@ -669,11 +724,11 @@ class DESISpectraClass(BaseSpectraClass):
     spectra within the max_separation distance (by providing multiple sparclid). specID instead is passed as a unique 
     int value and returns a single spectrum.
     """
-    #actually queries also BOSS and SDSS DR16
     def __init__(self, ra, dec, max_separation = 1, 
                  datasets = ["DESI-DR1", "DESI-EDR", "BOSS-DR16", "SDSS-DR16"],
                  sourceId = None, client = None):
         super().__init__(ra, dec, max_separation=max_separation, sourceId=sourceId)
+        
         if isinstance(datasets, str): 
             datasets = [datasets]
         self.datasets = datasets
@@ -684,28 +739,54 @@ class DESISpectraClass(BaseSpectraClass):
             self.client = shared_data.get_data("Sparcl_client")
         else:
             self.client = client
-    
+
+        if ("DESI-DR1" in self.datasets) | ("DESI-EDR" in self.datasets):
+            self.moc = load_moc(survey = "DESI")
+        elif ("BOSS-DR16" in self.datasets) | ("SDSS-DR16" in self.datasets):
+            self.moc = load_moc(survey = "SDSS")
+
+
     def get_spectra(self, max_separation = None, return_object = False):
-        """Call all methods to get spectra"""
+        """
+        Method which calls sequentially all the other methods to get the spectra. return_object returns 
+        the required spectra in addition to storing it as an attribute for multithread purposes.
+        """
+        self.error_tracker.reset()
+
+        #if not check_isin_survey(ra = self.ra,
+        #                         dec = self.dec,
+        #                         moc  = self.moc):
+        #    self.error_tracker.log_error("Source not in the survey", 
+        #                                 "The selected source is outside the survey coverage area")
+        #    return None
         
         if max_separation is not None:
             self.max_separation = max_separation / 3600
 
         if self.sourceId is not None:
             self.query_spectra_specid(verbose = True)
+
         else:
             self.query_main_table(verbose = True)
-            self.query_spectra_sparclid(verbose = True)
-        
-        if self.spectra is not None:
+            if not self.error_tracker.has_error:
+                self.query_spectra_sparclid(verbose = True)
+
+        if not self.error_tracker.has_error:
             self.get_smoothed_spectra(kernel = "Box1dkernel",  window = 10)
         
         if return_object:
-            return self.spectra
+            return getattr(self, "spectra", None)
+        
+    def _remove_source_attributes(self):
+        """Removes all attributes specific to a source"""
+        attributes = ["table_results", "available_spectra", "spectrum_query"]
+        for attribute in attributes:
+            if hasattr(self, attribute):
+                delattr(self, attribute)
 
-    
     def query_main_table(self, verbose = False):
-        """Query using SparcClient. It does not accept circular queries, so we first perform a box search within
+        
+        """Query using SparcClient. It does not accept cone queries, so we first perform a box search within
         [ra-radius, ra+radius]* [dec-radius, dec+radius] and then we keep only sources effectively within the cone"""
         
         constraints  = {"ra" : [self.ra-self.max_separation, self.ra+self.max_separation],
@@ -715,21 +796,30 @@ class DESISpectraClass(BaseSpectraClass):
         outfields = ['sparcl_id','specid', 'ra', 'dec', "data_release"]
 
         self.coordinates = SkyCoord(ra = self.ra, dec = self.dec, unit = "deg", frame = "icrs")
-
+        
         tic = time.perf_counter()
-        found = self.client.find(outfields = outfields, constraints = constraints, limit = 200)
-        self.table_results = pd.DataFrame.from_records(found.records)
-        self.table_results = self.table_results.drop_duplicates(subset = "specid")
+        try:
+            found = self.client.find(outfields = outfields, constraints = constraints, limit = 200)
+            self.table_results = pd.DataFrame.from_records(found.records)
+            self.table_results = self.table_results.drop_duplicates(subset = "specid")
+        except ReadTimeout as e:
+            self.error_tracker.log_error(e, "Could not connect to Sparcl server before reaching timeout")
+            return
+        
+        toc = time.perf_counter()
+        if verbose:
+            print(f"Querying table with Sparclient required {toc-tic} seconds")
         
         if len(self.table_results) > 1:
             self.table_results["separation"] = self.coordinates.separation(
                           SkyCoord(self.table_results["ra"], self.table_results["dec"], unit = "deg")).value
             self.table_results = self.table_results[self.table_results["separation"]<= self.max_separation].sort_values("separation")
-
+        
         self.available_spectra = len(self.table_results)
-        toc = time.perf_counter()
-        if verbose:
-            print(f"Querying table with Sparclient required {toc-tic} seconds")
+        if self.available_spectra < 1:
+            self.error_tracker.log_error("No spectrum available", 
+                                         "No spectrum found around the provided coordinates")
+            
   
     def get_info_spectra(self):
         for dataset in self.datasets:
@@ -746,47 +836,47 @@ class DESISpectraClass(BaseSpectraClass):
         
         if self.available_spectra >= 1:
             sparcl_id = list(self.table_results["sparcl_id"])
-
             tic = time.perf_counter()
-            self.spectrum_query = self.client.retrieve(uuid_list = sparcl_id, dataset_list = self.datasets,
-                                              include = include)
-            if self.spectrum_query.info["status"]["success"]:
-                self.spectrum_query = self.spectrum_query.reorder(sparcl_id)
-                self.spectra = self.spectrum_query.records
-            else:
-                print("Something went wrong")
+            try:
+                self.spectrum_query = self.client.retrieve(uuid_list = sparcl_id, dataset_list = self.datasets,
+                                                          include = include)
+                if self.spectrum_query.info["status"]["success"]:
+                    self.spectrum_query = self.spectrum_query.reorder(sparcl_id)
+                    self.spectra = self.spectrum_query.records
+                else:
+                    self.error_tracker.log_error("Failed to retrieve spectra", 
+                                                 "The Sparcl query to retrive spectra failed")
+            except (ConnectionError, ReadTimeout) as e:
+                self.error_tracker.log_error(e, "Could not connect to Sparcl server before reaching timeout")
+            
             toc = time.perf_counter()
             if verbose:
                 print(f"Retrieving spectrum required {toc-tic} seconds")
-        else:
-            print("No available spectra")
 
     
     def query_spectra_specid(self, verbose = False):
         include = ['sparcl_id', 'specid', 'data_release', 'redshift', 'flux',
                     'wavelength', 'model', 'spectype', "ra", "dec", "mask"]
-        tic = time.perf_counter()
+        
         if self.sourceId is not None:
-            self.spectrum_query = self.client.retrieve_by_specid([self.sourceId], include = include,
+            tic = time.perf_counter()
+    
+            try:
+                self.spectrum_query = self.client.retrieve_by_specid([self.sourceId], include = include,
                                              dataset_list = self.datasets)
-            if self.spectrum_query.info["status"]["success"]:
-                self.spectra = [self.spectrum_query.records[0]] #Same spectrum could be in both DESI DR1 and DESI EDR 
-                self.available_spectra = 1
-            else:
-                print("Something went wrong")
+                if self.spectrum_query.info["status"]["success"]:
+                    self.spectra = [self.spectrum_query.records[0]] #Same spectrum could be in both DESI DR1 and DESI EDR 
+                    self.available_spectra = 1
+                else:
+                    self.error_tracker.log_error("Failed to retrieve spectra", 
+                                                 "The Sparcl query to retrive spectra failed")
+            except (ConnectionError, ReadTimeout) as e:
+                self.error_tracker.log_error(e, "Could not connect to Sparcl server before reaching timeout")
+            
             toc = time.perf_counter()
             if verbose:
-                print(f"Retrieving DESI/SDSS spectra required {toc-tic} seconds")
-        else:
-             print("No target specId provided ")
+                print(f"Retrieving spectrum required {toc-tic} seconds")
 
-    def check_coverage(self, path = "data/mocs"):
-        self.has_coverage = False
-        if ("DESI-DR1" in self.datasets) | ("DESI-EDR" in self.datasets):
-            self.has_coverage = self.has_coverage | check_isin_survey(self.ra, self.dec, survey = "DESI", path = path)
-        if ("BOSS-DR16" in self.datasets) | ("SDSS-DR16" in self.datasets):
-            self.has_coverage = self.has_coverage | check_isin_survey(self.ra, self.dec, survey = "SDSS", path = path)
-    
     
 class SpectrumContainer:
     """Utility class to store retrieved Euclid Spectra in a similar way to DESI ones"""
@@ -817,8 +907,54 @@ class EuclidSpectraClass(BaseSpectraClass):
             self.client = shared_data.get_data("Euclid_client")
         else:
             self.client = client
+        self.moc = load_moc("Euclid_Q1")
+    
+    def _remove_source_attributes(self):
+        """Removes all attributes specific to a source"""
+        attributes = ["table_results", "available_spectra", "specz_results", "specz_table"]
+        for attribute in attributes:
+            if hasattr(self, attribute):
+                delattr(self, attribute)
 
+    def get_spectra(self, max_separation = None, return_object = False):
+        """Method which calls sequentially all the other methods to get the spectra. return_object returns 
+        the required spectra in addition to storing it as an attribute for multithread purposes.
+        """
+        
+        self.error_tracker.reset()
 
+        if not check_isin_survey(ra = self.ra,
+                                 dec = self.dec,
+                                 moc  = self.moc):
+            self.error_tracker.log_error("Source not in the survey", 
+                                         "The selected source is outside the survey coverage area")
+        if max_separation is not None:
+            self.max_separation = max_separation / 3600
+        
+        if self.sourceId is not None:
+            self.query_spectra_sourceId(verbose=True)
+            if not self.error_tracker.has_error:
+                for spectrum in self.spectra:
+                    spectrum.set_attribute("ra", np.nan)
+                    spectrum.set_attribute("dec", np.nan)
+                    spectrum.set_attribute("redshift", np.nan) 
+                    spectrum.set_attribute("spectype", "")
+                    
+        else:
+            self.query_table(verbose = True)
+            if not self.error_tracker.has_error:
+                self.query_spectra_sourceId(verbose=True)
+                if not self.error_tracker.has_error:
+                    source_id = list(self.table_results["source_id"])
+                    self.spectra = self._reorder_spectra(self.spectra, source_id)
+                    self._add_info_spectra()
+
+        if not self.error_tracker.has_error:
+            self.get_smoothed_spectra(kernel = "Box1dkernel",  window = 5)
+        
+        if return_object:
+            return getattr(self, "spectra", None)
+        
     def query_table(self, verbose = False):
         query = f"""SELECT TOP 400
                     spec.file_name, spec.file_path, spec.source_id, spec.spectra_source_oid, spec.ra_obj, spec.dec_obj,
@@ -827,36 +963,24 @@ class EuclidSpectraClass(BaseSpectraClass):
                     WHERE DISTANCE(ra_obj, dec_obj, {self.ra}, {self.dec}) < {self.max_separation}
                     ORDER BY separation
                 """
-        
-        #10 times slower query to get also spectro-z
-        #query_z = f"""SELECT TOP 400  
-        #        spec.file_name, spec.file_path, spec.source_id, spec.spectra_source_oid, spec.ra_obj, spec.dec_obj,
-        #    DISTANCE(spec.ra_obj, spec.dec_obj, {self.ra}, {self.dec})*3600 AS separation, 
-        #    class.spe_class, gal.spe_z AS gal_z
-        #    FROM spectra_source AS spec
-        #    LEFT JOIN catalogue.spectro_zcatalog_spe_classification AS class on spec.source_id = class.object_id
-        #    LEFT JOIN catalogue.spectro_zcatalog_spe_galaxy_candidates AS gal on spec.source_id = gal.object_id
-        #    WHERE DISTANCE(ra_obj, dec_obj, {self.ra}, {self.dec}) < {self.max_separation}
-        #    ORDER BY separation
-        #    """
-        #    #QSOs have bad spec-z
-        #    #LEFT JOIN catalogue.spectro_zcatalog_spe_qso_candidates AS qso on spec.source_id = qso.object_id
-
         tic = time.perf_counter()
         job = self.client.launch_job(query)
-        try:
-            self.table_results = job.get_results()
-            self.available_spectra = len(self.table_results)
-        except AttributeError:
-            print("Query returned None")
-            self.available_spectra = 0
+            
+        if (job is None) or (job.get_phase() in ("ERROR", "ABORTED")):
+            self.error_tracker.log_error("Connection Error", "Failed to connect to ESA Science Archive")
+            return
         
+        self.table_results = job.get_results()
+        self.available_spectra = len(self.table_results)
+        if self.available_spectra < 1:
+            self.error_tracker.log_error("No spectra in the field", "No spectra found around the requested coordinates")
         toc = time.perf_counter()
         if verbose:
-            print(f"Querying Euclid spectra_source table required {toc-tic} seconds")
-    
+                print(f"Querying Euclid spectra_source table required {toc-tic} seconds")
+        
+  
     @staticmethod
-    def get_url(source_id, retrieval_type = "SPECTRA_RGS" ):
+    def _get_euclid_url(source_id, retrieval_type = "SPECTRA_RGS" ):
         """retrieval_type : str either  'SPECTRA_RGS', 'SPECTRA_BGS' or 'ALL'
         Type of spectrum to be retrieved, Red, or Blue grism, ALL returns a .zip file.
         In Q1 only Red Grism Spectra are available"""
@@ -874,7 +998,6 @@ class EuclidSpectraClass(BaseSpectraClass):
         ordered_spectra = [spectra_dict[s_id] for s_id in source_id if s_id in spectra_dict]
         return ordered_spectra
     
-
     @staticmethod
     def _get_Euclid_mask(euclid_mask):
         """Converts Euclid Mask Flags convention into a boolean mask.
@@ -885,7 +1008,7 @@ class EuclidSpectraClass(BaseSpectraClass):
 
     def _add_info_spectra(self):
         """Spectra and main table must be ordered """
-        if len(self.spectra) == len(self.table_results):
+        if len(self.spectra) == self.available_spectra:
             for spectrum, ra, dec, s_id in zip(self.spectra,
                                             self.table_results["ra_obj"], 
                                             self.table_results["dec_obj"],
@@ -893,35 +1016,41 @@ class EuclidSpectraClass(BaseSpectraClass):
                 if  spectrum.sourceId == s_id:
                     spectrum.set_attribute("ra", ra)
                     spectrum.set_attribute("dec", dec)
-                    spectrum.set_attribute("redshift", np.nan) #avoid issues with plot
-                    spectrum.set_attribute("spectype", "") #avoid issues with plot
+                    spectrum.set_attribute("redshift", np.nan) 
+                    spectrum.set_attribute("spectype", "") 
         
 
     def query_spectra_sourceId(self, verbose = False):
-         
         source_id = list(self.table_results["source_id"])
-        url = self.get_url(source_id=source_id, retrieval_type= "SPECTRA_RGS")
+        url = self._get_euclid_url(source_id=source_id, retrieval_type= "SPECTRA_RGS")
         tic = time.perf_counter()
-        r = requests.get(url)
-        if r.status_code == 200:
-            self.spectra = []
-            if r.headers.get("Content-Type","").endswith("fits"): ##in the future we might incur in .zip files
-                hdus = fits.open(BytesIO(r.content))
-                for hdu in hdus[1:]:  #first one is empty
-                    spectrum  = SpectrumContainer(wavelength = hdu.data['WAVELENGTH'],
-                                                  flux = hdu.data["SIGNAL"] * hdu.header["FSCALE"] * 1e17,
-                                                  mask = self._get_Euclid_mask(hdu.data["MASK"]),
-                                                  sourceId = hdu.header["SOURC_ID"])
-                    self.spectra.append(spectrum)
-            else:
-                print("For the  moment only fits format are supported")
+        try:
+            r = requests.get(url, timeout=60)
+            r.raise_for_status()
+        except requests.exceptions.RequestException as e:
+            self.error_tracker.log_error(e, "Failed to retrieve spectra from ESA URL")
+            return
+        retrieved_content_type = r.headers.get("Content-Type", "")
+        if retrieved_content_type.endswith("fits"):  #in the future we might incur in .zip files
+            try:    
+                self.spectra = []
+                with fits.open(BytesIO(r.content)) as hdus:
+                    for hdu in hdus[1:]:  #first one is empty
+                        spectrum  = SpectrumContainer(wavelength = hdu.data['WAVELENGTH'],
+                                                      flux = hdu.data["SIGNAL"] * hdu.header["FSCALE"] * 1e17,
+                                                      mask = self._get_Euclid_mask(hdu.data["MASK"]),
+                                                      sourceId = hdu.header["SOURC_ID"])
+                        self.spectra.append(spectrum)
+            except OSError as e:
+                self.error_tracker.log_error(e, "Downloaded Corrupted FITS file")
+               
         else:
-            print(f"Euclid spectra request failed with status code {r.status_code}")
+            self.error_tracker.log_error(f"Received {retrieved_content_type}, only FITS supported for now", f"Unsupported Format: {retrieved_content_type}")
         toc = time.perf_counter()
         if verbose:
             print(f"Retrieving Euclid spectra required {toc-tic} seconds")
 
-    
+
     def query_specz_table(self, verbose = False):
         """It queries the table with fitted specz and classification. If classification == "star", redshift is set to 0,
          else the one derived from galaxies with the highest probability is used. QSO redshift not available at the moment"""
@@ -979,38 +1108,8 @@ class EuclidSpectraClass(BaseSpectraClass):
             self._update_info_spectra(attribute, self.specz_table[col_name].values)
    
     
-    def get_spectra(self, max_separation = None, return_object = False):
-        """Call all methods to get spectra
-           max_separation allows to override self.max_separation to have multiple queries with the same
-           initialized object"""
-        self.spectra = None
-        if max_separation is not None:
-            self.max_separation = max_separation / 3600
-        
-        if self.sourceId is not None:
-            self.query_spectra_sourceId(verbose=True)
-            for spectrum in self.spectra:
-                    spectrum.set_attribute("ra", np.nan)
-                    spectrum.set_attribute("dec", np.nan)
-                    spectrum.set_attribute("redshift", np.nan) 
-                    spectrum.set_attribute("spectype", "")
-            #Euclid Spectra fits file do not have position of the source
-        else:
-            self.query_table(verbose = True)
-            if self.available_spectra > 0:
-                self.query_spectra_sourceId(verbose=True)
-                source_id = list(self.table_results["source_id"])
-                self.spectra = self._reorder_spectra(self.spectra, source_id)
-                self._add_info_spectra()
-            else:
-                print("No available spectra")
-        if self.spectra is not None:
-            self.get_smoothed_spectra(kernel = "Box1dkernel",  window = 5)
-        
-        if return_object:
-            return self.spectra
-           
-              
+
+
 
 def LoTSS_cutout(ra, dec, radius = 10, check_coverage = True):
     """radius in arcsec"""
@@ -1069,17 +1168,20 @@ def VLASS_cutout(ra, dec, radius = 10, verbose = False, check_coverage = True):
     return None
 
 
-def check_isin_survey(ra, dec, survey, path = "data/mocs"):
-    surveys = {"Euclid" : "Euclid_Q1_color.fits",
-               "DESI"   : "DESI_from_query.fits",
-               "SDSS"   : "SDSS_color.fits",
-               "VLASS"  : "VLASS_QL.fits",
-               "LoTSS"  : "LoTSS_dr2.fits",
+
+def load_moc(survey, path = "data/mocs"):
+    surveys = {"Euclid_Q1" : "Euclid_Q1_color.fits",
+               "Euclid_DR1": "Euclid_Q1_color.fits",
+               "DESI" : "DESI_from_query.fits",
+               "SDSS" : "SDSS_color.fits",
+               "VLASS" : "VLASS_QL.fits",
+               "LoTSS" : "LoTSS_dr2.fits",
                }
     assert survey in surveys, f"No Moc file available for {survey}"
-    moc = mocpy.MOC.from_fits(os.path.join(path, surveys[survey]))
-    return moc.contains_lonlat(ra*u.deg, dec*u.deg)
+    return mocpy.MOC.from_fits(os.path.join(path, surveys[survey]))
 
+def check_isin_survey(ra, dec, moc):
+    return moc.contains_lonlat(ra*u.deg, dec*u.deg)
 
 
 def get_ra_dec_DESI():
@@ -1095,12 +1197,10 @@ def get_ra_dec_DESI():
     dec = found.records[0]["dec"]
     return ra, dec
 
-
 def get_ra_dec_Euclid():
     ra = 265.94946 
     dec = 65.83025    
     return ra, dec  
-
 
 def print_Euclid_tables():
     tables = Euclid.load_tables(only_names=True, include_shared_tables=True)

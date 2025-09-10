@@ -61,7 +61,7 @@ class CustomPlotClass(param.Parameterized):
 
     available_stages = ["columns_selection", "plot"]
 
-    stage = param.ObjectSelector(default="columns_selection", objects = available_stages)
+    stage = param.ObjectSelector(default = "columns_selection", objects = available_stages)
     
     def __init__(self, data, src, close_button, extra_features, 
                  panel_name = "custom_plot",
@@ -81,7 +81,7 @@ class CustomPlotClass(param.Parameterized):
         else:
             self.stage = ready_stage
         self.figure = pn.pane.HoloViews(sizing_mode="stretch_both")
-        self.message_pane = pn.pane.Markdown("## Loading...", sizing_mode="stretch_both", max_height = 30)
+        self.message_pane = pn.pane.Markdown("## Loading...", sizing_mode="stretch_width", height = 80)
         self.plot_settings_button = pn.widgets.Button(name="Open Settings", button_type="primary", max_height = 40, max_width=100, sizing_mode="stretch_both" )
         self.plot_settings_button.on_click(self._toggle_settings_panel)
         self.plot_settings_panel = pn.Column(visible = False)
@@ -281,6 +281,13 @@ class CustomPlotClass(param.Parameterized):
                                             padding = 0,border = 0,framewise = True, xaxis=None, 
                                             yaxis=None, cmap = "grey")
     
+    def get_error_panel(self, message_1, message_2):
+        message = f"# {message_1}:\n"  
+        message += f"## {message_2}"
+        self.message_pane.object = message
+        self.message_pane.visible = True 
+        self.figure.objects = [self.get_empty_image()]
+
     def remove_shared_data(self):
         """Removes subscriptions and published data from the shared data"""
         shared_data.cleanup_extension_panel(self.panel_id)
@@ -356,16 +363,19 @@ class EuclidPlotClass(CustomPlotClass):
         self.filter = self._get_from_settings_dictionary("filter", "Color")
         self.radius = self._get_from_settings_dictionary("radius", 5.0)
         
-   
+
     def _change_source_cb(self, attr, old, new):
-        self._initialise_euclid_object()
-        self._run_euclid()
+        self.stored_spectrum_coordinates = {}
+        initialised = self._initialise_euclid_object()
+        if initialised:
+            self._run_euclid()
 
     def get_layout(self):
         self._initialise_widgets()
-        self._initialise_euclid_object()
+        initialised = self._initialise_euclid_object()
         self._subscribe_to_shared()
-        self._run_euclid()
+        if initialised:
+            self._run_euclid()
         return  pn.Column(self.message_pane, self.figure, self.plot_settings_panel, 
                           scroll = True, sizing_mode = "stretch_both")
     
@@ -395,7 +405,6 @@ class EuclidPlotClass(CustomPlotClass):
     def _update_settings_dictionary(key, value):
         config.settings["Euclid_cutout_settings"][key] = value
 
-    
     def _save_figure(self, directory_path = "data/saved_sources"):
         try:
             fname = f"{self.panel_name}.png"
@@ -429,13 +438,18 @@ class EuclidPlotClass(CustomPlotClass):
     def _initialise_euclid_object(self):
         self.ra, self.dec = self.get_ra_dec()
         if (self.ra is None) or (self.dec is None):
-            raise ValueError("RA or DEC is missing")
-        else:
+            self.get_error_panel("Euclid cutout unavailable", "Missing RA or DEC value")
+            return False
+        
+        try: 
+            self.euclid_object.reset_data(self.ra, self.dec)
+        except AttributeError:
             self.euclid_object = EuclidCutoutsClass(self.ra, self.dec, 
                              euclid_filters= ["VIS", "NIR_Y", "NIR_J", "NIR_H"],
                              client = shared_data.get_data("Euclid_client", None))
-            self.euclid_object.check_coverage()
-            self.overplotted_coordinates = []
+        
+        self.overplotted_coordinates = []
+        return True
             
 
     def _initialise_widgets(self):
@@ -549,15 +563,13 @@ class EuclidPlotClass(CustomPlotClass):
              self.figure.object = hv.Overlay(self.euclid_fig + self.overplotted_coordinates)
              self.message_pane.visible = False
         except Exception as e:         #too generic
-            print("Euclid image unavailable")
-            print(e)
-
+            print(f"Euclid image unavailable:\n {e}")
+ 
     def _add_coordinates(self, coordinates, dataset):
         """Storing Coordinates from DESI/SDSS
            coordinates : dict : {"ra" : [...], "dec" : [...]} 
            dataset : string, key of the dictionary storing the coordinates
         """
-
         if not coordinates or "ra" not in coordinates or "dec" not in coordinates:
             print("Wrong passed coordinates")
             return
@@ -700,33 +712,30 @@ class EuclidPlotClass(CustomPlotClass):
         """Wrapper for multithreading"""
         self.message_pane.object = "## Loading..."
         self.message_pane.visible = True
-        if not self.euclid_object.has_coverage:
-            print("The Source is not contained in Euclid mocs")
-            self.message_pane.object = "## The source is not in the Euclid covered area"
-            self.figure.object =  self.get_empty_image()
-
         shared_data.publish(self.panel_id, "EuclidCutout_running", True)
  
         def callback(future_obj=None):
             shared_data.publish(self.panel_id, "EuclidCutout_running", False)
             result = future_obj.result() #result = self.euclid_object.plot_data[self.filter] or None
-            if result is None:
-                self.message_pane.object = "## The Euclid cutout query failed"
+            if self.euclid_object.error_tracker.has_error:
+                message =  f"# Euclid cutout unavailable:\n"
+                message += f"## {self.euclid_object.error_tracker.error_message}"
+                self.message_pane.object = message
                 self.message_pane.visible = True #probably already visible
                 self.figure.object = self.get_empty_image()
                 return
-
             self.overplot_coords_widget.value = False
             if self.contrast_scaler.value != (0,1):
                 low, high =  self.contrast_scaler.value
                 scaled_image = self.change_intensity_range(self.euclid_object.plot_data[self.filter], low, high)
-                self.get_euclid_figure_hv(scaled_image, show_coordinates = self.overplot_source_coords_widget.value)
+                self.get_euclid_figure_hv(scaled_image, 
+                                          show_coordinates = self.overplot_source_coords_widget.value)
             else:
-                self.get_euclid_figure_hv( self.euclid_object.plot_data[self.filter], show_coordinates= self.overplot_source_coords_widget.value)
+                self.get_euclid_figure_hv(self.euclid_object.plot_data[self.filter], 
+                                          show_coordinates= self.overplot_source_coords_widget.value)
             self._update_image()
             self.message_pane.visible = False
      
-        
         self.run_multithread(self.euclid_object.get_final_cutout,
                              func_kwargs = {"radius" : self.radius, "stretch" : self.stretching_input.value, 
                               "filtro" : self.filter_input.value,
@@ -812,28 +821,33 @@ class SpectrumPlotClass(CustomPlotClass):
         self._src_callback = self._change_source_cb
         self.src.on_change("data", self._src_callback)
         self.from_sourceId = False
+        self._initialize_settings_dictionary()
         self.plot_settings_panel = pn.Column(visible = False, scroll = True)
         self.mode_options = ["Use TargetId", "Cone Search"]
         self.chosen_mode = self.mode_options[1]
+   
+    def _initialize_settings_dictionary(self):
+        self.max_separation = config.settings.get("spectrumRadius", 5)
 
 
     def get_layout(self):
         self._initialize_settings_panel()
-        self._initialize_spectrum_object()
-        self._run_spectrum()
+        initialized = self._initialize_spectrum_object()
+        if initialized:
+            self._run_spectrum()
         return pn.Column(self.message_pane, self.figure, self.plot_settings_panel,  scroll = True)
     
     def _change_source_cb(self, attr, old, new):
         if self.stage == "plot":
-            self._initialize_spectrum_object()
-            self._run_spectrum()
+            initialized = self._initialize_spectrum_object()
+            if initialized:
+                self._run_spectrum()
 
     def _subscribe_to_shared(self):
         if not self.from_sourceId:
             if not shared_data.is_subscribed(self.panel_id, "Euclid_radius"):
                shared_data.subscribe(self.panel_id, "Euclid_radius", self._update_max_separation)
-    
-    
+       
     def _save_figure(self, directory_path = "data/saved_sources"):
         if self.spectrum_object.spectra is not None:
             if self.redshift_column_selector.value != "None":
@@ -860,32 +874,42 @@ class SpectrumPlotClass(CustomPlotClass):
 
     def _initialize_spectrum_object(self):
         
-        self.max_separation = shared_data.get_data("Euclid_radius", 0.5)
-
         if self.from_sourceId:
             try:
                 self.sourceId = int(self.get_value_from_df(config.settings[f"{self.dataset}_TargetID"]))
                 self.ra, self.dec = None, None
             except KeyError:
-                raise KeyError("Missing column with target ID")
+                self.get_error_panel("Spectrum unavailable", "Missing column with target ID" )
+                return False
             except ValueError:
-                raise ValueError(f"{self.dataset}_TargetID must be convertible to int")
+                self.get_error_panel("Spectrum unavailable", "Missing target ID")
+                return False         
         else:
             self.sourceId = None
             self.ra, self.dec = self.get_ra_dec()
             if (self.ra is None) or (self.dec is None):
-                raise ValueError("Missing ra and dec")
+                self.get_error_panel("Spectrum unavailable", "Missing Missing RA or DEC values")
+                return False
 
-        if self._is_euclid_spec:
-            self.spectrum_object = EuclidSpectraClass(self.ra, self.dec, max_separation = self.max_separation,
+        try:
+            self.spectrum_object.reset_data(ra = self.ra, dec = self.dec,
+                                             max_separation = self.max_separation,
                                              sourceId = self.sourceId)
-        else:
-            datasets = (["DESI-DR1"] if self.dataset == "DESI"
-                else ["BOSS-DR16", "SDSS-DR16"] if self.dataset == "SDSS"
-                else None)
-            self.spectrum_object = DESISpectraClass(self.ra, self.dec, datasets = datasets ,
-                                        sourceId = self.sourceId, max_separation = self.max_separation,
-                                        client = shared_data.get_data("Sparcl_client", None))
+
+        except AttributeError:
+            if self._is_euclid_spec:
+                self.spectrum_object = EuclidSpectraClass(self.ra, self.dec, 
+                                                          max_separation = self.max_separation,
+                                                        sourceId = self.sourceId)
+            else:
+                datasets = (["DESI-DR1"] if self.dataset == "DESI"
+                            else ["BOSS-DR16", "SDSS-DR16"] if self.dataset == "SDSS"
+                             else None)
+                self.spectrum_object = DESISpectraClass(self.ra, self.dec, datasets = datasets,
+                                                        max_separation = self.max_separation,
+                                                        sourceId = self.sourceId,
+                                                        client = shared_data.get_data("Sparcl_client", None))
+        return True
 
     def _add_coordinates_to_shared(self, ra, dec):
         """
@@ -903,7 +927,13 @@ class SpectrumPlotClass(CustomPlotClass):
         
         def callback(future_result = None):
             shared_data.publish(self.panel_id, f"{self.dataset}_running", False)
-            if self.spectrum_object.spectra is not None:
+            if self.spectrum_object.error_tracker.has_error:
+                message = "# Spectrum unavailable:\n"
+                message += f"## {self.spectrum_object.error_tracker.error_message}"
+                self.message_pane.object = message
+                self.message_pane.visible = True 
+                self.figure.objects = [self.get_empty_image()]
+            else:
                 if self.redshift_column_selector.value != "None":
                     redshift_value = self.get_value_from_df(self.redshift_column_selector.value)
                     if redshift_value is not None:
@@ -911,11 +941,7 @@ class SpectrumPlotClass(CustomPlotClass):
                 self._update_plot()
                 self._add_coordinates_to_shared(*self.spectrum_object.get_coordinates())
                 self.message_pane.visible = False
-            else:
-                self.message_pane.object = "## Spectrum unavailable"
-                self.message_pane.visible = True #probably already visible
-                self.figure.objects = [self.get_empty_image()]
-                
+
 
         self.run_multithread(self.spectrum_object.get_spectra, 
                              func_kwargs = {"max_separation" : max_separation, "return_object" : True},
@@ -1531,9 +1557,6 @@ class SEDPlotClass(CustomPlotClass):
 
 
 
-
-
-
 class RadioClass(CustomPlotClass):
     
     def __init__(self, data, src, close_button, extra_features, dataset):
@@ -1559,7 +1582,7 @@ class RadioClass(CustomPlotClass):
         self._run_radio(radius = self.radius)
         return  pn.Column(self.message_pane, self.figure, self.plot_settings_panel, 
                           scroll = True, sizing_mode = "stretch_both")
-
+    
     def _initialise_widgets(self):
 
         self.radius_input = pn.widgets.FloatInput(name = "Radius [arcsec]", value = self.radius, 
@@ -1589,7 +1612,6 @@ class RadioClass(CustomPlotClass):
                 self.message_pane.object = f"## {self.dataset} cutout query failed"
                 self.message_pane.visible = True #probably already visible
             elif result is not None:
-                print("i am obtaining the image")
                 print(result.shape)
                 self.figure.object = self.get_radio_figure(result)
                 self.message_pane.visible = False
