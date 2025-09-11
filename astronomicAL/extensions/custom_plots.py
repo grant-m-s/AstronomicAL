@@ -485,6 +485,12 @@ class EuclidPlotClass(CustomPlotClass):
         self.overplot_coords_widget = pn.widgets.Checkbox(name = "Spectrum Coordinates")
         self.overplot_coords_widget.param.watch(self._overplot_coordinates_callback, "value")
 
+        self.contour_levels_input = pn.widgets.IntInput(name = "Contour Levels", value = self._get_from_settings_dictionary("levels", 0), 
+                                                  step =1, start = 0, end = 15, max_width = 200,
+                                                  sizing_mode="stretch_both")
+        self.contour_levels_input.param.watch(self._update_contour_levels, "value")
+
+
 
         self.environment_input = pn.widgets.Select(name = "Euclid Science Archive Environment", 
                                               options =  {"Public Data Release" : "PDR", "Internal Data Release" : "IDR", 
@@ -509,7 +515,8 @@ class EuclidPlotClass(CustomPlotClass):
 
         self.plot_settings_panel = pn.Column(self.contrast_scaler, self.radius_input, self.stretching_input, 
                                              self.filter_input,
-                                             pn.Row(self.overplot_source_coords_widget,self.overplot_coords_widget), 
+                                             pn.Row(self.overplot_source_coords_widget,self.overplot_coords_widget),
+                                             self.contour_levels_input, 
                                              self.environment_input, 
                                              self.login_column, 
                                              scroll = True, visible = False)
@@ -547,16 +554,25 @@ class EuclidPlotClass(CustomPlotClass):
         self.filter = event.new
         self._update_settings_dictionary("filter", self.filter)
         self.get_euclid_figure_hv(self.euclid_object.plot_data[self.filter],
-                               show_coordinates= self.overplot_source_coords_widget.value)
+                               show_coordinates = self.overplot_source_coords_widget.value)
         self._update_image()
         
     def _update_stretching(self, event):
         stretch = event.new
         self._update_settings_dictionary("stretching", stretch)
         self.euclid_object.get_plot_data(stretch = stretch)
-        self.get_euclid_figure_hv(self.euclid_object.plot_data[self.filter], show_coordinates= self.overplot_source_coords_widget.value)
+        self.get_euclid_figure_hv(self.euclid_object.plot_data[self.filter], 
+                                  show_coordinates = self.overplot_source_coords_widget.value)
         self._update_image()
 
+    
+    def _update_contour_levels(self, event):
+        levels = event.new
+        self._update_settings_dictionary("levels", levels)
+        self.get_euclid_figure_hv(self.euclid_object.plot_data[self.filter], 
+                                  show_coordinates = self.overplot_source_coords_widget.value)
+        self._update_image()
+        
     
     def _update_image(self): 
         try:
@@ -656,10 +672,12 @@ class EuclidPlotClass(CustomPlotClass):
         return bar_length_arcsecond
 
     
-    def get_euclid_figure_hv(self, data, show_coordinates = False, show_scale = True):
+    def get_euclid_figure_hv(self, data, 
+                             show_coordinates = False, 
+                             show_scale = True):
         
         self.image_height, self.image_width,  = data.shape[:2]
-        bounds = (0, 0, self.image_height, self.image_width)
+        bounds = (0, 0, self.image_width, self.image_height)
         
         if len(data.shape) == 3:
             image = hv.RGB(data[::-1,...], bounds=bounds).opts(
@@ -680,8 +698,16 @@ class EuclidPlotClass(CustomPlotClass):
                                          yaxis=None,
                                          cmap = "grey",
                                          )
-
+        self.image_stream = hv.streams.Tap(source=image, x=np.nan, y=np.nan)
+        self.image_stream.param.watch(self._light_profile_callback, ["x"])
+        
         self.euclid_fig = [image]
+
+        if self.contour_levels_input.value > 0:
+            N_contour_levels = self.contour_levels_input.value
+            contours = hv.operation.contours(image, levels = N_contour_levels).opts(cmap='Reds', colorbar=False, 
+                                                                    active_tools=[], show_legend = False)
+            self.euclid_fig.append(contours)
         
         if show_scale:
             self.bar_length_pixels = self.image_width * 0.2  #always shows a bar 1/5 of the plot 
@@ -707,6 +733,47 @@ class EuclidPlotClass(CustomPlotClass):
             
         if self.overplot_coords_widget.value:
             self._show_overplot_coordinates()
+
+    def _light_profile_callback(self, event):
+        col, row = self.image_stream.x, self.image_stream.y
+        if (row is None) or (col is None):
+            return
+        row, col = int(round(row)), int(round(col))
+        row = max(0, min(row, self.image_height - 1))
+        col = max(0, min(col, self.image_width - 1))
+
+        if self.filter not in ["Color"]: #TODO compute light profile for RGB images
+            self.get_light_profile_plot(row, col)
+    
+    def _light_profile_callback_reverse(self, event):
+        self._update_image()
+
+    def get_light_profile_plot(self, row, col):
+        if self.contrast_scaler.value != (0,1):
+            low, high =  self.contrast_scaler.value
+            data = self.change_intensity_range(self.euclid_object.plot_data[self.filter], low, high)        
+        else:
+            data = self.euclid_object.plot_data[self.filter]
+        
+        def get_curve(values, idx, xlabel):
+            curve =hv.Curve(values, kdims ="x", vdims ="value").opts(toolbar=None, padding = 0.0,
+                                                                      border = 1, framewise = True,
+                                                                      active_tools =[],
+                                                                      xlabel=xlabel, 
+                                                                      yaxis=None,  ylim = (0,1.05), 
+                                                                      color = "black") 
+            line = hv.VLine(idx).opts(color = "red", line_width=1, line_dash='dotted')
+            return hv.Overlay([curve, line]).opts(responsive=True, toolbar = None)
+                                                                                       
+        plot_x = get_curve(data[row, :], col, "X coordinate")   
+        plot_y = get_curve(data[:, col], row, "Y coordinate")      
+        layout = hv.Layout(plot_x + plot_y).cols(1).opts(sizing_mode = "stretch_both")
+        row_stream = hv.streams.Tap(source=plot_x, x=np.nan, y=np.nan)
+        col_stream = hv.streams.Tap(source=plot_y, x=np.nan, y=np.nan)
+        row_stream.param.watch(self._light_profile_callback_reverse, ["x"])
+        col_stream.param.watch(self._light_profile_callback_reverse, ["x"])
+        self.figure.object = layout
+    
 
     def _run_euclid(self):
         """Wrapper for multithreading"""
@@ -743,7 +810,9 @@ class EuclidPlotClass(CustomPlotClass):
                               callback = callback)
     
 
-    def get_euclid_figure(self, data, show_coordinates = False, show_scale = True,
+    def get_euclid_figure(self, data, 
+                          show_coordinates = False, 
+                          show_scale = True,
                           show_spectra_coordinates = False):
         """Fuction to have the plot in matplotlib in order to be saved.
            Less general than get_euclid_figure_hv as in this case coordinates are overplotted on the same axis
