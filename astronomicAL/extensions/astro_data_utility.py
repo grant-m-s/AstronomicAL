@@ -6,6 +6,7 @@ import concurrent.futures
 from io import BytesIO
 import numpy as np
 import pandas as pd
+from scipy.stats import median_abs_deviation
 import warnings
 from astropy import units as u
 from astroquery.esa.euclid import EuclidClass, Euclid
@@ -72,8 +73,7 @@ class EuclidCutoutsClass:
         """This function handles the change of the environment of the client EuclidClass
             Note that at the moment there is no way to automatically recognize if the login failed"""
         assert environment in ("PDR", "IDR", "OTF", "REG"), "environment must be  'PDR', 'IDR,, 'OTF', 'REG'"
-        shared_data.set_data("Euclid_client", EuclidClass(environment= environment))
-        self.client = shared_data.get_data("Euclid_client")
+        self.client =  EuclidClass(environment = environment)
         if environment != "PDR":
             if credentials_filepath is not None:
                 self.client.login(user = None, password = None, credentials_file = credentials_filepath)
@@ -169,44 +169,144 @@ class EuclidCutoutsClass:
         for band in self.euclid_filters:
             reprojected, _ = reproject_interp((self.data[band], self.wcs[band]), ref_wcs, shape_out=ref_shape)
             self.reprojected_data |= {band : reprojected}
-    
-    @staticmethod
-    def transform_image(image, 
-                        stretch = LinearStretch(slope =1), 
-                        interval = AsymmetricPercentileInterval(lower_percentile = 1, upper_percentile=99)):
-        transform = stretch + interval 
-        return transform(image)
-    
-
-    def stack_cutouts(self, r_img = "NIR_H", g_img = "NIR_Y", b_img = "VIS",
-                        stretch = LinearStretch(slope =1), 
-                        interval = AsymmetricPercentileInterval(lower_percentile = 1, upper_percentile=99) ):
         
-        norm_images = [self.transform_image(self.reprojected_data[band], stretch = stretch, interval = interval)
-                   for band in [r_img, g_img, b_img]]
-        return  np.dstack(norm_images)
+        self.data["Color"] = self.get_color_cutout(r_img = "NIR_H", g_img = "NIR_Y", b_img = "VIS", stretch=None,
+                                                        stretch_interval = None)
 
 
-    def get_plot_data(self, stretch,  interval = AsymmetricPercentileInterval(lower_percentile = 1, upper_percentile=99)):
-        """This is just a convenient method which creates a dictionary with the cutouts to be 
-           plotted preserving the original data"""
+    def get_plot_data(self, stretch = "Linear", 
+                        stretch_scale = None,
+                        stretch_interval = AsymmetricPercentileInterval(lower_percentile = 0.1, upper_percentile=100),
+                        ):
+        """This is just a convenient method which initializes the cutouts to be plotted for all bands plus 
+           the color image by calling self._stretch_image"""
         
-        stretch_map = {"Linear": lambda: LinearStretch(slope=1),
+        stretch_map = {"Linear": lambda: LinearStretch(slope = stretch_scale if stretch_scale is not None else 1),
                       "Sqrt": lambda: SqrtStretch(),
-                      "Log" : lambda: LogStretch(),
-                      "Asinh": lambda: AsinhStretch(),
-                      "PowerLaw": lambda: PowerStretch(a=2)}
+                      "Log" : lambda: LogStretch(a = stretch_scale if stretch_scale is not None else 1000),
+                      "Asinh": lambda: AsinhStretch(a = stretch_scale if stretch_scale is not None else 0.1),
+                      "PowerLaw": lambda: PowerStretch(a = stretch_scale if stretch_scale is not None else 2)}
+            
         if isinstance(stretch, str):
             stretch = stretch_map.get(stretch)()
-        
+
         self.plot_data = {}
-        for band in self.euclid_filters:
-            self.plot_data[band] =  self.transform_image(self.data[band], stretch = stretch, interval = interval)
+        self.plot_data_info = {}
         
-        self.plot_data["Color"] = self.stack_cutouts(r_img = "NIR_H", g_img = "NIR_Y", b_img = "VIS", stretch=stretch,
-                                                       interval = interval)
+        for band in self.euclid_filters:
+            self.plot_data[band] =  self._stretch_image(self.data[band], stretch = stretch, 
+                                                        stretch_interval = stretch_interval)
+            self.plot_data_info[band] =  {"min_value" : np.nanmin(self.plot_data[band]),
+                                          "max_value" : np.nanmax(self.plot_data[band]) }
+        
+        
+        self.plot_data["Color"] = self.get_color_cutout(r_img = "NIR_H", g_img = "NIR_Y", b_img = "VIS", stretch=stretch,
+                                                        stretch_interval = stretch_interval)
+
+        self.plot_data_info["Color"] = { "min_value" : [np.nanmin(i) for i in self.plot_data["Color"]], 
+                                         "max_value" : [np.nanmax(i) for i in self.plot_data["Color"]]}
+
+
+    def get_color_cutout(self, r_img = "NIR_H", g_img = "NIR_Y", b_img = "VIS",
+                        stretch = None, 
+                        stretch_interval = None):
+        
+        images = [self._stretch_image(self.reprojected_data[band], stretch = stretch, 
+                 stretch_interval = stretch_interval) for band in [r_img, g_img, b_img]]
          
- 
+        return  np.dstack(images)
+  
+    def transform_image_range(self, band, low, high, gamma = 1, scale_method = "MinMax",
+                              scale_by_channel = False):
+        """Clip and scales the plot. This is used to update the plot due 
+           to a change of parameters in CustomPlot
+        """
+        if  band != "Color":
+            image = self.plot_data[band]
+            image_min = self.plot_data_info[band].get("min_value", None)
+            image_max = self.plot_data_info[band].get("max_value", None)
+            clipped_image, new_min, new_max = self._clip_image(image, low, high, 
+                                            image_min = image_min, image_max = image_max)
+            scaled_image = self._scale_image(clipped_image, 
+                                            scale_method = scale_method,
+                                            image_min = new_min, image_max = new_max)
+        else:
+            ##band == Color
+            if not np.iterable(low):
+                low = [low] * 3
+            if not np.iterable(high):
+                high = [high] * 3
+            if not np.iterable(gamma):
+                gamma = [gamma] * 3
+            clipped_images = []
+            abs_min, abs_max = np.inf, -np.inf
+            image_min = np.min(self.plot_data_info[band]["min_value"])
+            image_max = np.max(self.plot_data_info[band]["max_value"])
+            for i in range(3):
+                image = self.plot_data[band][:, :, i]
+                clipped_image, new_min, new_max = self._clip_image(image, low[i], high[i], 
+                                            image_min = image_min, image_max = image_max)
+                clipped_image = clipped_image**gamma[i]
+                abs_min = min(abs_min, new_min)
+                abs_max = max(abs_max, new_max)
+                if scale_by_channel:
+                    clipped_image = self._scale_image(clipped_image, 
+                                            scale_method = scale_method,
+                                            image_min = new_min, image_max = new_max)
+                clipped_images.append(clipped_image)
+            
+            scaled_image = self._scale_image(np.dstack(clipped_images), scale_method = "minmax",
+                                             image_min = abs_min, image_max = abs_max)
+
+        return scaled_image
+    
+    @staticmethod
+    def _stretch_image(image, stretch, stretch_interval):
+        if stretch is None:
+            stretch = LinearStretch()
+        if stretch_interval is None:
+            transform = stretch
+        else:
+            transform = stretch + stretch_interval 
+        return transform(image)
+    
+    @staticmethod
+    def _clip_image(image, low, high, image_min = None, image_max = None, clip = False):
+        
+        if (low == 0) and (high == 1):
+            return image, image_min, image_max
+        if image_min is None:
+            image_min = np.nanmin(image)
+        if image_max is None:
+            image_max = np.nanmax(image)
+        
+        image_range = image_max - image_min
+        absolute_low = image_min + low * image_range
+        absolute_high = image_min + high * image_range
+
+        return np.clip(image, absolute_low, absolute_high), absolute_low, absolute_high
+    
+    @staticmethod
+    def _scale_image(image, scale_method= "minmax", image_min = None, image_max = None):
+        if scale_method.lower() =="minmax":
+            if image_min is None:
+                image_min = np.nanmin(image)
+            if image_max is None:
+                image_max = np.nanmax(image)
+            scaled_image = (image-image_min)/(image_max-image_min)
+            scaled_image = np.clip(scaled_image, 0,1)
+    
+        elif scale_method.lower() == "expand":
+            print("using expand scale")
+            mid_value = np.nanmedian(image)
+            sigma = np.nanstd(image)
+            scaled_image = np.where(image>mid_value+(1*sigma), image * 2, image / 2)
+        
+        else:
+            raise ValueError(f"Unknown scale_method: {scale_method}") 
+        return scaled_image
+
+
     def _add_overplot_coordinates(self, ra, dec, dataset = "default"):
         """
         Creates a dictionary to store coordinates from different datasets which can
@@ -219,8 +319,6 @@ class EuclidCutoutsClass:
             self.overplot_coordinates = {}
         self.overplot_coordinates[dataset] = {"ra" : ra, "dec" : dec}
 
-        
-    
     def _convert_overplot_coordinates(self, filtro = "Color", dataset = "default", zipped = True):
         """
         Converts the stored coordinates into pixel coordinates for a given filter.
@@ -268,11 +366,15 @@ class EuclidCutoutsClass:
                 print("The required band is not available")
             except OSError as e:
                 print(e)
+            except FileNotFoundError as e:
+                print(f"I could not find {self.cutouts_paths[band]}\n {e}")
+
         
     def get_final_cutout(self, radius, 
                          stretch =  "Linear", 
                          filtro = "Color", 
                          reference = "VIS", 
+                         stretch_scale = None,
                          verbose = False,
                          return_object = False):
         """
@@ -313,67 +415,16 @@ class EuclidCutoutsClass:
             return None
             
         self.reproject_cutouts(reference=reference)
-        self.get_plot_data(stretch=stretch)
+        self.get_plot_data(stretch=stretch, stretch_scale = stretch_scale)
         if return_object:
             return self.plot_data.get(filtro, None)
-        
-        
+         
     def clean_space(self):
         """Free quota of queries to Euclid Science Archive by removing asinchronous jobs. 
          It takes a couple of minutes"""
         joblist = self.client.list_async_jobs()
         to_remove = [j.jobid for j in joblist]
         self.client.remove_jobs(to_remove)
-
-
-
-    @staticmethod
-    def zoom_image(image, scale, same_shape = True, zooming_order = 1):
-        if scale >= 1:
-            return image
-        if scale <= 0:
-            return None
-        height, width = image.shape[:2]
-        new_height, new_width = int(height * scale), int(width * scale)
-        
-        top = (height - new_height) // 2
-        left = (width - new_width) // 2
-        bottom = top + new_height
-        right = left + new_width
-        
-        cropped_image = image[top:bottom, left:right]
-        if not same_shape:
-            return cropped_image
-        zoom_factors = (height / new_height, width / new_width) if image.ndim == 2 else (height / new_height, width / new_width, 1)
-        #return zoom(cropped_image, zoom_factors, order=zooming_order)
-    
-    def get_scaled_cutout(self, scale, same_shape = True, zooming_order = 1, verbose = False, filtro = "Color"):
-        """here scale refers to the current scaled image"""
-
-        tic = time.perf_counter()
-        if not hasattr(self,"scaled_cutouts"):
-            self.scaled_cutouts = self.data.copy()
-            self.scales = {band : 1 for band in self.scaled_cutouts}   #currently same scale for all bands
-            self.scaled_arcsec_per_pix = self.arcsec_per_pix.copy()
-        try:
-            self.scales[filtro] = self.scales[filtro]*scale
-            self.scaled_cutouts[filtro] = self.zoom_image(self.data[filtro], self.scales[filtro], same_shape = same_shape,
-                                                         zooming_order=zooming_order)
-            if same_shape:
-                    self.scaled_arcsec_per_pix[filtro] = self.scaled_arcsec_per_pix[filtro] * scale
-        except KeyError:    
-            for band, image in self.data.items():
-                self.scales[band] = self.scales[band]*scale
-                self.scaled_cutouts[band] = self.zoom_image(image, self.scales[band], same_shape = same_shape,
-                                                       zooming_order=zooming_order)
-                if same_shape:
-                    self.scaled_arcsec_per_pix[band] = self.scaled_arcsec_per_pix[band] * scale
-
-        toc = time.perf_counter()
-        
-        if verbose:
-            print(f"Scaling cutouts required {toc-tic} seconds")
-   
 
 
 class BaseSpectraClass:
@@ -486,7 +537,7 @@ class BaseSpectraClass:
             plot_emlines = False
         
         ax.plot(wavlen, flux, c = 'grey', lw = 0.3, label = "Flux")
-        ax.plot(wavlen, smoothed, **smoothed_kwargs, label = "Smoothed Flux" )
+        ax.plot(wavlen, smoothed, **smoothed_kwargs, label = "Smoothed Flux")
 
         if plot_mask:
             start_idx, end_idx = self.find_masked_regions(mask = self.spectra[idx].mask, min_width=5)
@@ -1057,18 +1108,23 @@ class EuclidSpectraClass(BaseSpectraClass):
 
         if self.spectra is not None:
             sourceid_list = [spectrum.sourceId for spectrum in self.spectra]
+            sourceids= ",".join([str(s) for s in sourceid_list])
             query = f"""SELECT 
                     class.object_id, class.spe_class, gal.spe_z AS gal_z, gal.spe_z_prob
                     FROM catalogue.spectro_zcatalog_spe_classification as class
                     LEFT JOIN catalogue.spectro_zcatalog_spe_galaxy_candidates AS gal 
                     ON class.object_id = gal.object_id
-                    WHERE class.object_id IN {tuple(sourceid_list)}
+                    WHERE class.object_id IN ({sourceids})
                     """
            
             tic = time.perf_counter()
             job = self.client.launch_job(query)
+            if (job is None) or (job.get_phase() in ("ERROR", "ABORTED")):
+                self.specz_table = None 
+                return
             try:
                 self.specz_results = job.get_results()
+            
                 #keeping only galaxy redshift with highest probability, reordering to match the sourceid_list
                 self.specz_table = (self.specz_results.to_pandas().sort_values(["object_id", "spe_z_prob"], 
                                                                    ascending=[True, False]).drop_duplicates("object_id"))
@@ -1081,10 +1137,8 @@ class EuclidSpectraClass(BaseSpectraClass):
                                                                     np.nan,
                                                                     np.nan], 
                                                                     default=0)
-
             except AttributeError:
-                self.specz_table = None
-            
+                self.specz_table = None 
             toc = time.perf_counter()
             if verbose:
                 print(f"Querying Euclid spectroscopic redshift table required {toc-tic} seconds")
@@ -1103,9 +1157,10 @@ class EuclidSpectraClass(BaseSpectraClass):
                 spectrum.set_attribute(attribute, value)
         
     def update_info_from_query(self):
-        for attribute in ["spectype", "redshift"]:
-            col_name = "spe_class" if attribute == "spectype" else attribute 
-            self._update_info_spectra(attribute, self.specz_table[col_name].values)
+        if self.specz_table is not None:
+            for attribute in ["spectype", "redshift"]:
+                col_name = "spe_class" if attribute == "spectype" else attribute 
+                self._update_info_spectra(attribute, self.specz_table[col_name].values)
    
     
 

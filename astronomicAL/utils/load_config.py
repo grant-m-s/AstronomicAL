@@ -29,29 +29,29 @@ def verify_import_config(curr_config_file):
         return has_error, error_message
 
     if config.settings["config_load_level"] > 0:
-
-        columns_needed = [
-            "dataset_filepath",
-            "optimise_data",
-            "layout",
-            "id_col",
-            "label_col",
-            "default_vars",
-            "labels",
-            "label_colours",
-            "labels_to_strings",
-            "strings_to_labels",
-            "extra_info_cols",
-            "extra_image_cols",
-            "labels_to_train",
-            "features_for_training",
-            "exclude_labels",
-            "exclude_unknown_labels",
-            "unclassified_labels",
-            "scale_data",
-            "feature_generation",
-            "test_set_file",
-        ]
+        
+        columns_needed = [ "dataset_filepath",
+                           "optimise_data",
+                           "layout",
+                           "id_col",
+                           "label_col",
+                           "default_vars",
+                           "labels",
+                           "label_colours",
+                           "labels_to_strings",
+                           "strings_to_labels",
+                           "extra_info_cols",
+                            "feature_generation"]
+        
+        if curr_config_file.get("layout", {}).get("0", {}).get("contents") != "Exploring":
+                    columns_needed.extend(["extra_image_cols",
+                                       "labels_to_train",
+                                       "features_for_training",
+                                       "exclude_labels",
+                                       "exclude_unknown_labels",
+                                       "unclassified_labels",
+                                       "scale_data",
+                                       "test_set_file",])
 
         missing_settings = list(
             set(columns_needed).difference(list(curr_config_file.keys()))
@@ -475,17 +475,34 @@ def verify_euclid_cutout_config(curr_config_file, has_error, error_message):
                                "valid" : {"Linear", "Sqrt", "Log", "Asinh", "PowerLaw"},
                                "error": "Available stretchings: `Linear`, `Sqrt`, `Log`, `Asinh`, `PowerLaw`"
                             },
-                "scaling": {  
+                "scale": {
+                          "valid": {"MinMax", "Expand"},
+                          "error": "Available scale: `MinMax`, `Expand`"
+                          },
+                "clipping": {  
                           "check": lambda x: (isinstance(x, (list, tuple))
                                               and len(x) == 2
                                               and all(isinstance(v, (int, float)) for v in x)
                                               and 0 <= x[0] < x[1] <= 1),
-                          "error": "scaling must be a list or tuple of `two ordered numbers between 0 and 1`"
+                          "error": "clipping must be a list or tuple of `two ordered numbers between 0 and 1`"
                            },
                 "source_coordinates": {
                                        "valid" : {True, False},
                                        "error" : "Available source_coordinates values: `true`, `false`"
-                                       }          
+                                       },
+                "levels": {
+                          "check": lambda l: isinstance(l, int) and 0 <= l <= 10,
+                          "error": "levels must be a positive int number with `l ≤ 10`"
+                          },
+                
+                "gamma": {  
+                          "check": lambda x: (isinstance(x, (list, tuple))
+                                              and len(x) == 3
+                                              and all(isinstance(v, (int, float)) for v in x)
+                                              and all(0 < v <= 5 for v in x)),
+                          "error": "gamma must be a list or tuple of `three numbers between 0 and 5`"
+                           },
+
                 }
             
             new_error, new_message = verify_config_dict(config_dict, validation_rules, "Euclid_cutout_settings")

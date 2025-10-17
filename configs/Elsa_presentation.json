@@ -85,14 +85,15 @@
             2
         ]
     ],
+    "notebook_directory" : "data/notebook_2025_10_06",
     "test_set_file": false,
     "ra_col_name": "right_ascension_euclid",
     "dec_col_name": "declination_euclid",
     "Euclid_cutout_settings": {
-        "filter": "Color",
+        "filter": "VIS",
         "radius": 10.0,
         "stretching": "Linear",
-        "scaling": [
+        "clipping": [
             0,
             0.85
         ],

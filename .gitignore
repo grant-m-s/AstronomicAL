@@ -9,11 +9,13 @@ models
 *.py.bak
 *.bak 
 *Euclid_and_Desi_reduced.fits
+*extended.fits
 *.DS_Store
 *.login
 data/EDFN_DESI.fits
 data/EDFN-DESI.fits
 data/saved_sources
+data/notebook*
 data_cutouts
 astronomicAL/extensions/data
 

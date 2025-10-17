@@ -45,7 +45,10 @@ def get_customplot_dict():
 
         "BroadBand SED"  : lambda data, src, close_button : SEDPlotClass(data, src, close_button,
                                                             extra_features=[]),
-        
+
+        "Notes Panel"  : lambda data, src, close_button : LogBookClass(data, src, close_button,
+                                                            extra_features=[]),
+
         "VLASS Cutout"  : lambda data, src, close_button : RadioClass(data, src, close_button,
                                                             extra_features=[], dataset="VLASS"),
         
@@ -124,11 +127,14 @@ class CustomPlotClass(param.Parameterized):
             print(err_message)
             ra, dec = None, None
         return ra, dec
+    
+    def _get_selected_id(self):
+        return self.get_value_from_df(config.settings["id_col"])
 
     def check_required_column(self, column):
-        return column in list(self.df.columns)
+        return column in self.df.columns
     
-    
+
     def get_column_list(self, excluded_columns = ["id_col", "ra_dec", "label_col"],
                               excluded_types = ["object"], allowed_types = None):
         """
@@ -238,17 +244,24 @@ class CustomPlotClass(param.Parameterized):
         else:
             print("The unknown_columns attribute was not initialized, not changing Stage")
     
-    def _save_panel(self, directory_path = "data/saved_sources"):
+    def _save_panel(self, directory_path = "data/saved_sources", 
+                    save_fits_files = True, 
+                    prefix = None, 
+                    ): 
+        paths = {}
         if self.stage == "plot":
             try:
-               self._save_figure(directory_path = directory_path)
+               paths["figure"] = self._save_figure(directory_path = directory_path, prefix = prefix)
             except AttributeError:
                 print(f"{self.panel_name} has no _save_panel_method")
-            try:
-                self._save_data_to_fits(directory_path = directory_path)
-            except AttributeError:
-                pass
-
+            
+            if save_fits_files:
+                try:
+                    paths["fits_file"] = self._save_data_to_fits(directory_path = directory_path)
+                    #paths["fits_file"] is currently always None
+                except AttributeError:
+                    pass
+        return paths
             
     def run_multithread(self, function, func_kwargs=None, callback=None, allowed_exceptions=(Exception,)):
         if func_kwargs is None:
@@ -287,6 +300,10 @@ class CustomPlotClass(param.Parameterized):
         self.message_pane.object = message
         self.message_pane.visible = True 
         self.figure.objects = [self.get_empty_image()]
+
+    def subscribe_to_shared(self, key, function):
+        if not shared_data.is_subscribed(self.panel_id, key):
+               shared_data.subscribe(self.panel_id, key, function)
 
     def remove_shared_data(self):
         """Removes subscriptions and published data from the shared data"""
@@ -373,9 +390,12 @@ class EuclidPlotClass(CustomPlotClass):
     def get_layout(self):
         self._initialise_widgets()
         initialised = self._initialise_euclid_object()
-        self._subscribe_to_shared()
+        self._manage_subscriptions()
         if initialised:
             self._run_euclid()
+        self.message_pane.object = "## Io non dovrei essere qui..."
+        self.message_pane.visible = False
+
         return  pn.Column(self.message_pane, self.figure, self.plot_settings_panel, 
                           scroll = True, sizing_mode = "stretch_both")
     
@@ -386,18 +406,20 @@ class EuclidPlotClass(CustomPlotClass):
         default_values = { "filter" : "Color",
                            "radius" : 5.0,
                            "stretching" : "Linear",
-                           "scaling" : (0,1),
+                           "clipping" : (0,1),
+                           "scale" : "minmax",
+                           "gamma" : (1,1,1),
                            "source_coordinates" : False,
+                           "levels" : 0,
                         }
         for key, value in default_values.items():
             if key not in euclid_settings:
                 self._update_settings_dictionary(key, value)
 
-    
     @staticmethod
     def _get_from_settings_dictionary(key, default):
         value = config.settings["Euclid_cutout_settings"].get(key, default)
-        if key == "scaling":
+        if key in ("clipping", "gamma"):
             value = tuple(value)
         return value
     
@@ -405,30 +427,66 @@ class EuclidPlotClass(CustomPlotClass):
     def _update_settings_dictionary(key, value):
         config.settings["Euclid_cutout_settings"][key] = value
 
-    def _save_figure(self, directory_path = "data/saved_sources"):
-        try:
-            fname = f"{self.panel_name}.png"
-            filename = os.path.join(directory_path,fname)
+    def _update_all_settings_dictionary(self):
+        filter = self.filter_input.value
+        low, high = self.contrast_scaler.value
+        gamma = (self.gamma_red_input.value,  self.gamma_green_input.value, self.gamma_blue_input.value)
+        print(gamma)
+        scale = self.scale_input.value
+        source_coordinates = self.overplot_source_coords_widget.value
+        levels = self.contour_levels_input.value
+        self._update_settings_dictionary("scale", scale)
+        self._update_settings_dictionary("filter", filter)
+        self._update_settings_dictionary("gamma", gamma)
+        self._update_settings_dictionary("clipping", (low, high))
+        self._update_settings_dictionary("source_coordinates", source_coordinates)
+        self._update_settings_dictionary("levels", levels)
+
+    def _get_scaled_image(self):
+        if self.filter != "Color":
             low, high = self.contrast_scaler.value
-            scaled_image =  self.change_intensity_range(self.euclid_object.plot_data[self.filter],
-                                                        low, high)
+            return self.euclid_object.transform_image_range(self.filter, low, high,
+                                                            scale_method = self.scale_input.value)
+    
+        gamma = (self.gamma_red_input.value,  self.gamma_green_input.value, self.gamma_blue_input.value)
+        scale_by_channel = True
+        low_r, high_r = self.contrast_scaler_red.value
+        low_g, high_g = self.contrast_scaler_green.value
+        low_b, high_b = self.contrast_scaler_blue.value
+        low = (low_r, low_g, low_b)
+        high = (high_r, high_g, high_b)
+        if (low == (0,0,0)) and (high == (1,1,1)):
+            low, high = self.contrast_scaler.value
+            scale_by_channel = False
+        return self.euclid_object.transform_image_range(self.filter, low, high, gamma = gamma, 
+                                                        scale_method = self.scale_input.value,
+                                                        scale_by_channel = scale_by_channel)
+         
+    def _save_figure(self, directory_path = "data/saved_sources", prefix = None):
+        try:
+            fname = f"{prefix + '_' if prefix else ''}{self.panel_name}.png"
+            filename = os.path.join(directory_path,fname)
+            scaled_image =  self._get_scaled_image()
             fig = self.get_euclid_figure(scaled_image, show_scale = True,
                                         show_coordinates = self.overplot_source_coords_widget.value,
                                         show_spectra_coordinates = self.overplot_coords_widget.value)
             fig.savefig(filename, bbox_inches = "tight")
             plt.close(fig)
+            return filename
         except FileNotFoundError:
             print(f"Could not find the saving directory: {directory_path}")
         except AttributeError as e:
             print(e)
         except KeyError as e:
             print(f"Missing filter {e} in euclid_object.plot_data")
+   
+  
 
 
     def _save_data_to_fits(self, directory_path = "data/saved_sources"):
         try:
-            self.euclid_object.export_cutouts_to_fits(bands_to_export=[self.filter], 
-                                                      directory_path=directory_path)
+            self.euclid_object.export_cutouts_to_fits(bands_to_export = ["VIS", "NIR_Y", "NIR_J", "NIR_H"], 
+                                                      directory_path = directory_path)
         except AttributeError:
             pass
         except FileNotFoundError:
@@ -457,123 +515,181 @@ class EuclidPlotClass(CustomPlotClass):
         self.radius_input = pn.widgets.FloatInput(name = "Radius [arcsec]", value = self.radius, 
                                                   step = 0.5, start = 1, end = 100, max_width = 200,
                                                   sizing_mode="stretch_both")
-        self.radius_input.param.watch(self._update_radius, "value")
-
+        
         self.stretching_input = pn.widgets.Select(name = "Stretching function", 
                                                 options=  ['Linear', 'Sqrt', 'Log', 'Asinh', 'PowerLaw'],
                                                 value = self._get_from_settings_dictionary("stretching", "Linear"),
                                                 sizing_mode = "stretch_both")
-        self.stretching_input.param.watch(self._update_stretching, "value")
+        
+        self.scale_input = pn.widgets.Select(name = "Scaling Mode", 
+                                             options =  ["MinMax", "Expand"],
+                                             value = self._get_from_settings_dictionary("scaling", "MinMax"),
+                                            sizing_mode = "stretch_both")
 
-        self.contrast_scaler = pn.widgets.RangeSlider(name = "Image scaling", 
+        
+        self.contrast_scaler = pn.widgets.RangeSlider(name = "Image Clipping", 
                                                      start = 0, end = 1, step = 0.004, 
-                                                     value = self._get_from_settings_dictionary("scaling", (0,1)),
+                                                     value = self._get_from_settings_dictionary("clipping", (0,1)),
                                                      sizing_mode = "stretch_both")
-        self.contrast_scaler.param.watch(self._update_intensity_scaling, "value")  
-
+        
         self.filter_input = pn.widgets.Select(name = "Euclid Filter", 
-                                              options =  {"VIS" : "VIS", 'Y' : "NIR_Y", 'J' : "NIR_J", 
+                                                options =  {"VIS" : "VIS", 'Y' : "NIR_Y", 'J' : "NIR_J", 
                                                         'H' : "NIR_H", 'Color' : "Color"},
-                                                        value  = self.filter,
+                                                value  = self.filter,
+                                                max_width = 200,
                                                 sizing_mode = "stretch_both")
-        self.filter_input.param.watch(self._update_filter, "value")
         
         self.overplot_source_coords_widget = pn.widgets.Checkbox(name = "Source Coordinates",
                                                                  value = self._get_from_settings_dictionary("source_coordinates", "False"))
-        self.overplot_source_coords_widget.param.watch(self._overplot_source_coordinates_callback, "value")
-
+        
         self.overplot_coords_widget = pn.widgets.Checkbox(name = "Spectrum Coordinates")
-        self.overplot_coords_widget.param.watch(self._overplot_coordinates_callback, "value")
-
+    
         self.contour_levels_input = pn.widgets.IntInput(name = "Contour Levels", value = self._get_from_settings_dictionary("levels", 0), 
                                                   step =1, start = 0, end = 15, max_width = 200,
                                                   sizing_mode="stretch_both")
-        self.contour_levels_input.param.watch(self._update_contour_levels, "value")
-
-
+        self.contour_levels_scale_input = pn.widgets.Select(name= "Contours drop",
+                                                            options= {"Sqrt(2)" : (np.sqrt(2), 1), "2" : (2, 1), "10" : (10,1),
+                                                                      "Exponential" : (np.exp(1),1), "Gaussian" : (np.exp(1),2),
+                                                                      "de Vaucouleurs" : (np.exp(1), 0.25)},  
+                                                            value=1, sizing_mode = "stretch_both",
+                                                            max_width = 150)
+          
 
         self.environment_input = pn.widgets.Select(name = "Euclid Science Archive Environment", 
-                                              options =  {"Public Data Release" : "PDR", "Internal Data Release" : "IDR", 
-                                                          "On The Fly" : "OTF", "REG" : "REG"},
-                                                           value  = "PDR",
-                                                           disabled_options=["REG"],
-                                                sizing_mode = "stretch_both")
-        self.environment_input.param.watch(self._change_euclid_environment, "value")
-
+                                            options =  {"Public Data Release" : "PDR", "Internal Data Release" : "IDR", 
+                                                        "On The Fly" : "OTF", "REG" : "REG"},
+                                            value  = "PDR",
+                                            disabled_options=["REG"],
+                                            sizing_mode = "stretch_both")
+        
         self.user_input = pn.widgets.TextInput(name = 'Euclid Science Archive username', 
                                                placeholder = 'Enter your Euclid Science Archive username here',
                                                sizing_mode = "stretch_both")
         self.password_input = pn.widgets.PasswordInput(name = "Password", 
-                                                       placeholder = 'Enter your Euclid Science Archive password here',
-                                                       sizing_mode = "stretch_both")
-
+                                                placeholder = 'Enter your Euclid Science Archive password here',
+                                                sizing_mode = "stretch_both")
+        
         self.confirm_login_button = pn.widgets.Button(name = "Confirm", sizing_mode = "stretch_both", max_height = 30, 
                                                        max_width = 80, button_type= "primary")
-        self.confirm_login_button.on_click(self._confirm_login_credentials_cb)
-
+        
         self.login_column = pn.Column(self.user_input, self.password_input, self.confirm_login_button, visible = False)
+        
+        self.color_settings_column = self._initialise_color_settings()
+        self.color_settings_button = pn.widgets.Button(name = "Color image settings", sizing_mode = "stretch_both", max_height = 30, 
+                                                       max_width = 80, button_type= "primary")
+    
+        
+        self.radius_input.param.watch(self._update_radius, "value")
+        self.stretching_input.param.watch(self._update_stretching, "value")
+        self.contrast_scaler.param.watch(self._general_parameter_callabck, "value")  
+        self.scale_input.param.watch(self._general_parameter_callabck, "value")  
+        self.filter_input.param.watch(self._general_parameter_callabck, "value")
+        self.overplot_source_coords_widget.param.watch(self._general_parameter_callabck, "value")
+        self.overplot_coords_widget.param.watch(self._overplot_coordinates_callback, "value")
+        self.contour_levels_input.param.watch(self._general_parameter_callabck, "value")
+        self.contour_levels_scale_input.param.watch(self._general_parameter_callabck, "value")
 
-        self.plot_settings_panel = pn.Column(self.contrast_scaler, self.radius_input, self.stretching_input, 
+
+
+    
+
+        self.environment_input.param.watch(self._change_euclid_environment, "value")
+        self.confirm_login_button.on_click(self._confirm_login_credentials_cb)
+        self.color_settings_button.on_click(self._open_color_settings_cb)
+
+
+        self.plot_settings_panel = pn.Column(self.contrast_scaler, self.radius_input, 
+                                             pn.Row(self.stretching_input, self.scale_input),
                                              self.filter_input,
                                              pn.Row(self.overplot_source_coords_widget,self.overplot_coords_widget),
-                                             self.contour_levels_input, 
+                                             pn.Row(self.contour_levels_input, self.contour_levels_scale_input),
+                                             self.color_settings_column,
+                                             self.color_settings_button,
                                              self.environment_input, 
                                              self.login_column, 
                                              scroll = True, visible = False)
         
+
+    def _initialise_color_settings(self):
+        self.contrast_scaler_red = pn.widgets.RangeSlider(name = "Image Red scaling", 
+                                                     start = 0, end = 1, step = 0.004, 
+                                                     value = (0,1), bar_color = "red",
+                                                     max_width = 400,
+                                                     sizing_mode = "stretch_both")
+        self.contrast_scaler_green = pn.widgets.RangeSlider(name = "Image Green scaling", 
+                                                     start = 0, end = 1, step = 0.004, 
+                                                     value = (0,1), bar_color = "green",
+                                                     max_width = 400,
+                                                     sizing_mode = "stretch_both")
+        self.contrast_scaler_blue = pn.widgets.RangeSlider(name = "Image Blue scaling", 
+                                                     start = 0, end = 1, step = 0.004, 
+                                                     value = (0,1), bar_color = "blue",
+                                                     max_width = 400,
+                                                     sizing_mode = "stretch_both")
+        
+        self.gamma_red_input = pn.widgets.FloatInput(name = "Γ [R]", 
+                                                  value = self._get_from_settings_dictionary("gamma", [1,1,1])[0],
+                                                  step = 0.1, start = 0, end = 5, max_width = 100,
+                                                  sizing_mode="stretch_both")
+        self.gamma_green_input = pn.widgets.FloatInput(name = "Γ [G]", 
+                                                  value = self._get_from_settings_dictionary("gamma", [1,1,1])[1],
+                                                  step = 0.1, start = 0, end = 5, max_width = 100,
+                                                  sizing_mode="stretch_both")
+        self.gamma_blue_input = pn.widgets.FloatInput(name = "Γ [B]", 
+                                                  value = self._get_from_settings_dictionary("gamma", [1,1,1])[2],
+                                                  step = 0.1, start = 0, end = 5, max_width = 100,
+                                                  sizing_mode="stretch_both")
+        
+        self.contrast_scaler_red.param.watch(self._color_specific_callabck, "value_throttled")  
+        self.contrast_scaler_green.param.watch(self._color_specific_callabck, "value_throttled")  
+        self.contrast_scaler_blue.param.watch(self._color_specific_callabck, "value_throttled")  
+        self.gamma_red_input.param.watch(self._color_specific_callabck, "value")
+        self.gamma_green_input.param.watch(self._color_specific_callabck, "value")
+        self.gamma_blue_input.param.watch(self._color_specific_callabck, "value")
+        
+        return pn.Column(pn.Column(self.contrast_scaler_red, self.contrast_scaler_green, self.contrast_scaler_blue),
+                         pn.Row(self.gamma_red_input, self.gamma_green_input, self.gamma_blue_input),
+                         visible = False)
+                              
+
+        
     def _update_radius(self, event):
-        if event.new: #avoid passing None
+        if event.new: 
             self.radius = event.new
             self._update_settings_dictionary("radius", self.radius)
             shared_data.publish(self.panel_id, "Euclid_radius", self.radius)
             self._run_euclid()
         else:
             print("Input a valid value for radius")
-
-    @staticmethod
-    def change_intensity_range(image, low, high):
-        image = np.clip(image, low, high)
-        image = (image-low)/(high-low)
-        return np.clip(image, 0,1)
-
-    def _update_intensity_scaling(self, event):
-        low, high = event.new
-        self._update_settings_dictionary("scaling", (low, high))
-        scaled_image = self.change_intensity_range(self.euclid_object.plot_data[self.filter], 
-                                                   low, high)
-        self.get_euclid_figure_hv(scaled_image, show_coordinates= self.overplot_source_coords_widget.value)
-        self._update_image()
     
-    def _overplot_source_coordinates_callback(self, event):
-        self._update_settings_dictionary("source_coordinates", event.new)
-        self.get_euclid_figure_hv(self.euclid_object.plot_data[self.filter], 
-                               show_coordinates=event.new)
-        self._update_image()
-
-    def _update_filter(self, event):
-        self.filter = event.new
-        self._update_settings_dictionary("filter", self.filter)
-        self.get_euclid_figure_hv(self.euclid_object.plot_data[self.filter],
-                               show_coordinates = self.overplot_source_coords_widget.value)
+    def _general_parameter_callabck(self, event):
+        self.filter = self.filter_input.value
+        self._update_all_settings_dictionary()
+        scaled_image = self._get_scaled_image()
+        self.get_euclid_figure_hv(scaled_image, show_coordinates= self.overplot_source_coords_widget.value)
         self._update_image()
         
     def _update_stretching(self, event):
-        stretch = event.new
+        stretch = self.stretching_input.value
+        #Use non default scale only if the actual scale parameter is being changed
+        if not isinstance(event.new, str):
+            stretch_scale = self.stretching_scale_input.value
+            self._update_settings_dictionary("stretching_scale", stretch_scale)
+        else:
+            stretch_scale = None
+        
         self._update_settings_dictionary("stretching", stretch)
-        self.euclid_object.get_plot_data(stretch = stretch)
-        self.get_euclid_figure_hv(self.euclid_object.plot_data[self.filter], 
-                                  show_coordinates = self.overplot_source_coords_widget.value)
+        self.euclid_object.get_plot_data(stretch = stretch, stretch_scale = stretch_scale)
+        scaled_image = self._get_scaled_image()
+        self.get_euclid_figure_hv(scaled_image, show_coordinates = self.overplot_source_coords_widget.value)
         self._update_image()
 
-    
-    def _update_contour_levels(self, event):
-        levels = event.new
-        self._update_settings_dictionary("levels", levels)
-        self.get_euclid_figure_hv(self.euclid_object.plot_data[self.filter], 
-                                  show_coordinates = self.overplot_source_coords_widget.value)
-        self._update_image()
-        
-    
+    def _color_specific_callabck(self, event):
+        if self.filter == "Color":
+            scaled_image = self._get_scaled_image()
+            self.get_euclid_figure_hv(scaled_image, show_coordinates = self.overplot_source_coords_widget.value)
+            self._update_image()
+
     def _update_image(self): 
         try:
              self.figure.object = hv.Overlay(self.euclid_fig + self.overplotted_coordinates)
@@ -655,7 +771,7 @@ class EuclidPlotClass(CustomPlotClass):
                     self.euclid_object.change_environment(environment=self.environment,
                                                       user = user, password = password)
         else:
-            self.euclid_object.change_environment(environment=self.environment)        
+            self.euclid_object.change_environment(environment = self.environment)        
 
 
     def _confirm_login_credentials_cb(self, event):
@@ -664,7 +780,11 @@ class EuclidPlotClass(CustomPlotClass):
         config.settings["EuclidAccountPassword"] = self.password_input.value
         self.euclid_object.change_environment(environment=self.environment,
                                                 user = config.settings["EuclidAccountUser"], 
-                                                passwsord = config.settings["EuclidAccountPassword"])
+                                                password = config.settings["EuclidAccountPassword"])
+        shared_data.publish(self.panel_id, "Euclid_client", self.euclid_object.client)
+    
+    def _open_color_settings_cb(self, event):
+        self.color_settings_column.visible  = not self.color_settings_column.visible
 
 
     def get_plot_scale(self):
@@ -705,7 +825,11 @@ class EuclidPlotClass(CustomPlotClass):
 
         if self.contour_levels_input.value > 0:
             N_contour_levels = self.contour_levels_input.value
-            contours = hv.operation.contours(image, levels = N_contour_levels).opts(cmap='Reds', colorbar=False, 
+            base, exponent = self.contour_levels_scale_input.value
+            temp_data = self.euclid_object.data[self.filter]
+            temp_img = hv.RGB(temp_data[::-1,...], bounds=bounds) if len(temp_data.shape) == 3 else hv.Image(temp_data[::-1,...], bounds=bounds)
+            levels = np.nanmax(temp_data)/(base ** (np.arange(1, N_contour_levels+1)*exponent))
+            contours = hv.operation.contours(temp_img, levels = levels).opts(cmap=['red'], colorbar=False, 
                                                                     active_tools=[], show_legend = False)
             self.euclid_fig.append(contours)
         
@@ -730,7 +854,8 @@ class EuclidPlotClass(CustomPlotClass):
                                     marker = "+", 
                                     size = 30)
                 self.euclid_fig.append(points)
-            
+        
+        
         if self.overplot_coords_widget.value:
             self._show_overplot_coordinates()
 
@@ -749,24 +874,51 @@ class EuclidPlotClass(CustomPlotClass):
         self._update_image()
 
     def get_light_profile_plot(self, row, col):
-        if self.contrast_scaler.value != (0,1):
-            low, high =  self.contrast_scaler.value
-            data = self.change_intensity_range(self.euclid_object.plot_data[self.filter], low, high)        
-        else:
-            data = self.euclid_object.plot_data[self.filter]
+
+        scaled_image = self._get_scaled_image()
         
-        def get_curve(values, idx, xlabel):
+        def get_curve(values, idx, xlabel, plot_psf = True, fwhm_psf = 0.16, arcsec_per_pix = 0.1):
             curve =hv.Curve(values, kdims ="x", vdims ="value").opts(toolbar=None, padding = 0.0,
                                                                       border = 1, framewise = True,
                                                                       active_tools =[],
                                                                       xlabel=xlabel, 
-                                                                      yaxis=None,  ylim = (0,1.05), 
+                                                                      yaxis=None,  
+                                                                      ylim = (min(0,np.nanmin(values)),np.nanmax(values)*1.1), 
                                                                       color = "black") 
             line = hv.VLine(idx).opts(color = "red", line_width=1, line_dash='dotted')
-            return hv.Overlay([curve, line]).opts(responsive=True, toolbar = None)
-                                                                                       
-        plot_x = get_curve(data[row, :], col, "X coordinate")   
-        plot_y = get_curve(data[:, col], row, "Y coordinate")      
+            
+            if plot_psf:
+                #Centering the psf around the brightest pixel in a 15 px window. if multiple maxima are found
+                #it centers to the middle one
+                window = 15
+                start = max(0, idx - window)
+                end = min(len(values), idx + window)
+                reduced_values = values[start:end]
+                peak = np.nanmax(reduced_values)
+                peak_indices = np.where(reduced_values == peak)[0]
+                peak_idx = start + peak_indices[len(peak_indices) // 2]
+                sigma_psf = fwhm_psf/2.35482004503/arcsec_per_pix
+                x = np.arange(len(values))
+                psf_profile = peak * np.exp(-0.5*((x-peak_idx)/sigma_psf)**2)
+                psf = hv.Curve(psf_profile, kdims = "x", vdims ="value").opts(color = "red", line_width=1, line_dash='solid')
+                image = hv.Overlay([curve, line, psf]).opts(responsive=True, toolbar = None)
+            else:
+                image = hv.Overlay([curve, line]).opts(responsive=True, toolbar = None)
+
+            return image
+
+        arcsec_per_pix = self.euclid_object.arcsec_per_pix[self.filter]
+        fwhm_psf = 0.16 if self.filter == "VIS" else 0.3 
+        plot_psf = self._get_from_settings_dictionary("stretching", None) == "Linear"
+
+        plot_x = get_curve(scaled_image[row, :], col, "X coordinate", 
+                           plot_psf = plot_psf, fwhm_psf = fwhm_psf,
+                           arcsec_per_pix = arcsec_per_pix
+                           )   
+        plot_y = get_curve(scaled_image[:, col], row, "Y coordinate",
+                           plot_psf = plot_psf, fwhm_psf = fwhm_psf,
+                           arcsec_per_pix = arcsec_per_pix)      
+        
         layout = hv.Layout(plot_x + plot_y).cols(1).opts(sizing_mode = "stretch_both")
         row_stream = hv.streams.Tap(source=plot_x, x=np.nan, y=np.nan)
         col_stream = hv.streams.Tap(source=plot_y, x=np.nan, y=np.nan)
@@ -792,16 +944,9 @@ class EuclidPlotClass(CustomPlotClass):
                 self.figure.object = self.get_empty_image()
                 return
             self.overplot_coords_widget.value = False
-            if self.contrast_scaler.value != (0,1):
-                low, high =  self.contrast_scaler.value
-                scaled_image = self.change_intensity_range(self.euclid_object.plot_data[self.filter], low, high)
-                self.get_euclid_figure_hv(scaled_image, 
-                                          show_coordinates = self.overplot_source_coords_widget.value)
-            else:
-                self.get_euclid_figure_hv(self.euclid_object.plot_data[self.filter], 
-                                          show_coordinates= self.overplot_source_coords_widget.value)
+            scaled_image = self._get_scaled_image()
+            self.get_euclid_figure_hv(scaled_image, show_coordinates = self.overplot_source_coords_widget.value)
             self._update_image()
-            self.message_pane.visible = False
      
         self.run_multithread(self.euclid_object.get_final_cutout,
                              func_kwargs = {"radius" : self.radius, "stretch" : self.stretching_input.value, 
@@ -858,16 +1003,14 @@ class EuclidPlotClass(CustomPlotClass):
         fig.subplots_adjust(left=0.0, right=1, top=1, bottom=0)
         return fig
                
-    
-    def _subscribe_to_shared(self):
+    def _manage_subscriptions(self):
         """It manages all the subscriptions to the shared dictionary. not very flexible but it works"""
         desi_callback = lambda coords: self._add_coordinates(coords, "DESI")
         sdss_callback = lambda coords: self._add_coordinates(coords, "SDSS")
         euclid_callback = lambda coords: self._add_coordinates(coords, "EuclidSpec")
-        shared_data.replace_subscribe(self.panel_id, "DESI_coordinates", desi_callback)
-        shared_data.replace_subscribe(self.panel_id, "SDSS_coordinates", sdss_callback)
-        shared_data.replace_subscribe(self.panel_id, "EuclidSpec_coordinates", euclid_callback)
-        
+        self.subscribe_to_shared("DESI_coordinates", desi_callback)
+        self.subscribe_to_shared("SDSS_coordinates", sdss_callback)
+        self.subscribe_to_shared("EuclidSpec_coordinates", euclid_callback)
         #If DESI/SDSS panel are already initialized, I need to pass the coordinates directly
         if shared_data.get_data("DESI_coordinates"):
             self._add_coordinates(shared_data.get_data("DESI_coordinates"), "DESI")
@@ -912,12 +1055,7 @@ class SpectrumPlotClass(CustomPlotClass):
             if initialized:
                 self._run_spectrum()
 
-    def _subscribe_to_shared(self):
-        if not self.from_sourceId:
-            if not shared_data.is_subscribed(self.panel_id, "Euclid_radius"):
-               shared_data.subscribe(self.panel_id, "Euclid_radius", self._update_max_separation)
-       
-    def _save_figure(self, directory_path = "data/saved_sources"):
+    def _save_figure(self, directory_path = "data/saved_sources", prefix = None):
         if self.spectrum_object.spectra is not None:
             if self.redshift_column_selector.value != "None":
                 redshift_value = self.get_value_from_df(self.redshift_column_selector.value)
@@ -926,11 +1064,13 @@ class SpectrumPlotClass(CustomPlotClass):
             plot_model = False if self._is_euclid_spec else True
             plot_lines = "class" if self.plot_lines_checkbox.value else False
             try:
-                fname = f"{self.panel_name}.png"
+                fname = f"{prefix + '_' if prefix else ''}{self.panel_name}.png"
                 filename = os.path.join(directory_path, fname)
                 fig = self.spectrum_object.plot_all_spectra(plot_model = plot_model, plot_lines = plot_lines)
                 fig.savefig(filename, bbox_inches = "tight")
                 plt.close(fig)
+                return filename
+            
             except FileNotFoundError:
                 print(f"Could not find the saving directory: {directory_path}")
 
@@ -969,7 +1109,8 @@ class SpectrumPlotClass(CustomPlotClass):
             if self._is_euclid_spec:
                 self.spectrum_object = EuclidSpectraClass(self.ra, self.dec, 
                                                           max_separation = self.max_separation,
-                                                        sourceId = self.sourceId)
+                                                          sourceId = self.sourceId,
+                                                          client = shared_data.get_data("Euclid_client", None))
             else:
                 datasets = (["DESI-DR1"] if self.dataset == "DESI"
                             else ["BOSS-DR16", "SDSS-DR16"] if self.dataset == "SDSS"
@@ -1054,11 +1195,11 @@ class SpectrumPlotClass(CustomPlotClass):
         self.redshift_input.param.watch(self._redshift_input_cb, "value")
         self.redshift_column_selector.param.watch(self._redshift_column_selector_cb, "value")
         
-
+            
         self.plot_settings_panel = pn.Column(self.retrieve_mode_button, 
                                              pn.Row(self.max_separation_input, pn.Column(pn.Spacer(height=23), self.link_to_cutout_checkbox), align = "center"),
                                              self.plot_lines_checkbox,
-                                             pn.Row(self.redshift_input,  self.query_redshift_button, 
+                                             pn.Row(self.redshift_input,  pn.Column(pn.Spacer(height=10), self.query_redshift_button),
                                              self.redshift_column_selector, align = "center"),
                                              scroll = True, visible = False)
         
@@ -1086,7 +1227,8 @@ class SpectrumPlotClass(CustomPlotClass):
 
     def _link_to_cutout_cb(self, event):
         if event.new:
-            self._subscribe_to_shared()
+            if not self.from_sourceId:
+                self.subscribe_to_shared("Euclid_radius", self._update_max_separation )
         else:
             shared_data.unsubscribe(self.panel_id, "Euclid_radius")
     
@@ -1145,8 +1287,6 @@ class SpectrumPlotClass(CustomPlotClass):
 
 
 class SEDPlotClass(CustomPlotClass):
-    """A class used to plot the Broadband SED of the selected source. At the moment all fluxes should 
-    have the same units"""
 
     
     available_stages = ["filters_selection", "columns_selection",
@@ -1196,6 +1336,11 @@ class SEDPlotClass(CustomPlotClass):
             filter_data = json.load(f)
         return filter_data
     
+    def write_photometric_file(self, extra_path = ""):
+        filepath = os.path.join(extra_path, "data/sed_data/photometric_bands.json")
+        with open(filepath, "w") as f:
+            json.dump(self.filter_data, f, indent=4) 
+    
     def create_checkbox_tooltip(self, band, name, wavlen, fwhm, value = False):
         checkbox = pn.widgets.Checkbox(name=band, value=value, width=150)
         tooltip_text = f"{name},  (Wavelength: {wavlen} Å, FWHM: {fwhm} Å)"
@@ -1206,14 +1351,15 @@ class SEDPlotClass(CustomPlotClass):
         self.checkboxes = {} #dictionary storing all the checkboxs available
         self.checkbox_group = [] #List storing all pairs of checkbox-tooltip
         for band, info in self.filter_data.items():
+            value = band in config.settings["SED_bands"] if "SED_bands" in config.settings else False
             checkbox, tooltip_icon = self.create_checkbox_tooltip(band, info["name"], 
                                                                   info["wavelength"], info["FWHM"],
-                                                                   value = band in config.settings["SED_bands"])
+                                                                  value = value)
             self.checkbox_group.append(pn.Row(checkbox, tooltip_icon, align='center'))
             self.checkboxes[band] = checkbox
 
     def _initialize_add_band(self):
-        self.short_name_input = pn.widgets.TextInput(name = "Short Filter Name")
+        self.short_name_input = pn.widgets.TextInput(name = "Short Filter Name", value ="")
         self.full_name_input = pn.widgets.TextInput(name = "Full Filter Name", value = "")
         self.wavelength_input = pn.widgets.FloatInput(name = "Effective Wavelength [Å]")
         self.fwhm_input = pn.widgets.FloatInput(name= "FWHM [Å]", value = 0)
@@ -1265,7 +1411,7 @@ class SEDPlotClass(CustomPlotClass):
             self.update_photometric_file(new_band, name, wavlen, fwhm)
 
         self.short_name_input.value = ""
-        self.full_name_input = ""
+        self.full_name_input.value = ""
         self.wavelength_input.value = 0.0
         self.fwhm_input.value = 0.0
         self.add_band_pane.visible = False
@@ -1282,6 +1428,7 @@ class SEDPlotClass(CustomPlotClass):
             self.stage = "plot"
 
     def _filters_selection_continue_cb(self):
+        self.write_photometric_file()
         self.bands_to_plot = [band for band in self.checkboxes.keys() if  self.checkboxes[band].value]
         if self.bands_to_plot:
             self.error_bands_to_plot = [f"err_{band}" for band in self.bands_to_plot]
@@ -1425,7 +1572,7 @@ class SEDPlotClass(CustomPlotClass):
                                                                                         lower_head = None, upper_head = None, active_tools =[])
                                                                                                                    
         is_upper_limit = err_y < 0
-        has_larger_errors = err_y > y #These could also be considered a upper limits...
+        has_larger_errors = err_y > y #These could also be considered as upper limits...
         good_measure = ~np.logical_or(is_upper_limit, has_larger_errors)
     
         ybars = hv.ErrorBars((x[good_measure ], y[good_measure ], err_y[good_measure ], err_y[good_measure ]), kdims='wavelength', vdims=["Flux", "yneg", "ypos"]).opts(
@@ -1446,7 +1593,7 @@ class SEDPlotClass(CustomPlotClass):
         
     
         plot = scatter * xerrbars * ybars * upper_limits * larger_errors
-        xlabel = r'$$ \lambda_{rest} ~[{Å}] $$' if redshift > 0 else r'$$ \lambda_{obs} ~[{Å}] $$'
+        xlabel = 'Rest-frame Wavelength [Å]' if redshift > 0 else 'Observed-frame Wavelength (rest) [Å]'
         ylabel = "Flux [erg/s cm-2]" if output_units == "nufnu" else "Flux density [μJy]" 
         hooks = [] if output_units == "nufnu" else [SEDPlotClass.add_magnitude_axis]
 
@@ -1583,16 +1730,18 @@ class SEDPlotClass(CustomPlotClass):
         self.message_pane.visible = False
         
 
-    def _save_figure(self, directory_path = "data/saved_sources"):
+    def _save_figure(self, directory_path = "data/saved_sources", prefix = None):
         y, y_err = self.convert_to_microjy(self.flux, self.flux_err) #Should already be clean
         y, y_err = self.convert_to_output_units(self.wavlen, y, y_err, output_units = self.unit_selector.value)
         fig = self.plot_SED(self.wavlen, y, y_err, self.fwhm, output_units = self.unit_selector.value)
         if fig is not None:
             try:
-                fname = f"{self.panel_name}.png"
+                fname = f"{prefix + '_' if prefix else ''}{self.panel_name}.png"
                 filename = os.path.join(directory_path,fname)
                 fig.savefig(filename, bbox_inches = "tight")
                 plt.close(fig)
+                return filename
+            
             except FileNotFoundError:
                 print(f"Cold not find the saving directory: {directory_path}")     
 
@@ -1620,7 +1769,6 @@ class SEDPlotClass(CustomPlotClass):
             units_to_select = self._get_unknown_units()
             return self.units_selection_panel(units_to_select)
         else:
-            print("moved to plot stage")
             return self.plot_panel()
 
 
@@ -1711,4 +1859,32 @@ class RadioClass(CustomPlotClass):
         return image
 
     
+class LogBookClass(CustomPlotClass):
     
+    def __init__(self, data, src, close_button, extra_features):
+        super().__init__(data, src, close_button, extra_features, panel_name = "Notes Panel")
+        self._src_callback = self._change_source_cb
+        self.src.on_change("data", self._src_callback)
+
+    def _change_source_cb(self, attr, old, new):
+        self.logbook_panel.value = ""
+
+    def get_layout(self):
+        self._initialise_widgets()
+        return  pn.Column(self.logbook_panel, 
+                          scroll = True, 
+                          sizing_mode = "stretch_both")
+    
+    def _initialise_widgets(self):
+
+        self.logbook_panel = pn.widgets.TextAreaInput(name = "Logbook",
+                                                      auto_grow = False, 
+                                                      placeholder='Tke your notes here...')
+
+    def _save_panel(self, directory_path= "data/saved_sources", save_fits_files= False, prefix = None):
+        paths = {}
+        paths["text"] = self.logbook_panel.value.strip()
+        return paths
+                                                      
+
+                        

@@ -42,6 +42,7 @@ class ExplorationDashboard(param.Parameterized):
         self.next_button.on_click(self._go_next)
         self.search_button.on_click(self._search_button_cb)
         self.sourceid_watcher = self.sourceid_input.param.watch(self._sourceid_input_cb, "value", onlychanged=False)
+        self._initialise_add_remove_columns_widgets()
         self._update_navigation_flags()
         self._subscribe_to_shared()
 
@@ -155,16 +156,63 @@ class ExplorationDashboard(param.Parameterized):
             source_id = str(self.src.data[id_col][0])
             extra_data_list = [["SourceId", source_id]]
             for col in config.settings["extra_info_cols"]:
-                value = self.src.data[f"{col}"][0]
-                if isinstance(value, float) and value < 1e4:
-                    value = float(f"{value:.6g}")
-                extra_data_list.append([col, value])
+                try:
+                    value = self.src.data[f"{col}"][0]
+                    if isinstance(value, float) and value < 1e4:
+                        value = float(f"{value:.6g}")
+                    extra_data_list.append([col, value])
+                except KeyError:
+                    continue
             return  pd.DataFrame(extra_data_list, columns=["Column", "Value"])
         else:
             cols = ["SourceId"] + config.settings["extra_info_cols"]
             return  pd.DataFrame(cols, columns=["Column"])
+        
     
+    def _save_extra_info_df(self):
+        return self._get_extra_info_df()
+    
+    def _initialise_add_remove_columns_widgets(self):
+        self.add_column_button = pn.widgets.Button(name = "Add Col", max_height = 60, max_width =90, sizing_mode = "scale_both")
+        self.remove_column_button = pn.widgets.Button(name = "Remove Col", max_height = 60, max_width =90, sizing_mode = "scale_both")
+        self.column_selector = pn.widgets.Select(options = [], max_height = 60, max_width =120, visible = False)
+        self.selector_watcher = None
+        self.add_column_button.on_click(self._add_column_callback)
+        self.remove_column_button.on_click(self._remove_column_callback)                      
+    
+    def _add_column_callback(self, event):
+        self.column_selector.value = None
+        options = [""] + [i for i in self.df.columns if i not in config.settings["extra_info_cols"]]
+        self.column_selector.visible = True
+        self.column_selector.options = options
+        if self.selector_watcher is not None:
+            self.column_selector.param.unwatch(self.selector_watcher)
+        self.selector_watcher = self.column_selector.param.watch(self._add_extra_feature, "value")
+    
+    def _remove_column_callback(self, event):
+        self.column_selector.value = None
+        options = [""] + list(config.settings["extra_info_cols"])
+        self.column_selector.visible = True
+        self.column_selector.options = options
+        if self.selector_watcher is not None:
+            self.column_selector.param.unwatch(self.selector_watcher)
+        self.selector_watcher = self.column_selector.param.watch(self._remove_extra_feature, "value")
 
+    def _add_extra_feature(self, event):
+        column = event.new
+        if column and column not in config.settings["extra_info_cols"]:
+            config.settings["extra_info_cols"].append(column)
+            self.extra_info_pane.object = self._get_extra_info_df()
+            self.column_selector.visible = False
+
+    def _remove_extra_feature(self, event):
+        column = event.new
+        if column and column in config.settings["extra_info_cols"]:
+            config.settings["extra_info_cols"].remove(column)
+            self.extra_info_pane.object = self._get_extra_info_df()
+            self.column_selector.visible = False
+
+    
     def _selected_src_from_plot_cb(self, sourceid):
         self.sourceid_input.param.unwatch(self.sourceid_watcher)
         self.sourceid_input.value = sourceid
@@ -220,10 +268,8 @@ class ExplorationDashboard(param.Parameterized):
 
     def _add_ra_dec_col(self, df):
         new_df = df
-
         ra_col_name = config.settings["ra_col_name"]
         dec_col_name = config.settings["dec_col_name"]
-
         new_df["ra_dec"] = df[ra_col_name].astype(str) + "," + df[dec_col_name].astype(str)
       
         return new_df
@@ -239,6 +285,11 @@ class ExplorationDashboard(param.Parameterized):
     def get_layout(self):
         return pn.Column(pn.Param(self, parameters = ["index"], widgets={"index": pn.widgets.IntInput}),
                          pn.Column(self.extra_info_pane, sizing_mode = "stretch_both", scroll = True, max_height = 200),
+                         pn.Row(self.add_column_button,
+                                self.remove_column_button,
+                                pn.Spacer(width = 30),
+                                self.column_selector,
+                                ),
                          self.sourceid_input,
                          pn.Row(self.prev_button,self.next_button, self.search_button), sizing_mode = "stretch_both")
 

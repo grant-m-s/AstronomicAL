@@ -98,7 +98,8 @@ react.header.append(
     pn.Row(
         config.get_save_layout_button(config.settings["confirmed"], True),
         export_fits_file_button,
-        config.get_save_panel_data_button(config.settings["confirmed"])
+        config.get_save_panel_data_button(config.settings["confirmed"]),
+        config.get_save_logbook_button(config.settings["confirmed"])
     )
 )
 
