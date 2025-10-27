@@ -1,5 +1,6 @@
 import os
 import time
+from string import Template
 import requests 
 from requests.exceptions import ReadTimeout, ConnectTimeout
 import concurrent.futures 
@@ -1222,6 +1223,31 @@ def VLASS_cutout(ra, dec, radius = 10, verbose = False, check_coverage = True):
     print("VLA-VLASS does not cover these coordinates")
     return None
 
+def make_srcdoc_aladin_lite(survey_id, ra, dec, fov = 0.015):
+    tpl = Template("""<!doctype html>
+            <html><head>
+            <meta charset="utf-8"/>
+            <meta name="viewport" content="width=device-width, height=device-height, initial-scale=1.0, user-scalable=no">
+            <style>html,body,#aladin{margin:0;width:100%;height:100%}</style>
+            </head><body>
+            <div id="aladin"></div>
+            <script src="https://aladin.cds.unistra.fr/AladinLite/api/v3/latest/aladin.js" charset="utf-8"></script>
+            <script>
+            A.init.then(function () {
+                A.aladin("#aladin", {
+                cooFrame: "ICRS",
+                survey: "$survey",
+                target: "$ra $dec",
+                fov: $fov,
+                showFullscreenControl: false,
+                showLayersControl: false
+                });
+            });
+            </script>
+            </body></html>""")
+    return tpl.substitute(survey=survey_id, ra = ra, dec =dec, fov=fov)
+
+
 
 
 def load_moc(survey, path = "data/mocs"):
@@ -1237,7 +1263,6 @@ def load_moc(survey, path = "data/mocs"):
 
 def check_isin_survey(ra, dec, moc):
     return moc.contains_lonlat(ra*u.deg, dec*u.deg)
-
 
 def get_ra_dec_DESI():
     """"
@@ -1339,27 +1364,4 @@ class sdss_cutouts_class:
             self.get_url()
             return None
          
-    #def query_main_table(self, verbose = False):
-    #    """Astro Data Lab does not accept Circle or Point functions,
-    #      referred to https://datalab.noirlab.edu/help/index.php?qa=366&qa_1=dont-adql-functions-like-point-circle-work-query-interface
-    #      for cone search.
-    #      LIMIT = 100 just to avoid strange results"""
-    #    
-    #    datasets_str = ', '.join(f"'{ds}'" for ds in self.datasets)
-    #
-    #    query = f"""SELECT sparcl_id, specid, ra, dec, redshift, spectype, 
-    #             data_release, redshift_err, specprimary, redshift_warning,
-    #             3600.0 * q3c_dist(ra, dec, {self.ra}, {self.dec}) AS separation_arcsec
-    #             FROM sparcl.main
-    #             WHERE Q3C_RADIAL_QUERY(ra, dec, {self.ra},{self.dec}, {self.max_separation})
-    #             AND data_release IN ({datasets_str})
-    #             ORDER BY separation_arcsec ASC
-    #             LIMIT 100"""
-    #    
-    #    tic = time.perf_counter()
-    #    self.table_results = qc.query(sql=query, fmt='pandas')
-    #    self.table_results = self.table_results.drop_duplicates(subset = "specid")
-    #    self.available_spectra = len(self.table_results)
-    #    toc = time.perf_counter()
-    #    if verbose:
-    #        print(f"Querying Noirlab table required {toc-tic} seconds")
+   

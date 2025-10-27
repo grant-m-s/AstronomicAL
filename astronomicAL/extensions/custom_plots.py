@@ -1,14 +1,9 @@
-from holoviews.operation.datashader import (
-    datashade,
-    dynspread,
-)
 
-import datashader as ds
 import holoviews as hv
-
 import astronomicAL.config as config
 import numpy as np
 import os
+import html
 import pandas as pd
 import panel as pn
 import json
@@ -23,7 +18,7 @@ from bokeh.models import Range1d, LinearAxis
 from astronomicAL.utils.optimise import matches_type
 from astronomicAL.extensions.shared_data import shared_data
 from astronomicAL.extensions.astro_data_utility import DESISpectraClass, EuclidCutoutsClass, EuclidSpectraClass
-from astronomicAL.extensions.astro_data_utility import VLASS_cutout, LoTSS_cutout
+from astronomicAL.extensions.astro_data_utility import VLASS_cutout, LoTSS_cutout, make_srcdoc_aladin_lite
 
 
 
@@ -48,7 +43,10 @@ def get_customplot_dict():
 
         "Notes Panel"  : lambda data, src, close_button : LogBookClass(data, src, close_button,
                                                             extra_features=[]),
-
+        
+        "Aladin Lite"  : lambda data, src, close_button : AladinClass(data, src, close_button,
+                                                            extra_features=[]),                                                  
+        
         "VLASS Cutout"  : lambda data, src, close_button : RadioClass(data, src, close_button,
                                                             extra_features=[], dataset="VLASS"),
         
@@ -1310,7 +1308,6 @@ class SEDPlotClass(CustomPlotClass):
 
     def _change_source_cb(self, attr, old, new):
         if self.stage == "plot":
-            print("in the right stage")
             self._update_plot(new)
     
     
@@ -1857,6 +1854,92 @@ class RadioClass(CustomPlotClass):
                                          yaxis=None,
                                          )
         return image
+
+
+
+class AladinClass(CustomPlotClass):
+    # Available surveys here: https://aladin.cds.unistra.fr/hips/list
+    
+    def __init__(self, data, src, close_button, extra_features):
+        super().__init__(data, src, close_button, extra_features, panel_name = "Aladin Panel")
+        self._src_callback = self._change_source_cb
+        self.src.on_change("data", self._src_callback)
+        self.figure = pn.pane.HTML("", sizing_mode="stretch_both")
+    
+
+    def _change_source_cb(self, attr, old, new):
+        self.ra, self.dec = self.get_ra_dec()
+        if (self.ra is None) or (self.dec is None):
+            self.get_error_panel("Euclid cutout unavailable", "Missing RA or DEC value")
+        self._update_image(None)
+
+
+    @staticmethod
+    def make_iframe_html(survey_id, ra, dec):
+        srcdoc = make_srcdoc_aladin_lite(survey_id = survey_id, ra = ra, dec =dec)
+        # Escape for inclusion inside the srcdoc='' attribute
+        srcdoc_escaped = html.escape(srcdoc, quote=True)
+        return "<iframe width='800' height='500' style='border:none' srcdoc='{0}'></iframe>".format(srcdoc_escaped)
+    
+    def _initialise_widgets(self):
+
+        xray_surveys = {
+            "eROSITA (rate, color)" :  	"erosita/dr1/rate/rgb",
+            "eROSITA 0.2-0.6 keV (count)" : "erosita/dr1/count/021",
+            "eROSITA 0.6-2.3 keV (count)" : "erosita/dr1/count/022",
+            "eROSITA 2.3-5 keV (count)" :   "erosita/dr1/count/023",
+            "Swift XRT (exposure)" :  	"nasa.heasarc/P/Swift/XRT/exp", 
+            "XMM (color)" :  "xcatdb/P/XMM/PN/color",
+            "XMM (0.5-1 keV)" : "xcatdb/P/XMM/PN/eb2",
+            "XMM (1-2 keV)" : "xcatdb/P/XMM/PN/eb3",
+            "XMM (2-4.5 keV)" : "xcatdb/P/XMM/PN/eb4",
+            }
+        
+        optical_surveys = {
+            "SDSS (color)" : "CDS/P/SDSS9/color",
+            "DSS2 (color)" : "P/DSS2/color",
+            "Pan-STARRS (color)" : "P/PanSTARRS/DR1/color-z-zg-g",
+            "GALEX (color)": "P/GALEXGR6/AIS/color",
+            "DESI Legacy Survey (color)" : "CDS/P/DESI-Legacy-Surveys/DR10/color",
+            "DES (color)" : "CDS/P/DES-DR2/ColorIRG",
+            }
+
+        ir_surveys = {       
+            "AllWISE (color)": "P/allWISE/color",
+            "2MASS (color)": "P/2MASS/color",
+            "Herschel SPIRE (color)" : "ESAVO/P/HERSCHEL/SPIRE-color",
+            "Spitzer IRAC (color)" : "CDS/P/SPITZER/color",
+            "Euclid Q1 (color)" : "CDS/P/Euclid/Q1/color",
+        }
+    
+        self.survey_selector = pn.widgets.Select(name = "Survey",
+                                                 value = "P/DSS2/color",
+                                                 groups = {"X-rays" : xray_surveys,
+                                                           "Optical/UV" : optical_surveys,
+                                                           "IR" : ir_surveys})
+        self.survey_selector.param.watch(self._update_image, "value")
+        self.plot_settings_panel = pn.Column(self.survey_selector, 
+                                             scroll = True, visible = False)
+
+
+    def _update_image(self, event):
+        self.message_pane.visible = False
+        self.figure.object = self.make_iframe_html(self.survey_selector.value, 
+                                          self.ra, self.dec)
+        
+
+    
+    def get_layout(self):
+        self._initialise_widgets()
+        self.ra, self.dec = self.get_ra_dec()
+        if (self.ra is None) or (self.dec is None):
+            self.get_error_panel("Euclid cutout unavailable", "Missing RA or DEC value")
+
+        self._update_image(None)
+        return  pn.Column(self.message_pane, self.figure, self.plot_settings_panel, 
+                          scroll = True, sizing_mode = "stretch_both")
+
+
 
     
 class LogBookClass(CustomPlotClass):
