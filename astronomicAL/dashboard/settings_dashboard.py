@@ -1,11 +1,12 @@
 from astronomicAL.settings.active_learning import ActiveLearningSettings
-from astronomicAL.settings.exploring import ExploringSettings
 from astronomicAL.settings.data_selection import DataSelection
-from astronomicAL.settings.param_assignment import ParameterAssignment
+from astronomicAL.settings.param_assignment import ParameterAssignment_ML, ParameterAssignment_Exploring
 from functools import partial
 
 import astronomicAL.config as config
 import panel as pn
+
+
 
 
 class SettingsDashboard:
@@ -29,7 +30,7 @@ class SettingsDashboard:
     """
 
     def __init__(self, main, src):
-        self.row = pn.Row(pn.pane.Str("loading"))
+        self.row = pn.Row(pn.pane.Str("loading"), sizing_mode = "stretch_both")
 
         self.src = src
 
@@ -84,6 +85,7 @@ class SettingsDashboard:
                 self._make_mode_row("images/cluster.png", self.select_AL_mode_button),
                 self._make_mode_row("images/exploration.png", self.select_exploring_mode_button),
                 min_height = 600,
+                sizing_mode = "stretch_height"
                 )
                 
             )
@@ -138,7 +140,7 @@ class SettingsDashboard:
                 ready_parameter="ready",
             ),
             self.pipeline.add_stage(
-                "Assign Parameters", ParameterAssignment(mode = mode), ready_parameter="ready"
+                "Assign Parameters", ParameterAssignment_ML(), ready_parameter="ready"
             ),
             self.pipeline.add_stage(
                 "Features Settings",
@@ -151,7 +153,7 @@ class SettingsDashboard:
                 ready_parameter="ready",
             ),
             self.pipeline.add_stage(
-                "Assign Parameters", ParameterAssignment(mode = mode), ready_parameter="ready"
+                "Assign Parameters", ParameterAssignment_ML(), ready_parameter="ready"
             ),
             self.pipeline.add_stage(
                 "Features Settings",
@@ -165,12 +167,9 @@ class SettingsDashboard:
                 ready_parameter="ready",
             ),
             self.pipeline.add_stage(
-                "Assign Parameters", ParameterAssignment(mode = mode), ready_parameter="ready"
+                "Assign Parameters", ParameterAssignment_Exploring(self._close_settings_button), 
             ),
-            self.pipeline.add_stage(
-                "Features Settings",
-                ExploringSettings(self._close_settings_button, mode=mode),
-            )
+
         else:
             valid_mode = False
 
@@ -205,7 +204,6 @@ class SettingsDashboard:
         -------
         updated_settings : dict
             A dictionary of assigned parameters.
-
         """
         updated_settings = {}
         updated_settings["id_col"] = self.pipeline["Assign Parameters"].get_id_column()
@@ -222,10 +220,11 @@ class SettingsDashboard:
         return updated_settings
 
     def _close_settings_cb(self, event, main):
+        
         print("closing settings")
 
-        self.df = self.pipeline["Features Settings"].get_df()
-
+        stage_name =  list(self.pipeline._stages.keys())[self._pipeline_stage]
+        self.df = self.pipeline[stage_name].get_df()
         config.main_df = self.df
 
         src = {}
@@ -235,13 +234,12 @@ class SettingsDashboard:
         self.src.data = src
 
         self._close_settings_button.disabled = True
-        self._close_settings_button.name = "Setting up training panels..."
+        self._close_settings_button.name = "Setting up panels..."
 
         if config.mode == "AL":
             main.set_contents(updated="Active Learning")
         elif config.mode == "Labelling":
             main.set_contents(updated="Labelling")
-        
         elif config.mode == "Exploring":
             main.set_contents(updated="Exploring")
 
@@ -280,13 +278,14 @@ class SettingsDashboard:
             return self.row
 
         else:
-
-            if self.pipeline["Features Settings"].is_complete():
-                self._close_settings_button.disabled = False
+            
+            if "Features Settings" in self.pipeline._stages:
+                if self.pipeline["Features Settings"].is_complete():
+                    self._close_settings_button.disabled = False
 
             self.row[0] = pn.Card(
                 pn.Column(
-                    pn.Row(self.pipeline.stage),
+                    pn.Row(self.pipeline.stage, sizing_mode = "stretch_both"),
                     pn.Row(
                         pn.layout.HSpacer(),
                         pn.layout.HSpacer(),
@@ -294,6 +293,7 @@ class SettingsDashboard:
                         max_height=50,
                         # max_width=500,
                     ),
+                    sizing_mode = "stretch_both"
                 ),
                 header=pn.Row(
                     pn.widgets.StaticText(
@@ -306,6 +306,6 @@ class SettingsDashboard:
                     self._close_settings_button,
                 ),
                 collapsible=False,
+                sizing_mode = "stretch_both"
             )
-
             return self.row

@@ -83,5 +83,15 @@
         "name": "Euclid.NISP.H",
         "wavelength": 17410.63,
         "FWHM": 4563.68
+    },
+    "FUV": {
+        "name": "Galex FUV",
+        "wavelength": 1548.85,
+        "FWHM": 266
+    },
+    "NUV": {
+        "name": "Galex NUV",
+        "wavelength": 2303.37,
+        "FWHM": 768
     }
 }

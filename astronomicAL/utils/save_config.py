@@ -59,10 +59,20 @@ class NumpyEncoder(json.JSONEncoder):
         elif isinstance(obj, np.ndarray):
             return obj.tolist()
         return json.JSONEncoder.default(self, obj)
+    
+
+
 
 
 def save_config_file_cb(attr, old, new, trigger_text, autosave):
     save_config_file(new, trigger_text=trigger_text, autosave=autosave)
+
+
+
+def update_export_config(export_config, settings, key):
+    if key in settings:
+        export_config[key] = settings[key]
+    return export_config
 
 
 def save_config_file(layout_from_js, trigger_text, autosave=False, test=False):
@@ -90,23 +100,28 @@ def save_config_file(layout_from_js, trigger_text, autosave=False, test=False):
     export_config["layout"] = layout
     export_config["id_col"] = config.settings["id_col"]
     export_config["label_col"] = config.settings["label_col"]
-    export_config["default_vars"] = config.settings["default_vars"]
     export_config["labels"] = config.settings["labels"]
     export_config["label_colours"] = config.settings["label_colours"]
     export_config["labels_to_strings"] = config.settings["labels_to_strings"]
     export_config["strings_to_labels"] = config.settings["strings_to_labels"]
-    export_config["extra_info_cols"] = config.settings["extra_info_cols"]
-    export_config["extra_image_cols"] = config.settings["extra_image_cols"]
-    export_config["labels_to_train"] = config.settings["labels_to_train"]
-    export_config["features_for_training"] = config.settings["features_for_training"]
-    export_config["exclude_labels"] = config.settings["exclude_labels"]
-    export_config["exclude_unknown_labels"] = config.settings["exclude_unknown_labels"]
-    export_config["unclassified_labels"] = config.settings["unclassified_labels"]
-    export_config["scale_data"] = config.settings["scale_data"]
-    export_config["feature_generation"] = config.settings["feature_generation"]
-    export_config["test_set_file"] = config.settings["test_set_file"]
     export_config["ra_col_name"] = config.settings["ra_col_name"]
     export_config["dec_col_name"] = config.settings["dec_col_name"]
+
+    #Settings not required in Exploring mode
+    key_list = ["default_vars",
+                "extra_info_cols", 
+                "extra_info_cols", 
+                "extra_image_cols",
+                "labels_to_train",
+                "features_for_training",
+                "exclude_labels",
+                "exclude_unknown_labels",
+                "unclassified_labels",
+                "scale_data",
+                "feature_generation",
+                "test_set_file"]
+    for key in key_list:
+        export_config = update_export_config(export_config, config.settings, key)
 
     for i in layout:
         curr_contents = config.dashboards[i].contents

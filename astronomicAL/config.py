@@ -61,17 +61,15 @@ def _save_layout_button_rename():
 def _save_layout_button_cb(event):
     Process(target=_save_layout_button_rename).start()
 
-
 def get_save_panel_data_button(enable_button):
-    save_panel_button = pn.widgets.Button(name="Export Panel Data", disabled = not enable_button, button_type = "default")
-    save_panel_button.on_click(save_panel_data_button_cb)
-    return save_panel_button
+    settings["save_panel_button"] = pn.widgets.Button(name="Export Panel Data", disabled = not enable_button, button_type = "default")
+    settings["save_panel_button"].on_click(save_panel_data_button_cb)
+    return settings["save_panel_button"]
 
 def get_save_logbook_button(enable_button):
-    save_logbook_button = pn.widgets.Button(name="Export Logbook", disabled = not enable_button, button_type = "default")
-    save_logbook_button.on_click(save_logbook_button_cb)
-    return save_logbook_button
-
+    settings["save_logbook_button"] = pn.widgets.Button(name="Export Logbook", disabled = not enable_button, button_type = "default")
+    settings["save_logbook_button"].on_click(save_logbook_button_cb)
+    return settings["save_logbook_button"]
 
 def save_panel_data_button_cb(event):
      """ Call the _save_panel method for all the panels which allow to save their stored plots and  fits file.
@@ -88,7 +86,6 @@ def save_panel_data_button_cb(event):
         if hasattr(dashboard.panel_contents, "_save_panel"):
             _ = dashboard.panel_contents._save_panel(directory_path = main_dir,
                                                      save_fits_files = True)
-
 
 def save_logbook_button_cb(event):
     

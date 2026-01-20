@@ -222,6 +222,7 @@ class EuclidCutoutsClass:
         """Clip and scales the plot. This is used to update the plot due 
            to a change of parameters in CustomPlot
         """
+        
         if  band != "Color":
             image = self.plot_data[band]
             image_min = self.plot_data_info[band].get("min_value", None)
@@ -417,6 +418,7 @@ class EuclidCutoutsClass:
             
         self.reproject_cutouts(reference=reference)
         self.get_plot_data(stretch=stretch, stretch_scale = stretch_scale)
+        
         if return_object:
             return self.plot_data.get(filtro, None)
          
@@ -445,10 +447,8 @@ class BaseSpectraClass:
         self.max_separation = max_separation / 3600
         self.error_tracker.reset()
         self._remove_source_attributes()
-    
-    def _remove_source_attributes(self):
-        pass
-      
+
+
     def get_coordinates(self):
         if self.spectra is not None:
             ra = [getattr(spectrum, "ra", np.nan) for spectrum in self.spectra]
@@ -777,7 +777,7 @@ class DESISpectraClass(BaseSpectraClass):
     int value and returns a single spectrum.
     """
     def __init__(self, ra, dec, max_separation = 1, 
-                 datasets = ["DESI-DR1", "DESI-EDR", "BOSS-DR16", "SDSS-DR16"],
+                 datasets = ["DESI-DR1", "DESI-EDR", "BOSS-DR17", "SDSS-DR17"],
                  sourceId = None, client = None):
         super().__init__(ra, dec, max_separation=max_separation, sourceId=sourceId)
         
@@ -794,7 +794,7 @@ class DESISpectraClass(BaseSpectraClass):
 
         if ("DESI-DR1" in self.datasets) | ("DESI-EDR" in self.datasets):
             self.moc = load_moc(survey = "DESI")
-        elif ("BOSS-DR16" in self.datasets) | ("SDSS-DR16" in self.datasets):
+        elif ("BOSS-DR16" in self.datasets) | ("SDSS-DR17" in self.datasets):
             self.moc = load_moc(survey = "SDSS")
 
 
@@ -968,7 +968,8 @@ class EuclidSpectraClass(BaseSpectraClass):
             if hasattr(self, attribute):
                 delattr(self, attribute)
 
-    def get_spectra(self, max_separation = None, return_object = False):
+    def get_spectra(self, max_separation = None, return_object = False,
+                    smooth_kernel = "Box1dkernel",  smooth_window = 5):
         """Method which calls sequentially all the other methods to get the spectra. return_object returns 
         the required spectra in addition to storing it as an attribute for multithread purposes.
         """
@@ -1002,7 +1003,7 @@ class EuclidSpectraClass(BaseSpectraClass):
                     self._add_info_spectra()
 
         if not self.error_tracker.has_error:
-            self.get_smoothed_spectra(kernel = "Box1dkernel",  window = 5)
+            self.get_smoothed_spectra(kernel = smooth_kernel,  window = smooth_window)
         
         if return_object:
             return getattr(self, "spectra", None)
@@ -1011,7 +1012,7 @@ class EuclidSpectraClass(BaseSpectraClass):
         query = f"""SELECT TOP 400
                     spec.file_name, spec.file_path, spec.source_id, spec.spectra_source_oid, spec.ra_obj, spec.dec_obj,
                     DISTANCE(spec.ra_obj, spec.dec_obj, {self.ra}, {self.dec})*3600 AS separation
-                    FROM spectra_source AS spec
+                    FROM q1.spectra_source AS spec
                     WHERE DISTANCE(ra_obj, dec_obj, {self.ra}, {self.dec}) < {self.max_separation}
                     ORDER BY separation
                 """
@@ -1335,14 +1336,31 @@ class radio_cutouts_class:
         self.dec = float(dec)
         self.get_url()
         return None
+    
+
+def SDSS_cutout(ra, dec, radius):
+    from PIL import Image
+    scale = radius/64
+    scale = 0.4
+    url = "http://skyserver.sdss.org/dr16/SkyServerWS/ImgCutout/getjpeg?TaskName=Skyserver.Explore.Image&ra="
+    url = f"{url}{ra}&dec={dec}&opt=G&scale={scale}"
+    response =requests.get(url)
+    try:
+        image = Image.open(BytesIO(response.content))
+        return np.array(image)
+    except Exception as e:
+        print(e)
+        return None
+    
 
 
 class sdss_cutouts_class:
         
-        def __init__(self, ra, dec, scale = 0.2):
+        def __init__(self, ra, dec, radius = 5):
             self.ra = ra
             self.dec = dec 
-            self.scale = scale
+            self.radius = radius
+            self.scale = radius/64
             self.get_url()
 
         def get_url(self):

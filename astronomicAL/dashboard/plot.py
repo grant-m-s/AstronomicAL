@@ -20,6 +20,13 @@ from astronomicAL.extensions.shared_data import shared_data
 
 class BasePlotClass(param.Parameterized):
 
+    X_variable = param.Selector(objects=["0"], default="0", doc= "Selection box for the X axis of the plot")
+    log_xscale = param.Boolean(default=False, doc = "Use log for x axis")
+    log_yscale = param.Boolean(default=False, doc = "Use log for y axis")
+    label_selector = param.ListSelector(default=["All"], objects=["All"], doc= "Labels to plot")
+    
+    selector_params = ("X_variable",)
+
     def  __init__(self,  src, close_button):
         super().__init__()
         self.panel_id = str(uuid.uuid4()) 
@@ -27,7 +34,7 @@ class BasePlotClass(param.Parameterized):
         self.df = config.main_df
         self.close_button = close_button
         self.figure = pn.pane.HoloViews(sizing_mode="stretch_both")
-        self.settings_button = pn.widgets.Button(name="Settings ▾", button_type="primary",  max_height = 40, max_width=100)
+        self.settings_button = pn.widgets.Button(name="Open Settings", button_type="primary",  max_height = 40, max_width=100)
         self.settings_button.on_click(self._toggle_settings_panel)
     
     def update_df(self):
@@ -70,7 +77,7 @@ class BasePlotClass(param.Parameterized):
             ids = self.df[id_col].values
         return ids
     
-    def _initialize_settings_dictionary(self, key_name, default_values):
+    def _initialise_settings_dictionary(self, key_name, default_values):
         """
         key_name = 'Histogram_plot_settings' or 'Scatter_plot_settings'
         default_values = Dictionary with key-values to be used as default ones
@@ -79,6 +86,32 @@ class BasePlotClass(param.Parameterized):
         for key, value in default_values.items():
             if key not in settings_dict:
                 settings_dict[key] = value
+
+    def _initialise_selector_options(self):
+        """Initilaises the available options for params objects which allow selection"""
+        for name in self.selector_params:
+            self.param[name].objects = self.available_columns
+
+    def _initialise_param_objects(self,  **extra_params):
+        """
+        Method to initialise the param object which goverrn the behaviour of the plot, setting their initial values 
+        and the allowed options.
+
+        Parameters:
+        -------------
+        extra_params: param_name = value, for param objects which are not used in both Scatter and histogram plot
+        """
+
+        self._initialise_selector_options()
+        self.param.label_selector.objects = ["All"] + list(config.settings["strings_to_labels"].keys())
+
+        self.param.update(
+                    X_variable = self._get_from_settings_dictionary("X_variable", self.available_columns[0]),
+                    label_selector = self._get_from_settings_dictionary("label", ['All']),
+                    log_xscale = self._get_from_settings_dictionary("log_x", False),
+                    log_yscale = self._get_from_settings_dictionary("log_y", False),
+                    **extra_params
+                )
 
     def remove_shared_data(self):
         """Removes subscriptions and published data from the shared data"""
@@ -116,32 +149,33 @@ class ScatterPlotDashboard(BasePlotClass):
     df : DataFrame
         The shared dataframe which holds all the data.
 
-    """
+    """   
 
-    X_variable = param.Selector(objects=["0"], default="0", doc="Selection box for the X axis of the plot.")
-    Y_variable = param.Selector(objects=["1"], default="1", doc="Selection box for the Y axis of the plot.")
-    log_xscale = param.Boolean(default=False, doc = "Use log for x axis")
-    log_yscale = param.Boolean(default=False, doc = "Use log for y axis")
-    label_selector = param.ListSelector(default=["All"], objects=["All"], doc= "Labels to plot")
+    Y_variable = param.Selector(objects=["1"], default="1", doc="Selection box for the Y axis of the plot")
     plot_mode = param.Selector(default="tap", objects=["tap", "rasterized"], doc= "Plot Mode")
-    
+    selector_params = ("X_variable", "Y_variable")
 
 
     def __init__(self, src, close_button):
         super().__init__(src, close_button)
         self._src_callback = self._change_source_cb
         self.src.on_change("data", self._src_callback)
-
-        self._initialize_settings_dictionary(key_name = "Scatter_plot_settings",
+        self.available_columns = self.get_column_list(excluded_columns = ["id_col", "label_col", "ra_dec"])
+        
+        #In exploring mode there is no default variable in settings. Kept the config.settings.get for consistency
+        self._initialise_settings_dictionary(key_name = "Scatter_plot_settings",
                                              default_values =  {
-                                             "X_variable" : config.settings["default_vars"][0],
-                                             "Y_variable" : config.settings["default_vars"][1],
+                                             "X_variable" : config.settings.get("default_vars", self.available_columns[:2])[0],
+                                             "Y_variable" : config.settings.get("default_vars", self.available_columns[:2])[1],
                                              "log_x" : False,
                                              "log_y" : False,
                                              "labels" : ["All"],
                                              "mode" : "tap"})
 
-        self._initialize_param_objects(excluded_columns = ["id_col", "label_col", "ra_dec"])
+        self._initialise_param_objects(
+                                       Y_variable = self._get_from_settings_dictionary("Y_variable", self.available_columns[0]),
+                                       plot_mode = self._get_from_settings_dictionary("mode", "tap"),
+                                       )
         
         self.settings_panel = pn.Column(
             pn.Param(
@@ -160,21 +194,6 @@ class ScatterPlotDashboard(BasePlotClass):
             margin=(10, 0, 0, 0)
         )
     
- 
-    def _initialize_param_objects(self, excluded_columns = ["id_col", "label_col", "ra_dec"] ):
-        available_columns = self.get_column_list(excluded_columns = excluded_columns)
-        self.param.X_variable.objects = available_columns
-        self.param.Y_variable.objects = available_columns
-        self.param.label_selector.objects = ["All"] + list(config.settings["strings_to_labels"].keys())
-
-        self.param.update(
-                    X_variable = self._get_from_settings_dictionary("X_variable", config.settings["default_vars"][0]),
-                    Y_variable = self._get_from_settings_dictionary("Y_variable", config.settings["default_vars"][1]),
-                    label_selector = self._get_from_settings_dictionary("label", ['All']),
-                    log_xscale = self._get_from_settings_dictionary("log_x", False),
-                    log_yscale = self._get_from_settings_dictionary("log_y", False),
-                    plot_mode = self._get_from_settings_dictionary("mode", "tap"),
-                )
 
     @staticmethod  
     def _get_from_settings_dictionary(key, default):
@@ -347,25 +366,22 @@ class ScatterPlotDashboard(BasePlotClass):
 
 class HistoDashboard(BasePlotClass):
     
-    X_variable = param.Selector(objects=["0"], default="0", doc="X axis variable")
-    log_xscale = param.Boolean(default=False, doc = None)
-    log_yscale = param.Boolean(default=False, doc = None)
     density = param.Boolean(default=False, doc = None )
     cumulative = param.Boolean(default=False, doc = None)
     Nbins = param.Integer(default=10, bounds=(2, 200), doc = "Number of bins")
     range_min = param.Number(default= -np.inf, bounds=(-np.inf, np.inf), doc= "Range min")
     range_max = param.Number(default= np.inf, bounds=(-np.inf, np.inf), doc= "Range max")
-    label_selector = param.ListSelector(default=["All"], objects=["All"], doc="Labels to plot")
-   
+
     def __init__(self, src, close_button):
         
         super().__init__(src, close_button)
         self._src_callback = self._change_source_cb
         self.src.on_change("data", self._src_callback)
+        self.available_columns = self.get_column_list(excluded_columns = ["id_col", "ra_dec"])
         
-        self._initialize_settings_dictionary(key_name = "Histogram_plot_settings",
+        self._initialise_settings_dictionary(key_name = "Histogram_plot_settings",
                                              default_values =  {
-                                             "X_variable" : config.settings["default_vars"][0],
+                                             "X_variable" : config.settings.get("default_vars", self.available_columns[:2])[0],
                                              "log_x" : False,
                                              "log_y" : False,
                                              "density" : False,
@@ -375,7 +391,13 @@ class HistoDashboard(BasePlotClass):
                                              "labels" : ["All"],
                                              })
 
-        self._initialize_param_objects(excluded_columns = ["id_col", "ra_dec"])
+        self._initialise_param_objects(
+                                    cumulative = self._get_from_settings_dictionary("cumulative", False),
+                                    density = self._get_from_settings_dictionary("density", False),
+                                    Nbins = self._get_from_settings_dictionary("Nbins", 10),
+                                    range_min = self._get_from_settings_dictionary("range", (-np.inf, np.inf))[0],
+                                    range_max = self._get_from_settings_dictionary("range", (-np.inf, np.inf))[1],
+                                    )
 
         self.settings_panel = pn.Column(
             pn.Param(
@@ -398,22 +420,6 @@ class HistoDashboard(BasePlotClass):
         )
     
         
-    def _initialize_param_objects(self, excluded_columns = ["id_col", "ra_dec"] ):
-        self.param.X_variable.objects = self.get_column_list(excluded_columns=excluded_columns)
-        self.param.label_selector.objects = ["All"] + list(config.settings["strings_to_labels"].keys())
-        
-        self.param.update(
-                    X_variable = self._get_from_settings_dictionary("X_variable", config.settings["default_vars"][0]),
-                    label_selector = self._get_from_settings_dictionary("label", ['All']),
-                    log_xscale = self._get_from_settings_dictionary("log_x", False),
-                    log_yscale = self._get_from_settings_dictionary("log_y", False),
-                    cumulative = self._get_from_settings_dictionary("cumulative", False),
-                    density = self._get_from_settings_dictionary("density", False),
-                    Nbins = self._get_from_settings_dictionary("Nbins", 10),
-                    range_min = self._get_from_settings_dictionary("range", (-np.inf, np.inf))[0],
-                    range_max = self._get_from_settings_dictionary("range", (-np.inf, np.inf))[1],
-                    )
-
     def _change_source_cb(self, attr, old, new):
         selected_src_plot = self.plot_selected(self.X_variable)
         if selected_src_plot is not None:
@@ -796,7 +802,6 @@ class PlotDashboard(param.Parameterized):
                )
         return plot
     
-
     def panel(self):
         """Render the current view.
 

@@ -27,6 +27,7 @@ class ExplorationDashboard(param.Parameterized):
         self.current_position = 0 
         self.param.index.bounds = (0, len(self.df) - 1)
         self._preprocess_data()
+        self._create_extra_info_cols_list()
         self._update_selected_src()
         
 
@@ -88,7 +89,7 @@ class ExplorationDashboard(param.Parameterized):
     def _sourceid_input_cb(self, event):
         sourceid = event.new
         if sourceid:
-             self._find_from_id(self, sourceid)
+             self._find_from_id(sourceid)
 
     def _get_id(self):
         """Returns all ids in the table"""
@@ -105,7 +106,6 @@ class ExplorationDashboard(param.Parameterized):
             return str(self.src.data[id_col][0])
         
     
-
     def _find_from_id(self, sourceid):
         sourceid = sourceid.strip() 
         try:
@@ -261,7 +261,7 @@ class ExplorationDashboard(param.Parameterized):
     def _generate_fake_label_column(self, df):
         """This is not very elegant but allows to keep the code as it is.
            If No labels is selected, it creates a column No labels with all Nan"""
-        if config.settings["label_col"] not in df.columns and config.settings["label_col"]=="No Labels":
+        if (config.settings["label_col"] not in df.columns) and (config.settings["label_col"] == "No Labels"):
             df[config.settings["label_col"]] = np.nan
         return df
     
@@ -278,8 +278,12 @@ class ExplorationDashboard(param.Parameterized):
         """Process all the data according to the config file. In exploring panel it just"
            compute combination of features and creating ra and dec column"""
         self.df = self._generate_fake_label_column(self.df)
-        self.df = self._generate_features(self.df)
+        #self.df = self._generate_features(self.df)
         self.df = self._add_ra_dec_col(self.df)
+
+    def _create_extra_info_cols_list(self):  
+        if "extra_info_cols" not in  config.settings:
+            config.settings["extra_info_cols"] = []
 
 
     def get_layout(self):

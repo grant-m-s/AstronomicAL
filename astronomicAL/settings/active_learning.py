@@ -315,7 +315,6 @@ class ActiveLearningSettings(param.Parameterized):
         ]
 
         if new_feature_generator not in self.feature_generator_selected:
-            print("doing the correct thing")
             self.feature_generator_selected.append(
                 [self.feature_generator.value, self.feature_generator_number.value]
             )

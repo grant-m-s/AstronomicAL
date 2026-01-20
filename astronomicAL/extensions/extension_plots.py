@@ -51,15 +51,15 @@ def get_plot_dict():
         #"Mateos 2012 Wedge": CustomPlot(
         #    mateos_2012_wedge, ["Log10(W3_Flux/W2_Flux)", "Log10(W2_Flux/W1_Flux)"]
         #),
-        #"BPT Plots": CustomPlot(
-        #    bpt_plot,
-        #    [
-        #        "Log10(NII_6584_FLUX/H_ALPHA_FLUX)",
-        #        "Log10(SII_6717_FLUX/H_ALPHA_FLUX)",
-        #        "Log10(OI_6300_FLUX/H_ALPHA_FLUX)",
-        #        "Log10(OIII_5007_FLUX/H_BETA_FLUX)",
-        #    ],
-        #),
+        "BPT Plots": CustomPlot(
+            bpt_plot,
+            [
+                "Log10(NII_6584_FLUX/H_ALPHA_FLUX)",
+                "Log10(SII_6717_FLUX/H_ALPHA_FLUX)",
+                "Log10(OI_6300_FLUX/H_ALPHA_FLUX)",
+                "Log10(OIII_5007_FLUX/H_BETA_FLUX)",
+            ],
+        ),
         #"SED Plot": SEDPlot(sed_plot, []),
 
         #"VLA-VLASS Cutout" : CustomPlot(vlass_cutout_plot, []),

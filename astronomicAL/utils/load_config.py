@@ -35,23 +35,24 @@ def verify_import_config(curr_config_file):
                            "layout",
                            "id_col",
                            "label_col",
-                           "default_vars",
                            "labels",
                            "label_colours",
                            "labels_to_strings",
                            "strings_to_labels",
-                           "extra_info_cols",
-                            "feature_generation"]
+                            ]
         
         if curr_config_file.get("layout", {}).get("0", {}).get("contents") != "Exploring":
-                    columns_needed.extend(["extra_image_cols",
-                                       "labels_to_train",
-                                       "features_for_training",
-                                       "exclude_labels",
-                                       "exclude_unknown_labels",
-                                       "unclassified_labels",
-                                       "scale_data",
-                                       "test_set_file",])
+            columns_needed.extend(["extra_image_cols",
+                                    "extra_info_cols",
+                                    "feature_generation",
+                                    "default_vars",
+                                    "labels_to_train",
+                                    "features_for_training",
+                                    "exclude_labels",
+                                    "exclude_unknown_labels",
+                                    "unclassified_labels",
+                                    "scale_data",
+                                    "test_set_file",])
 
         missing_settings = list(
             set(columns_needed).difference(list(curr_config_file.keys()))
@@ -105,12 +106,14 @@ def verify_import_config(curr_config_file):
             "extra_info_cols",
             "extra_image_cols",
         ]:
-            if type(config.settings[setting]) is str:
-                columns_used.append(config.settings[setting])
+            value = config.settings.get(setting) # In exploring mode this returns None for settings not required
+            if value is None:
+                continue 
+            if isinstance(value, str):
+                columns_used.append(value)
 
-            elif type(config.settings[setting]) is list:
-                for col in config.settings[setting]:
-                    columns_used.append(col)
+            elif isinstance(value, list):
+                columns_used.extend(value)
 
         missing_cols = []
         for col in columns_used:
@@ -128,7 +131,7 @@ def verify_import_config(curr_config_file):
         if "feature_generation" not in missing_settings:
             opers = list(get_oper_dict().keys())
             missing_opers = []
-            for oper in config.settings["feature_generation"]:
+            for oper in config.settings.get("feature_generation", []):
                 if oper[0] not in opers:
                     missing_opers.append(oper[0])
             if len(missing_opers) > 0:

@@ -9,6 +9,7 @@ import panel as pn
 import json
 import param
 import uuid
+import time
 import matplotlib.pyplot as plt
 from matplotlib.ticker import ScalarFormatter
 import concurrent.futures 
@@ -18,7 +19,7 @@ from bokeh.models import Range1d, LinearAxis
 from astronomicAL.utils.optimise import matches_type
 from astronomicAL.extensions.shared_data import shared_data
 from astronomicAL.extensions.astro_data_utility import DESISpectraClass, EuclidCutoutsClass, EuclidSpectraClass
-from astronomicAL.extensions.astro_data_utility import VLASS_cutout, LoTSS_cutout, make_srcdoc_aladin_lite
+from astronomicAL.extensions.astro_data_utility import VLASS_cutout, LoTSS_cutout, make_srcdoc_aladin_lite, SDSS_cutout
 
 
 
@@ -51,7 +52,10 @@ def get_customplot_dict():
                                                             extra_features=[], dataset="VLASS"),
         
         "LoTSS Cutout"  : lambda data, src, close_button : RadioClass(data, src, close_button,
-                                                            extra_features=[], dataset="LoTSS")                                                  
+                                                            extra_features=[], dataset="LoTSS"),
+
+        #"SDSS Cutout"  : lambda data, src, close_button : SDSSClass(data, src, close_button,
+        #                                                    extra_features=[], dataset="SDSS")                                                                                                      
 
     }
 
@@ -391,7 +395,6 @@ class EuclidPlotClass(CustomPlotClass):
         self._manage_subscriptions()
         if initialised:
             self._run_euclid()
-        self.message_pane.object = "## Io non dovrei essere qui..."
         self.message_pane.visible = False
 
         return  pn.Column(self.message_pane, self.figure, self.plot_settings_panel, 
@@ -429,7 +432,6 @@ class EuclidPlotClass(CustomPlotClass):
         filter = self.filter_input.value
         low, high = self.contrast_scaler.value
         gamma = (self.gamma_red_input.value,  self.gamma_green_input.value, self.gamma_blue_input.value)
-        print(gamma)
         scale = self.scale_input.value
         source_coordinates = self.overplot_source_coords_widget.value
         levels = self.contour_levels_input.value
@@ -499,6 +501,7 @@ class EuclidPlotClass(CustomPlotClass):
         
         try: 
             self.euclid_object.reset_data(self.ra, self.dec)
+        
         except AttributeError:
             self.euclid_object = EuclidCutoutsClass(self.ra, self.dec, 
                              euclid_filters= ["VIS", "NIR_Y", "NIR_J", "NIR_H"],
@@ -661,11 +664,12 @@ class EuclidPlotClass(CustomPlotClass):
             print("Input a valid value for radius")
     
     def _general_parameter_callabck(self, event):
-        self.filter = self.filter_input.value
-        self._update_all_settings_dictionary()
-        scaled_image = self._get_scaled_image()
-        self.get_euclid_figure_hv(scaled_image, show_coordinates= self.overplot_source_coords_widget.value)
-        self._update_image()
+        if hasattr(self.euclid_object, "plot_data"):
+            self.filter = self.filter_input.value
+            self._update_all_settings_dictionary()
+            scaled_image = self._get_scaled_image()
+            self.get_euclid_figure_hv(scaled_image, show_coordinates= self.overplot_source_coords_widget.value)
+            self._update_image()
         
     def _update_stretching(self, event):
         stretch = self.stretching_input.value
@@ -684,9 +688,10 @@ class EuclidPlotClass(CustomPlotClass):
 
     def _color_specific_callabck(self, event):
         if self.filter == "Color":
-            scaled_image = self._get_scaled_image()
-            self.get_euclid_figure_hv(scaled_image, show_coordinates = self.overplot_source_coords_widget.value)
-            self._update_image()
+            if hasattr(self.euclid_object, "plot_data"):
+                scaled_image = self._get_scaled_image()
+                self.get_euclid_figure_hv(scaled_image, show_coordinates = self.overplot_source_coords_widget.value)
+                self._update_image()
 
     def _update_image(self): 
         try:
@@ -932,8 +937,9 @@ class EuclidPlotClass(CustomPlotClass):
         shared_data.publish(self.panel_id, "EuclidCutout_running", True)
  
         def callback(future_obj=None):
+            result = future_obj.result() # result = self.euclid_object.plot_data[self.filter] or None
             shared_data.publish(self.panel_id, "EuclidCutout_running", False)
-            result = future_obj.result() #result = self.euclid_object.plot_data[self.filter] or None
+            
             if self.euclid_object.error_tracker.has_error:
                 message =  f"# Euclid cutout unavailable:\n"
                 message += f"## {self.euclid_object.error_tracker.error_message}"
@@ -1111,7 +1117,7 @@ class SpectrumPlotClass(CustomPlotClass):
                                                           client = shared_data.get_data("Euclid_client", None))
             else:
                 datasets = (["DESI-DR1"] if self.dataset == "DESI"
-                            else ["BOSS-DR16", "SDSS-DR16"] if self.dataset == "SDSS"
+                            else ["BOSS-DR17", "SDSS-DR17"] if self.dataset == "SDSS"
                              else None)
                 self.spectrum_object = DESISpectraClass(self.ra, self.dec, datasets = datasets,
                                                         max_separation = self.max_separation,
@@ -1170,6 +1176,17 @@ class SpectrumPlotClass(CustomPlotClass):
         self.plot_lines_checkbox = pn.widgets.Checkbox(name = "Plot Emission/Absorption Lines positions",  value = not self._is_euclid_spec, align = "center")
         self.plot_lines_checkbox.disabled = self._is_euclid_spec
         
+        self.plot_model_checkbox = pn.widgets.Checkbox(name = "Plot Model",  value = not self._is_euclid_spec, align = "center")
+        self.plot_model_checkbox.disabled = self._is_euclid_spec
+
+
+        self.smoothing_window_input = pn.widgets.IntInput(name = "Smoothing Window", value = 5, start = 1, end = 50, step =1,
+                                                         max_width = 200, max_height = 40, sizing_mode="stretch_both")
+        self.smoothing_function_input = pn.widgets.Select(name = "Smoothing Function", align = "center", 
+                                                          options = {"Box" : "Box1DKernel", "Gaussian" : "Gaussian1DKernel"},
+                                                          value = "Box1DKernel",
+                                                          max_width = 200, max_height = 40, sizing_mode="stretch_both")
+
         self.redshift_input = pn.widgets.FloatInput(name = "Assign Redshift (Same for all Sources)", start = 0.0, end = 15, 
                                                     max_width = 200, max_height = 40, sizing_mode="stretch_both")
         self.query_redshift_button  = pn.widgets.Button(name = "Query Redshift", align = "center", button_type = "primary",
@@ -1178,6 +1195,7 @@ class SpectrumPlotClass(CustomPlotClass):
                                                            options = ["None"] + self.get_column_list(allowed_types=["float"]),
                                                            value = "None",
                                                            max_width = 200, max_height = 40, sizing_mode="stretch_both")
+        
         self.redshift_input.disabled = not self._is_euclid_spec
         self.query_redshift_button.disabled = not self._is_euclid_spec
         self.redshift_column_selector.disabled = not self._is_euclid_spec
@@ -1188,7 +1206,10 @@ class SpectrumPlotClass(CustomPlotClass):
         self.link_to_cutout_checkbox.param.watch(self._link_to_cutout_cb, "value")
 
         
-        self.plot_lines_checkbox.param.watch(self._plot_lines_cb, "value") 
+        self.plot_lines_checkbox.param.watch(self._general_parameter_cb, "value") 
+        self.plot_model_checkbox.param.watch(self._general_parameter_cb, "value") 
+        self.smoothing_function_input.param.watch(self._update_smoothing_cb, "value")
+        self.smoothing_window_input.param.watch(self._update_smoothing_cb, "value")
         self.query_redshift_button.on_click(self._query_redshift_cb)
         self.redshift_input.param.watch(self._redshift_input_cb, "value")
         self.redshift_column_selector.param.watch(self._redshift_column_selector_cb, "value")
@@ -1196,9 +1217,10 @@ class SpectrumPlotClass(CustomPlotClass):
             
         self.plot_settings_panel = pn.Column(self.retrieve_mode_button, 
                                              pn.Row(self.max_separation_input, pn.Column(pn.Spacer(height=23), self.link_to_cutout_checkbox), align = "center"),
-                                             self.plot_lines_checkbox,
+                                             pn.Row(self.plot_lines_checkbox, self.plot_model_checkbox),
+                                             pn.Row(self.smoothing_function_input, self.smoothing_window_input, align = "center"),
                                              pn.Row(self.redshift_input,  pn.Column(pn.Spacer(height=10), self.query_redshift_button),
-                                             self.redshift_column_selector, align = "center"),
+                                             self.redshift_column_selector, pn.Spacer(width=350), align = "center"),
                                              scroll = True, visible = False)
         
     
@@ -1229,8 +1251,16 @@ class SpectrumPlotClass(CustomPlotClass):
                 self.subscribe_to_shared("Euclid_radius", self._update_max_separation )
         else:
             shared_data.unsubscribe(self.panel_id, "Euclid_radius")
+
+    def _update_smoothing_cb(self, event):
+        if self.spectrum_object.spectra is not None:
+            self.spectrum_object.get_smoothed_spectra(kernel = self.smoothing_function_input.value,
+                                                      window= self.smoothing_window_input.value)
+            self._update_plot()
+
     
-    def _plot_lines_cb(self, event):
+    def _general_parameter_cb(self, event):
+        """This is the Calbback to update the plot without actually querying new data"""
         if self.spectrum_object.spectra is not None:
             self._update_plot()
     
@@ -1263,7 +1293,7 @@ class SpectrumPlotClass(CustomPlotClass):
             self.redshift_input.value = redshift_value
     
     def _update_plot(self):
-        plot_model = False if self._is_euclid_spec else True
+        plot_model = self.plot_model_checkbox.value
         plot_lines = "class" if self.plot_lines_checkbox.value else False
         kwargs = {"aspect" : 3.8 if self.spectrum_object.available_spectra > 1 else 3.17, "responsive" : True}
         plot = self.spectrum_object.plot_all_spectra_hv(plot_model = plot_model, plot_lines = plot_lines,
@@ -1854,6 +1884,84 @@ class RadioClass(CustomPlotClass):
                                          yaxis=None,
                                          )
         return image
+    
+class SDSSClass(CustomPlotClass):
+    
+    def __init__(self, data, src, close_button, extra_features, dataset):
+        super().__init__(data, src, close_button, extra_features)
+        self._src_callback = self._change_source_cb
+        self.src.on_change("data", self._src_callback)
+        self.dataset = dataset
+        self._initialize_source()
+        self.radius = 25.6
+
+    def _initialize_source(self):
+        self.ra, self.dec = self.get_ra_dec()
+        if (self.ra is None) or (self.dec is None):
+            self.message_pane.visible = True
+            self.message_pane.object = ["## Missing Ra and Dec"]   
+
+    def _change_source_cb(self, attr, old, new):
+        self._initialize_source()
+        self._run_sdss(radius = self.radius)
+
+    def get_layout(self):
+        self._initialise_widgets()
+        self._run_sdss(radius = self.radius)
+        return  pn.Column(self.message_pane, self.figure, self.plot_settings_panel, 
+                          scroll = True, sizing_mode = "stretch_both")
+    
+    def _initialise_widgets(self):
+
+        self.radius_input = pn.widgets.FloatInput(name = "Radius [arcsec]", value = self.radius, 
+                                                  step = 1, start = 1, end = 100, max_width = 200,
+                                                  sizing_mode="stretch_both", max_height =30)
+        self.radius_input.param.watch(self._update_radius, "value")
+        
+        self.plot_settings_panel = pn.Column(self.radius_input, 
+                                             scroll = True, visible = False)
+        
+    def _update_radius(self, event):
+        if event.new: 
+            self.radius = event.new
+            self._run_sdss(radius = self.radius)
+        else:
+            print("Input a valid value for radius")
+
+    def _run_sdss(self, radius = 25.6):
+        self.message_pane.visible = True
+        shared_data.publish(self.panel_id, f"SDSS_running", True)
+
+        def callback(future_obj = None):
+            print("Ended SDSS query")
+            shared_data.publish(self.panel_id, "SDSS_running", False)
+            result = future_obj.result() 
+            if result is None:
+                self.message_pane.object = f"## {self.dataset} cutout query failed"
+                self.message_pane.visible = True #probably already visible
+            elif result is not None:
+                self.figure.object = self.get_sdss_figure(result)
+                self.message_pane.visible = False
+
+        if self.dataset == "SDSS":
+            self.run_multithread(SDSS_cutout, 
+                             func_kwargs = {"ra" : self.ra, "dec" : self.dec,
+                                            "radius" : radius},
+                             callback=callback)
+
+
+    def get_sdss_figure(self, data):
+        print("Entering here!!!")
+        #self.image_height, self.image_width = data.shape[:2]
+        #bounds = (0, 0, self.image_height, self.image_width)
+        image = hv.Image(data).opts(active_tools =[], toolbar=None,
+                                    padding = 0,
+                                    border = 0,
+                                    framewise = True,
+                                    xaxis=None, 
+                                    yaxis=None,
+                                    )
+        return image
 
 
 
@@ -1870,7 +1978,7 @@ class AladinClass(CustomPlotClass):
     def _change_source_cb(self, attr, old, new):
         self.ra, self.dec = self.get_ra_dec()
         if (self.ra is None) or (self.dec is None):
-            self.get_error_panel("Euclid cutout unavailable", "Missing RA or DEC value")
+            self.get_error_panel("Aladin panel unavailable", "Missing RA or DEC value")
         self._update_image(None)
 
 
@@ -1933,11 +2041,11 @@ class AladinClass(CustomPlotClass):
         self._initialise_widgets()
         self.ra, self.dec = self.get_ra_dec()
         if (self.ra is None) or (self.dec is None):
-            self.get_error_panel("Euclid cutout unavailable", "Missing RA or DEC value")
+            self.get_error_panel("Aladin panel unavailable", "Missing RA or DEC value")
 
         self._update_image(None)
         return  pn.Column(self.message_pane, self.figure, self.plot_settings_panel, 
-                          scroll = True, sizing_mode = "stretch_both")
+                          scroll = False, sizing_mode = "stretch_both")
 
 
 
