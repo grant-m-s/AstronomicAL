@@ -18,6 +18,7 @@ data/saved_sources
 data/notebook*
 data_cutouts
 astronomicAL/extensions/data
+*.fits
 
 
 
