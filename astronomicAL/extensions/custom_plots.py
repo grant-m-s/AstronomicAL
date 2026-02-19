@@ -2070,7 +2070,7 @@ class LogBookClass(CustomPlotClass):
 
         self.logbook_panel = pn.widgets.TextAreaInput(name = "Logbook",
                                                       auto_grow = False, 
-                                                      placeholder='Tke your notes here...')
+                                                      placeholder='Take your notes here...')
 
     def _save_panel(self, directory_path= "data/saved_sources", save_fits_files= False, prefix = None):
         paths = {}

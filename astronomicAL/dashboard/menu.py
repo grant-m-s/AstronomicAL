@@ -30,6 +30,7 @@ class MenuDashboard:
         plot_options = [
             "Basic Plot",
             "Histogram Plot",
+            "Density Plot",
             "Selected Source Info",
         ] + list(custom_plots.get_customplot_dict().keys()) +  list(extension_plots.get_plot_dict().keys())
 

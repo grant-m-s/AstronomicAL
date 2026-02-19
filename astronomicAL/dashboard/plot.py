@@ -21,8 +21,8 @@ from astronomicAL.extensions.shared_data import shared_data
 class BasePlotClass(param.Parameterized):
 
     X_variable = param.Selector(objects=["0"], default="0", doc= "Selection box for the X axis of the plot")
-    log_xscale = param.Boolean(default=False, doc = "Use log for x axis")
-    log_yscale = param.Boolean(default=False, doc = "Use log for y axis")
+    log_xscale = param.Boolean(default=False, label = "log x",  doc = "Use log for x axis")
+    log_yscale = param.Boolean(default=False, label = "log y", doc = "Use log for y axis")
     label_selector = param.ListSelector(default=["All"], objects=["All"], doc= "Labels to plot")
     
     selector_params = ("X_variable",)
@@ -79,7 +79,7 @@ class BasePlotClass(param.Parameterized):
     
     def _initialise_settings_dictionary(self, key_name, default_values):
         """
-        key_name = 'Histogram_plot_settings' or 'Scatter_plot_settings'
+        key_name = 'Histogram_plot_settings', 'Scatter_plot_settings' or 'Density_plot_settings'
         default_values = Dictionary with key-values to be used as default ones
         """
         settings_dict = config.settings.setdefault(key_name, {})
@@ -369,8 +369,8 @@ class HistoDashboard(BasePlotClass):
     density = param.Boolean(default=False, doc = None )
     cumulative = param.Boolean(default=False, doc = None)
     Nbins = param.Integer(default=10, bounds=(2, 200), doc = "Number of bins")
-    range_min = param.Number(default= -np.inf, bounds=(-np.inf, np.inf), doc= "Range min")
-    range_max = param.Number(default= np.inf, bounds=(-np.inf, np.inf), doc= "Range max")
+    range_min = param.Number(default= None, bounds=(-np.inf, np.inf), allow_None= True,  doc= "Range min")
+    range_max = param.Number(default= None, bounds=(-np.inf, np.inf), allow_None= True, doc= "Range max")
 
     def __init__(self, src, close_button):
         
@@ -461,9 +461,13 @@ class HistoDashboard(BasePlotClass):
                       range = (-np.inf, np.inf), label = "", xlabel = "x", ylabel = "frequency",
                       **kwargs):
         
+        xmin, xmax = range
+        xmin = -np.inf if xmin is None else xmin
+        xmax =  np.inf if xmax is None else xmax
+        
         x = x_var[np.isfinite(x_var)]
-        xmin = max(np.min(x),range[0])
-        xmax = min(np.max(x),range[1])
+        xmin = max(np.min(x), xmin)
+        xmax = min(np.max(x), xmax)
         
         #if range[1] < xmin or range[0] > xmax i get an error due to bins not increasing
         if xmin > xmax:
@@ -596,6 +600,240 @@ class HistoDashboard(BasePlotClass):
                                 sizing_mode="stretch_both",
                         )
     
+
+
+class DensityPlotDashboard(BasePlotClass):
+
+    Y_variable = param.Selector(objects=["1"], default="1", doc="Selection box for the Y axis of the plot")
+    selector_params = ("X_variable", "Y_variable")
+    Nbins = param.Integer(default=10, bounds=(2, 200), doc = "Number of bins per axis")
+    x_range_min = param.Number(default = None, bounds=(-np.inf, np.inf), allow_None= True, doc = "X variable range min")
+    x_range_max = param.Number(default = None, bounds=(-np.inf, np.inf), allow_None= True, doc = "X variable range max")
+    y_range_min = param.Number(default = None, bounds=(-np.inf, np.inf), allow_None= True, doc = "Y variable range min")
+    y_range_max = param.Number(default = None, bounds=(-np.inf, np.inf), allow_None= True, doc = "Y variable range max")
+    log_zscale = param.Boolean(default=False, label = "log density",  doc = "Use log for density color")
+
+    clim = param.Integer(default=10, bounds=(2, 1000), doc = "Number of bins per axis")
+
+    def __init__(self, src, close_button):
+        super().__init__(src, close_button)
+        self._src_callback = self._change_source_cb
+        self.src.on_change("data", self._src_callback)
+        self.available_columns = self.get_column_list(excluded_columns = ["id_col", "label_col", "ra_dec"])
+        
+        self._initialise_settings_dictionary(key_name = "Density_plot_settings",
+                                             default_values =  {
+                                             "X_variable" : config.settings.get("default_vars", self.available_columns[:2])[0],
+                                             "Y_variable" : config.settings.get("default_vars", self.available_columns[:2])[1],
+                                             "log_x" : False,
+                                             "log_y" : False,
+                                             "labels" : ["All"],
+                                             "x_range" : (-np.inf, np.inf),
+                                             "y_range" : (-np.inf, np.inf),
+                                             "Nbins" : 20,
+                                             "log_z" : False})
+
+        self._initialise_param_objects(
+                                       Y_variable = self._get_from_settings_dictionary("Y_variable", self.available_columns[0]),                                   
+                                       Nbins = self._get_from_settings_dictionary("Nbins", 10),
+                                       log_zscale = self._get_from_settings_dictionary("log_z", False),
+                                       x_range_min = self._get_from_settings_dictionary("x_range", (-np.inf, np.inf))[0],
+                                       x_range_max = self._get_from_settings_dictionary("x_range", (-np.inf, np.inf))[1],
+                                       y_range_min = self._get_from_settings_dictionary("y_range", (-np.inf, np.inf))[0],
+                                       y_range_max = self._get_from_settings_dictionary("y_range", (-np.inf, np.inf))[1],
+                                    )
+
+
+        self.param_widgets = {
+                              "log_xscale": pn.widgets.Checkbox.from_param(self.param.log_xscale),
+                              "log_yscale": pn.widgets.Checkbox.from_param(self.param.log_yscale),
+                              "log_zscale": pn.widgets.Checkbox.from_param(self.param.log_zscale),
+                              "Nbins": pn.widgets.IntSlider.from_param(self.param.Nbins, throttled=True),
+                              "x_range_min" : pn.widgets.FloatInput.from_param(self.param.x_range_min),
+                              "x_range_max" : pn.widgets.FloatInput.from_param(self.param.x_range_max),
+                              "y_range_min" : pn.widgets.FloatInput.from_param(self.param.y_range_min),
+                              "y_range_max" : pn.widgets.FloatInput.from_param(self.param.y_range_max),
+                              "label_selector": pn.widgets.MultiChoice.from_param(self.param.label_selector, width=200, height=80),
+                             }
+        
+
+        self.settings_panel = pn.Column(pn.Row(self.param_widgets["log_xscale"], self.param_widgets["log_yscale"], self.param_widgets["log_zscale"] ),
+                                        self.param_widgets["Nbins"],
+                                        pn.Column(pn.Row(self.param_widgets["x_range_min"], self.param_widgets["x_range_max"]),
+                                                  pn.Row(self.param_widgets["y_range_min"], self.param_widgets["y_range_max"])),
+                                        self.param_widgets["label_selector"],
+                                        sizing_mode="stretch_width",
+                                        visible=False,
+                                        margin=(10, 0, 0, 0)       
+                                        )
+
+
+    @staticmethod  
+    def _get_from_settings_dictionary(key, default):
+        value = config.settings["Density_plot_settings"].get(key, default)
+        return value
+    
+    
+    def _update_all_settings_dictionary(self):
+        new_values =  {"X_variable" : self.X_variable,
+                       "Y_variable" : self.Y_variable,
+                       "log_x" : self.log_xscale,
+                       "log_y" : self.log_yscale,
+                       "labels" : self.label_selector,
+                       "Nbins" : self.Nbins,
+                       "x_range" : (self.x_range_min, self.x_range_max),
+                       "y_range" : (self.y_range_min, self.y_range_max)
+        }
+        config.settings["Density_plot_settings"].update(new_values)
+
+
+    def _change_source_cb(self, attr, old, new):
+        selected_src_plot = self.plot_selected(self.X_variable, self.Y_variable)
+        if selected_src_plot is not None:
+            self.figure.object = hv.Overlay(self.main_plot + selected_src_plot).collate()
+
+
+
+    @param.depends("X_variable", "Y_variable", "label_selector", "log_xscale",
+                   "log_yscale", "log_zscale",
+                   "Nbins", "x_range_min", "x_range_max", "y_range_min",
+                   "y_range_max",
+                   watch=True)
+    
+    def _update_plot(self):
+        self._update_all_settings_dictionary()
+        self.main_plot = self.plot()
+        selected_src_plot = self.plot_selected(self.X_variable, self.Y_variable)
+        if selected_src_plot is not None:
+            self.figure.object = hv.Overlay(self.main_plot + selected_src_plot).collate()
+        else:
+            self.figure.object = self.main_plot
+    
+
+    def get_density_hv(self, x_var, y_var, log_x = False, log_y = False, 
+                       x_range = (-np.inf, np.inf), y_range = (-np.inf, np.inf),
+                       log_z = False,
+                       Nbins = 25, cmap = "viridis"):
+        
+        
+
+        xmin, xmax = x_range
+        xmin = -np.inf if xmin is None else xmin
+        xmax =  np.inf if xmax is None else xmax
+
+        ymin, ymax = y_range
+        ymin = -np.inf if ymin is None else ymin
+        ymax =  np.inf if ymax is None else ymax
+       
+        select = np.logical_and.reduce([np.isfinite(x_var), np.isfinite(y_var), 
+                                        x_var >= xmin, x_var < xmax,
+                                        y_var >= ymin, y_var < ymax])
+        
+        x, y = x_var[select], y_var[select]
+        if log_x:
+            x = np.log10(x) 
+            xmin, xmax = np.log10(xmin), np.log10(xmax)
+        if log_y:
+            y = np.log10(y)
+            ymin, ymax = np.log10(ymin), np.log10(ymax)
+
+    
+    
+        density_plot= hv.HexTiles((x, y), kdims=["x", "y"]).opts(
+                     gridsize = Nbins,
+                     tools = ["hover"],
+                     active_tools=[],
+                     xlabel=self.X_variable,
+                     ylabel=self.Y_variable,
+                     xlim = (np.min(x), np.max(x)),
+                     ylim = (np.min(y), np.max(y)),
+                     logz = log_z,
+                     colorbar = True,
+                     cmap = cmap)
+         
+        return density_plot
+   
+    
+    def plot(self, x_var = None, y_var = None):
+
+        if x_var is None:
+            x_var = self.df[self.X_variable].to_numpy()
+        if y_var is None:
+            y_var = self.df[self.Y_variable].to_numpy()
+        
+        strings_to_plot = self.label_selector
+       
+        if bool(strings_to_plot) and ("All" not in strings_to_plot or len(strings_to_plot)>1):
+           labels = self.df[config.settings["label_col"]]
+           labels_to_plot = [config.settings["strings_to_labels"][i] for i in strings_to_plot if i != "All"]
+        
+        else:
+            labels_to_plot = []
+       
+        self.overlays = []
+        if "All" in strings_to_plot:
+            h = self.get_density_hv(x_var, y_var, Nbins = self.Nbins,  
+                                    log_x = self.log_xscale, log_y = self.log_yscale,
+                                    x_range = (self.x_range_min, self.x_range_max),
+                                    y_range = (self.y_range_min, self.y_range_max),
+                                    log_z = self.log_zscale,
+                                    cmap= "Blues")
+            self.overlays.append(h)
+
+        for i, label_to_plot in enumerate(labels_to_plot):
+            select = labels == label_to_plot
+            h = self.get_density_hv(x_var[select], y_var[select], Nbins = self.Nbins,  
+                                    log_x = self.log_xscale, log_y = self.log_yscale,
+                                    x_range = (self.x_range_min, self.x_range_max),
+                                    y_range = (self.y_range_min, self.y_range_max),
+                                    log_z = self.log_zscale,
+                                    cmap= "Reds")
+                                    
+            self.overlays.append(h)          
+        plot = hv.Overlay(self.overlays).opts(active_tools = [], xlabel=self.X_variable,
+                                            ylabel=self.Y_variable)
+        return plot
+    
+    def plot_selected(self, x_var, y_var):
+        selected_plot = hv.Scatter((4, 3))
+        return selected_plot
+
+        cols = list(self.df.columns)
+        if len(self.src.data[cols[0]]) == 1:
+            selected = pd.DataFrame(self.src.data, columns=cols, index=[0])
+        else:
+            return None
+        if selected.shape[0] > 0:
+            selected_plot = hv.Scatter(selected, x_var, y_var,).opts(
+                fill_color="black",
+                marker="circle",
+                size=10,
+                active_tools=[],
+                logx = self.log_xscale,
+                logy = self.log_yscale)
+            return selected_plot
+        
+
+    def panel(self):
+        self._update_plot()
+        return pn.Card(
+                  pn.Column(
+                      pn.Row(self.figure, sizing_mode="scale_both"),
+                        self.settings_panel, scroll = True),
+                  header=pn.Row(
+                        pn.Spacer(width=25,),
+                        self.close_button,
+                        pn.Row(self.param.X_variable, max_width=100),
+                        pn.Row(self.param.Y_variable, max_width=100),
+                        self.settings_button,
+                        max_width=400,
+                    ),
+            collapsible=False,
+            sizing_mode="stretch_both",
+        )
+
+
+
 
 
 

@@ -29,7 +29,7 @@ def append_latex(filename, new_content):
 
 
 def get_figure_string(figure_path, figure_width=0.5):
-    string = rf"""\begin{{figure}}
+    string = rf"""\begin{{figure}}[!h]
     \centering
     \includegraphics[width={figure_width}\linewidth]{{{figure_path}}}
     \caption{{}}

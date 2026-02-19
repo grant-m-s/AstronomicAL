@@ -12,6 +12,7 @@ from functools import partial
 import astronomicAL.config as config
 from astronomicAL.extensions.shared_data import shared_data
 from astronomicAL.extensions import feature_generation
+from astronomicAL.utils.optimise import matches_type, get_series_type
 
 class ExplorationDashboard(param.Parameterized):
 
@@ -44,6 +45,7 @@ class ExplorationDashboard(param.Parameterized):
         self.search_button.on_click(self._search_button_cb)
         self.sourceid_watcher = self.sourceid_input.param.watch(self._sourceid_input_cb, "value", onlychanged=False)
         self._initialise_add_remove_columns_widgets()
+        self._initialise_label_selector()
         self._update_navigation_flags()
         self._subscribe_to_shared()
 
@@ -230,6 +232,7 @@ class ExplorationDashboard(param.Parameterized):
                 selected_dict[config.settings["id_col"]] = [self.index]
         self.src.data = selected_dict
 
+
     def _generate_features(self, df):
         """Create the feature combinations that the user specified.
         Parameters
@@ -277,7 +280,7 @@ class ExplorationDashboard(param.Parameterized):
     def _preprocess_data(self):
         """Process all the data according to the config file. In exploring panel it just"
            compute combination of features and creating ra and dec column"""
-        self.df = self._generate_fake_label_column(self.df)
+        #self.df = self._generate_fake_label_column(self.df)
         #self.df = self._generate_features(self.df)
         self.df = self._add_ra_dec_col(self.df)
 
@@ -285,7 +288,105 @@ class ExplorationDashboard(param.Parameterized):
         if "extra_info_cols" not in  config.settings:
             config.settings["extra_info_cols"] = []
 
+    
+    def _initialise_label_selector(self):
+        label_column_options =  ["No Labels"] + list(self.df.columns)
+        self.label_selector = pn.widgets.Select(options = label_column_options, 
+                                                value = config.settings["label_col"],
+                                                max_height = 60, max_width =120, 
+                                                visible = True)
+        self.label_selector.param.watch(self._update_labels_cb, "value")
+        self.colorpickers_layout = pn.Column()
+        self.strings_to_label_layout = pn.Column()
+        self.confirm_label_button = pn.widgets.Button(name = "Confirm", button_type = "success",
+                                                      max_height = 40, max_width = 80,
+                                                       visible = False)
+        self.confirm_label_button.on_click(self._confirm_labels_change_cb)
+    
+    def _update_labels_cb(self, event):
+        selected_label_column = event.new
+        if (selected_label_column not in self.df.columns) or (selected_label_column == "No Labels"):
+            self.labels = []
+        else:
+            self.label_type = get_series_type(self.df[selected_label_column])
+            if self.label_type == "mixed": # strings and numbers are in the column
+                self.df[selected_label_column] = self.df[selected_label_column].astype(str)
+                self.label_type = "string"
+            elif self.label_type == "bool":
+                self.df[selected_label_column] = self.df[selected_label_column].astype(int)
+                self.label_type = "int"
+            if len(self.df[selected_label_column].unique()) > 20:
+                print(
+                """You have chosen a column with too many unique values (possibly continous) please choose a column with a smaller set of labels (<=20)"""
+                )
+                return
+            
+            self.labels = sorted(self.df[selected_label_column].unique())
+            self._update_label_strings_input()
+            self._update_colours_input()
+        self.confirm_label_button.visible = True
 
+    def _confirm_labels_change_cb(self, event):
+        self.strings_to_label_layout.clear()
+        self.colorpickers_layout.clear()
+        config.settings["label_col"] = self.label_selector.value
+        config.settings["labels"] = self.labels
+        config.settings["labels_to_strings"], config.settings["strings_to_labels"] = self.get_label_strings()
+        config.settings["label_colours"] = self.get_label_colours()
+        self.confirm_label_button.visible = False
+            
+
+    def _update_label_strings_input(self):
+        self.strings_to_label_layout.clear()
+        self.label_to_strings_param ={}
+        for i, data_label in enumerate(self.labels):
+            text_input = pn.widgets.TextInput(name=f"{data_label}", placeholder=f"{data_label}")
+            self.label_to_strings_param[f"{data_label}"] = text_input
+        self.strings_to_label_layout.extend(self.label_to_strings_param.values())
+
+
+    def _update_colours_input(self):
+        self.colorpickers_layout.clear()
+        self.colours_param = {}
+
+        colour_list = [
+            "#1f77b4",
+            "#ff7f0e",
+            "#2ca02c",
+            "#d62728",
+            "#9467bd",
+            "#8c564b",
+            "#e377c2",
+            "#7f7f7f",
+            "#bcbd22",
+            "#17becf",
+        ]
+        for i, label in enumerate(self.labels):
+            picker = pn.widgets.ColorPicker(name= str(label),
+                    value=colour_list[i % len(colour_list)],
+                    max_width=int(200 / len(self.labels)),)
+            self.colours_param[label] = picker
+        self.colorpickers_layout.extend(self.colours_param.values())
+
+    def get_label_strings(self):
+        labels_to_strings = {}
+        strings_to_labels = {}
+
+        for label in self.labels:
+            value = self.label_to_strings_param[f"{label}"].value
+            if value == "":
+                value = str(label)
+            labels_to_strings[f"{label}"] = value
+            strings_to_labels[f"{value}"] = label
+        return labels_to_strings, strings_to_labels
+    
+
+    def get_label_colours(self):
+        colours = {key : param_obj.value for key, param_obj in self.colours_param.items()}
+        return colours
+
+
+    
     def get_layout(self):
         return pn.Column(pn.Param(self, parameters = ["index"], widgets={"index": pn.widgets.IntInput}),
                          pn.Column(self.extra_info_pane, sizing_mode = "stretch_both", scroll = True, max_height = 200),
@@ -295,8 +396,10 @@ class ExplorationDashboard(param.Parameterized):
                                 self.column_selector,
                                 ),
                          self.sourceid_input,
-                         pn.Row(self.prev_button,self.next_button, self.search_button), sizing_mode = "stretch_both")
-
+                         pn.Row(self.prev_button,self.next_button, self.search_button), 
+                         pn.Row(self.label_selector, pn.Column(self.colorpickers_layout, self.strings_to_label_layout), self.confirm_label_button),
+                         sizing_mode = "stretch_both")
+    
 
     def mypanel(self):
         layout = self.get_layout()
@@ -312,4 +415,6 @@ class ExplorationDashboard(param.Parameterized):
             
     def cleanup_panel_plot(self):
         self.remove_shared_data()
+
+
 

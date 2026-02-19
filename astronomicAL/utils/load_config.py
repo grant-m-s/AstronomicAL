@@ -146,6 +146,7 @@ def verify_import_config(curr_config_file):
                 "Active Learning",
                 "Basic Plot",
                 "Histogram Plot",
+                "Density Plot",
                 "Labelling",
                 'Exploring',
                 "Selected Source Info",
