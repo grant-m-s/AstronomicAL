@@ -1,14 +1,22 @@
-numpy
-bokeh
-panel
-astropy
-pandas
-modAL-python
-holoviews
-datashader
-coverage
-pytest
-jinja2
-scikit-learn
+astropy==5.3.4
+astroquery==0.4.10
+bokeh==3.7.2
+coverage==7.8.0
 dask[dataframe]
-urllib3
+datashader==0.18.0
+holoviews==1.20.2
+Jinja2==3.1.6
+matplotlib==3.8.4
+mocpy==0.17.1
+modAL-python==0.4.2.1
+pandas==2.1.4
+panel==1.6.3
+pytest==8.3.5
+reproject==0.14.1
+scikit-learn==1.4.1.post1
+sparclclient==1.2.4
+urllib3==2.4.0
+
+
+#To have the histogram work with yscale = log holoviews must be pip installed from github. See https://github.com/holoviz/holoviews/pull/6575/files.
+#pip install holoviews doesn't track that merged pull request yet

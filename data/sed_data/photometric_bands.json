@@ -1,0 +1,97 @@
+{
+    "u": {
+        "name": "LSST.u",
+        "wavelength": 3751.2,
+        "FWHM": 473.19
+    },
+    "g": {
+        "name": "LSST.g",
+        "wavelength": 4740.66,
+        "FWHM": 1253.26
+    },
+    "r": {
+        "name": "LSST.r",
+        "wavelength": 6172.34,
+        "FWHM": 1206.92
+    },
+    "i": {
+        "name": "LSST.i",
+        "wavelength": 7500.97,
+        "FWHM": 1174.77
+    },
+    "z": {
+        "name": "LSST.z",
+        "wavelength": 8678.9,
+        "FWHM": 997.51
+    },
+    "y": {
+        "name": "LSST.y",
+        "wavelength": 9711.82,
+        "FWHM": 871.831
+    },
+    "J": {
+        "name": "VISTA.J",
+        "wavelength": 12481.04,
+        "FWHM": 1541.38
+    },
+    "H": {
+        "name": "VISTA.H",
+        "wavelength": 16347.74,
+        "FWHM": 2673.17
+    },
+    "Ks": {
+        "name": "VISTA.Ks",
+        "wavelength": 21435.42,
+        "FWHM": 2793.43
+    },
+    "W1": {
+        "name": "WISE.W1",
+        "wavelength": 33526.0,
+        "FWHM": 6626.42
+    },
+    "W2": {
+        "name": "WISE.W2",
+        "wavelength": 46028.0,
+        "FWHM": 10422.66
+    },
+    "W3": {
+        "name": "WISE.W3",
+        "wavelength": 115608.0,
+        "FWHM": 55055.23
+    },
+    "W4": {
+        "name": "WISE.W4",
+        "wavelength": 220883.0,
+        "FWHM": 41016.8
+    },
+    "VIS": {
+        "name": "Euclid.VIS",
+        "wavelength": 6869.74,
+        "FWHM": 3318.32
+    },
+    "NISP.Y": {
+        "name": "Euclid.NISP.Y",
+        "wavelength": 10688.6,
+        "FWHM": 2332.48
+    },
+    "NISP.J": {
+        "name": "Euclid.NISP.J",
+        "wavelength": 13422.62,
+        "FWHM": 3554.06
+    },
+    "NISP.H": {
+        "name": "Euclid.NISP.H",
+        "wavelength": 17410.63,
+        "FWHM": 4563.68
+    },
+    "FUV": {
+        "name": "Galex FUV",
+        "wavelength": 1548.85,
+        "FWHM": 266
+    },
+    "NUV": {
+        "name": "Galex NUV",
+        "wavelength": 2303.37,
+        "FWHM": 768
+    }
+}

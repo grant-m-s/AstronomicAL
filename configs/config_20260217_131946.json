@@ -1,0 +1,135 @@
+{
+    "Author": "",
+    "doi": "",
+    "dataset_filepath": "data/for_astronomical.fits",
+    "optimise_data": true,
+    "layout": {
+        "0": {
+            "x": 0,
+            "y": 0,
+            "w": 3,
+            "h": 4,
+            "contents": "Exploring"
+        },
+        "1": {
+            "x": 3,
+            "y": 0,
+            "w": 3,
+            "h": 4,
+            "contents": "Euclid Cutout"
+        },
+        "2": {
+            "x": 0,
+            "y": 4,
+            "w": 5,
+            "h": 4,
+            "contents": "Aladin Lite"
+        },
+        "3": {
+            "x": 5,
+            "y": 4,
+            "w": 6,
+            "h": 4,
+            "contents": "DESI Spectra"
+        },
+        "4": {
+            "x": 6,
+            "y": 13,
+            "w": 5,
+            "h": 4,
+            "contents": "Menu"
+        },
+        "5": {
+            "x": 6,
+            "y": 0,
+            "w": 5,
+            "h": 4,
+            "contents": "BroadBand SED"
+        }
+    },
+    "id_col": "ids",
+    "label_col": "SPECTYPE_desi",
+    "labels": [
+        "GALAXY",
+        "QSO",
+        "nan"
+    ],
+    "label_colours": {
+        "GALAXY": "#1f77b4",
+        "QSO": "#ff7f0e",
+        "nan": "#2ca02c"
+    },
+    "labels_to_strings": {
+        "GALAXY": "GALAXY",
+        "QSO": "QSO",
+        "nan": "nan"
+    },
+    "strings_to_labels": {
+        "GALAXY": "GALAXY",
+        "QSO": "QSO",
+        "nan": "nan"
+    },
+    "ra_col_name": "right_ascension_euclid",
+    "dec_col_name": "declination_euclid",
+    "extra_info_cols": [
+        "mag_vis"
+    ],
+    "Euclid_cutout_settings": {
+        "filter": "Color",
+        "radius": 5.0,
+        "stretching": "Asinh",
+        "clipping": [
+            0,
+            1
+        ],
+        "gamma": [
+            1,
+            1,
+            1
+        ],
+        "source_coordinates": false,
+        "levels": 0,
+        "scale": "minmax"
+    },
+    "SED_bands": {
+        "u": "flux_u",
+        "g": "flux_g",
+        "r": "flux_r",
+        "i": "flux_i",
+        "z": "flux_z",
+        "W1": "flux_w1",
+        "W2": "flux_w2",
+        "NISP.Y": "flux_y",
+        "NISP.J": "flux_j",
+        "NISP.H": "flux_h",
+        "FUV": "flux_fuv",
+        "NUV": "flux_nuv",
+        "err_u": "fluxerr_u",
+        "err_g": "fluxerr_g",
+        "err_r": "fluxerr_r",
+        "err_i": "fluxerr_i",
+        "err_z": "fluxerr_z",
+        "err_W1": "fluxerr_w1",
+        "err_W2": "fluxerr_w2",
+        "err_NISP.Y": "fluxerr_y",
+        "err_NISP.J": "fluxerr_j",
+        "err_NISP.H": "fluxerr_h",
+        "err_FUV": "fluxerr_fuv",
+        "err_NUV": "fluxerr_nuv"
+    },
+    "SED_units": {
+        "u": "microJy",
+        "g": "microJy",
+        "r": "microJy",
+        "i": "microJy",
+        "z": "microJy",
+        "W1": "microJy",
+        "W2": "microJy",
+        "NISP.Y": "microJy",
+        "NISP.J": "microJy",
+        "NISP.H": "microJy",
+        "FUV": "microJy",
+        "NUV": "microJy"
+    },
+    "classifiers": {}
+}

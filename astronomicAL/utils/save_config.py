@@ -7,7 +7,7 @@ import numpy as np
 
 save_layout_js_cb = """
 function FindReact(dom, traverseUp = 0) {
-const key = Object.keys(dom).find(key=>key.startsWith("__reactInternalInstance$"));
+const key = Object.keys(dom).find(key=>key.startsWith("__reactFiber$"));
 const domFiber = dom[key];
 if (domFiber == null) return null;
 
@@ -59,10 +59,20 @@ class NumpyEncoder(json.JSONEncoder):
         elif isinstance(obj, np.ndarray):
             return obj.tolist()
         return json.JSONEncoder.default(self, obj)
+    
+
+
 
 
 def save_config_file_cb(attr, old, new, trigger_text, autosave):
     save_config_file(new, trigger_text=trigger_text, autosave=autosave)
+
+
+
+def update_export_config(export_config, settings, key):
+    if key in settings:
+        export_config[key] = settings[key]
+    return export_config
 
 
 def save_config_file(layout_from_js, trigger_text, autosave=False, test=False):
@@ -90,21 +100,44 @@ def save_config_file(layout_from_js, trigger_text, autosave=False, test=False):
     export_config["layout"] = layout
     export_config["id_col"] = config.settings["id_col"]
     export_config["label_col"] = config.settings["label_col"]
-    export_config["default_vars"] = config.settings["default_vars"]
     export_config["labels"] = config.settings["labels"]
     export_config["label_colours"] = config.settings["label_colours"]
     export_config["labels_to_strings"] = config.settings["labels_to_strings"]
     export_config["strings_to_labels"] = config.settings["strings_to_labels"]
-    export_config["extra_info_cols"] = config.settings["extra_info_cols"]
-    export_config["extra_image_cols"] = config.settings["extra_image_cols"]
-    export_config["labels_to_train"] = config.settings["labels_to_train"]
-    export_config["features_for_training"] = config.settings["features_for_training"]
-    export_config["exclude_labels"] = config.settings["exclude_labels"]
-    export_config["exclude_unknown_labels"] = config.settings["exclude_unknown_labels"]
-    export_config["unclassified_labels"] = config.settings["unclassified_labels"]
-    export_config["scale_data"] = config.settings["scale_data"]
-    export_config["feature_generation"] = config.settings["feature_generation"]
-    export_config["test_set_file"] = config.settings["test_set_file"]
+    export_config["ra_col_name"] = config.settings["ra_col_name"]
+    export_config["dec_col_name"] = config.settings["dec_col_name"]
+
+    #Settings not required in Exploring mode
+    key_list = ["default_vars",
+                "extra_info_cols", 
+                "extra_info_cols", 
+                "extra_image_cols",
+                "labels_to_train",
+                "features_for_training",
+                "exclude_labels",
+                "exclude_unknown_labels",
+                "unclassified_labels",
+                "scale_data",
+                "feature_generation",
+                "test_set_file"]
+    for key in key_list:
+        export_config = update_export_config(export_config, config.settings, key)
+
+    for i in layout:
+        curr_contents = config.dashboards[i].contents
+        if curr_contents == "BroadBand SED":
+            export_config["SED_bands"] = config.settings["SED_bands"]
+            export_config["SED_units"] = config.settings["SED_units"]
+        
+        elif curr_contents == "Euclid Cutout":
+            export_config["Euclid_cutout_settings"] = config.settings["Euclid_cutout_settings"]
+        
+        elif curr_contents == "Basic Plot":
+            export_config["Scatter_plot_settings"] = config.settings["Scatter_plot_settings"]
+
+        elif curr_contents == "Histogram Plot":
+            export_config["Histogram_plot_settings"] = config.settings["Histogram_plot_settings"]
+
 
     if "classifiers" not in config.settings.keys():
         config.settings["classifiers"] = {}
@@ -114,15 +147,15 @@ def save_config_file(layout_from_js, trigger_text, autosave=False, test=False):
     if autosave:
         print("AUTOSAVING...")
         with open("configs/autosave.json", "w") as fp:
-            json.dump(export_config, fp, cls=NumpyEncoder)
+            json.dump(export_config, fp, cls=NumpyEncoder, indent=4)
     elif test:
         with open(f"configs/config_export.json", "w") as fp:
-            json.dump(export_config, fp, cls=NumpyEncoder)
+            json.dump(export_config, fp, cls=NumpyEncoder, indent=4)
     else:
         now = datetime.now()
-        dt_string = now.strftime("%Y%m%d_%H:%M:%S")
+        dt_string = now.strftime("%Y%m%d_%H%M%S")
         with open(f"configs/config_{dt_string}.json", "w") as fp:
-            json.dump(export_config, fp, cls=NumpyEncoder)
+            json.dump(export_config, fp, cls=NumpyEncoder, indent=4)
 
         print(f"Final Export Config Settings: {export_config}")
         print(f"Config File saved to: configs/config_{dt_string}.json")
