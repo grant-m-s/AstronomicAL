@@ -2,6 +2,8 @@
 # astronomicAL specific
 data/cutouts
 models
+data/
+data/*.fits
 
 #Added by Ivano
 .venv*/
