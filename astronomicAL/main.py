@@ -14,8 +14,6 @@ pn.extension()
 hv.extension("bokeh")
 hv.renderer("bokeh").webgl = True
 
-
-
 def export_fits_file_cb(event):
 
     list_ids = []
@@ -75,7 +73,11 @@ def export_fits_file_cb(event):
 
 files = pn.widgets.FileInput()
 
-react = pn.template.ReactTemplate(title="astronomicAL")
+react = pn.template.ReactTemplate(
+    title="astronomicAL",
+    compact="vertical",
+    prevent_collision=False,
+    )
 
 pn.config.sizing_mode = "stretch_both"
 
