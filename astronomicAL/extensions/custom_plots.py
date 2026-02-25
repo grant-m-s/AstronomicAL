@@ -365,7 +365,7 @@ class CustomPlotClass(param.Parameterized):
 
         return pn.Column(toolbar, self.layout, sizing_mode="stretch_both", min_height =450,)
     
-    @param.depends("stage")                        
+    @param.depends("stage")                
     def mypanel(self):
         if self.stage == "columns_selection":
             return self.columns_selection_panel(self.unknown_columns)
@@ -380,21 +380,22 @@ class EuclidPlotClass(CustomPlotClass):
         self._src_callback = self._change_source_cb
         self.src.on_change("data", self._src_callback)
         self._initialize_settings_dictionary()
-
+        self.euclid_object = None
+        self._initialise_euclid_object()
         self.euclid_pane = pn.pane.HoloViews(width=400, height=400) #euclid_pane = Euclid cutout, figure = euclid_pane+overplotted_coordinates
         self.filter = self._get_from_settings_dictionary("filter", "Color")
         self.radius = self._get_from_settings_dictionary("radius", 5.0)
         
 
     def _change_source_cb(self, attr, old, new):
-        self.stored_spectrum_coordinates = {}
         initialised = self._initialise_euclid_object()
+        self.stored_spectrum_coordinates = {}
         if initialised:
             self._run_euclid()
 
     def get_layout(self):
-        self._initialise_widgets()
         initialised = self._initialise_euclid_object()
+        self._initialise_widgets()
         self._manage_subscriptions()
         if initialised:
             self._run_euclid()
@@ -585,13 +586,13 @@ class EuclidPlotClass(CustomPlotClass):
         
         self.radius_input.param.watch(self._update_radius, "value")
         self.stretching_input.param.watch(self._update_stretching, "value")
-        self.contrast_scaler.param.watch(self._general_parameter_callabck, "value")  
-        self.scale_input.param.watch(self._general_parameter_callabck, "value")  
-        self.filter_input.param.watch(self._general_parameter_callabck, "value")
-        self.overplot_source_coords_widget.param.watch(self._general_parameter_callabck, "value")
+        self.contrast_scaler.param.watch(self._general_parameter_callback, "value")  
+        self.scale_input.param.watch(self._general_parameter_callback, "value")  
+        self.filter_input.param.watch(self._general_parameter_callback, "value")
+        self.overplot_source_coords_widget.param.watch(self._general_parameter_callback, "value")
         self.overplot_coords_widget.param.watch(self._overplot_coordinates_callback, "value")
-        self.contour_levels_input.param.watch(self._general_parameter_callabck, "value")
-        self.contour_levels_scale_input.param.watch(self._general_parameter_callabck, "value")
+        self.contour_levels_input.param.watch(self._general_parameter_callback, "value")
+        self.contour_levels_scale_input.param.watch(self._general_parameter_callback, "value")
 
 
 
@@ -666,7 +667,7 @@ class EuclidPlotClass(CustomPlotClass):
         else:
             print("Input a valid value for radius")
     
-    def _general_parameter_callabck(self, event):
+    def _general_parameter_callback(self, event):
         if hasattr(self.euclid_object, "plot_data"):
             self.filter = self.filter_input.value
             self._update_all_settings_dictionary()
