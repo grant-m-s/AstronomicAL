@@ -2,18 +2,146 @@
 import panel as pn
 import json
 import os
+import time
 import uuid
 
+from datetime import datetime
 import numpy as np
+import pandas as pd
 from astropy.table import Table
 import astronomicAL.config as config
 from astronomicAL.dashboard.dashboard import Dashboard
+from astronomicAL.extensions.dynamic_react_layout import DynamicReactGrid
 from astronomicAL.extensions.extension_plots import get_plot_dict
 from astronomicAL.extensions.custom_plots import get_customplot_dict
 from astronomicAL.extensions.feature_generation import get_oper_dict
 from astronomicAL.extensions.models import get_classifiers
 from astronomicAL.extensions.query_strategies import get_strategy_dict
 from astronomicAL.settings.data_selection import DataSelection
+
+
+def create_header(react, grid, config):
+    """
+    Build and attach the app header row.
+
+    Parameters
+    ----------
+    react: pn.template.ReactTemplate (or compatible)
+    grid: the dynamic grid instance (react._dynamic_grid)
+    config: astronomicAL.config module (or object providing the same API)
+    """
+
+    if not hasattr(react, "_header_box"):
+        react._header_box = pn.Row(sizing_mode="stretch_width")
+        react.header.append(react._header_box)
+
+    export_fits_file_button = pn.widgets.Button(name="Export Labelled Data to Fits File")
+
+    def _close_from_js(event):
+        tile_id = event.new
+        if not tile_id:
+            return
+
+        # Not found -> just clear the signal
+        if tile_id not in grid.keys:
+            grid.close_key = ""
+            return
+
+        idx = grid.keys.index(tile_id)
+
+        # Remove from every breakpoint layout
+        new_layouts = {}
+        for bp, bp_layout in (grid.layouts or {}).items():
+            new_layouts[bp] = [it for it in (bp_layout or []) if str(it.get("i")) != str(tile_id)]
+
+        config.dashboards.pop(tile_id, None)
+        # Update all in one go (prevents flicker / intermediate inconsistent states)
+        grid.param.update(
+            keys=[k for k in grid.keys if k != tile_id],
+            objects=[obj for i, obj in enumerate(grid.objects) if i != idx],
+            layouts=new_layouts,
+            close_key="",
+        )
+
+    if not getattr(grid, "_close_watcher_attached", False):
+        grid.param.watch(_close_from_js, "close_key")
+        grid._close_watcher_attached = True
+
+    def export_fits_file_cb(event):
+        list_ids = []
+        list_labels = []
+
+        if config.settings.get("confirmed"):
+            if "classifiers" in config.settings:
+                for label in config.settings["classifiers"]:
+                    entry = config.settings["classifiers"][label]
+                    if ("id" in entry) and ("y" in entry):
+                        list_ids.extend(entry["id"])
+                        list_labels.extend(entry["y"])
+
+            # include test-set labels (if configured)
+            orig_labelled_data = {}
+            if config.settings.get("test_set_file"):
+                if os.path.exists("data/test_set.json"):
+                    with open("data/test_set.json", "r") as f:
+                        orig_labelled_data = json.load(f)
+                for _id, _lab in orig_labelled_data.items():
+                    list_ids.append(_id)
+                    list_labels.append(_lab)
+
+        if list_ids:
+            exported_labels = pd.DataFrame({"id": list_ids, "label": list_labels}, dtype="string")
+
+            from astronomicAL.utils.save_config import save_dataframe_to_fits
+
+            dt_string = datetime.now().strftime("%Y%m%d_%H:%M:%S")
+            path = f"data/labelled_data_{dt_string}.fits"
+            save_dataframe_to_fits(exported_labels, path)
+
+            export_fits_file_button.disabled = True
+            export_fits_file_button.name = f"{len(list_ids)} labelled sources saved to '{path}'"
+            time.sleep(3)
+            export_fits_file_button.name = "Export Labelled Data to Fits File"
+            export_fits_file_button.disabled = False
+        else:
+            export_fits_file_button.disabled = True
+            export_fits_file_button.name = "No Labelled Data Found"
+            time.sleep(3)
+            export_fits_file_button.name = "Export Labelled Data to Fits File"
+            export_fits_file_button.disabled = False
+
+    export_fits_file_button.on_click(export_fits_file_cb)
+
+    add_menu_btn = pn.widgets.Button(name="+", button_type="default", width=38, height=34)
+    add_menu_btn.styles = {
+        "font-size": "26px",
+        "font-weight": "700",
+        "line-height": "1",
+        "padding": "0",
+    }
+    add_menu_btn.css_classes = ["al-add-menu-btn"]
+    add_menu_btn.description = "Add Panel"
+
+    def _on_add_menu(_):
+        add_menu_panel(grid)
+
+    add_menu_btn.on_click(_on_add_menu)
+
+    header_row = pn.Row(
+        config.get_save_layout_button(config.settings.get("confirmed", False), True),
+        export_fits_file_button,
+        config.get_save_panel_data_button(config.settings.get("confirmed", False)),
+        config.get_save_logbook_button(config.settings.get("confirmed", False)),
+        add_menu_btn,
+        sizing_mode="stretch_width",
+    )
+
+    # IMPORTANT: replace contents, don’t append
+    react._header_box[:] = [header_row]
+    print("\n\n\n\n added header... \n")
+
+    return react
+
 
 def add_menu_panel(grid):
 
@@ -310,7 +438,7 @@ def update_config_settings(imported_config):
 # keep your existing imports: Dashboard, DataSelection, update_config_settings, config, etc.
 
 def create_layout_from_file(react):
-    from astronomicAL.extensions.dynamic_react_layout import DynamicReactGrid
+
     with open(config.layout_file) as layout_file:
         curr_config_file = json.load(layout_file)
 
@@ -442,10 +570,10 @@ def create_layout_from_file(react):
     print("Has _esm:", hasattr(grid, "_esm"), "len:", len(getattr(grid, "_esm", "") or ""))
     print("Keys:", len(grid.keys), "Objects:", len(grid.objects))
 
+    react = create_header(react, grid, config)
+
     return react
 
-
-from astronomicAL.extensions.dynamic_react_layout import DynamicReactGrid
 
 def create_default_layout(react):
     print("No Layout File Found. Reverting to default dashboard layout (DynamicReactGrid).")
@@ -492,11 +620,11 @@ def create_default_layout(react):
     # top-right: 6:12,0:5 -> w=6, h=5
     # bottom row: 0:4, 4:8, 8:12, rows 5:9 -> each w=4, h=4
     lg_layout = [
-        {"i": "settings", "x": 0, "y": 0, "w": 6, "h": 5},
-        {"i": "plot-0",   "x": 6, "y": 0, "w": 6, "h": 5},
-        {"i": "plot-1",   "x": 0, "y": 5, "w": 4, "h": 4},
-        {"i": "plot-2",   "x": 4, "y": 5, "w": 4, "h": 4},
-        {"i": "plot-3",   "x": 8, "y": 5, "w": 4, "h": 4},
+        {"i": "settings", "x": 0, "y": 0, "w": 6, "h": 8},
+        {"i": "plot-0",   "x": 6, "y": 0, "w": 6, "h": 8},
+        {"i": "plot-1",   "x": 0, "y": 8, "w": 4, "h": 4},
+        {"i": "plot-2",   "x": 4, "y": 8, "w": 4, "h": 4},
+        {"i": "plot-3",   "x": 8, "y": 8, "w": 4, "h": 4},
     ]
 
     # Generate md/sm from lg (3 across / 2 across / 1 across)
@@ -526,6 +654,8 @@ def create_default_layout(react):
 
     # store reference so existing save buttons can find it later if needed
     react._dynamic_grid = grid
+
+    react = create_header(react, grid, config)
 
     return react
 
@@ -807,13 +937,3 @@ def verify_plot_config(curr_config_file, table, has_error, error_message):
                     ##config_dict is not a dict, but this is already catched verify_config_dict
                     pass
     return has_error, error_message
-
-
-
-
-
-
-
-
-
-                                       

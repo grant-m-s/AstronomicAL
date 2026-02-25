@@ -421,6 +421,8 @@ class ActiveLearningModel:
 
         self.assign_label_group.value = "Unsure"
 
+        self.assign_label_group.css_classes = ["al-labels"]
+
         self.assign_label_button = pn.widgets.Button(
             name="Assign Label",
             button_type="primary",
@@ -569,8 +571,8 @@ class ActiveLearningModel:
 
         self.active_tab = 0
 
-        self.setup_row = pn.Row("Loading")
-        self.panel_row = pn.Row("Loading")
+        self.setup_row = pn.Column("Loading...", sizing_mode="stretch_width", margin=(0, 0, 0, 0))
+        self.panel_row = pn.Column("Loading...", sizing_mode="stretch_both", margin=(0, 0, 0, 0))
 
         self.conf_mat_tr_tn = "TN"
         self.conf_mat_tr_fn = "FN"
@@ -2155,10 +2157,9 @@ class ActiveLearningModel:
             pn.Row(
                 self._train_tab_colour_switch,
                 max_height=35,
-                max_width=500,
                 sizing_mode="stretch_width",
             ),
-            pn.Row(full_plot, sizing_mode="stretch_both"),
+            full_plot,
             sizing_mode="stretch_both",
             name="Training Set",
         )
@@ -2281,84 +2282,58 @@ class ActiveLearningModel:
             ).options(show_legend=True)
         ).opts(legend_position="bottom_right", toolbar=None, default_tools=[])
 
+
+    def _cm_block(self, title, scores_text, tn, fp, fn, tp):
+        html = f"""
+        <div class="al-cm">
+        <h4>{title}</h4>
+        <div class="metrics">{scores_text}</div>
+        <table>
+            <tr>
+            <th></th>
+            <th>Predicted 0</th>
+            <th>Predicted 1</th>
+            </tr>
+            <tr>
+            <td class="rowhdr">Actual 0</td>
+            <td class="diag">{tn}</td>
+            <td class="offd">{fp}</td>
+            </tr>
+            <tr>
+            <td class="rowhdr">Actual 1</td>
+            <td class="offd">{fn}</td>
+            <td class="diag">{tp}</td>
+            </tr>
+        </table>
+        </div>
+        """
+        return pn.pane.HTML(html, sizing_mode="stretch_width", margin=(0,0,0,0))
+
     def _add_conf_matrices(self):
         if not self._show_test_results:
+            tr_scores = f"Acc: {self._train_scores['acc']}, Prec: {self._train_scores['prec']}, Rec: {self._train_scores['rec']}, F1: {self._train_scores['f1']}"
+            val_scores = f"Acc: {self._val_scores['acc']}, Prec: {self._val_scores['prec']}, Rec: {self._val_scores['rec']}, F1: {self._val_scores['f1']}"
+
             return pn.Column(
-                pn.pane.Markdown(
-                    "**Training Set:**",
-                    # sizing_mode="fixed",
-                    margin=(0, 0, 0, 0),
-                ),
-                pn.pane.Markdown(
-                    f"Acc: {self._train_scores['acc']}, Prec: {self._train_scores['prec']}, Rec: {self._train_scores['rec']}, F1: {self._train_scores['f1']}",
-                    # sizing_mode="fixed",
-                ),
-                pn.Row(
-                    pn.Column(
-                        pn.Row("", max_height=30),
-                        pn.Row("Actual 0", min_height=50),
-                        pn.Row("Actual 1", min_height=50),
-                    ),
-                    pn.Column(
-                        pn.Row("Predicted 0", max_height=30),
-                        pn.Row(pn.pane.Str(self.conf_mat_tr_tn), min_height=50),
-                        pn.Row(pn.pane.Str(self.conf_mat_tr_fn), min_height=50),
-                    ),
-                    pn.Column(
-                        pn.Row("Predicted 1", max_height=30),
-                        pn.Row(pn.pane.Str(self.conf_mat_tr_fp), min_height=50),
-                        pn.Row(pn.pane.Str(self.conf_mat_tr_tp), min_height=50),
-                    ),
-                ),
-                pn.layout.Divider(max_height=5, margin=(0, 0, 0, 0)),
-                pn.pane.Markdown("**Validation Set:**", sizing_mode="fixed"),
-                pn.pane.Markdown(
-                    f"Acc: {self._val_scores['acc']}, Prec: {self._val_scores['prec']}, Rec: {self._val_scores['rec']}, F1: {self._val_scores['f1']}",
-                    # sizing_mode="fixed",
-                ),
-                pn.Row(
-                    pn.Column(
-                        pn.Row("", max_height=30),
-                        pn.Row("Actual 0", min_height=50),
-                        pn.Row("Actual 1", min_height=50),
-                    ),
-                    pn.Column(
-                        pn.Row("Predicted 0", max_height=30),
-                        pn.Row(pn.pane.Str(self.conf_mat_val_tn), min_height=50),
-                        pn.Row(pn.pane.Str(self.conf_mat_val_fn), min_height=50),
-                    ),
-                    pn.Column(
-                        pn.Row("Predicted 1", max_height=30),
-                        pn.Row(pn.pane.Str(self.conf_mat_val_fp), min_height=50),
-                        pn.Row(pn.pane.Str(self.conf_mat_val_tp), min_height=50),
-                    ),
-                ),
+                self._cm_block("Training Set", tr_scores,
+                        self.conf_mat_tr_tn, self.conf_mat_tr_fp,
+                        self.conf_mat_tr_fn, self.conf_mat_tr_tp),
+                pn.Spacer(height=12),
+                self._cm_block("Validation Set", val_scores,
+                        self.conf_mat_val_tn, self.conf_mat_val_fp,
+                        self.conf_mat_val_fn, self.conf_mat_val_tp),
+                sizing_mode="stretch_width",
+                margin=(0,0,0,0),
             )
         else:
+            test_scores = f"Acc: {self._test_scores['acc']}, Prec: {self._test_scores['prec']}, Rec: {self._test_scores['rec']}, F1: {self._test_scores['f1']}"
+
             if (not self._show_caution) or (self._seen_caution):
                 return pn.Column(
-                    pn.pane.Markdown("Test Set:", sizing_mode="fixed"),
-                    pn.pane.Markdown(
-                        f"Acc: {self._test_scores['acc']}, Prec: {self._test_scores['prec']}, Rec: {self._test_scores['rec']}, F1: {self._test_scores['f1']}",
-                        # sizing_mode="fixed",
-                    ),
-                    pn.Row(
-                        pn.Column(
-                            pn.Row("", max_height=30),
-                            pn.Row("Actual 0", min_height=50),
-                            pn.Row("Actual 1", min_height=50),
-                        ),
-                        pn.Column(
-                            pn.Row("Predicted 0", max_height=30),
-                            pn.Row(pn.pane.Str(self.conf_mat_test_tn), min_height=50),
-                            pn.Row(pn.pane.Str(self.conf_mat_test_fn), min_height=50),
-                        ),
-                        pn.Column(
-                            pn.Row("Predicted 1", max_height=30),
-                            pn.Row(pn.pane.Str(self.conf_mat_test_fp), min_height=50),
-                            pn.Row(pn.pane.Str(self.conf_mat_test_tp), min_height=50),
-                        ),
-                    ),
+                    self._cm_block("Test Set", test_scores,
+                        self.conf_mat_test_tn, self.conf_mat_test_fp,
+                        self.conf_mat_test_fn, self.conf_mat_test_tp),
+                    pn.Spacer(height=12),
                     pn.pane.Markdown(
                         """
                         Please remember to cite our software if you publish these results. See the [Citing page](https://astronomical.readthedocs.io/en/latest/content/other/citing.html) in the documentation for instructions about referencing and citing the astronomicAL software.
@@ -2459,17 +2434,57 @@ class ActiveLearningModel:
             )
         else:
 
-            self.setup_row[0] = pn.Column(
-                pn.widgets.StaticText(
-                    name="Number of points trained on",
-                    value=f"{self.curr_num_points}",
-                ),
+            self.setup_row[0] = pn.widgets.StaticText(
+                name="Number of points trained on",
+                value=f"{self.curr_num_points}",
+                height=24,
+                sizing_mode="fixed",
             )
 
     def _update_tab_plots_cb(self, attr, old, new):
 
         self.tabs_view[0] = self._train_tab()
         self.tabs_view[2] = self._val_tab()
+
+    def _footer(self, selected_message):
+        # Row 1: label group + assign
+        row1 = pn.Row(
+            self.assign_label_group,
+            self.assign_label_button,
+            sizing_mode="stretch_width",
+            margin=(0, 0, 0, 0),
+        )
+        self.assign_label_button.width = 140
+        self.assign_label_button.sizing_mode = "fixed"
+
+        # Row 2: status + actions
+        self.show_queried_button.width = 220
+        self.show_queried_button.sizing_mode = "fixed"
+
+        self.checkpoint_button.width = 140
+        self.checkpoint_button.sizing_mode = "fixed"
+
+        self.request_test_results_button.width = 160
+        self.request_test_results_button.sizing_mode = "fixed"
+
+        status = pn.pane.Markdown(
+            selected_message.object if hasattr(selected_message, "object") else str(selected_message),
+            styles=selected_message.styles if hasattr(selected_message, "styles") else {},
+            sizing_mode="stretch_width",
+            margin=(6, 10, 0, 0),
+            css_classes=["al-status"],
+        )
+
+        row2 = pn.Row(
+            status,
+            self.show_queried_button,
+            self.checkpoint_button,
+            self.request_test_results_button,
+            sizing_mode="stretch_width",
+            margin=(0, 0, 0, 0),
+        )
+
+        return pn.Column(row1, row2, sizing_mode="stretch_width", css_classes=["al-footer"])
 
     def _panel_cb(self, attr, old, new):
         if self._training:
@@ -2500,7 +2515,8 @@ class ActiveLearningModel:
             ("Validation Set", self._val_tab()),
             ("Scores", self._scores_tab()),
             active=self.active_tab,
-            # dynamic=True,
+            sizing_mode="stretch_both",
+            min_height=500,
         )
 
         if self._queried_is_selected:
@@ -2520,39 +2536,23 @@ class ActiveLearningModel:
 
             self.setup_panel()
 
-            buttons_row = pn.Row(max_height=30)
-            if self._training:
-                if self._assigned:
-                    buttons_row.append(self.next_iteration_button)
-                else:
-                    buttons_row = pn.Column(
-                        pn.Row(
-                            self.assign_label_group,
-                            self.assign_label_button,
-                            max_height=30,
-                            width_policy="max",
-                        ),
-                        pn.layout.VSpacer(max_height=5),
-                        pn.Row(
-                            selected_message,
-                            self.show_queried_button,
-                            self.checkpoint_button,
-                            self.request_test_results_button,
-                            width_policy="max",
-                            max_height=30,
-                            max_width=2000,
-                        ),
-                        max_height=70,
-                    )
+            if self._training and (not self._assigned):
+                buttons_row = self._footer(selected_message)
+            elif self._training and self._assigned:
+                buttons_row = pn.Row(self.next_iteration_button, sizing_mode="stretch_width")
+            else:
+                buttons_row = pn.Row()
 
             self.panel_row[0] = pn.Column(
-                pn.Row(self.setup_row),
+                self.setup_row,
                 pn.Row(
                     self.tabs_view,
-                    self._add_conf_matrices(),
+                    pn.Column(self._add_conf_matrices(), scroll=True, sizing_mode="stretch_both"),
+                    sizing_mode="stretch_both",
+                    styles={"align-items": "flex-start"},
                 ),
-                pn.Row(max_height=20),
                 buttons_row,
+                sizing_mode="stretch_both"
             )
             return self.panel_row
         else:
