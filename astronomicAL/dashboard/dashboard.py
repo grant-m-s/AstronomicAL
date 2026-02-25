@@ -51,7 +51,7 @@ class Dashboard(param.Parameterized):
         self.df = config.main_df
         self.current_extension_plot = None
         
-        self._close_button = pn.widgets.Button(name="Close", max_width=100)
+        self._close_button = pn.widgets.Button(name="Close", max_width=100, max_height=40)
         self._close_button.on_click(self._close_button_cb)
         
         self._submit_button = pn.widgets.Button(name="Submit Column Names")
@@ -199,10 +199,10 @@ class Dashboard(param.Parameterized):
         elif hasattr(self.panel_contents, "mypanel"):
             self.row[0] = self.panel_contents.mypanel
         else:
-            self.row[0] = pn.Card(
-                self.panel_contents,
-                header=pn.Row(self._close_button),
-                collapsible=False,
+            toolbar = pn.Row(self._close_button, max_height=50)
+            body = self.panel_contents
+            self.row[0] = pn.Column(
+                toolbar,body,
             )
 
         print("self.row dashboard:", self.row)

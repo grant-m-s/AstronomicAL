@@ -1,5 +1,4 @@
 import panel as pn
-pn.extension('tabulator')
 import param
 import os
 import uuid
@@ -403,9 +402,10 @@ class ExplorationDashboard(param.Parameterized):
 
     def mypanel(self):
         layout = self.get_layout()
-        return pn.Card(layout, 
-                      header = pn.Row(pn.Spacer(width=25,),),
-                        collapsible = False, sizing_mode="stretch_both")
+        toolbar = pn.Row(pn.Spacer(width=25,), max_height=50)
+        body = layout
+        return pn.Column(toolbar,body,
+               sizing_mode="stretch_both")
     
 
     def remove_shared_data(self):

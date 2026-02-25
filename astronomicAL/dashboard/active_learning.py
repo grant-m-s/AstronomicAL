@@ -63,5 +63,6 @@ class ActiveLearningDashboard:
             parent Dashboard.
 
         """
-        self.row[0] = pn.Card(self.al_tabs, collapsible=False)
+        body = self.al_tabs
+        self.row[0] = pn.Column(body)
         return self.row

@@ -347,19 +347,20 @@ class ScatterPlotDashboard(BasePlotClass):
 
     def panel(self):
         self._update_plot()
-        return pn.Card(
-                  pn.Column(
-                      pn.Row(self.figure, sizing_mode="scale_both"),
-                        self.settings_panel, scroll = True),
-                  header=pn.Row(
+
+        toolbar = pn.Row(
                         pn.Spacer(width=25,),
                         self.close_button,
                         pn.Row(self.param.X_variable, max_width=100),
                         pn.Row(self.param.Y_variable, max_width=100),
                         self.settings_button,
-                        max_width=400,
-                    ),
-            collapsible=False,
+                        max_width=400, max_height=50
+                    )
+        body = pn.Column(
+                      pn.Row(self.figure, sizing_mode="scale_both"),
+                        self.settings_panel, scroll = True)
+        return pn.Column(
+            toolbar, body,
             sizing_mode="stretch_both",
         )
 
@@ -586,19 +587,20 @@ class HistoDashboard(BasePlotClass):
 
     def panel(self):
         self._update_plot()
-        return pn.Card(
-                        pn.Column(
-                               pn.Row(self.figure, sizing_mode="scale_both"),
-                               self.settings_panel, scroll = True),
-                        header= pn.Row(
-                                   pn.Spacer(width=25),
-                                   self.close_button,
-                                   pn.Row(self.param.X_variable, max_width=100),
-                                   self.settings_button,
-                                   ),
-                                collapsible=False,
-                                sizing_mode="stretch_both",
-                        )
+
+        toolbar = pn.Row(
+                    pn.Spacer(width=25),
+                    self.close_button,
+                    pn.Row(self.param.X_variable, max_width=100),
+                    self.settings_button, max_height=50
+                )
+        body = pn.Column(
+                    pn.Row(self.figure, sizing_mode="scale_both"),
+                    self.settings_panel, scroll = True)
+        return pn.Column(
+                    toolbar, body,
+                        sizing_mode="stretch_both",
+                    )
     
 
 
@@ -816,19 +818,19 @@ class DensityPlotDashboard(BasePlotClass):
 
     def panel(self):
         self._update_plot()
-        return pn.Card(
-                  pn.Column(
-                      pn.Row(self.figure, sizing_mode="scale_both"),
-                        self.settings_panel, scroll = True),
-                  header=pn.Row(
+        toolbar = pn.Row(
                         pn.Spacer(width=25,),
                         self.close_button,
                         pn.Row(self.param.X_variable, max_width=100),
                         pn.Row(self.param.Y_variable, max_width=100),
                         self.settings_button,
-                        max_width=400,
-                    ),
-            collapsible=False,
+                        max_width=400, max_height=50
+                    )
+        body = pn.Column(
+                    pn.Row(self.figure, sizing_mode="scale_both"),
+                    self.settings_panel, scroll = True)
+        return pn.Column(
+            toolbar, body,
             sizing_mode="stretch_both",
         )
 
@@ -1051,9 +1053,7 @@ class PlotDashboard(param.Parameterized):
 
         """
 
-        self.row[0] = pn.Card(
-            pn.Row(self.plot, sizing_mode="stretch_both"),
-            header=pn.Row(
+        toolbar = pn.Row(
                 pn.Spacer(width=25,
                         #    sizing_mode="fixed"
                            ),
@@ -1061,9 +1061,15 @@ class PlotDashboard(param.Parameterized):
                 pn.Row(self.param.X_variable, max_width=100),
                 pn.Row(self.param.Y_variable, max_width=100),
                 max_width=400,
+                max_height=50
                 # sizing_mode="fixed",
-            ),
-            collapsible=False,
+            )
+        
+        body = pn.Row(self.plot, sizing_mode="stretch_both")
+
+        self.row[0] = pn.Column(
+            toolbar,
+            body,
             sizing_mode="stretch_both",
         )
         return self.row

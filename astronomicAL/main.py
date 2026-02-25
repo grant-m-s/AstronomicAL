@@ -1,3 +1,13 @@
+import panel as pn
+pn.extension("tabulator")
+
+print("pn.config.raw_css type:", type(pn.config.raw_css))
+print("pn.state._extensions:", getattr(pn.state, "_extensions", None))
+print("pn.state._loaded_extensions:", getattr(pn.state, "_loaded_extensions", None))
+
+
+
+
 import os
 import sys
 
@@ -5,14 +15,13 @@ sys.path.insert(1, os.path.join(sys.path[0], "../"))
 from astronomicAL.utils import load_config
 import astronomicAL.config as config
 import holoviews as hv
+hv.extension("bokeh")
+hv.renderer("bokeh").webgl = True
+
 import json
-import panel as pn
 import pandas as pd
 import time
 
-pn.extension()   
-hv.extension("bokeh")
-hv.renderer("bokeh").webgl = True
 
 def export_fits_file_cb(event):
 
@@ -74,7 +83,7 @@ def export_fits_file_cb(event):
 files = pn.widgets.FileInput()
 
 react = pn.template.ReactTemplate(
-    title="astronomicAL",
+    title="AstronomicAL",
     compact="vertical",
     prevent_collision=False,
     )
@@ -95,13 +104,57 @@ export_fits_file_button = pn.widgets.Button(
 
 export_fits_file_button.on_click(export_fits_file_cb)
 
+add_menu_btn = pn.widgets.Button(name="+", button_type="default", width=38, height=34)
+add_menu_btn.styles = {
+    "font-size": "26px",
+    "font-weight": "700",
+    "line-height": "1",
+    "padding": "0",
+}
+add_menu_btn.css_classes = ["al-add-menu-btn"]
+add_menu_btn.description = "Add Panel"
+
+grid = react._dynamic_grid
+def _on_add_menu(_):
+    load_config.add_menu_panel(grid)
+
+add_menu_btn.on_click(_on_add_menu)
+
+def _close_from_js(event):
+    tile_id = event.new
+    if not tile_id:
+        return
+
+    # Not found -> just clear the signal
+    if tile_id not in grid.keys:
+        grid.close_key = ""
+        return
+
+    idx = grid.keys.index(tile_id)
+
+    # Remove from every breakpoint layout
+    new_layouts = {}
+    for bp, bp_layout in (grid.layouts or {}).items():
+        new_layouts[bp] = [it for it in (bp_layout or []) if str(it.get("i")) != str(tile_id)]
+
+    config.dashboards.pop(tile_id, None)
+    # Update all in one go (prevents flicker / intermediate inconsistent states)
+    grid.param.update(
+        keys=[k for k in grid.keys if k != tile_id],
+        objects=[obj for i, obj in enumerate(grid.objects) if i != idx],
+        layouts=new_layouts,
+        close_key="",
+    )
+
+grid.param.watch(_close_from_js, "close_key")
 
 react.header.append(
     pn.Row(
         config.get_save_layout_button(config.settings["confirmed"], True),
         export_fits_file_button,
         config.get_save_panel_data_button(config.settings["confirmed"]),
-        config.get_save_logbook_button(config.settings["confirmed"])
+        config.get_save_logbook_button(config.settings["confirmed"]),
+        add_menu_btn
     )
 )
 

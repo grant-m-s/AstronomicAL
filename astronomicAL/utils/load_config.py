@@ -2,6 +2,8 @@
 import panel as pn
 import json
 import os
+import uuid
+
 import numpy as np
 from astropy.table import Table
 import astronomicAL.config as config
@@ -13,6 +15,78 @@ from astronomicAL.extensions.models import get_classifiers
 from astronomicAL.extensions.query_strategies import get_strategy_dict
 from astronomicAL.settings.data_selection import DataSelection
 
+def add_menu_panel(grid):
+
+    def _bp_geom(bp: str):
+        if bp == "lg":
+            return 4, 4   # w,h
+        if bp == "md":
+            return 6, 4
+        return 12, 4
+    
+    def _overlaps(a, b) -> bool:
+        return not (
+            a["x"] + a["w"] <= b["x"] or
+            b["x"] + b["w"] <= a["x"] or
+            a["y"] + a["h"] <= b["y"] or
+            b["y"] + b["h"] <= a["y"]
+        )
+
+    def find_first_fit(layout_items, cols: int, w: int, h: int) -> tuple[int, int]:
+        """
+        Find first free (x,y) for a w×h tile, scanning row-major:
+        y=0.., x=0..cols-w
+        """
+        items = [
+            {"x": int(it.get("x", 0)), "y": int(it.get("y", 0)),
+            "w": int(it.get("w", 1)), "h": int(it.get("h", 1))}
+            for it in (layout_items or [])
+            if it is not None
+        ]
+
+        max_y = 0
+        for it in items:
+            max_y = max(max_y, it["y"] + it["h"])
+
+        # search existing rows first, then a little beyond current max
+        for y in range(0, max_y + 100):  # 100 rows headroom; cheap scan
+            for x in range(0, cols - w + 1):
+                cand = {"x": x, "y": y, "w": w, "h": h}
+                if not any(_overlaps(cand, it) for it in items):
+                    return x, y
+
+        # fallback: append at bottom-left
+        return 0, max_y
+
+    numeric = [int(x) for x in grid.keys if str(x).isdigit()]
+    new_id = str(max(numeric) + 1) if numeric else f"menu-{uuid.uuid4().hex[:8]}"
+
+    dash = Dashboard(src=config.source, contents="Menu")
+    config.dashboards[new_id] = dash
+
+    try:
+        view = dash.panel(in_grid=True)
+    except TypeError:
+        view = dash.panel()
+
+    n = len(grid.keys)
+    new_keys = [*grid.keys, new_id]
+    new_objs = [*grid.objects, view]
+
+    new_layouts = {**(grid.layouts or {})}
+    for bp, cols in (grid.cols_by_breakpoint or {}).items():
+        w, h = _bp_geom(bp)
+        bp_layout = list(new_layouts.get(bp, []))
+
+        x, y = find_first_fit(bp_layout, cols=int(cols), w=w, h=h)
+        bp_layout.append({"i": new_id, "x": x, "y": y, "w": w, "h": h})
+        new_layouts[bp] = bp_layout
+
+    grid.param.update(
+        keys=new_keys,
+        objects=new_objs,
+        layouts=new_layouts,
+    )
 
 
 def verify_import_config(curr_config_file):
@@ -233,16 +307,16 @@ def update_config_settings(imported_config):
             config.settings[key] = imported_config[key]
     config.settings["confirmed"] = True
 
+# keep your existing imports: Dashboard, DataSelection, update_config_settings, config, etc.
 
 def create_layout_from_file(react):
-
+    from astronomicAL.extensions.dynamic_react_layout import DynamicReactGrid
     with open(config.layout_file) as layout_file:
         curr_config_file = json.load(layout_file)
 
+    # ---- keep your existing config/data loading exactly as-is ----
     if len(curr_config_file.keys()) > 1:
-
         if config.settings["config_load_level"] > 0:
-
             update_config_settings(curr_config_file)
             load_data = DataSelection(config.source, mode=config.mode)
             config.main_df = load_data.get_dataframe_from_fits_file(
@@ -250,29 +324,59 @@ def create_layout_from_file(react):
                 optimise_data=curr_config_file["optimise_data"],
             )
 
-            src = {}
-            for col in config.main_df:
-                src[f"{col}"] = []
-            if not config.settings["id_col"] in src.keys():
+            src = {f"{col}": [] for col in config.main_df}
+            if config.settings["id_col"] not in src:
                 src[config.settings["id_col"]] = []
-
             config.source.data = src
 
     curr_layout = curr_config_file["layout"]
 
+    # ---- NEW: create the DynamicReactGrid and populate it ----
+    grid = DynamicReactGrid(
+        sizing_mode="stretch_both",
+        height=900,
+        # choose your “3 across / 2 across / 1 across” thresholds
+        breakpoints={"lg": 1350, "md": 900, "sm": 0},
+        cols_by_breakpoint={"lg": 12, "md": 12, "sm": 12},
+        resize_handles=["s","w","e","n","sw","nw","se"],
+        compact_type="vertical",
+    )
+
+    keys = []
+    objects = []
+    colors = {}
+    lg_layout = []
+
+    # helper: generate md/sm from lg (simple packing)
+    def _pack(ids, per_row, w, default_h=4):
+        out = []
+        for n, tid in enumerate(ids):
+            base = next((it for it in lg_layout if it["i"] == tid), None) or {}
+            h = int(base.get("h", default_h))
+            out.append({"i": tid, "x": (n % per_row) * w, "y": (n // per_row) * h, "w": w, "h": h})
+        return out
+
+    # ---- same loop, but target the grid instead of react.main slices ----
     for p, panel in curr_layout.items():
         print("curr_layout: ", p)
-        start_row = panel["y"]
-        end_row = panel["y"] + panel["h"]
-        start_col = panel["x"]
-        end_col = panel["x"] + panel["w"]
 
-        if "contents" in panel.keys():
-            contents = panel["contents"]
-        else:
-            contents = "Menu"
+        # existing geometry from file (assumed 12-col grid coords)
+        x = int(panel.get("x", 0))
+        y = int(panel.get("y", 0))
+        w = int(panel.get("w", 4))
+        h = int(panel.get("h", 4))
 
-        if int(p) == 0:
+        # existing contents logic
+        contents = panel.get("contents", "Menu")
+
+        # The old code compares int(p)==0; keep that behaviour
+        is_main = False
+        try:
+            is_main = (int(p) == 0)
+        except Exception:
+            is_main = (str(p) == "0")
+
+        if is_main:
             if (contents == "Menu") or (config.settings["config_load_level"] == 0):
                 contents = "Settings"
             elif config.mode == "Labelling":
@@ -281,59 +385,149 @@ def create_layout_from_file(react):
                 contents = "Active Learning"
             elif config.mode == "Exploring":
                 contents = "Exploring"
-            main_plot = Dashboard(src=config.source, contents=contents)
-            config.dashboards[p] = main_plot
-            react.main[start_row:end_row, start_col:end_col] = main_plot.panel()
-        
+
         else:
-            if "config_load_level" in list(config.settings.keys()):
-                if config.settings["config_load_level"] == 0:
-                    contents = "Menu"
-            new_plot = Dashboard(src=config.source, contents=contents)
-            config.dashboards[p] = new_plot
-            if contents == "Basic Plot":
+            if "config_load_level" in config.settings and config.settings["config_load_level"] == 0:
+                contents = "Menu"
 
-                x_axis = panel["panel_contents"][0]
-                y_axis = panel["panel_contents"][1]
+        dash = Dashboard(src=config.source, contents=contents)
+        config.dashboards[p] = dash
 
+        # restore “Basic Plot” axis selections (your existing behaviour)
+        if contents == "Basic Plot":
+            pc = panel.get("panel_contents", None)
+            if isinstance(pc, (list, tuple)) and len(pc) >= 2:
+                x_axis, y_axis = pc[0], pc[1]
                 if x_axis in list(config.source.data.keys()):
-
-                    new_plot.panel_contents.X_variable = panel["panel_contents"][0]
+                    dash.panel_contents.X_variable = x_axis
                 if y_axis in list(config.source.data.keys()):
-                    new_plot.panel_contents.Y_variable = panel["panel_contents"][1]
-            react.main[start_row:end_row, start_col:end_col] = new_plot.panel()
+                    dash.panel_contents.Y_variable = y_axis
+
+        # ---- NEW: store into DynamicReactGrid ----
+        tile_id = str(p)  # keep ids identical to existing file keys
+        keys.append(tile_id)
+        objects.append(dash.panel())
+
+        # optional color/state if present in new schema
+        if "color" in panel:
+            colors[tile_id] = panel["color"]
+
+        lg_layout.append({"i": tile_id, "x": x, "y": y, "w": w, "h": h})
+
+        # optional: restore slider value if you later add it
+        # if "value" in panel: set it here via your tile factory/state applier
+
+    grid.keys = keys
+    grid.objects = objects
+
+
+    ids_in_layout_order = [it["i"] for it in sorted(lg_layout, key=lambda it: (it["y"], it["x"]))]
+
+    md_layout = _pack(ids_in_layout_order, per_row=2, w=6)
+    sm_layout = _pack(ids_in_layout_order, per_row=1, w=12)
+
+    grid.breakpoints = {"lg": 1500, "md": 1050, "sm": 0}
+    grid.cols_by_breakpoint = {"lg": 12, "md": 12, "sm": 12}
+    grid.layouts = {"lg": lg_layout, "md": md_layout, "sm": sm_layout}
+
+    # Put it into the template (single component)
+    react.main[:9, :12] = grid   # 2D assignment
+    react._dynamic_grid = grid
+    
+    print("grid.layouts keys:", (grid.layouts or {}).keys())
+    for bp, L in (grid.layouts or {}).items():
+        print(bp, "len:", len(L))
+
+    print("Grid type:", type(grid))
+    print("Has _esm:", hasattr(grid, "_esm"), "len:", len(getattr(grid, "_esm", "") or ""))
+    print("Keys:", len(grid.keys), "Objects:", len(grid.objects))
 
     return react
 
 
+from astronomicAL.extensions.dynamic_react_layout import DynamicReactGrid
 
 def create_default_layout(react):
+    print("No Layout File Found. Reverting to default dashboard layout (DynamicReactGrid).")
 
-    print(
-        "No Layout File Found. Reverting to default found in astronomicAL/utils/save_config.py"
+    grid = DynamicReactGrid(
+        sizing_mode="stretch_both",
+        height=800,
+        # responsive behaviour you wanted:
+        breakpoints={"lg": 1350, "md": 900, "sm": 0},
+        cols_by_breakpoint={"lg": 12, "md": 12, "sm": 12},
+        resize_handles=["s","w","e","n","sw","nw","se"],
+        compact_type="vertical",
     )
 
+    # ---- Build the same dashboards as before ----
+    items = []
+
+    # 1) Settings (top-left)
     main_plot = Dashboard(src=config.source, contents="Settings")
     config.dashboards[0] = main_plot
-    react.main[:5, :6] = main_plot.panel()
+    items.append(("settings", main_plot.panel(), "hsl(210 70% 92%)"))
 
+    # 2) Top-right
     num = 0
-    for i in [6]:
+    new_plot = Dashboard(src=config.source)
+    config.dashboards[f"{num}"] = new_plot
+    items.append((f"plot-{num}", new_plot.panel(), "hsl(90 70% 92%)"))
+    num += 1
+
+    # 3) Bottom row: three plots
+    for _ in [0, 4, 8]:
         new_plot = Dashboard(src=config.source)
         config.dashboards[f"{num}"] = new_plot
-
-        react.main[:5, 6:] = new_plot.panel()
+        items.append((f"plot-{num}", new_plot.panel(), "hsl(30 70% 92%)"))
         num += 1
 
-    for i in [0, 4, 8]:
-        new_plot = Dashboard(src=config.source)
-        config.dashboards[f"{num}"] = new_plot
+    # ---- Populate grid state ----
+    grid.keys = [k for k, _, _ in items]
+    grid.objects = [obj for _, obj, _ in items]
 
-        react.main[5:9, i : i + 4] = new_plot.panel()
-        num += 1
+    # ---- Default layout (lg): match your old template geometry ----
+    # ReactTemplate was 12 cols, your slices:
+    # settings: 0:6, 0:5  -> w=6, h=5
+    # top-right: 6:12,0:5 -> w=6, h=5
+    # bottom row: 0:4, 4:8, 8:12, rows 5:9 -> each w=4, h=4
+    lg_layout = [
+        {"i": "settings", "x": 0, "y": 0, "w": 6, "h": 5},
+        {"i": "plot-0",   "x": 6, "y": 0, "w": 6, "h": 5},
+        {"i": "plot-1",   "x": 0, "y": 5, "w": 4, "h": 4},
+        {"i": "plot-2",   "x": 4, "y": 5, "w": 4, "h": 4},
+        {"i": "plot-3",   "x": 8, "y": 5, "w": 4, "h": 4},
+    ]
+
+    # Generate md/sm from lg (3 across / 2 across / 1 across)
+    # If you already have generator helpers, call them here.
+    def pack(ids, per_row, w, h_default=4):
+        out = []
+        for n, tid in enumerate(ids):
+            # keep each tile's original height if present
+            base = next((it for it in lg_layout if it["i"] == tid), None) or {}
+            h = int(base.get("h", h_default))
+            out.append({"i": tid, "x": (n % per_row) * w, "y": (n // per_row) * h, "w": w, "h": h})
+        return out
+
+    ids = [it["i"] for it in lg_layout]
+    md_layout = pack(ids, per_row=2, w=6)
+    sm_layout = pack(ids, per_row=1, w=12)
+
+    grid.breakpoints = {"lg": 1500, "md": 1050, "sm": 0}
+    grid.cols_by_breakpoint = {"lg": 12, "md": 12, "sm": 12}
+    grid.layouts = {"lg": lg_layout, "md": md_layout, "sm": sm_layout}
+
+    # ---- Put the grid into the template ----
+    # react.main.clear()
+    react.main[:9, :12] = grid   # 2D assignment
+
+    # react.main[:,:] = grid
+
+    # store reference so existing save buttons can find it later if needed
+    react._dynamic_grid = grid
 
     return react
-
 
 def verify_column_properties(table, col_name, config_dict_name):
     """Checks that a column in the table contains numeric values"""

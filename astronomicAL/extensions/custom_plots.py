@@ -195,8 +195,10 @@ class CustomPlotClass(param.Parameterized):
                                            settings_grid)
         else:
            card_content = settings_grid
-        return pn.Card(card_content, header = pn.Row(pn.Spacer(width=25), self.close_button, skip_button, submit_button),
-                                sizing_mode="stretch_both", scroll=True, collapsible = False, min_height = 300 )
+
+        toolbar = pn.Row(pn.Spacer(width=25), self.close_button, skip_button, submit_button, max_height=50)
+        return pn.Column(toolbar, card_content,
+                                sizing_mode="stretch_both", scroll=True, min_height = 300 )
 
     
     def _get_unknown_columns(self, columns_needed, settings_key = None):
@@ -359,8 +361,9 @@ class CustomPlotClass(param.Parameterized):
     
     def plot_panel(self):
         self.layout = self.get_layout()
-        return pn.Card(self.layout, header = pn.Row(pn.Spacer(width=25,),self.close_button, self.plot_settings_button),
-                       collapsible = False, sizing_mode="stretch_both", min_height =450,)
+        toolbar = pn.Row(pn.Spacer(width=25,),self.close_button, self.plot_settings_button, max_height=50)
+
+        return pn.Column(toolbar, self.layout, sizing_mode="stretch_both", min_height =450,)
     
     @param.depends("stage")                        
     def mypanel(self):
@@ -1349,11 +1352,13 @@ class SEDPlotClass(CustomPlotClass):
         submit_button = pn.widgets.Button(name='Confirm', button_type='primary', max_height=120)
         submit_button.on_click(self._submit_button_cb)
 
-        return pn.Card(pn.Column( pn.pane.Markdown("## Select the bands to plot in the SED"),
+        toolbar = pn.Row(pn.Spacer(width=25), self.close_button, submit_button, max_height=50)
+        body = pn.Column( pn.pane.Markdown("## Select the bands to plot in the SED"),
             pn.Row(pn.Column("## Available Bands", self.checkbox_pane, scroll = True),
-                   pn.Column(self.add_band_button, self.add_band_pane, scroll = True))),
-            header = pn.Row(pn.Spacer(width=25), self.close_button, submit_button),
-            sizing_mode="stretch_both",  scroll = True, collapsible = False, min_height = 300 )
+                   pn.Column(self.add_band_button, self.add_band_pane, scroll = True)))
+
+        return pn.Column(toolbar,body,
+            sizing_mode="stretch_both",  scroll = True, min_height = 300 )
 
 
     @staticmethod
@@ -1521,13 +1526,12 @@ class SEDPlotClass(CustomPlotClass):
         master_select_widget = pn.widgets.Select(name= "Apply same units to all columns", options=available_units, max_height=120, sizing_mode = "stretch_width")
         master_select_widget.param.watch(change_all_selections, "value")
          
-        
-        return pn.Card(pn.Column(pn.pane.Markdown("## Select the columns units", sizing_mode = "stretch_width",
+        toolbar = pn.Row(pn.Spacer(width=25), self.close_button, skip_button, submit_button, max_height=50)
+        body = pn.Column(pn.pane.Markdown("## Select the columns units", sizing_mode = "stretch_width",
                                                   margin=(15,0,15,15)),
                                 master_select_widget,
-                                settings_grid, scroll = True),
-                                header = pn.Row(pn.Spacer(width=25), self.close_button, skip_button, submit_button),
-                                sizing_mode="stretch_both", scroll=True, collapsible = False, min_height = 300 )
+                                settings_grid, scroll = True)
+        return pn.Column(toolbar,body, sizing_mode="stretch_both", scroll=True, min_height = 300 )
     
     def _get_unknown_units(self):
         """Return the list of bands for which the units are not present in the config file"""
@@ -1774,8 +1778,9 @@ class SEDPlotClass(CustomPlotClass):
 
     def plot_panel(self):
         self.layout = self.get_layout()
-        return pn.Card(self.layout, header = pn.Row(pn.Spacer(width=25,), self.close_button, self.plot_settings_button),
-                       collapsible = False, sizing_mode="stretch_both", min_height =450,)  
+        toolbar = pn.Row(pn.Spacer(width=25,), self.close_button, self.plot_settings_button, max_height=50)
+        return pn.Column(toolbar, self.layout,
+                         sizing_mode="stretch_both", min_height =450,)  
 
 
     @param.depends("stage")
@@ -2027,7 +2032,7 @@ class AladinClass(CustomPlotClass):
                                                            "IR" : ir_surveys})
         self.survey_selector.param.watch(self._update_image, "value")
         self.plot_settings_panel = pn.Column(self.survey_selector, 
-                                             scroll = True, visible = False)
+                                             scroll = True, visible = False, min_height=50,max_height=80)
 
 
     def _update_image(self, event):
@@ -2044,8 +2049,8 @@ class AladinClass(CustomPlotClass):
             self.get_error_panel("Aladin panel unavailable", "Missing RA or DEC value")
 
         self._update_image(None)
-        return  pn.Column(self.message_pane, self.figure, self.plot_settings_panel, 
-                          scroll = False, sizing_mode = "stretch_both")
+        return  pn.Column(self.message_pane,self.plot_settings_panel, self.figure, 
+                          scroll = True, sizing_mode = "stretch_both")
 
 
 

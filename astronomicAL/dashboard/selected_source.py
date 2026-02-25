@@ -196,17 +196,19 @@ class SelectedSourceDashboard:
             extra_data_pn = pn.pane.DataFrame(
                 extra_data_df, index=False,
             )
-            self.row[0] = pn.Card(
-                    pn.Row(extra_data_pn, max_height=250, max_width=300),
-                    collapsible=False,
-                    header=pn.Row(self.close_button, self.deselect_button, max_width=300),
+
+            toolbar = pn.Row(self.close_button, self.deselect_button, max_width=300, max_height=50)
+            body = pn.Row(extra_data_pn, max_height=250, max_width=300)
+            self.row[0] = pn.Column(
+                toolbar,
+                body
                 )
 
    
 
         else:
-            self.row[0] = pn.Card(
-                pn.Column(
+            toolbar = pn.Row(self.close_button, max_width=300, max_height=50)
+            body = pn.Column(
                     self.search_id,
                     self._search_status,
                     pn.Row(
@@ -218,8 +220,10 @@ class SelectedSourceDashboard:
                         ),
                         max_width=300,
                     ),
-                ),
-                header=pn.Row(self.close_button, max_width=300),
+                )
+            self.row[0] = pn.Column(
+                toolbar,
+                body
             )
 
         return self.row

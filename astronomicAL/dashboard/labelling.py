@@ -1,5 +1,4 @@
 import panel as pn
-pn.extension('tabulator')
 import astronomicAL.config as config
 from astronomicAL.dashboard.plot import PlotDashboard
 from astronomicAL.active_learning.active_learning import ActiveLearningModel
@@ -577,9 +576,6 @@ class LabellingDashboard(param.Parameterized):
 
         col_names = self.region_criteria_df.columns.tolist()
 
-
-        pn.extension('tabulator')
-
         df_pane = pn.widgets.Tabulator(self.region_criteria_df, widths={col_names[0]:80,col_names[1]:50,col_names[2]:50})
 
         buttons_row = pn.Row(
@@ -675,24 +671,24 @@ class LabellingDashboard(param.Parameterized):
         self.assign_label_button.disabled = False
 
         print("row before", self.row[0])
-
-        self.row[0] = pn.Card(
-            pn.Row(
-                plot,
-                labelling_info_col,
-                margin=(0, 20),
-            ),
-            buttons_row,
-            header=pn.Row(
+        toolbar = pn.Row(
                 pn.Spacer(width=25,
                         #    sizing_mode="fixed"
                            ),
                 pn.Row(self.param.X_variable, max_width=100),
                 pn.Row(self.param.Y_variable, max_width=100),
-                max_width=100,
+                max_width=100, max_height=50
                 # sizing_mode="fixed",
-            ),
-            collapsible=False,
+            )
+        body = pn.Row(
+                plot,
+                labelling_info_col,
+                margin=(0, 20),
+            )
+        self.row[0] = pn.Column(
+            toolbar,
+            body,
+            buttons_row,
             sizing_mode="stretch_both",
         )
         return self.row

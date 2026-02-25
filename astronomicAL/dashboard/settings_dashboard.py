@@ -79,17 +79,16 @@ class SettingsDashboard:
         self.create_pipeline(mode=mode)
 
     def create_mode_selection_menu(self):
-        layout = pn.Card(
-            pn.Column(
-                self._make_mode_row("images/classification.png", self.select_labelling_mode_button),
-                self._make_mode_row("images/cluster.png", self.select_AL_mode_button),
-                self._make_mode_row("images/exploration.png", self.select_exploring_mode_button),
-                min_height = 600,
-                sizing_mode = "stretch_height"
+        layout = pn.Row(
+                pn.Spacer(min_width=10,max_width=50),
+                self._make_mode_column("images/classification.png", self.select_labelling_mode_button),
+                pn.Spacer(min_width=10,max_width=50),
+                self._make_mode_column("images/cluster.png", self.select_AL_mode_button),
+                pn.Spacer(min_width=10,max_width=50),
+                self._make_mode_column("images/exploration.png", self.select_exploring_mode_button),
+                pn.Spacer(min_width=10,max_width=50),
+                sizing_mode = "stretch_both"
                 )
-                
-            )
-
         return layout
     
     def _make_mode_row(self, image_path, button):
@@ -103,19 +102,27 @@ class SettingsDashboard:
            
     
     def _make_mode_column(self, image_path, button):
+        button.align = "center"  # centers within its container
+
         return pn.Column(
-                        pn.pane.PNG(
-                                   image_path,
-                                   sizing_mode="stretch_width",  
-                                   aspect_ratio=1.0,             
-                                   margin=(0, 0, 5, 0),
-                                   max_height=250,
-                                   max_width = 250,
-                                   ),
-                                   pn.Spacer(height = 10),
-                                   pn.Row(button, min_height=40),        
-           
-                )
+            pn.pane.PNG(
+                image_path,
+                sizing_mode="stretch_width",
+                aspect_ratio=1.0,
+                margin=(0, 0, 5, 0),
+                max_height=250,
+                max_width=250,
+            ),
+            pn.Spacer(height=10),
+            pn.Row(
+                button,
+                sizing_mode="stretch_width",
+                styles={"justifyContent": "center"},
+                min_height=40,
+            ),
+            sizing_mode="stretch_width",
+            max_width=250,
+        )
 
 
     def create_pipeline(self, mode):
@@ -282,9 +289,18 @@ class SettingsDashboard:
             if "Features Settings" in self.pipeline._stages:
                 if self.pipeline["Features Settings"].is_complete():
                     self._close_settings_button.disabled = False
-
-            self.row[0] = pn.Card(
-                pn.Column(
+            toolbar = pn.Row(
+                    pn.widgets.StaticText(
+                        name="Settings Panel",
+                        value="Please choose the appropriate settings for your data",
+                    ),
+                    pn.pane.Markdown(
+                        "### " + list(self.pipeline._stages)[self._pipeline_stage],
+                    ),
+                    self._close_settings_button,
+                    max_height=50
+                )
+            body = pn.Column(
                     pn.Row(self.pipeline.stage, sizing_mode = "stretch_both"),
                     pn.Row(
                         pn.layout.HSpacer(),
@@ -294,18 +310,9 @@ class SettingsDashboard:
                         # max_width=500,
                     ),
                     sizing_mode = "stretch_both"
-                ),
-                header=pn.Row(
-                    pn.widgets.StaticText(
-                        name="Settings Panel",
-                        value="Please choose the appropriate settings for your data",
-                    ),
-                    pn.pane.Markdown(
-                        "### " + list(self.pipeline._stages)[self._pipeline_stage],
-                    ),
-                    self._close_settings_button,
-                ),
-                collapsible=False,
+                )
+            self.row[0] = pn.Column(
+                toolbar, body,
                 sizing_mode = "stretch_both"
             )
             return self.row
