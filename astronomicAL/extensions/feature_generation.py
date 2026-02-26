@@ -1,8 +1,7 @@
-from itertools import combinations
-
-import astronomicAL.config as config
 import numpy as np
-
+import pandas as pd
+from itertools import combinations
+import astronomicAL.config as config
 
 def get_oper_dict():
 
@@ -16,121 +15,156 @@ def get_oper_dict():
 
     return oper
 
+def _ensure_float32(arr):
+    # optional: keep memory down for huge data
+    return arr.astype(np.float32, copy=False) if arr.dtype == np.float64 else arr
 
-def add(df, n):
-
-    np.random.seed(0)
-
+def add(df, n, batch_size=64):
     bands = config.settings["features_for_training"]
-
     combs = list(combinations(bands, n))
 
-    cols = list(df.columns)
+    new_cols = {}
+    generated = []
 
-    generated_features = []
+    existing = set(df.columns)
 
     for comb in combs:
-        col = "+".join(comb)
-        generated_features.append(col)
-        if col not in cols:
-            for i in range(n):
-                if i == 0:
-                    df[col] = df[comb[i]]
-                else:
-                    df[col] = df[col] + df[comb[i]]
+        colname = "+".join(comb)
+        generated.append(colname)
+        if colname in existing:
+            continue
 
-    return df, generated_features
+        # compute directly: sum of columns
+        arr = df[comb[0]].to_numpy(copy=False)
+        for b in comb[1:]:
+            arr = arr + df[b].to_numpy(copy=False)
+
+        new_cols[colname] = _ensure_float32(np.asarray(arr))
+
+        # concat in batches to avoid huge dict growth
+        if len(new_cols) >= batch_size:
+            df = pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
+            new_cols.clear()
+
+    if new_cols:
+        df = pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
+
+    # optional: defragment blocks once at the end
+    df = df.copy()
+    return df, generated
+
+def subtract(df, n, batch_size=64):
+    bands = config.settings["features_for_training"]
+    combs = list(combinations(bands, n))
+    new_cols, generated = {}, []
+    existing = set(df.columns)
+
+    for comb in combs:
+        colname = "-".join(comb)
+        generated.append(colname)
+        if colname in existing:
+            continue
+
+        arr = df[comb[0]].to_numpy(copy=False)
+        for b in comb[1:]:
+            arr = arr - df[b].to_numpy(copy=False)
+
+        new_cols[colname] = _ensure_float32(np.asarray(arr))
+        if len(new_cols) >= batch_size:
+            df = pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
+            new_cols.clear()
+
+    if new_cols:
+        df = pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
+    df = df.copy()
+    return df, generated
 
 
-def subtract(df, n):
+def multiply(df, n, batch_size=64):
+    bands = config.settings["features_for_training"]
+    combs = list(combinations(bands, n))
+    new_cols, generated = {}, []
+    existing = set(df.columns)
 
-    np.random.seed(0)
+    for comb in combs:
+        colname = "*".join(comb)
+        generated.append(colname)
+        if colname in existing:
+            continue
+
+        arr = df[comb[0]].to_numpy(copy=False)
+        for b in comb[1:]:
+            arr = arr * df[b].to_numpy(copy=False)
+
+        new_cols[colname] = _ensure_float32(np.asarray(arr))
+        if len(new_cols) >= batch_size:
+            df = pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
+            new_cols.clear()
+
+    if new_cols:
+        df = pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
+    df = df.copy()
+    return df, generated
+
+
+def divide(df, n, batch_size=64, eps=0.0):
+    bands = config.settings["features_for_training"]
+    combs = list(combinations(bands, n))
+    new_cols, generated = {}, []
+    existing = set(df.columns)
+
+    for comb in combs:
+        colname = "/".join(comb)
+        generated.append(colname)
+        if colname in existing:
+            continue
+
+        num = df[comb[0]].to_numpy(copy=False)
+        arr = num
+        for b in comb[1:]:
+            den = df[b].to_numpy(copy=False)
+            if eps:
+                den = den + eps
+            arr = arr / den
+
+        new_cols[colname] = _ensure_float32(np.asarray(arr))
+        if len(new_cols) >= batch_size:
+            df = pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
+            new_cols.clear()
+
+    if new_cols:
+        df = pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
+    df = df.copy()
+    return df, generated
+
+def color(df, n=2, batch_size=64):
+    if n != 2:
+        raise ValueError("color only makes sense for n=2")
 
     bands = config.settings["features_for_training"]
+    combs = list(combinations(bands, 2))
 
-    combs = list(combinations(bands, n))
+    new_cols, generated = {}, []
+    existing = set(df.columns)
 
-    cols = list(df.columns)
-    generated_features = []
-    for comb in combs:
-        col = "-".join(comb)
-        generated_features.append(col)
-        if col not in cols:
-            for i in range(n):
-                if i == 0:
-                    df[col] = df[comb[i]]
-                else:
-                    df[col] = df[col] - df[comb[i]]
+    for a, b in combs:
+        colname = f"{a}-{b}"
+        generated.append(colname)
+        if colname in existing:
+            continue
 
-    return df, generated_features
+        A = df[a].to_numpy(copy=False)
+        B = df[b].to_numpy(copy=False)
+        arr = -2.5 * np.log10(A / B)
 
+        new_cols[colname] = _ensure_float32(np.asarray(arr))
 
-def multiply(df, n):
+        if len(new_cols) >= batch_size:
+            df = pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
+            new_cols.clear()
 
-    np.random.seed(0)
+    if new_cols:
+        df = pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
 
-    bands = config.settings["features_for_training"]
-
-    combs = list(combinations(bands, n))
-
-    cols = list(df.columns)
-    generated_features = []
-    for comb in combs:
-        col = "*".join(comb)
-        generated_features.append(col)
-        if col not in cols:
-            for i in range(n):
-                if i == 0:
-                    df[col] = df[comb[i]]
-                else:
-                    df[col] = df[col] * df[comb[i]]
-
-    return df, generated_features
-
-
-def divide(df, n):
-
-    np.random.seed(0)
-
-    bands = config.settings["features_for_training"]
-
-    combs = list(combinations(bands, n))
-
-    cols = list(df.columns)
-    generated_features = []
-    for comb in combs:
-        col = "/".join(comb)
-        generated_features.append(col)
-        if col not in cols:
-            for i in range(n):
-                if i == 0:
-                    df[col] = df[comb[i]]
-                else:
-                    df[col] = df[col] / df[comb[i]]
-
-    return df, generated_features
-
-
-
-def color(df, n):
-    if n > 2:
-        print("It doesn't really make sense,,,")
-    
-    np.random.seed(0)
-
-    bands = config.settings["features_for_training"]
-
-    combs = list(combinations(bands, n))
-
-    generated_features = []
-    for comb in combs:
-        col = "-".join(comb)
-        generated_features.append(col)
-        if col not in df.columns:
-            for i in range(n):
-                if i == 0:
-                    df[col] = df[comb[i]]
-                else:
-                    df[col] = -2.5*np.log10(df[col]/df[comb[i]])
-
-    return df, generated_features
+    df = df.copy()
+    return df, generated

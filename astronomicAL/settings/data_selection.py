@@ -1,4 +1,11 @@
-from astronomicAL.utils.optimise import optimise
+from astronomicAL.utils.optimise import (
+    PrintProgress, 
+    optimise_streaming, 
+    _fits_to_df_streaming, 
+    _decode_bytes_columns, 
+    df_mem_gib, 
+    rss_gib
+    )
 from astropy.table import Table
 from bokeh.models import TextAreaInput
 from bokeh.models.callbacks import CustomJS
@@ -210,58 +217,42 @@ class DataSelection(param.Parameterized):
         else:
             self.param.load_config_select.objects = [""] + self._init_load_config_options()
 
-
     def get_dataframe_from_fits_file(self, filename, optimise_data=None):
-        """Load data from FITS file into dataframe.
+        p = PrintProgress(every=2.0)
 
-        Parameters
-        ----------
-        filename : str
-            Path of file to be loaded.
-
-        Returns
-        -------
-        df : DataFrame
-            DataFrame containing the loaded in data from `filename`.
-
-        """
-        ext = filename[filename.rindex(".") + 1 :]
-        fits_table = Table.read(filename, format=f"{ext}")
-
-        names = [
-            name for name in fits_table.colnames if len(fits_table[name].shape) <= 1
-        ]
+        ext = filename[filename.rindex(".") + 1 :].lower()
 
         if optimise_data is None:
-            config.settings["optimise_data"] = self.memory_optimisation_check.value
-            if self.memory_optimisation_check.value:
-                approx_time = np.ceil(
-                    (np.array(fits_table).shape[0] * len(names)) / 200000000
-                )
-                self.load_data_button.name = (
-                    f"Optimising... Approx time: {int(approx_time)} minute(s)"
-                )
-                df = optimise(fits_table[names].to_pandas())
-            else:
-                df = fits_table[names].to_pandas()
-        elif optimise_data:
-            approx_time = np.ceil(
-                (np.array(fits_table).shape[0] * len(names)) / 200000000
-            )
-            self.load_data_button.name = (
-                f"Optimising... Approx time: {int(approx_time)} minute(s)"
-            )
-            df = optimise(fits_table[names].to_pandas())
+            val = bool(self.memory_optimisation_check.value)
+            config.settings["optimise_data"] = val
+            optimise_data = val
         else:
+            optimise_data = bool(optimise_data)
+
+        p.log(f"Start load: ext={ext}, optimise_data={optimise_data}")
+
+        if ext in ("fits", "fit", "fts"):
+            df = _fits_to_df_streaming(filename, hdu=1, p=p, cast_float32=False)
+            p.log(f"After read: mem≈{df_mem_gib(df):.2f} GiB, RSS≈{rss_gib():.2f} GiB")
+            df = _decode_bytes_columns(df, p=p)
+            p.log(f"After decode: mem≈{df_mem_gib(df):.2f} GiB, RSS≈{rss_gib():.2f} GiB")
+        else:
+            p.log(f"Reading non-FITS table via astropy: {ext}")
+            fits_table = Table.read(filename, format=ext)
+            names = [name for name in fits_table.colnames if len(fits_table[name].shape) <= 1]
             df = fits_table[names].to_pandas()
+            p.log(f"DataFrame built: rows={len(df):,}, cols={df.shape[1]:,}")
+            p.log(f"After table built: mem≈{df_mem_gib(df):.2f} GiB, RSS≈{rss_gib():.2f} GiB")
 
-        if ext == "fits":
-            for col, dtype in df.dtypes.items():
-                if dtype == object:  # Only process byte object columns.
-                    df[col] = df[col].apply(lambda x: x.decode("utf-8"))
 
+        if optimise_data:
+            df = optimise_streaming(df, p=p, log_every=10)
+            p.log(f"After optimise: mem≈{df_mem_gib(df):.2f} GiB, RSS≈{rss_gib():.2f} GiB")
+
+        p.log("Adding RA/DEC…")
         df = self.add_ra_dec_col(df)
-
+        p.log(f"After add_ra_dec: mem≈{df_mem_gib(df):.2f} GiB, RSS≈{rss_gib():.2f} GiB")
+        p.log("All done")
         return df
 
     def _load_data_cb(self, event):
@@ -273,7 +264,7 @@ class DataSelection(param.Parameterized):
 
         print(config.settings)
 
-        config.main_df = self.get_dataframe_from_fits_file(self.dataset)
+        config.main_df = self.get_dataframe_from_fits_file(self.dataset, config)
         self.df = config.main_df
         self.src.data = dict(pd.DataFrame())
 

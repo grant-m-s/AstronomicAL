@@ -1,5 +1,4 @@
 from astronomicAL.extensions import models, query_strategies, feature_generation
-from astronomicAL.utils.optimise import optimise
 from astronomicAL.utils import save_config
 from bokeh.models import (
     ColumnDataSource,
@@ -31,13 +30,13 @@ import astronomicAL.config as config
 import datashader as ds
 import holoviews as hv
 import numpy as np
+import gc
 import os
 import pandas as pd
 import panel as pn
 import json
 import sys
 import time
-
 
 class ActiveLearningModel:
     """This class handles the Machine Learning aspect of the codebase.
@@ -683,19 +682,6 @@ class ActiveLearningModel:
 
         self.assign_global_data()
 
-        total = 0
-        total += sys.getsizeof(config.ml_data)
-        for dataframe in config.ml_data.keys():
-            total += sys.getsizeof(config.ml_data[dataframe])
-
-        for key in config.ml_data.keys():
-            if isinstance(config.ml_data[key], pd.DataFrame):
-                config.ml_data[key] = optimise(config.ml_data[key])
-
-        total = 0
-        total += sys.getsizeof(config.ml_data)
-        for dataframe in config.ml_data.keys():
-            total += sys.getsizeof(config.ml_data[dataframe])
 
     def assign_global_data(self):
         """Assign the current train, validation and test sets to the shared

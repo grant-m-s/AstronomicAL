@@ -205,7 +205,5 @@ class Dashboard(param.Parameterized):
                 toolbar,body,
             )
 
-        print("self.row dashboard:", self.row)
-
         return self.row
     

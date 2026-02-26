@@ -138,7 +138,6 @@ def create_header(react, grid, config):
 
     # IMPORTANT: replace contents, don’t append
     react._header_box[:] = [header_row]
-    print("\n\n\n\n added header... \n")
 
     return react
 
@@ -449,6 +448,7 @@ def create_layout_from_file(react):
             load_data = DataSelection(config.source, mode=config.mode)
             config.main_df = load_data.get_dataframe_from_fits_file(
                 curr_config_file["dataset_filepath"],
+                config,
                 optimise_data=curr_config_file["optimise_data"],
             )
 
@@ -486,7 +486,6 @@ def create_layout_from_file(react):
 
     # ---- same loop, but target the grid instead of react.main slices ----
     for p, panel in curr_layout.items():
-        print("curr_layout: ", p)
 
         # existing geometry from file (assumed 12-col grid coords)
         x = int(panel.get("x", 0))
@@ -559,16 +558,8 @@ def create_layout_from_file(react):
     grid.layouts = {"lg": lg_layout, "md": md_layout, "sm": sm_layout}
 
     # Put it into the template (single component)
-    react.main[:9, :12] = grid   # 2D assignment
+    react.main[:12, :12] = grid   # 2D assignment
     react._dynamic_grid = grid
-    
-    print("grid.layouts keys:", (grid.layouts or {}).keys())
-    for bp, L in (grid.layouts or {}).items():
-        print(bp, "len:", len(L))
-
-    print("Grid type:", type(grid))
-    print("Has _esm:", hasattr(grid, "_esm"), "len:", len(getattr(grid, "_esm", "") or ""))
-    print("Keys:", len(grid.keys), "Objects:", len(grid.objects))
 
     react = create_header(react, grid, config)
 
@@ -594,25 +585,25 @@ def create_default_layout(react):
     # 1) Settings (top-left)
     main_plot = Dashboard(src=config.source, contents="Settings")
     config.dashboards[0] = main_plot
-    items.append(("settings", main_plot.panel(), "hsl(210 70% 92%)"))
+    items.append(("settings", main_plot.panel()))
 
     # 2) Top-right
     num = 0
     new_plot = Dashboard(src=config.source)
     config.dashboards[f"{num}"] = new_plot
-    items.append((f"plot-{num}", new_plot.panel(), "hsl(90 70% 92%)"))
+    items.append((f"plot-{num}", new_plot.panel()))
     num += 1
 
     # 3) Bottom row: three plots
     for _ in [0, 4, 8]:
         new_plot = Dashboard(src=config.source)
         config.dashboards[f"{num}"] = new_plot
-        items.append((f"plot-{num}", new_plot.panel(), "hsl(30 70% 92%)"))
+        items.append((f"plot-{num}", new_plot.panel()))
         num += 1
 
     # ---- Populate grid state ----
-    grid.keys = [k for k, _, _ in items]
-    grid.objects = [obj for _, obj, _ in items]
+    grid.keys = [k for k, _ in items]
+    grid.objects = [obj for _, obj in items]
 
     # ---- Default layout (lg): match your old template geometry ----
     # ReactTemplate was 12 cols, your slices:
@@ -620,11 +611,11 @@ def create_default_layout(react):
     # top-right: 6:12,0:5 -> w=6, h=5
     # bottom row: 0:4, 4:8, 8:12, rows 5:9 -> each w=4, h=4
     lg_layout = [
-        {"i": "settings", "x": 0, "y": 0, "w": 6, "h": 8},
-        {"i": "plot-0",   "x": 6, "y": 0, "w": 6, "h": 8},
-        {"i": "plot-1",   "x": 0, "y": 8, "w": 4, "h": 4},
-        {"i": "plot-2",   "x": 4, "y": 8, "w": 4, "h": 4},
-        {"i": "plot-3",   "x": 8, "y": 8, "w": 4, "h": 4},
+        {"i": "settings", "x": 0, "y": 0, "w": 6, "h": 12},
+        {"i": "plot-0",   "x": 6, "y": 0, "w": 6, "h": 12},
+        {"i": "plot-1",   "x": 0, "y": 12, "w": 4, "h": 8},
+        {"i": "plot-2",   "x": 4, "y": 12, "w": 4, "h": 8},
+        {"i": "plot-3",   "x": 8, "y": 12, "w": 4, "h": 8},
     ]
 
     # Generate md/sm from lg (3 across / 2 across / 1 across)
@@ -646,13 +637,8 @@ def create_default_layout(react):
     grid.cols_by_breakpoint = {"lg": 12, "md": 12, "sm": 12}
     grid.layouts = {"lg": lg_layout, "md": md_layout, "sm": sm_layout}
 
-    # ---- Put the grid into the template ----
-    # react.main.clear()
-    react.main[:9, :12] = grid   # 2D assignment
+    react.main[:12, :12] = grid   # 2D assignment
 
-    # react.main[:,:] = grid
-
-    # store reference so existing save buttons can find it later if needed
     react._dynamic_grid = grid
 
     react = create_header(react, grid, config)

@@ -281,6 +281,9 @@ class ParameterAssignment(param.Parameterized):
             updated_settings["strings_to_labels"],
         ) = self.get_label_strings()
 
+
+        assert updated_settings is not None, f"\n Updated Settings in settings/Param_assignment.py is None..."
+
         return updated_settings
 
 
@@ -330,6 +333,7 @@ class ParameterAssignment_ML(ParameterAssignment):
         updated_settings = super().get_settings()
         updated_settings["extra_info_cols"] = self.extra_info_selector.value
         updated_settings["extra_image_cols"] = self.extra_images_selector.value
+        return updated_settings
 
     def update_data(self, dataframe=None):
         super().update_data(dataframe)
