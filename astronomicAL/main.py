@@ -31,6 +31,30 @@ pn.extension(raw_css=[r"""
 }
 .al-footer { padding-top: 4px; }
 .al-status { font-size: 12px; }
+                      
+.al-middle-grow {
+  flex: 1 1 auto !important;   /* grow to fill vertical space */
+  min-height: 0 !important;    /* allow children to shrink/scroll */
+}
+.al-middle-grow > .bk { 
+  height: 100% !important;
+}
+                      
+
+.al-root-col {
+  display: flex !important;
+  flex-direction: column !important;
+  justify-content: flex-start !important; /* stop space-between behavior */
+  height: 100% !important;
+  min-height: 0 !important;
+}
+                      
+.bk-modal .bk.modal-body {
+  display: flex !important;
+  flex-direction: column !important;
+  justify-content: flex-start !important;
+  min-height: 0 !important;
+}
 """])
 
 import os

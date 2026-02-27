@@ -448,7 +448,6 @@ def create_layout_from_file(react):
             load_data = DataSelection(config.source, mode=config.mode)
             config.main_df = load_data.get_dataframe_from_fits_file(
                 curr_config_file["dataset_filepath"],
-                config,
                 optimise_data=curr_config_file["optimise_data"],
             )
 

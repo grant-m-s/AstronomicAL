@@ -241,6 +241,8 @@ class ActiveLearningModel:
         self._assigned = False
         self.retrain = False
 
+        self._ui_built = False
+
         if "config_load_level" in list(config.settings.keys()):
             if (config.settings["config_load_level"] == 2) and (
                 f"{self._label}" in config.settings["classifiers"]
@@ -293,6 +295,8 @@ class ActiveLearningModel:
         self._show_caution = True
         self._seen_caution = False
 
+        self._build_ui_once()
+        
         if self.retrain:
             self._start_training_cb(None)
 
@@ -456,6 +460,7 @@ class ActiveLearningModel:
         self.classifier_table = DataTable(
             source=self.classifier_table_source,
             columns=table_column,
+            height=120,
         )
 
         if "classifiers" in config.settings.keys():
@@ -570,8 +575,12 @@ class ActiveLearningModel:
 
         self.active_tab = 0
 
-        self.setup_row = pn.Column("Loading...", sizing_mode="stretch_width", margin=(0, 0, 0, 0))
-        self.panel_row = pn.Column("Loading...", sizing_mode="stretch_both", margin=(0, 0, 0, 0))
+        self.setup_row = pn.Column(sizing_mode="stretch_width", margin=(0,0,0,0))
+        self.panel_row = pn.Column(sizing_mode="stretch_both", margin=(0,0,0,0))
+
+        self.setup_row.sizing_mode = "stretch_width"
+        self.setup_row.height_policy = "min"
+        self.setup_row.margin = (0, 0, 0, 0)
 
         self.conf_mat_tr_tn = "TN"
         self.conf_mat_tr_fn = "FN"
@@ -588,7 +597,11 @@ class ActiveLearningModel:
 
     def _preprocess_data(self):
 
+        print("self.df before gen features:", self.df.shape)
+
         self.df, self.all_al_data = self.generate_features(self.df)
+
+        print("self.df after gen features:", self.df.shape)
 
         x, y = self.split_x_y_ids(self.all_al_data)
 
@@ -729,6 +742,9 @@ class ActiveLearningModel:
 
         if config.settings["scale_data"]:
             config.ml_data["scaler"] = self.scaler
+
+        config.main_df = self.df
+        print("ALModel:assign_global_data has updated config.main_df")
 
     def remove_from_pool(self, id=None):
         """Remove the current queried source from the active learning pool.
@@ -969,7 +985,7 @@ class ActiveLearningModel:
             self.next_iteration_button.name = "Next Iteration"
 
             if self.assign_label_button.name == "Assigned!":
-                self.panel()
+                self._refresh_ui()
                 return
 
             self.assign_label_button.name = "Assigned!"
@@ -1006,7 +1022,7 @@ class ActiveLearningModel:
             self.show_queried_point()
             self.assign_label_button.name = "Assign"
             self.assign_label_button.disabled = False
-            self.panel()
+            self._refresh_ui()
 
         config.settings["classifiers"][f"{self._label}"][
             "id"
@@ -1023,7 +1039,7 @@ class ActiveLearningModel:
             self.id_al_train
         ), f"AL_LABELS & IDs NOT EQUAL - {len(self.y_al_train)}|{len(self.id_al_train)}"
 
-        self.panel(button_update=True)
+        self._refresh_ui()
 
     def _empty_data(self):
 
@@ -1050,7 +1066,7 @@ class ActiveLearningModel:
         self._assigned = False
 
         self.next_iteration_button.disabled = False
-        self.panel()
+        self._refresh_ui_full()
         self.checkpoint_button.disabled = False
 
     def _start_training_cb(self, event):
@@ -1102,7 +1118,7 @@ class ActiveLearningModel:
 
             self.src.data = empty
 
-        self.panel()
+        self._refresh_ui_full()
 
     def _add_classifier_cb(self, event):
 
@@ -1943,12 +1959,13 @@ class ActiveLearningModel:
         """
         np.random.seed(0)
 
-        # CHANGED :: Change this to selected["AL_Features"]
         bands = config.settings["features_for_training"]
 
         features = bands + [config.settings["label_col"], config.settings["id_col"]]
 
         oper_dict = feature_generation.get_oper_dict()
+
+        print("number of features before: ", len(features))
 
         if "feature_generation" in list(config.settings.keys()):
             for generator in config.settings["feature_generation"]:
@@ -1959,6 +1976,8 @@ class ActiveLearningModel:
                 df, generated_features = oper_dict[oper](df, n)
                 features = features + generated_features
 
+        print("number of features after: ", len(features))
+        
         df_al = df[features]
 
         shuffled = np.random.permutation(list(df_al.index.values))
@@ -2368,7 +2387,7 @@ class ActiveLearningModel:
 
     def _request_test_results_cb(self, event):
         self._show_test_results = True
-        self.panel()
+        self._refresh_ui()
         self._seen_caution = True
 
     def _return_to_train_cb(self, event):
@@ -2378,12 +2397,12 @@ class ActiveLearningModel:
         if self._stop_caution_show_checkbox.value:
             self._show_caution = False
 
-        self.panel()
+        self._refresh_ui()
 
     def _show_test_results_cb(self, event):
         self._seen_test_results = True
         self._show_test_results = True
-        self.panel()
+        self._refresh_ui()
         self._seen_caution = False
 
         if self._stop_caution_show_checkbox.value:
@@ -2400,37 +2419,52 @@ class ActiveLearningModel:
 
         """
 
-        if not self._training:
-            self.setup_row[0] = pn.Row(
-                pn.Column(
-                    pn.Row(
-                        self.classifier_dropdown,
-                        self.query_strategy_dropdown,
-                        max_height=55,
-                    ),
-                    self.starting_num_points,
-                    max_height=110,
-                ),
-                pn.Column(
-                    self.add_classifier_button,
-                    self.remove_classifier_button,
-                    self.start_training_button,
-                ),
-                pn.Column(self.classifier_table, max_height=125),
-            )
-        else:
+        content = None
 
-            self.setup_row[0] = pn.widgets.StaticText(
+        if not self._training:
+
+            left = pn.Column(
+                pn.Row(self.classifier_dropdown, self.query_strategy_dropdown, max_height=55, height_policy="min"),
+                self.starting_num_points,
+                sizing_mode="stretch_width",
+                height_policy="min",
+                max_height=110,
+            )
+            right = pn.Column(
+                self.add_classifier_button,
+                self.remove_classifier_button,
+                self.start_training_button,
+                sizing_mode="fixed",
+                height_policy="min",
+            )
+
+            table = pn.Column(
+                self.classifier_table,
+                sizing_mode="stretch_width",
+                height=120,
+                height_policy="fixed",
+                margin=(0,0,0,0),
+            )
+
+            content = pn.Row(left, right, table, height_policy="min", sizing_mode="stretch_width")
+        else:
+            content = pn.widgets.StaticText(
                 name="Number of points trained on",
                 value=f"{self.curr_num_points}",
-                height=24,
-                sizing_mode="fixed",
+                sizing_mode="stretch_width",
+                height_policy="min",
+                margin=(0, 0, 0, 0),
             )
 
-    def _update_tab_plots_cb(self, attr, old, new):
+        if len(self.setup_row) == 0:
+            self.setup_row.append(content)
+        else:
+            self.setup_row[0] = content
 
-        self.tabs_view[0] = self._train_tab()
-        self.tabs_view[2] = self._val_tab()
+    def _update_tab_plots_cb(self, attr, old, new):
+        if getattr(self, "_ui_built", False):
+            self._train_container[:] = [self._train_tab()]
+            self._val_container[:] = [self._val_tab()]
 
     def _footer(self, selected_message):
         # Row 1: label group + assign
@@ -2472,39 +2506,119 @@ class ActiveLearningModel:
 
         return pn.Column(row1, row2, sizing_mode="stretch_width", css_classes=["al-footer"])
 
+    def _refresh_active_plot(self):
+        a = self.tabs_view.active
+        if a == 0:
+            self._train_pane.object = self._train_tab()
+        elif a == 1:
+            self._metric_pane.object = self._metric_tab()
+        elif a == 2:
+            self._val_pane.object = self._val_tab()
+        elif a == 3:
+            self._scores_pane.object = self._scores_tab()
+
     def _panel_cb(self, attr, old, new):
         if self._training:
-
-            query_idx = self.query_index
-            queried_id = self.id_pool.iloc[query_idx][config.settings["id_col"]].copy()
-
-            if self.src.data[config.settings["id_col"]] == list(queried_id):
-                self._queried_is_selected = True
-            else:
+            try:
+                query_idx = self.query_index
+                queried_id = self.id_pool.iloc[query_idx][config.settings["id_col"]].copy()
+                self._queried_is_selected = (self.src.data[config.settings["id_col"]] == list(queried_id))
+            except Exception:
                 self._queried_is_selected = False
-        self.panel()
 
-    def panel(self, button_update=False):
-        """Create the active learning tab panel.
+        if getattr(self, "_ui_built", False):
+            self._refresh_footer_only()
 
-        Returns
-        -------
-        panel_row : Panel Row
-            The panel is housed in a row which can then be rendered by the
-            respective Dashboard.
+    def _build_ui_once(self):
+        # --- persistent tab containers (can hold Panel layouts) ---
+        self._train_container  = pn.Column(sizing_mode="stretch_both")
+        self._metric_container = pn.Column(sizing_mode="stretch_both")
+        self._val_container    = pn.Column(sizing_mode="stretch_both")
+        self._scores_container = pn.Column(sizing_mode="stretch_both")
 
-        """
+        # initial fill
+        self._train_container[:]  = [self._train_tab()]
+        self._metric_container[:] = [self._metric_tab()]
+        self._val_container[:]    = [self._val_tab()]
+        self._scores_container[:] = [self._scores_tab()]
 
         self.tabs_view = pn.Tabs(
-            ("Training Set", self._train_tab()),
-            ("Metric", self._metric_tab()),
-            ("Validation Set", self._val_tab()),
-            ("Scores", self._scores_tab()),
+            ("Training Set", self._train_container),
+            ("Metric", self._metric_container),
+            ("Validation Set", self._val_container),
+            ("Scores", self._scores_container),
             active=self.active_tab,
             sizing_mode="stretch_both",
             min_height=500,
         )
+        self.tabs_view.param.watch(self._on_tab_change, "active")
 
+        self._cm_col = pn.Column(sizing_mode="stretch_both", scroll=True)
+        self._footer_col = pn.Column(sizing_mode="stretch_width")
+
+        self._middle_row = pn.Row(
+            self.tabs_view,
+            self._cm_col,
+            sizing_mode="stretch_both",
+            margin=(0, 0, 0, 0),
+            css_classes=["al-middle-grow"],
+        )
+
+        self._middle_row.sizing_mode = "stretch_both"
+        self._middle_row.height_policy = "max"
+
+        self.panel_row.css_classes = ["al-root-col"]
+
+        self.setup_panel()
+        self._refresh_cm()
+        self._refresh_footer_only()
+
+        self.panel_row[:] = [self.setup_row, self._middle_row, self._footer_col]
+
+
+    def _make_selected_message(self):
+        if self._queried_is_selected:
+            return pn.pane.Markdown("**The queried source is currently selected**",
+                                    styles={"color": "#558855"}, margin=(6,10,0,0))
+        return pn.pane.Markdown("**The queried source is not currently selected**",
+                                styles={"color": "#ff5555"}, margin=(6,10,0,0))
+    
+    def _refresh_cm(self):
+        # Replace children in-place (fast)
+        self._cm_col[:] = [self._add_conf_matrices()]
+
+
+    def _refresh_cm(self):
+        self._cm_col[:] = [self._add_conf_matrices()]
+
+    def _refresh_footer(self):
+        selected_message = self._make_selected_message()
+        if self._training and (not self._assigned):
+            footer = self._footer(selected_message)
+        elif self._training and self._assigned:
+            footer = pn.Row(self.next_iteration_button, sizing_mode="stretch_width")
+        else:
+            footer = pn.Row()
+        self._footer_col[:] = [footer]
+
+    def _refresh_ui(self, plots=True, cm=True, footer=True):
+        self.setup_panel()
+
+        if plots:
+            self._train_container[:]  = [self._train_tab()]
+            self._metric_container[:] = [self._metric_tab()]
+            self._val_container[:]    = [self._val_tab()]
+            self._scores_container[:] = [self._scores_tab()]
+
+        if cm:
+            self._refresh_cm()
+        if footer:
+            self._refresh_footer()
+
+    def _on_tab_change(self, event):
+        self.active_tab = int(event.new)
+
+    def _refresh_footer_only(self):
         if self._queried_is_selected:
             selected_message = pn.pane.Markdown(
                 "**The queried source is currently selected**",
@@ -2518,54 +2632,49 @@ class ActiveLearningModel:
                 max_width=250,
             )
 
-        if not button_update:
-
-            self.setup_panel()
-
-            if self._training and (not self._assigned):
-                buttons_row = self._footer(selected_message)
-            elif self._training and self._assigned:
-                buttons_row = pn.Row(self.next_iteration_button, sizing_mode="stretch_width")
-            else:
-                buttons_row = pn.Row()
-
-            self.panel_row[0] = pn.Column(
-                self.setup_row,
-                pn.Row(
-                    self.tabs_view,
-                    pn.Column(self._add_conf_matrices(), scroll=True, sizing_mode="stretch_both"),
-                    sizing_mode="stretch_both",
-                    styles={"align-items": "flex-start"},
-                ),
-                buttons_row,
-                sizing_mode="stretch_both"
-            )
-            return self.panel_row
+        if self._training and (not self._assigned):
+            footer = self._footer(selected_message)
+        elif self._training and self._assigned:
+            footer = pn.Row(self.next_iteration_button, sizing_mode="stretch_width")
         else:
-            buttons_row = pn.Row(max_height=30)
-            if self._training:
-                if self._assigned:
-                    buttons_row.append(self.next_iteration_button)
-                else:
-                    buttons_row = pn.Column(
-                        pn.Row(
-                            self.assign_label_group,
-                            self.assign_label_button,
-                            max_height=30,
-                            width_policy="max",
-                        ),
-                        pn.layout.VSpacer(max_height=5),
-                        pn.Row(
-                            selected_message,
-                            self.show_queried_button,
-                            self.checkpoint_button,
-                            self.request_test_results_button,
-                            width_policy="max",
-                            max_height=30,
-                            max_width=2000,
-                        ),
-                        max_height=70,
-                    )
-            self.panel_row[0][3] = buttons_row
+            footer = pn.Row()
 
-            return self.panel_row
+        self._footer_col[:] = [footer]
+
+    def _refresh_ui_full(self):
+
+        self.setup_panel()
+
+        # update tab contents (swap the one child in each container)
+        self._train_container[:]  = [self._train_tab()]
+        self._metric_container[:] = [self._metric_tab()]
+        self._val_container[:]    = [self._val_tab()]
+        self._scores_container[:] = [self._scores_tab()]
+
+        self._cm_col[:] = [self._add_conf_matrices()]
+
+        self._refresh_footer_only()
+
+    def panel(self, button_update=False):
+
+        """Create the active learning tab panel.
+
+        Returns
+        -------
+        panel_row : Panel Row
+            The panel is housed in a row which can then be rendered by the
+            respective Dashboard.
+
+        """
+
+        if not getattr(self, "_ui_built", False):
+            self._build_ui_once()
+            self._ui_built = True
+
+        # Update only what is needed
+        if button_update:
+            self._refresh_footer_only()
+        else:
+            self._refresh_ui_full()
+
+        return self.panel_row

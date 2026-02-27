@@ -105,6 +105,8 @@ class BasePlotClass(param.Parameterized):
         self._initialise_selector_options()
         self.param.label_selector.objects = ["All"] + list(config.settings["strings_to_labels"].keys())
 
+        self.update_df()
+
         self.param.update(
                     X_variable = self._get_from_settings_dictionary("X_variable", self.available_columns[0]),
                     label_selector = self._get_from_settings_dictionary("label", ['All']),
@@ -251,18 +253,36 @@ class ScatterPlotDashboard(BasePlotClass):
         
         if plot_mode == "tap" and (sourceid is not None):
             points = hv.Points((x, y, sourceid), kdims=["x", "y"], vdims=["id"]).opts(
-                     size = 5,
-                     xlim=(min_x, max_x),
-                     ylim=(min_y, max_y),
-                     tools = ["tap", "box_select"],
-                     active_tools=["tap"],
-                     selection_fill_color="red",
-                     nonselection_alpha=0.4,
-                     logx = self.log_xscale,
-                     logy = self.log_yscale,
-                     xlabel=self.X_variable,
-                     ylabel=self.Y_variable,
-                     color=color,)
+                size=4,
+
+                # Make dense clouds readable
+                alpha=0.25,
+
+                # Remove default outline (big visual improvement)
+                line_alpha=0.0,
+
+                # Keep axis limits etc
+                xlim=(min_x, max_x),
+                ylim=(min_y, max_y),
+                tools=["tap", "box_select", "wheel_zoom", "pan", "reset"],
+                active_tools=["wheel_zoom"],
+
+                # Better selection styling
+                selection_alpha=1.0,
+                selection_color="orange",
+                selection_line_color="black",
+                selection_line_width=2,
+
+                nonselection_alpha=0.08,
+                nonselection_color=color,   # keep same hue but faded
+                nonselection_line_alpha=0.0,
+
+                logx=self.log_xscale,
+                logy=self.log_yscale,
+                xlabel=self.X_variable,
+                ylabel=self.Y_variable,
+                color=color,
+            )
             
             sel_stream = streams.Selection1D(source=points)
 
@@ -335,13 +355,17 @@ class ScatterPlotDashboard(BasePlotClass):
         else:
             return None
         if selected.shape[0] > 0:
-            selected_plot = hv.Scatter(selected, x_var, y_var,).opts(
-                fill_color="black",
+            selected_plot = hv.Scatter(selected, x_var, y_var).opts(
                 marker="circle",
-                size=10,
+                size=14,
+                fill_alpha=0.0,       # hollow
+                line_color="black",
+                line_width=3,
+
                 active_tools=[],
-                logx = self.log_xscale,
-                logy = self.log_yscale)
+                logx=self.log_xscale,
+                logy=self.log_yscale,
+            )
             return selected_plot
         
 
