@@ -264,7 +264,7 @@ class DataSelection(param.Parameterized):
 
         print(config.settings)
 
-        config.main_df = self.get_dataframe_from_fits_file(self.dataset, config.settings["optimise_data"])
+        config.main_df = self.get_dataframe_from_fits_file(self.dataset)
         self.df = config.main_df
         self.src.data = dict(pd.DataFrame())
 
