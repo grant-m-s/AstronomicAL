@@ -23,8 +23,9 @@ class MenuDashboard:
 
     """
 
-    def __init__(self, main):
-
+    def __init__(self, main, context=None):
+        
+        self.context = context
         self.row = pn.Row(pn.pane.Str("loading"))
 
         plot_options = [

@@ -1,9 +1,13 @@
+from __future__ import annotations
 
 import panel as pn
 import json
 import os
 import time
 import uuid
+
+
+from typing import Optional, Tuple
 
 from datetime import datetime
 import numpy as np
@@ -19,8 +23,16 @@ from astronomicAL.extensions.models import get_classifiers
 from astronomicAL.extensions.query_strategies import get_strategy_dict
 from astronomicAL.settings.data_selection import DataSelection
 
+import os
+import json
+import time
+from datetime import datetime
 
-def create_header(react, grid, config):
+import pandas as pd
+import panel as pn
+
+
+def create_header(react, grid, context):
     """
     Build and attach the app header row.
 
@@ -28,8 +40,15 @@ def create_header(react, grid, config):
     ----------
     react: pn.template.ReactTemplate (or compatible)
     grid: the dynamic grid instance (react._dynamic_grid)
-    config: astronomicAL.config module (or object providing the same API)
+    context: AppContext (contains workspace + config, etc.)
     """
+    if context is None:
+        raise ValueError("create_header requires a non-null context")
+
+    # Keep backward compatibility: still rely on config-provided button factories
+    cfg = context.config
+    if cfg is None:
+        raise ValueError("context.config is required for current header buttons")
 
     if not hasattr(react, "_header_box"):
         react._header_box = pn.Row(sizing_mode="stretch_width")
@@ -37,54 +56,46 @@ def create_header(react, grid, config):
 
     export_fits_file_button = pn.widgets.Button(name="Export Labelled Data to Fits File")
 
+    # Close handling: delegate to WorkspaceManager (single owner of grid mutation)
     def _close_from_js(event):
         tile_id = event.new
         if not tile_id:
             return
-
-        # Not found -> just clear the signal
-        if tile_id not in grid.keys:
+        context.workspace.remove_panel(str(tile_id))
+        # Make sure the JS signal is cleared to avoid repeated triggers
+        try:
             grid.close_key = ""
-            return
+        except Exception:
+            pass
 
-        idx = grid.keys.index(tile_id)
+    # # Attach watcher only once (avoid duplicate watchers)
+    # if not getattr(grid, "_close_watcher_attached", False):
+    #     grid.param.watch(_close_from_js, "close_key")
+    #     grid._close_watcher_attached = True
 
-        # Remove from every breakpoint layout
-        new_layouts = {}
-        for bp, bp_layout in (grid.layouts or {}).items():
-            new_layouts[bp] = [it for it in (bp_layout or []) if str(it.get("i")) != str(tile_id)]
+    def export_fits_file_cb(_event):
+        list_ids: list[str] = []
+        list_labels: list[str] = []
 
-        config.dashboards.pop(tile_id, None)
-        # Update all in one go (prevents flicker / intermediate inconsistent states)
-        grid.param.update(
-            keys=[k for k in grid.keys if k != tile_id],
-            objects=[obj for i, obj in enumerate(grid.objects) if i != idx],
-            layouts=new_layouts,
-            close_key="",
-        )
+        settings = getattr(cfg, "settings", {}) or {}
 
-    if not getattr(grid, "_close_watcher_attached", False):
-        grid.param.watch(_close_from_js, "close_key")
-        grid._close_watcher_attached = True
-
-    def export_fits_file_cb(event):
-        list_ids = []
-        list_labels = []
-
-        if config.settings.get("confirmed"):
-            if "classifiers" in config.settings:
-                for label in config.settings["classifiers"]:
-                    entry = config.settings["classifiers"][label]
-                    if ("id" in entry) and ("y" in entry):
-                        list_ids.extend(entry["id"])
-                        list_labels.extend(entry["y"])
+        if settings.get("confirmed"):
+            # include labels from classifiers in settings
+            classifiers = settings.get("classifiers") or {}
+            for label, entry in classifiers.items():
+                if isinstance(entry, dict) and ("id" in entry) and ("y" in entry):
+                    list_ids.extend(entry["id"])
+                    list_labels.extend(entry["y"])
 
             # include test-set labels (if configured)
             orig_labelled_data = {}
-            if config.settings.get("test_set_file"):
+            test_set_file = settings.get("test_set_file")
+            if test_set_file:
+                # NOTE: existing behavior loads from a fixed path; keep that identical
                 if os.path.exists("data/test_set.json"):
-                    with open("data/test_set.json", "r") as f:
+                    with open("data/test_set.json", "r", encoding="utf-8") as f:
                         orig_labelled_data = json.load(f)
+
                 for _id, _lab in orig_labelled_data.items():
                     list_ids.append(_id)
                     list_labels.append(_lab)
@@ -123,34 +134,59 @@ def create_header(react, grid, config):
     add_menu_btn.description = "Add Panel"
 
     def _on_add_menu(_):
-        add_menu_panel(grid)
+        try:
+            add_menu_panel(grid, context=context)
+        except Exception as e:
+            import traceback
+            print("[add_menu_panel] ERROR:", e)
+            traceback.print_exc()
 
     add_menu_btn.on_click(_on_add_menu)
 
+    confirmed = bool(getattr(cfg, "settings", {}).get("confirmed", False))
+
     header_row = pn.Row(
-        config.get_save_layout_button(config.settings.get("confirmed", False), True),
+        cfg.get_save_layout_button(confirmed, True),
         export_fits_file_button,
-        config.get_save_panel_data_button(config.settings.get("confirmed", False)),
-        config.get_save_logbook_button(config.settings.get("confirmed", False)),
+        cfg.get_save_panel_data_button(confirmed),
+        cfg.get_save_logbook_button(confirmed),
         add_menu_btn,
         sizing_mode="stretch_width",
     )
 
     # IMPORTANT: replace contents, don’t append
     react._header_box[:] = [header_row]
-
     return react
 
 
-def add_menu_panel(grid):
+def bind_controller(view, controller):
+    """
+    Attach controller to a Panel view, and expose dispose on the view so
+    WorkspaceManager can dispose it even if controller isn't passed explicitly.
+    """
+    if view is None or controller is None:
+        return view
+    try:
+        setattr(view, "_al_controller", controller)
+        # Provide a dispose method on the view that forwards to controller.dispose()
+        if hasattr(controller, "dispose"):
+            setattr(view, "dispose", controller.dispose)
+    except Exception:
+        pass
+    return view
 
+import uuid
+
+def add_menu_panel(grid, context):
+    grid = context.workspace.grid  # override any stale reference
+    
     def _bp_geom(bp: str):
         if bp == "lg":
             return 4, 4   # w,h
         if bp == "md":
             return 6, 4
         return 12, 4
-    
+
     def _overlaps(a, b) -> bool:
         return not (
             a["x"] + a["w"] <= b["x"] or
@@ -166,7 +202,7 @@ def add_menu_panel(grid):
         """
         items = [
             {"x": int(it.get("x", 0)), "y": int(it.get("y", 0)),
-            "w": int(it.get("w", 1)), "h": int(it.get("h", 1))}
+             "w": int(it.get("w", 1)), "h": int(it.get("h", 1))}
             for it in (layout_items or [])
             if it is not None
         ]
@@ -185,37 +221,59 @@ def add_menu_panel(grid):
         # fallback: append at bottom-left
         return 0, max_y
 
-    numeric = [int(x) for x in grid.keys if str(x).isdigit()]
-    new_id = str(max(numeric) + 1) if numeric else f"menu-{uuid.uuid4().hex[:8]}"
+    if context is None or context.workspace is None:
+        raise ValueError("add_menu_panel requires context with workspace")
 
-    dash = Dashboard(src=config.source, contents="Menu")
-    config.dashboards[new_id] = dash
+    cfg = context.config
+    if cfg is None:
+        raise ValueError("add_menu_panel requires context.config (for Dashboard src/config)")
 
+    # Ensure counter starts above any existing numeric ids
+    settings = context.config.settings
+    if settings is None:
+        context.config.settings = {}
+        settings = context.config.settings
+
+    # compute current max numeric id in the live grid
+    numeric = [int(str(x)) for x in (context.workspace.grid.keys or []) if str(x).isdigit()]
+    current_max = max(numeric) if numeric else 0
+
+    # initialise counter only once (or bump it if grid has moved ahead)
+    counter = int(settings.get("_panel_id_counter", 0))
+    counter = max(counter, current_max)
+
+    # increment and persist
+    counter += 1
+    settings["_panel_id_counter"] = counter
+
+    new_id = str(counter)
+    
+    dash = Dashboard(src=cfg.source, contents="Menu", context=context)
     try:
         view = dash.panel(in_grid=True)
     except TypeError:
         view = dash.panel()
+    view = bind_controller(view, dash)
 
-    n = len(grid.keys)
-    new_keys = [*grid.keys, new_id]
-    new_objs = [*grid.objects, view]
+    # Compute a layout item for *one* breakpoint. WorkspaceManager will replicate
+    # it across breakpoints if you coded it that way; if not, we can pass per-bp.
+    #
+    # To keep behavior closest to your original, we compute a bp layout item for each bp.
+    # WorkspaceManager.add_panel currently takes one layout_item; so we pick lg if present,
+    # otherwise first available breakpoint. (If you want exact per-bp placement, see note below.)
+    new_layouts = (grid.layouts or {})
+    cols_by_bp = (grid.cols_by_breakpoint or {})
 
-    new_layouts = {**(grid.layouts or {})}
-    for bp, cols in (grid.cols_by_breakpoint or {}).items():
-        w, h = _bp_geom(bp)
-        bp_layout = list(new_layouts.get(bp, []))
+    # Choose a "primary" breakpoint to compute placement from
+    primary_bp = "lg" if "lg" in cols_by_bp else (next(iter(cols_by_bp.keys()), "lg"))
+    cols = int(cols_by_bp.get(primary_bp, 12))
+    w, h = _bp_geom(primary_bp)
+    bp_layout = list(new_layouts.get(primary_bp, []))
+    x, y = find_first_fit(bp_layout, cols=cols, w=w, h=h)
 
-        x, y = find_first_fit(bp_layout, cols=int(cols), w=w, h=h)
-        bp_layout.append({"i": new_id, "x": x, "y": y, "w": w, "h": h})
-        new_layouts[bp] = bp_layout
-
-    grid.param.update(
-        keys=new_keys,
-        objects=new_objs,
-        layouts=new_layouts,
-    )
-
-
+    layout_item = {"x": x, "y": y, "w": w, "h": h}
+    
+    context.workspace.add_panel(new_id, view, title="Menu", layout_item=layout_item)
 def verify_import_config(curr_config_file):
 
     has_error = False
@@ -436,7 +494,25 @@ def update_config_settings(imported_config):
 
 # keep your existing imports: Dashboard, DataSelection, update_config_settings, config, etc.
 
-def create_layout_from_file(react):
+def create_layout_skeleton(react: pn.template.ReactTemplate, *, return_grid: bool=False):
+    """
+    Creates the DynamicReactGrid and attaches it to react.main,
+    but does NOT create header/menu/dashboards.
+    This lets main() construct AppContext first.
+    """
+    grid = DynamicReactGrid(keys=[], objects=[], layouts={})
+    react._dynamic_grid = grid
+    react.main[:12,:12] = grid
+    if return_grid:
+        return react, grid
+    return react
+
+def create_layout_from_file(
+        react: pn.template.ReactTemplate,
+        context=None,
+        *,
+        return_grid: bool = False,
+    ):
 
     with open(config.layout_file) as layout_file:
         curr_config_file = json.load(layout_file)
@@ -516,7 +592,7 @@ def create_layout_from_file(react):
             if "config_load_level" in config.settings and config.settings["config_load_level"] == 0:
                 contents = "Menu"
 
-        dash = Dashboard(src=config.source, contents=contents)
+        dash = Dashboard(src=config.source, contents=contents, context=context)
         config.dashboards[p] = dash
 
         # restore “Basic Plot” axis selections (your existing behaviour)
@@ -560,12 +636,19 @@ def create_layout_from_file(react):
     react.main[:12, :12] = grid   # 2D assignment
     react._dynamic_grid = grid
 
-    react = create_header(react, grid, config)
+    react = create_header(react, grid, context=context)
 
+    if return_grid:
+        return react, grid
     return react
 
 
-def create_default_layout(react):
+def create_default_layout(
+    react: pn.template.ReactTemplate,
+    context=None,
+    *,
+    return_grid: bool = False,
+        ):
     print("No Layout File Found. Reverting to default dashboard layout (DynamicReactGrid).")
 
     grid = DynamicReactGrid(
@@ -582,20 +665,20 @@ def create_default_layout(react):
     items = []
 
     # 1) Settings (top-left)
-    main_plot = Dashboard(src=config.source, contents="Settings")
+    main_plot = Dashboard(src=config.source, contents="Settings", context=context)
     config.dashboards[0] = main_plot
     items.append(("settings", main_plot.panel()))
 
     # 2) Top-right
     num = 0
-    new_plot = Dashboard(src=config.source)
+    new_plot = Dashboard(src=config.source, context=context)
     config.dashboards[f"{num}"] = new_plot
     items.append((f"plot-{num}", new_plot.panel()))
     num += 1
 
     # 3) Bottom row: three plots
     for _ in [0, 4, 8]:
-        new_plot = Dashboard(src=config.source)
+        new_plot = Dashboard(src=config.source, context=context)
         config.dashboards[f"{num}"] = new_plot
         items.append((f"plot-{num}", new_plot.panel()))
         num += 1
@@ -640,8 +723,10 @@ def create_default_layout(react):
 
     react._dynamic_grid = grid
 
-    react = create_header(react, grid, config)
+    react = create_header(react, grid, context=context)
 
+    if return_grid:
+        return react, grid
     return react
 
 def verify_column_properties(table, col_name, config_dict_name):

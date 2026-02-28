@@ -1,6 +1,5 @@
 from astronomicAL.active_learning.active_learning import ActiveLearningModel
 
-import astronomicAL.config as config
 import panel as pn
 
 
@@ -23,7 +22,11 @@ class ActiveLearningDashboard:
 
     """
 
-    def __init__(self, src, df):
+    def __init__(self, src, df, context = None):
+
+        self.context = context
+        import astronomicAL.config as config
+        self.config = context.config if (context is not None and getattr(context, "config", None) is not None) else config
 
         self.df = df
         self.src = src
@@ -41,8 +44,8 @@ class ActiveLearningDashboard:
 
         """
         # CHANGED :: Add to AL settings
-        for label in config.settings["labels_to_train"]:
-            raw_label = config.settings["strings_to_labels"][label]
+        for label in self.config.settings["labels_to_train"]:
+            raw_label = self.config.settings["strings_to_labels"][label]
             print("AL Dashboard:", label, raw_label)
             self.active_learning.append(
                 ActiveLearningModel(df=self.df, src=self.src, label=label)

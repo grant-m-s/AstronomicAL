@@ -1,7 +1,6 @@
 from functools import partial
 from requests.exceptions import ConnectionError
 from multiprocessing import Process
-import astronomicAL.config as config
 import numpy as np
 import pandas as pd
 import panel as pn
@@ -44,9 +43,13 @@ class SelectedSourceDashboard:
     """
 
     
-    def __init__(self, src, close_button):
+    def __init__(self, src, close_button, context = None):
 
-        self.df = config.main_df
+        self.context = context
+        import astronomicAL.config as config
+        self.config = context.config if (context is not None and getattr(context, "config", None) is not None) else config
+
+        self.df = self.config.main_df
 
         self.src = src
         self.src.on_change("data", self._panel_cb)
@@ -84,17 +87,17 @@ class SelectedSourceDashboard:
 
         self._search_status = "Searching..."
 
-        if event.new not in list(self.df[config.settings["id_col"]].values):
+        if event.new not in list(self.df[self.config.settings["id_col"]].values):
             self._search_status = "ID not found in dataset"
             self.panel()
             return
 
-        selected_source = self.df[self.df[config.settings["id_col"]] == event.new]
+        selected_source = self.df[self.df[self.config.settings["id_col"]] == event.new]
 
-        selected_dict = selected_source.set_index(config.settings["id_col"]).to_dict(
+        selected_dict = selected_source.set_index(self.config.settings["id_col"]).to_dict(
             "list"
         )
-        selected_dict[config.settings["id_col"]] = [event.new]
+        selected_dict[self.config.settings["id_col"]] = [event.new]
         self.src.data = selected_dict
 
         self.panel()
@@ -107,10 +110,10 @@ class SelectedSourceDashboard:
     def _check_valid_selected(self):
         selected = False
 
-        if config.settings["id_col"] in list(self.src.data.keys()):
-            if len(self.src.data[config.settings["id_col"]]) > 0:
-                if self.src.data[config.settings["id_col"]][0] in list(
-                    self.df[config.settings["id_col"]].values
+        if self.config.settings["id_col"] in list(self.src.data.keys()):
+            if len(self.src.data[self.config.settings["id_col"]]) > 0:
+                if self.src.data[self.config.settings["id_col"]][0] in list(
+                    self.df[self.config.settings["id_col"]].values
                 ):
                     selected = True
 
@@ -121,7 +124,7 @@ class SelectedSourceDashboard:
         add_source_to_list = True
 
         if len(self.selected_history) > 0:
-            selected_id = self.src.data[config.settings["id_col"]][0]
+            selected_id = self.src.data[self.config.settings["id_col"]][0]
             top_of_history = self.selected_history[0]
             if selected_id == top_of_history:
                 add_source_to_list = False
@@ -130,7 +133,7 @@ class SelectedSourceDashboard:
 
         if add_source_to_list:
             self.selected_history = [
-                self.src.data[config.settings["id_col"]][0]
+                self.src.data[self.config.settings["id_col"]][0]
             ] + self.selected_history
 
     def _deselect_source_cb(self, event):
@@ -185,10 +188,10 @@ class SelectedSourceDashboard:
             self.deselect_button.on_click(self._deselect_source_cb)
 
             extra_data_list = [
-                ["Source ID", self.src.data[config.settings["id_col"]][0]]
+                ["Source ID", self.src.data[self.config.settings["id_col"]][0]]
             ]
 
-            for i, col in enumerate(config.settings["extra_info_cols"]):
+            for i, col in enumerate(self.config.settings["extra_info_cols"]):
 
                 extra_data_list.append([col, self.src.data[f"{col}"][0]])
 

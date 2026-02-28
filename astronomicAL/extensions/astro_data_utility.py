@@ -22,7 +22,6 @@ from astropy.convolution import convolve, Gaussian1DKernel, Box1DKernel
 import mocpy
 
 from sparcl.client import SparclClient 
-from astronomicAL.extensions.shared_data import shared_data
 from astronomicAL.utils.error_tracker import ErrorTracker
 
 
@@ -40,12 +39,18 @@ class EuclidCutoutsClass:
     def __init__(self, ra, dec, 
                  euclid_filters = ["VIS", "NIR_Y", "NIR_J", "NIR_H"],
                  client = None, 
-                 save_dir = "data/cutouts"):
-        
+                 save_dir = "data/cutouts",
+                 context = None):
+
+        self.context = context
+        import astronomicAL.config as config
+        self.config = context.config if (context is not None and getattr(context, "config", None) is not None) else config
+        self.shared = getattr(context, "shared", None)
+
         if client is None:
-            shared_data.set_data("Euclid_client", EuclidClass(environment="PDR"))
+            self.shared.set_data("Euclid_client", EuclidClass(environment="PDR"))
             print("Initialized EuclidClass")
-            self.client = shared_data.get_data("Euclid_client")
+            self.client = self.shared.get_data("Euclid_client")
         else:
             self.client = client
         
@@ -432,7 +437,17 @@ class EuclidCutoutsClass:
 
 class BaseSpectraClass:
     """Base class to store methods which are used both for Euclid and DESI/SDSS spectra"""
-    def __init__(self, ra, dec, max_separation = 1, sourceId = None):
+    def __init__(self, ra, dec, max_separation = 1, sourceId = None, context = None):
+
+        self.context = context
+        self.shared = getattr(context, "shared", None)
+
+        if (context is not None and getattr(context, "config", None) is not None):
+            config = context.config
+        else:
+            import astronomicAL.config as config
+            config = config
+
         self.ra = ra
         self.dec = dec
         self.error_tracker = ErrorTracker()
@@ -778,23 +793,28 @@ class DESISpectraClass(BaseSpectraClass):
     """
     def __init__(self, ra, dec, max_separation = 1, 
                  datasets = ["DESI-DR1", "DESI-EDR", "BOSS-DR17", "SDSS-DR17"],
-                 sourceId = None, client = None):
-        super().__init__(ra, dec, max_separation=max_separation, sourceId=sourceId)
+                 sourceId = None, client = None, context = None):
+        super().__init__(ra, dec, max_separation=max_separation, sourceId=sourceId, context = context)
         
+        self.context = context
+        import astronomicAL.config as config
+        self.config = context.config if (context is not None and getattr(context, "config", None) is not None) else config
+        self.shared = getattr(context, "shared", None)
+
         if isinstance(datasets, str): 
             datasets = [datasets]
         self.datasets = datasets
 
         if client is None:
-            shared_data.set_data("Sparcl_client", SparclClient(read_timeout=60))
+            self.shared.set_data("Sparcl_client", SparclClient(read_timeout=60))
             print("Initialized SparcClient")
-            self.client = shared_data.get_data("Sparcl_client")
+            self.client = self.shared.get_data("Sparcl_client")
         else:
             self.client = client
 
         if ("DESI-DR1" in self.datasets) | ("DESI-EDR" in self.datasets):
             self.moc = load_moc(survey = "DESI")
-        elif ("BOSS-DR16" in self.datasets) | ("SDSS-DR17" in self.datasets):
+        elif ("BOSS-DR17" in self.datasets) | ("SDSS-DR17" in self.datasets):
             self.moc = load_moc(survey = "SDSS")
 
 
@@ -951,12 +971,18 @@ class SpectrumContainer:
 
 class EuclidSpectraClass(BaseSpectraClass):
 
-    def __init__(self, ra, dec, max_separation =1, sourceId = None, client = None):
-        super().__init__(ra, dec, max_separation = max_separation, sourceId = sourceId)
+    def __init__(self, ra, dec, max_separation =1, sourceId = None, client = None, context = None):
+        super().__init__(ra, dec, max_separation = max_separation, sourceId = sourceId, context = context)
+
+        self.context = context
+        import astronomicAL.config as config
+        self.config = context.config if (context is not None and getattr(context, "config", None) is not None) else config
+        self.shared = getattr(context, "shared", None)
+
         if client is None:
-            shared_data.set_data("Euclid_client", EuclidClass(environment = "PDR"))
+            self.shared.set_data("Euclid_client", EuclidClass(environment = "PDR"))
             print("Initialized EuclidClass")
-            self.client = shared_data.get_data("Euclid_client")
+            self.client = self.shared.get_data("Euclid_client")
         else:
             self.client = client
         self.moc = load_moc("Euclid_Q1")
@@ -1016,6 +1042,7 @@ class EuclidSpectraClass(BaseSpectraClass):
                     WHERE DISTANCE(ra_obj, dec_obj, {self.ra}, {self.dec}) < {self.max_separation}
                     ORDER BY separation
                 """
+        print(f"query ra dec: ({self.ra},{self.dec})")
         tic = time.perf_counter()
         job = self.client.launch_job(query)
             
@@ -1026,7 +1053,7 @@ class EuclidSpectraClass(BaseSpectraClass):
         self.table_results = job.get_results()
         self.available_spectra = len(self.table_results)
         if self.available_spectra < 1:
-            self.error_tracker.log_error("No spectra in the field", "No spectra found around the requested coordinates")
+            self.error_tracker.log_error("No spectra in the field", f"No spectra found around the requested coordinates - ra: {self.ra}, dec:{self.dec}")
         toc = time.perf_counter()
         if verbose:
                 print(f"Querying Euclid spectra_source table required {toc-tic} seconds")
@@ -1342,7 +1369,7 @@ def SDSS_cutout(ra, dec, radius):
     from PIL import Image
     scale = radius/64
     scale = 0.4
-    url = "http://skyserver.sdss.org/dr16/SkyServerWS/ImgCutout/getjpeg?TaskName=Skyserver.Explore.Image&ra="
+    url = "http://skyserver.sdss.org/dr17/SkyServerWS/ImgCutout/getjpeg?TaskName=Skyserver.Explore.Image&ra="
     url = f"{url}{ra}&dec={dec}&opt=G&scale={scale}"
     response =requests.get(url)
     try:
@@ -1364,13 +1391,13 @@ class sdss_cutouts_class:
             self.get_url()
 
         def get_url(self):
-            url = "http://skyserver.sdss.org/dr16/SkyServerWS/ImgCutout/getjpeg?TaskName=Skyserver.Explore.Image&ra="
+            url = "http://skyserver.sdss.org/dr17/SkyServerWS/ImgCutout/getjpeg?TaskName=Skyserver.Explore.Image&ra="
 
             self.url = f"{url}{self.ra}&dec={self.dec}&opt=G&scale={self.scale}"
             return None
 
         def update_scale(self, scale):
-            url = "http://skyserver.sdss.org/dr16/SkyServerWS/ImgCutout/getjpeg?TaskName=Skyserver.Explore.Image&ra="
+            url = "http://skyserver.sdss.org/dr17/SkyServerWS/ImgCutout/getjpeg?TaskName=Skyserver.Explore.Image&ra="
             self.scale = scale
             self.url = f"{url}{self.ra}&dec={self.dec}&opt=G&scale={self.scale}"
             return None

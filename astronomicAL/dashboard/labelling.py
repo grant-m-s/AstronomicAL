@@ -1,6 +1,4 @@
 import panel as pn
-import astronomicAL.config as config
-from astronomicAL.dashboard.plot import PlotDashboard
 from astronomicAL.active_learning.active_learning import ActiveLearningModel
 import numpy as np
 import datashader as ds
@@ -62,10 +60,15 @@ class LabellingDashboard(param.Parameterized):
         objects=["1"], default="1", doc="Selection box for the Y axis of the plot."
     )
 
-    def __init__(self, src, df):
+    def __init__(self, src, df, context=None):
         super(LabellingDashboard, self).__init__()
 
         self.row = pn.Row(pn.pane.Str("loading"))
+        self.context = context
+        import astronomicAL.config as config
+
+        self.config = context.config if (context is not None and getattr(context, "config", None) is not None) else config
+
         self.df = df
         self.sample_region = df
         self.region_criteria_df = pd.DataFrame([], columns=["column", "oper", "value"])
@@ -76,7 +79,7 @@ class LabellingDashboard(param.Parameterized):
         self.labels = self.get_previous_labels()
         self._construct_panel()
 
-        ActiveLearningModel(self.src, df, config.settings["labels_to_train"][0])
+        ActiveLearningModel(self.src, df, self.config.settings["labels_to_train"][0], context=context)
 
         self._update_variable_lists()
         self.select_random_point()
@@ -87,19 +90,19 @@ class LabellingDashboard(param.Parameterized):
 
         options = []
 
-        all_labels = list(config.main_df[config.settings["label_col"]].unique())
+        all_labels = list(self.config.main_df[self.config.settings["label_col"]].unique())
 
         all_labels.sort()
 
         if -1 in all_labels:
             all_labels.remove(-1)
 
-        if config.settings["exclude_labels"]:
-            for i in config.settings["unclassified_labels"]:
-                all_labels.remove(config.settings["strings_to_labels"][f"{i}"])
+        if self.config.settings["exclude_labels"]:
+            for i in self.config.settings["unclassified_labels"]:
+                all_labels.remove(self.config.settings["strings_to_labels"][f"{i}"])
 
         for i in all_labels:
-            options.append(config.settings["labels_to_strings"][f"{i}"])
+            options.append(self.config.settings["labels_to_strings"][f"{i}"])
 
         options.append("Unsure")
         self.assign_label_group = pn.widgets.RadioButtonGroup(
@@ -175,21 +178,21 @@ class LabellingDashboard(param.Parameterized):
 
         """
 
-        cols = list(config.main_df.columns)
+        cols = list(self.config.main_df.columns)
 
-        if config.settings["id_col"] in cols:
-            cols.remove(config.settings["id_col"])
-        if config.settings["label_col"] in cols:
-            cols.remove(config.settings["label_col"])
+        if self.config.settings["id_col"] in cols:
+            cols.remove(self.config.settings["id_col"])
+        if self.config.settings["label_col"] in cols:
+            cols.remove(self.config.settings["label_col"])
 
         self.column_dropdown.options = cols
 
         self.param.X_variable.objects = cols
         self.param.Y_variable.objects = cols
-        self.param.X_variable.default = config.settings["default_vars"][0]
-        self.param.Y_variable.default = config.settings["default_vars"][1]
-        self.X_variable = config.settings["default_vars"][0]
-        self.Y_variable = config.settings["default_vars"][1]
+        self.param.X_variable.default = self.config.settings["default_vars"][0]
+        self.param.Y_variable.default = self.config.settings["default_vars"][1]
+        self.X_variable = self.config.settings["default_vars"][0]
+        self.Y_variable = self.config.settings["default_vars"][1]
 
     def update_sample_region(self, event=None, button="ADD"):
 
@@ -340,7 +343,7 @@ class LabellingDashboard(param.Parameterized):
             #active_tools=["pan", "wheel_zoom"],
         )
 
-        color_key = config.settings["label_colours"]
+        color_key = self.config.settings["label_colours"]
 
         # color_points = hv.NdOverlay(
         #     {
@@ -385,7 +388,7 @@ class LabellingDashboard(param.Parameterized):
             datashade(
                 p,
                 color_key=new_key,
-                aggregator=ds.by(config.settings["label_col"], ds.count()),
+                aggregator=ds.by(self.config.settings["label_col"], ds.count()),
             ).opts(
                 xlim=(min_x, max_x),
                 ylim=(min_y, max_y),
@@ -403,7 +406,7 @@ class LabellingDashboard(param.Parameterized):
             datashade(
                 sample_region,
                 color_key=color_key,
-                aggregator=ds.by(config.settings["label_col"], ds.count()),
+                aggregator=ds.by(self.config.settings["label_col"], ds.count()),
                 min_alpha=70,
                 alpha=100,
             ).opts(
@@ -428,12 +431,12 @@ class LabellingDashboard(param.Parameterized):
         print("_assign_label_cb")
 
         selected_label = self.assign_label_group.value
-        id = self.src.data[config.settings["id_col"]][0]
+        id = self.src.data[self.config.settings["id_col"]][0]
 
         self.assign_label_button.disabled = True
 
         if selected_label != "Unsure":
-            raw_label = config.settings["strings_to_labels"][selected_label]
+            raw_label = self.config.settings["strings_to_labels"][selected_label]
         else:
             raw_label = -1
 
@@ -479,8 +482,8 @@ class LabellingDashboard(param.Parameterized):
         
         selected_source = self.df[self.get_id() == selected]
         selected_dict = selected_source.to_dict("list")
-        if config.settings["id_col"] not in selected_dict:
-            selected_dict[config.settings["id_col"]] = selected
+        if self.config.settings["id_col"] not in selected_dict:
+            selected_dict[self.config.settings["id_col"]] = selected
 
         self.src.data = selected_dict
         self.assign_label_group.value = "Unsure"
@@ -511,17 +514,17 @@ class LabellingDashboard(param.Parameterized):
 
             selected_source = self.df[self.get_id() == updated]
             selected_dict = selected_source.to_dict("list")
-            if config.settings["id_col"] not in selected_dict:
-                selected_dict[config.settings["id_col"]] = updated
+            if self.config.settings["id_col"] not in selected_dict:
+                selected_dict[self.config.settings["id_col"]] = updated
 
-            self.assign_label_group.value = config.settings["labels_to_strings"][
+            self.assign_label_group.value = self.config.settings["labels_to_strings"][
                 f"{self.labels[updated]}"
             ]
 
             self.src.data = selected_dict
 
     def get_current_index_in_labelled_data(self):
-        id_col = config.settings["id_col"]
+        id_col = self.config.settings["id_col"]
         labelled_keys = list(self.labels.keys())
         total = len(labelled_keys)
         if id_col in self.src.data and len(self.src.data[id_col]) > 0:
@@ -536,7 +539,7 @@ class LabellingDashboard(param.Parameterized):
         return index
     
     def get_id(self, df = None):
-        id_col = config.settings["id_col"]
+        id_col = self.config.settings["id_col"]
         target_df = self.df if df is None else df
 
         if id_col == "Use Index":
@@ -609,11 +612,11 @@ class LabellingDashboard(param.Parameterized):
         if len(self.sample_region) == 0:
             self.new_labelled_button.disabled = True
 
-        if self.src.data[config.settings["id_col"]][0] in list(self.labels.keys()):
+        if self.src.data[self.config.settings["id_col"]][0] in list(self.labels.keys()):
 
-            raw_label = self.labels[self.src.data[config.settings["id_col"]][0]]
+            raw_label = self.labels[self.src.data[self.config.settings["id_col"]][0]]
 
-            label = config.settings["labels_to_strings"][f"{raw_label}"]
+            label = self.config.settings["labels_to_strings"][f"{raw_label}"]
 
             previous_label = pn.widgets.StaticText(
                 name="Current Label",
@@ -625,8 +628,8 @@ class LabellingDashboard(param.Parameterized):
                 value=f"Unlabelled",
             )
 
-        dataset_raw_label = self.src.data[config.settings["label_col"]][0]
-        dataset_label = config.settings["labels_to_strings"][f"{dataset_raw_label}"]
+        dataset_raw_label = self.src.data[self.config.settings["label_col"]][0]
+        dataset_label = self.config.settings["labels_to_strings"][f"{dataset_raw_label}"]
 
         if (index + 1) > total:
             index_tally = f"NEW ({total} Labelled)"
@@ -653,7 +656,7 @@ class LabellingDashboard(param.Parameterized):
             self.remove_sample_criteria_button,
             pn.widgets.StaticText(name="Labelled Point", value=index_tally),
             pn.widgets.StaticText(
-                name="Source ID", value=f"{self.src.data[config.settings['id_col']][0]}"
+                name="Source ID", value=f"{self.src.data[self.config.settings['id_col']][0]}"
             ),
             pn.widgets.StaticText(
                 name="Original Dataset Label",

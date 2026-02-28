@@ -51,12 +51,19 @@ class DataSelection(param.Parameterized):
 
     ready = param.Boolean(default=False)
 
-    def __init__(self, src, mode):
+    def __init__(self, src, mode, context=None):
         super(DataSelection, self).__init__()
 
         self.mode = mode
         self.src = src
         self.error_message = ""
+        self.context = context
+
+        self.config = context.config if (context is not None and getattr(context, "config", None) is not None) else config
+
+        # Guarantee settings dict exists
+        if getattr(self.config, "settings", None) is None:
+            self.config.settings = {}
 
         self._initialise_widgets()
 
@@ -86,7 +93,7 @@ class DataSelection(param.Parameterized):
         self.config_file = config_files[0]
 
         print("CONFIG:")
-        print(config.layout_file)
+        print(self.config.layout_file)
         self.memory_optimisation_check = pn.widgets.Checkbox(
             name="Optimise for memory?", value=True
         )
@@ -179,13 +186,13 @@ class DataSelection(param.Parameterized):
 
         self.load_data_button_js.name = "Verifying Config..."
 
-        config.layout_file = self.config_file
-        config.settings["config_load_level"] = (
+        self.config.layout_file = self.config_file
+        self.config.settings["config_load_level"] = (
             list(self.param.load_config_select.objects).index(self.load_config_select)
             - 1
         )
 
-        with open(config.layout_file) as layout_file:
+        with open(self.config.layout_file) as layout_file:
             curr_config_file = json.load(layout_file)
 
         from astronomicAL.utils.load_config import (
@@ -195,7 +202,7 @@ class DataSelection(param.Parameterized):
         has_error, error_message = verify_import_config(curr_config_file)
 
         if has_error:
-            config.settings = {} # empty all assigned configurations parameters
+            self.config.settings = {} # empty all assigned configurations parameters
             print(f"has error - {error_message}")
             self.error_message = error_message
             self.load_data_button_js.name = "Unable to load config"
@@ -208,7 +215,7 @@ class DataSelection(param.Parameterized):
         
         self.panel_col = self.panel()
 
-        print(f"Config load level: {config.settings['config_load_level']}")
+        print(f"Config load level: {self.config.settings['config_load_level']}")
 
     @param.depends("config_file", watch=True)
     def update_available_loading_options(self):
@@ -224,7 +231,7 @@ class DataSelection(param.Parameterized):
 
         if optimise_data is None:
             val = bool(self.memory_optimisation_check.value)
-            config.settings["optimise_data"] = val
+            self.config.settings["optimise_data"] = val
             optimise_data = val
         else:
             optimise_data = bool(optimise_data)
@@ -260,12 +267,12 @@ class DataSelection(param.Parameterized):
         self.load_data_button.name = "Loading File..."
         print("loading new dataset")
 
-        config.settings["dataset_filepath"] = self.dataset
+        self.config.settings["dataset_filepath"] = self.dataset
 
-        print(config.settings)
+        print(self.config.settings)
 
-        config.main_df = self.get_dataframe_from_fits_file(self.dataset)
-        self.df = config.main_df
+        self.config.main_df = self.get_dataframe_from_fits_file(self.dataset)
+        self.df = self.config.main_df
         self.src.data = dict(pd.DataFrame())
 
         print(f" dataset shape: {self.df.shape}")
@@ -279,8 +286,8 @@ class DataSelection(param.Parameterized):
         new_df = df
 
         #we should add this option at some point in the config/settings pipeline
-        ra_col_name = config.settings.get("ra_col_name", "ra")
-        dec_col_name = config.settings.get("dec_col_name", "dec")
+        ra_col_name = self.config.settings.get("ra_col_name", "ra")
+        dec_col_name = self.config.settings.get("dec_col_name", "dec")
 
         has_loc = (ra_col_name in list(new_df.columns)) and (dec_col_name in list(new_df.columns))
  

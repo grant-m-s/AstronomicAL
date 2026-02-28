@@ -4,9 +4,8 @@ from astronomicAL.settings.param_assignment import ParameterAssignment_ML, Param
 from functools import partial
 
 import astronomicAL.config as config
+
 import panel as pn
-
-
 
 
 class SettingsDashboard:
@@ -29,10 +28,14 @@ class SettingsDashboard:
         A pipeline of stages for the user to assign key parameters.
     """
 
-    def __init__(self, main, src):
+    def __init__(self, main, src, context=None):
         self.row = pn.Row(pn.pane.Str("loading"), sizing_mode = "stretch_both")
 
         self.src = src
+
+        self.context = context
+
+        self.config = context.config if (context is not None and getattr(context, "config", None) is not None) else config
 
         self.df = None
 
@@ -75,7 +78,7 @@ class SettingsDashboard:
 
     def _create_pipeline_cb(self, event, mode, main):
         main.mode = mode
-        config.mode = mode
+        self.config.mode = mode
         self.create_pipeline(mode=mode)
 
     def create_mode_selection_menu(self):
@@ -232,7 +235,7 @@ class SettingsDashboard:
 
         stage_name =  list(self.pipeline._stages.keys())[self._pipeline_stage]
         self.df = self.pipeline[stage_name].get_df()
-        config.main_df = self.df
+        self.config.main_df = self.df
 
         src = {}
         for col in self.df.columns:
@@ -243,11 +246,11 @@ class SettingsDashboard:
         self._close_settings_button.disabled = True
         self._close_settings_button.name = "Setting up panels..."
 
-        if config.mode == "AL":
+        if self.config.mode == "AL":
             main.set_contents(updated="Active Learning")
-        elif config.mode == "Labelling":
+        elif self.config.mode == "Labelling":
             main.set_contents(updated="Labelling")
-        elif config.mode == "Exploring":
+        elif self.config.mode == "Exploring":
             main.set_contents(updated="Exploring")
 
     def _stage_previous_cb(self, event):
@@ -258,7 +261,7 @@ class SettingsDashboard:
     def _stage_next_cb(self, event):
 
         if self.df is None:
-            self.df = config.main_df
+            self.df = self.config.main_df
 
         pipeline_list = list(self.pipeline._stages)
 

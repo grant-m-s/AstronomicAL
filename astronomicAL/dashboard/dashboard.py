@@ -8,7 +8,6 @@ from astronomicAL.dashboard.settings_dashboard import SettingsDashboard
 from astronomicAL.extensions import extension_plots, custom_plots
 from bokeh.models import ColumnDataSource
 
-import astronomicAL.config as config
 import panel as pn
 import param
 
@@ -42,14 +41,23 @@ class Dashboard(param.Parameterized):
 
     contents = param.String()
 
-    def __init__(self, src, contents= "Menu"):
+    def __init__(self, src, contents= "Menu", context=None):
         super(Dashboard, self).__init__()
 
         self.src = src
         self.src.on_change("data", self._update_extension_plots_cb)
         self.row = pn.Row(pn.pane.Str("loading"))
-        self.df = config.main_df
+
+        self.context = context
+        import astronomicAL.config as config
+        self.config = context.config if (context is not None and getattr(context, "config", None) is not None) else config
+        self.shared = getattr(context, "shared", None)
+        self.df = self.config.main_df
         self.current_extension_plot = None
+
+        self._child_controllers = []  # controllers that should be disposed with this dashboard
+
+        self._disposed = False
         
         self._close_button = pn.widgets.Button(name="Close", max_width=100, max_height=40)
         self._close_button.on_click(self._close_button_cb)
@@ -70,12 +78,58 @@ class Dashboard(param.Parameterized):
                 if i == len(self.plot_dict[self.contents].col_selection) - 1:
                     continue
                 for selector in row:
-                    config.settings[selector.name] = selector.value
+                    self.config.settings[selector.name] = selector.value
         else:
             self._submit_button.name = "Submit updated column names"
             self._submit_button.disabled = False
             self.plot_dict[self.contents]._load_file()
         self._update_contents()
+
+    def dispose(self) -> None:
+        if getattr(self, "_disposed", False):
+            return
+        self._disposed = True
+
+        print(f"[dispose] Dashboard {getattr(self, 'contents', '')}")
+
+        # Always stop the src callback owned by the Dashboard itself
+        try:
+            self.src.remove_on_change("data", self._update_extension_plots_cb)
+        except Exception:
+            pass
+
+        pc = getattr(self, "panel_contents", None)
+
+        # Case 1: custom plot controllers (EuclidPlotClass, SpectrumPlotClass, etc.)
+        if pc is not None and hasattr(pc, "dispose"):
+            try:
+                pc.dispose()
+            except Exception:
+                pass
+
+        # Case 2: extension plot workflow (wrapper object + cleanup_panel_plot)
+        else:
+            # Clean up wrapper state if relevant
+            try:
+                self._cleanup_current_extension_plot()
+            except Exception:
+                pass
+
+            # Also allow panel_contents cleanup if it exists (but no dispose)
+            if pc is not None and hasattr(pc, "cleanup_panel_plot"):
+                try:
+                    pc.cleanup_panel_plot()
+                except Exception:
+                    pass
+
+        # Optional: dispose any child controllers if you are using them elsewhere
+        for ctrl in list(getattr(self, "_child_controllers", [])):
+            try:
+                if hasattr(ctrl, "dispose"):
+                    ctrl.dispose()
+            except Exception:
+                pass
+        self._child_controllers = []
 
     def _close_button_cb(self, event):
         self._cleanup_current_extension_plot()
@@ -86,7 +140,7 @@ class Dashboard(param.Parameterized):
         if self.contents in list(self.plot_dict.keys()):
             self.current_extension_plot = self.plot_dict[self.contents]
             self.panel_contents = self.plot_dict[self.contents].plot(self._submit_button)(
-                config.main_df, self.src
+                self.config.main_df, self.src
             )
             self.panel()
 
@@ -106,7 +160,7 @@ class Dashboard(param.Parameterized):
         if self.contents == "Settings":
 
             self.mode = ""
-            self.panel_contents = SettingsDashboard(self, self.src)
+            self.panel_contents = SettingsDashboard(self, self.src, context=self.context)
 
         elif self.contents == "Menu":
 
@@ -114,57 +168,57 @@ class Dashboard(param.Parameterized):
 
         elif self.contents == "Active Learning":
 
-            self.df = config.main_df
-            self.panel_contents = ActiveLearningDashboard(self.src, self.df)
+            self.df = self.config.main_df
+            self.panel_contents = ActiveLearningDashboard(self.src, self.df, context=self.context)
 
         elif self.contents == "Histogram Plot":
-            if not config.settings["confirmed"]:
+            if not self.config.settings["confirmed"]:
                 self.contents = "Menu"
                 print("Please Complete Settings before accessing this view.")
                 return
-            self.panel_contents = HistoDashboard(self.src, self._close_button)
+            self.panel_contents = HistoDashboard(self.src, self._close_button, context=self.context)
         
         elif self.contents == "Basic Plot":
-            if not config.settings["confirmed"]:
+            if not self.config.settings["confirmed"]:
                 self.contents = "Menu"
                 print("Please Complete Settings before accessing this view.")
                 return
-            self.panel_contents = ScatterPlotDashboard(self.src, self._close_button)
+            self.panel_contents = ScatterPlotDashboard(self.src, self._close_button, context=self.context)
         
         elif self.contents == "Density Plot":
-            if not config.settings["confirmed"]:
+            if not self.config.settings["confirmed"]:
                 self.contents = "Menu"
                 print("Please Complete Settings before accessing this view.")
                 return
-            self.panel_contents = DensityPlotDashboard(self.src, self._close_button)
+            self.panel_contents = DensityPlotDashboard(self.src, self._close_button, context=self.context)
 
         elif self.contents == "Labelling":
-            self.df = config.main_df
-            self.panel_contents = LabellingDashboard(self.src, self.df)
+            self.df = self.config.main_df
+            self.panel_contents = LabellingDashboard(self.src, self.df, context=self.context)
         
         elif self.contents == "Exploring":
-            self.df = config.main_df
-            self.panel_contents = ExplorationDashboard(self.src, self.df)
+            self.df = self.config.main_df
+            self.panel_contents = ExplorationDashboard(self.src, self.df, context=self.context)
 
         elif self.contents == "Selected Source Info":
-            if not config.settings["confirmed"]:
+            if not self.config.settings["confirmed"]:
                 self.contents = "Menu"
                 print("Please Complete Settings before accessing this view.")
                 return
-            self.panel_contents = SelectedSourceDashboard(self.src, self._close_button)
+            self.panel_contents = SelectedSourceDashboard(self.src, self._close_button, context=self.context)
         
         elif self.contents in self.cust_plot_dict:
-            if not config.settings["confirmed"]:
+            if not self.config.settings["confirmed"]:
                 self.contents = "Menu"
                 print("Please Complete Settings before accessing this view.")
                 return
-            self.panel_contents = self.cust_plot_dict[self.contents](config.main_df, self.src, self._close_button)
+            self.panel_contents = self.cust_plot_dict[self.contents](self.config.main_df, self.src, self._close_button, context=self.context)
         
         else:
             self.current_extension_plot = self.plot_dict[self.contents]
             self.panel_contents = self.current_extension_plot.plot(
                 self._submit_button
-            )(config.main_df, self.src)
+            )(self.config.main_df, self.src)
 
         self.panel()
 
@@ -204,6 +258,12 @@ class Dashboard(param.Parameterized):
             self.row[0] = pn.Column(
                 toolbar,body,
             )
+
+        try:
+            self.row._al_controller = self
+            self.row.dispose = self.dispose
+        except Exception:
+            pass
 
         return self.row
     

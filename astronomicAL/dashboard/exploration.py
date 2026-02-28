@@ -7,9 +7,6 @@ import numpy as np
 
 from functools import partial
 
-
-import astronomicAL.config as config
-from astronomicAL.extensions.shared_data import shared_data
 from astronomicAL.extensions import feature_generation
 from astronomicAL.utils.optimise import matches_type, get_series_type
 
@@ -17,9 +14,16 @@ class ExplorationDashboard(param.Parameterized):
 
     index = param.Integer(default=0, bounds=(0, 0))
 
-    def __init__(self, src, df, **params):
+    def __init__(self, src, df, context=None, **params):
+
         super().__init__(**params)
         self.src = src
+        self.context = context
+        
+        import astronomicAL.config as config
+
+        self.config = context.config if (context is not None and getattr(context, "config", None) is not None) else config
+        self.shared = getattr(context, "shared", None)
         self.df = df
         self._running_panels = set() #elements of the set indicate the panel currently using multithreading
         self.visited_indices = [self.index]  
@@ -94,7 +98,7 @@ class ExplorationDashboard(param.Parameterized):
 
     def _get_id(self):
         """Returns all ids in the table"""
-        id_col = config.settings["id_col"]
+        id_col = self.config.settings["id_col"]
         if id_col == "Use Index":
             return pd.Series(self.df.index, index=self.df.index)  # Ensures it's a Series
         else:
@@ -102,7 +106,7 @@ class ExplorationDashboard(param.Parameterized):
         
     def _get_selected_id(self):
         """Returns the sourceID for the selected source"""
-        id_col = config.settings["id_col"]
+        id_col = self.config.settings["id_col"]
         if len(self.src.data[id_col]) > 0:
             return str(self.src.data[id_col][0])
         
@@ -143,20 +147,20 @@ class ExplorationDashboard(param.Parameterized):
     def _subscribe_to_shared(self):
         panels_using_multithread = ["EuclidCutout", "EuclidSpec", "DESI", "SDSS", "VLASS", "LoTSS"]
         for panel in panels_using_multithread:
-            shared_data.replace_subscribe(self.panel_id, f"{panel}_running", 
+            self.shared.replace_subscribe(self.panel_id, f"{panel}_running", 
                                           lambda is_running, panel_name=panel: self._multithread_running_cb(is_running, panel_name))
-        shared_data.replace_subscribe(self.panel_id, "selected_sourceid", self._selected_src_from_plot_cb)
+        self.shared.replace_subscribe(self.panel_id, "selected_sourceid", self._selected_src_from_plot_cb)
          
     def _update_navigation_flags(self):
         self.prev_button.disabled = self.current_position == 0
         self.next_button.disabled = False
 
     def _get_extra_info_df(self):
-        id_col = config.settings["id_col"]
+        id_col = self.config.settings["id_col"]
         if len(self.src.data[id_col]) > 0:
             source_id = str(self.src.data[id_col][0])
             extra_data_list = [["SourceId", source_id]]
-            for col in config.settings["extra_info_cols"]:
+            for col in self.config.settings["extra_info_cols"]:
                 try:
                     value = self.src.data[f"{col}"][0]
                     if isinstance(value, float) and value < 1e4:
@@ -166,7 +170,7 @@ class ExplorationDashboard(param.Parameterized):
                     continue
             return  pd.DataFrame(extra_data_list, columns=["Column", "Value"])
         else:
-            cols = ["SourceId"] + config.settings["extra_info_cols"]
+            cols = ["SourceId"] + self.config.settings["extra_info_cols"]
             return  pd.DataFrame(cols, columns=["Column"])
         
     
@@ -183,7 +187,7 @@ class ExplorationDashboard(param.Parameterized):
     
     def _add_column_callback(self, event):
         self.column_selector.value = None
-        options = [""] + [i for i in self.df.columns if i not in config.settings["extra_info_cols"]]
+        options = [""] + [i for i in self.df.columns if i not in self.config.settings["extra_info_cols"]]
         self.column_selector.visible = True
         self.column_selector.options = options
         if self.selector_watcher is not None:
@@ -192,7 +196,7 @@ class ExplorationDashboard(param.Parameterized):
     
     def _remove_column_callback(self, event):
         self.column_selector.value = None
-        options = [""] + list(config.settings["extra_info_cols"])
+        options = [""] + list(self.config.settings["extra_info_cols"])
         self.column_selector.visible = True
         self.column_selector.options = options
         if self.selector_watcher is not None:
@@ -201,15 +205,15 @@ class ExplorationDashboard(param.Parameterized):
 
     def _add_extra_feature(self, event):
         column = event.new
-        if column and column not in config.settings["extra_info_cols"]:
-            config.settings["extra_info_cols"].append(column)
+        if column and column not in self.config.settings["extra_info_cols"]:
+            self.config.settings["extra_info_cols"].append(column)
             self.extra_info_pane.object = self._get_extra_info_df()
             self.column_selector.visible = False
 
     def _remove_extra_feature(self, event):
         column = event.new
-        if column and column in config.settings["extra_info_cols"]:
-            config.settings["extra_info_cols"].remove(column)
+        if column and column in self.config.settings["extra_info_cols"]:
+            self.config.settings["extra_info_cols"].remove(column)
             self.extra_info_pane.object = self._get_extra_info_df()
             self.column_selector.visible = False
 
@@ -227,8 +231,8 @@ class ExplorationDashboard(param.Parameterized):
 
     def _update_selected_src(self):
         selected_dict = self.df.iloc[[self.index]].to_dict("list")
-        if config.settings["id_col"] not in selected_dict:
-                selected_dict[config.settings["id_col"]] = [self.index]
+        if self.config.settings["id_col"] not in selected_dict:
+                selected_dict[self.config.settings["id_col"]] = [self.index]
         self.src.data = selected_dict
 
 
@@ -246,14 +250,14 @@ class ExplorationDashboard(param.Parameterized):
             combinations.
         """
 
-        bands = config.settings["features_for_training"]
+        bands = self.config.settings["features_for_training"]
 
-        features = bands + [config.settings["label_col"], config.settings["id_col"]]
+        features = bands + [self.config.settings["label_col"], self.config.settings["id_col"]]
 
         oper_dict = feature_generation.get_oper_dict()
 
-        if "feature_generation" in list(config.settings.keys()):
-            for generator in config.settings["feature_generation"]:
+        if "feature_generation" in list(self.config.settings.keys()):
+            for generator in self.config.settings["feature_generation"]:
                 oper = generator[0]
                 n = generator[1]
                 df, generated_features = oper_dict[oper](df, n)
@@ -263,15 +267,15 @@ class ExplorationDashboard(param.Parameterized):
     def _generate_fake_label_column(self, df):
         """This is not very elegant but allows to keep the code as it is.
            If No labels is selected, it creates a column No labels with all Nan"""
-        if (config.settings["label_col"] not in df.columns) and (config.settings["label_col"] == "No Labels"):
-            df[config.settings["label_col"]] = np.nan
+        if (self.config.settings["label_col"] not in df.columns) and (config.settings["label_col"] == "No Labels"):
+            df[self.config.settings["label_col"]] = np.nan
         return df
     
 
     def _add_ra_dec_col(self, df):
         new_df = df
-        ra_col_name = config.settings["ra_col_name"]
-        dec_col_name = config.settings["dec_col_name"]
+        ra_col_name = self.config.settings["ra_col_name"]
+        dec_col_name = self.config.settings["dec_col_name"]
         new_df["ra_dec"] = df[ra_col_name].astype(str) + "," + df[dec_col_name].astype(str)
       
         return new_df
@@ -284,14 +288,14 @@ class ExplorationDashboard(param.Parameterized):
         self.df = self._add_ra_dec_col(self.df)
 
     def _create_extra_info_cols_list(self):  
-        if "extra_info_cols" not in  config.settings:
-            config.settings["extra_info_cols"] = []
+        if "extra_info_cols" not in  self.config.settings:
+            self.config.settings["extra_info_cols"] = []
 
     
     def _initialise_label_selector(self):
         label_column_options =  ["No Labels"] + list(self.df.columns)
         self.label_selector = pn.widgets.Select(options = label_column_options, 
-                                                value = config.settings["label_col"],
+                                                value = self.config.settings["label_col"],
                                                 max_height = 60, max_width =120, 
                                                 visible = True)
         self.label_selector.param.watch(self._update_labels_cb, "value")
@@ -328,10 +332,10 @@ class ExplorationDashboard(param.Parameterized):
     def _confirm_labels_change_cb(self, event):
         self.strings_to_label_layout.clear()
         self.colorpickers_layout.clear()
-        config.settings["label_col"] = self.label_selector.value
-        config.settings["labels"] = self.labels
-        config.settings["labels_to_strings"], config.settings["strings_to_labels"] = self.get_label_strings()
-        config.settings["label_colours"] = self.get_label_colours()
+        self.config.settings["label_col"] = self.label_selector.value
+        self.config.settings["labels"] = self.labels
+        self.config.settings["labels_to_strings"], self.config.settings["strings_to_labels"] = self.get_label_strings()
+        self.config.settings["label_colours"] = self.get_label_colours()
         self.confirm_label_button.visible = False
             
 
@@ -410,7 +414,7 @@ class ExplorationDashboard(param.Parameterized):
 
     def remove_shared_data(self):
         """Removes subscriptions and published data from the shared data"""
-        shared_data.cleanup_extension_panel(self.panel_id)
+        self.shared.cleanup_extension_panel(self.panel_id)
         print(f"[{self.panel_id}] removed from shared data")
             
     def cleanup_panel_plot(self):

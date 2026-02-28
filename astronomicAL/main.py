@@ -63,36 +63,59 @@ import sys
 sys.path.insert(1, os.path.join(sys.path[0], "../"))
 from astronomicAL.utils import load_config
 import astronomicAL.config as config
+
+from astronomicAL.platform.context import AppContext
+from astronomicAL.platform.events import EventBus
+from astronomicAL.platform.jobs import JobManager
+from astronomicAL.platform.artifacts import ArtifactStore
+from astronomicAL.platform.datasets import DatasetManager
+from astronomicAL.platform.workspace import WorkspaceManager
+from astronomicAL.extensions.shared_data import shared_data
+
 import holoviews as hv
 hv.extension("bokeh")
 hv.renderer("bokeh").webgl = True
 
-files = pn.widgets.FileInput()
-
-react = pn.template.ReactTemplate(
-    title="AstronomicAL",
-    compact="vertical",
-    prevent_collision=False,
-    )
-
 pn.config.sizing_mode = "stretch_both"
 
-react._header_box = pn.Row(sizing_mode="stretch_width")
-react.header.append(react._header_box)
+react = pn.template.ReactTemplate(title="AstronomicAL", compact="vertical", prevent_collision=False)#
 
+# Create empty layout/grid first
+react, grid = load_config.create_layout_skeleton(react, return_grid=True)
+
+# Construct platform services
+events = EventBus()
+jobs = JobManager(max_workers=16)
+artifacts = ArtifactStore(cache_dir="data/cache_artifacts")
+datasets = DatasetManager()
+workspace = WorkspaceManager(react_template=react, grid=grid)
+
+context = AppContext(
+    events=events,
+    jobs=jobs,
+    artifacts=artifacts,
+    datasets=datasets,
+    workspace=workspace,
+    config=config,
+)
+
+context.shared = shared_data # temp
+
+print("shared data at startup: ", context.shared)
+
+react._app_context = context
+
+required = ["config", "shared", "events", "jobs", "artifacts", "datasets", "workspace"]
+missing = [name for name in required if getattr(context, name, None) is None]
+if missing:
+    raise RuntimeError(f"AppContext missing services: {missing}")
+
+# Now finalize layout using context (header + dashboards + restore layouts)
 if os.path.isfile(config.layout_file):
-    print("loading from file...")
-    react = load_config.create_layout_from_file(react)
-    print("loaded from file...")
-
+    load_config.create_layout_from_file(react, context)
 else:
-    react = load_config.create_default_layout(react)
+    load_config.create_default_layout(react, context)
+
+workspace.register_existing()
 
 react.servable()
-
-# TODO :: http://holoviews.org/reference/apps/bokeh/player.html#apps-bokeh-gallery-player
-# TODO :: https://panel.holoviz.org/gallery/simple/save_filtered_df.html#simple-gallery-save-filtered-df
-
-# CHANGED :: Keep axis the same on refresh (stop zooming out - outliers)
-# CHANGED :: Save React Layout (likely need to wait for Panel update)
-# CHANGED :: Fix Datashader Colours to match Bokeh
