@@ -84,11 +84,12 @@ react = pn.template.ReactTemplate(title="AstronomicAL", compact="vertical", prev
 react, grid = load_config.create_layout_skeleton(react, return_grid=True)
 
 # Construct platform services
-events = EventBus()
+events = EventBus(trace=True, trace_limit=1000)
 jobs = JobManager(max_workers=16)
 artifacts = ArtifactStore(cache_dir="data/cache_artifacts")
 datasets = DatasetManager()
 workspace = WorkspaceManager(react_template=react, grid=grid)
+
 
 context = AppContext(
     events=events,

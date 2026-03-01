@@ -21,6 +21,7 @@ from astronomicAL.utils.optimise import matches_type
 from astronomicAL.extensions.astro_data_utility import DESISpectraClass, EuclidCutoutsClass, EuclidSpectraClass
 from astronomicAL.extensions.astro_data_utility import VLASS_cutout, LoTSS_cutout, make_srcdoc_aladin_lite, SDSS_cutout
 
+
 import uuid
 import traceback
 from dataclasses import dataclass
@@ -67,6 +68,10 @@ def get_customplot_dict():
         
         "LoTSS Cutout"  : lambda data, src, close_button, context : RadioClass(data, src, close_button,
                                                             extra_features=[], dataset="LoTSS", context=context),
+
+        "Event Monitor": lambda data, src, close_button, context : EventMonitorClass(
+            data, src, close_button, extra_features=[], context=context
+        ),
 
         #"SDSS Cutout"  : lambda data, src, close_button, context : SDSSClass(data, src, close_button,
         #                                                    extra_features=[], dataset="SDSS", context=context)                                                                                                      
@@ -1320,22 +1325,63 @@ class EuclidPlotClass(CustomPlotClass):
         fig.subplots_adjust(left=0.0, right=1, top=1, bottom=0)
         return fig
                
+    # def _manage_subscriptions(self):
+    #     """It manages all the subscriptions to the shared dictionary. not very flexible but it works"""
+    #     desi_callback = lambda coords: self._add_coordinates(coords, "DESI")
+    #     sdss_callback = lambda coords: self._add_coordinates(coords, "SDSS")
+    #     euclid_callback = lambda coords: self._add_coordinates(coords, "EuclidSpec")
+    #     self.subscribe_to_shared("DESI_coordinates", desi_callback)
+    #     self.subscribe_to_shared("SDSS_coordinates", sdss_callback)
+    #     self.subscribe_to_shared("EuclidSpec_coordinates", euclid_callback)
+    #     #If DESI/SDSS panel are already initialized, I need to pass the coordinates directly
+    #     if self.shared.get_data("DESI_coordinates"):
+    #         self._add_coordinates(self.shared.get_data("DESI_coordinates"), "DESI")
+    #     if self.shared.get_data("SDSS_coordinates"):
+    #         self._add_coordinates(self.shared.get_data("SDSS_coordinates"), "SDSS")
+    #     if self.shared.get_data("EuclidSpec_coordinates"):
+    #         self._add_coordinates(self.shared.get_data("EuclidSpec_coordinates"), "EuclidSpec")
+
     def _manage_subscriptions(self):
-        """It manages all the subscriptions to the shared dictionary. not very flexible but it works"""
-        desi_callback = lambda coords: self._add_coordinates(coords, "DESI")
-        sdss_callback = lambda coords: self._add_coordinates(coords, "SDSS")
-        euclid_callback = lambda coords: self._add_coordinates(coords, "EuclidSpec")
-        self.subscribe_to_shared("DESI_coordinates", desi_callback)
-        self.subscribe_to_shared("SDSS_coordinates", sdss_callback)
-        self.subscribe_to_shared("EuclidSpec_coordinates", euclid_callback)
-        #If DESI/SDSS panel are already initialized, I need to pass the coordinates directly
-        if self.shared.get_data("DESI_coordinates"):
-            self._add_coordinates(self.shared.get_data("DESI_coordinates"), "DESI")
-        if self.shared.get_data("SDSS_coordinates"):
-            self._add_coordinates(self.shared.get_data("SDSS_coordinates"), "SDSS")
-        if self.shared.get_data("EuclidSpec_coordinates"):
-            self._add_coordinates(self.shared.get_data("EuclidSpec_coordinates"), "EuclidSpec")
-      
+        """
+        Subscribe to coordinate updates via EventBus + ArtifactStore.
+
+        Expects events:
+        topic: "astro.coords.updated"
+        payload: {"source": "...", "artifact_id": "...", "dataset_id": "..."}
+        """
+
+        # Subscribe once
+        def _coords_updated(topic, payload):
+            if not payload:
+                return
+            source = payload.get("source")
+            artifact_id = payload.get("artifact_id")
+            if not source or not artifact_id:
+                return
+
+            try:
+                coords = self.context.artifacts.get(artifact_id)
+            except Exception as e:
+                print(f"Failed to load coords artifact {artifact_id}: {e}")
+                return
+
+            # coords should be {"ra": [...], "dec": [...]}
+            dataset_name = source  # re-use your existing labels ("DESI", "SDSS", "EuclidSpec")
+            self._add_coordinates(coords, dataset_name)
+
+        # Use base class subscribe helper if you have it, otherwise:
+        self.subscribe("astro.coords.updated", _coords_updated)
+
+        # OPTIONAL: if you want EuclidPlot to immediately show the latest known coords
+        # from each source on initialisation, you can query artifacts:
+        for src_name in ("DESI", "SDSS", "EuclidSpec"):
+            refs = self.context.artifacts.find(type="astro.coords", params_subset={"source": src_name})
+            if refs:
+                try:
+                    coords = self.context.artifacts.get(refs[0].artifact_id)  # newest first
+                    self._add_coordinates(coords, src_name)
+                except Exception:
+                    pass
 
 
 class SpectrumPlotClass(CustomPlotClass):
@@ -1459,38 +1505,118 @@ class SpectrumPlotClass(CustomPlotClass):
         """
         ra and dec are lists
         """
-        if self.shared: self.shared.publish(self.panel_id, f"{self.dataset}_coordinates", {"ra": ra, "dec": dec})
+        coords_dict = {"ra":list(ra), "dec":list(dec)}
+        # if self.shared: self.shared.publish(self.panel_id, f"{self.dataset}_coordinates", coords_dict)
+        self.publish_coords(f"{self.dataset}", coords_dict["ra"], coords_dict["dec"])
+
         return None
+
+    def publish_coords(self, source: str, ra: list[float], dec: list[float], dataset_id: str = "default"):
+        if self.context is None:
+            return
+
+        coords = {"ra": ra, "dec": dec}
+
+        artifact_id = self.context.artifacts.put(
+            type="astro.coords",
+            payload=coords,
+            dataset_id=dataset_id,
+            params={"source": source},
+        )
+
+        self.context.events.publish(
+            "astro.coords.updated",
+            {"source": source, "artifact_id": artifact_id, "dataset_id": dataset_id},
+        )    
+
+    # def _run_spectrum(self, max_separation = None):
+    #     self.message_pane.object = "## Loading..."
+    #     self.message_pane.visible = True
+    #     if self.shared: self.shared.publish(self.panel_id, f"{self.dataset}_running", True)
+    #     if max_separation is None:
+    #         max_separation = self.max_separation
         
-    def _run_spectrum(self, max_separation = None):
+    #     def callback(future_result = None):
+    #         if self.shared: self.shared.publish(self.panel_id, f"{self.dataset}_running", False)
+    #         if self.spectrum_object.error_tracker.has_error:
+    #             message = "# Spectrum unavailable:\n"
+    #             message += f"## {self.spectrum_object.error_tracker.error_message}"
+    #             self.message_pane.object = message
+    #             self.message_pane.visible = True 
+    #             self.figure.objects = [self.get_empty_image()]
+    #         else:
+    #             if self.redshift_column_selector.value != "None":
+    #                 redshift_value = self.get_value_from_df(self.redshift_column_selector.value)
+    #                 if redshift_value is not None:
+    #                    self.redshift_input.value = redshift_value
+    #             self._update_plot()
+    #             self._add_coordinates_to_shared(*self.spectrum_object.get_coordinates())
+    #             self.message_pane.visible = False
+
+
+    #     self.run_multithread(self.spectrum_object.get_spectra, 
+    #                          func_kwargs = {"max_separation" : max_separation, "return_object" : True},
+    #                          callback=callback)
+
+    def _run_spectrum(self, max_separation=None):
         self.message_pane.object = "## Loading..."
         self.message_pane.visible = True
-        if self.shared: self.shared.publish(self.panel_id, f"{self.dataset}_running", True)
+
+        # NEW: running state via EventBus
+        if self.context is not None and getattr(self.context, "events", None) is not None:
+            self.context.events.publish(
+                "astro.spectra.running",
+                {"source": self.dataset, "running": True, "panel_id": self.panel_id},
+            )
+
         if max_separation is None:
             max_separation = self.max_separation
-        
-        def callback(future_result = None):
-            if self.shared: self.shared.publish(self.panel_id, f"{self.dataset}_running", False)
-            if self.spectrum_object.error_tracker.has_error:
-                message = "# Spectrum unavailable:\n"
-                message += f"## {self.spectrum_object.error_tracker.error_message}"
-                self.message_pane.object = message
-                self.message_pane.visible = True 
-                self.figure.objects = [self.get_empty_image()]
-            else:
+
+        def _set_running(val: bool):
+            if self.context is not None and getattr(self.context, "events", None) is not None:
+                self.context.events.publish(
+                    "astro.spectra.running",
+                    {"source": self.dataset, "running": val, "panel_id": self.panel_id},
+                )
+
+        def callback(future_result=None):
+            try:
+                _set_running(False)
+
+                if self.spectrum_object.error_tracker.has_error:
+                    message = "# Spectrum unavailable:\n"
+                    message += f"## {self.spectrum_object.error_tracker.error_message}"
+                    self.message_pane.object = message
+                    self.message_pane.visible = True
+                    self.figure.objects = [self.get_empty_image()]
+                    return
+
+                # Success path
                 if self.redshift_column_selector.value != "None":
                     redshift_value = self.get_value_from_df(self.redshift_column_selector.value)
                     if redshift_value is not None:
-                       self.redshift_input.value = redshift_value
+                        self.redshift_input.value = redshift_value
+
                 self._update_plot()
-                self._add_coordinates_to_shared(*self.spectrum_object.get_coordinates())
+
+                # Publishes coords via artifacts+events (your helper)
+                ra_list, dec_list = self.spectrum_object.get_coordinates()
+                self._add_coordinates_to_shared(ra_list, dec_list)
+
                 self.message_pane.visible = False
 
+            except Exception as e:
+                # Ensure UI doesn't get stuck
+                self.message_pane.object = f"# Error updating spectrum panel\n## {e}"
+                self.message_pane.visible = True
+                _set_running(False)
 
-        self.run_multithread(self.spectrum_object.get_spectra, 
-                             func_kwargs = {"max_separation" : max_separation, "return_object" : True},
-                             callback=callback)
-        
+        self.run_multithread(
+            self.spectrum_object.get_spectra,
+            func_kwargs={"max_separation": max_separation, "return_object": True},
+            callback=callback,
+        )
+
 
     def _initialize_settings_panel(self):
         self.retrieve_mode_button = pn.widgets.RadioButtonGroup(name="How to retrieve spectrum", options=self.mode_options, 
@@ -2467,4 +2593,122 @@ class LogBookClass(CustomPlotClass):
         return paths
                                                       
 
-                        
+
+######
+
+class EventMonitorClass(CustomPlotClass):
+    """
+    A lightweight UI panel to inspect EventBus publishes and subscriptions.
+    Appears as a selectable panel in the menu.
+    """
+
+    def __init__(self, data, src, close_button=None, extra_features=None, context=None, **params):
+        super().__init__(
+            data=data,
+            src=src,
+            close_button=close_button,
+            extra_features=extra_features,
+            context=context,
+            panel_name="Event Monitor",
+            **params,
+        )
+
+        # Enable tracing if supported (safe no-op if not)
+        if self.context and getattr(self.context, "events", None):
+            try:
+                self.context.events.enable_trace(True)
+            except Exception:
+                pass
+
+        # UI
+        self.refresh_btn = pn.widgets.Button(name="Refresh", button_type="primary", width=100)
+        self.trace_toggle = pn.widgets.Checkbox(name="Trace enabled", value=True)
+        self.limit_input = pn.widgets.IntInput(name="Rows", value=200, start=10, end=5000, step=10, width=120)
+
+        self.events_table = pn.widgets.Tabulator(
+            pd.DataFrame(columns=["time", "topic", "payload"]),
+            height=360,
+            sizing_mode="stretch_both",
+        )
+
+        self.subs_table = pn.widgets.Tabulator(
+            pd.DataFrame(columns=["topic", "subscribers"]),
+            height=220,
+            sizing_mode="stretch_both",
+        )
+
+        self.status = pn.pane.Markdown("", sizing_mode="stretch_width")
+
+        self.refresh_btn.on_click(lambda _e: self.refresh())
+
+        # periodic refresh
+        self._period_ms = 1000
+        self._cb = pn.state.add_periodic_callback(self.refresh, period=self._period_ms, start=True)
+
+        # initial fill
+        self.refresh()
+
+    def refresh(self):
+        if not (self.context and getattr(self.context, "events", None)):
+            self.status.object = "### Event bus not available on context."
+            return
+
+        # Toggle trace if supported
+        try:
+            self.context.events.enable_trace(bool(self.trace_toggle.value))
+        except Exception:
+            pass
+
+        # Pull recent events
+        n = int(self.limit_input.value or 200)
+        try:
+            events = self.context.events.recent_events(n)
+        except Exception:
+            # If tracing not implemented, show a helpful message
+            self.status.object = "### Event tracing not implemented on EventBus. Add recent_events()/enable_trace()."
+            return
+
+        df = pd.DataFrame(
+            [
+                {
+                    "time": time.strftime("%H:%M:%S", time.localtime(t)),
+                    "topic": topic,
+                    "payload": (str(payload)[:240] if payload is not None else ""),
+                }
+                for (t, topic, payload) in events
+            ]
+        )
+        self.events_table.value = df
+
+        # Pull subscriber counts
+        try:
+            subs = self.context.events.subscribers()
+            df2 = pd.DataFrame([{"topic": k, "subscribers": v} for k, v in sorted(subs.items())])
+            self.subs_table.value = df2
+        except Exception:
+            pass
+
+        self.status.object = f"### Showing last {len(df)} events • {time.strftime('%H:%M:%S')}"
+
+    def get_layout(self):
+        return pn.Column(
+            pn.Row(self.refresh_btn, self.trace_toggle, self.limit_input),
+            self.status,
+            pn.pane.Markdown("#### Recent published events"),
+            self.events_table,
+            pn.pane.Markdown("#### Current subscriptions"),
+            self.subs_table,
+            sizing_mode="stretch_both",
+            scroll=True,
+        )
+
+    def dispose(self) -> None:
+        # stop periodic callback
+        try:
+            if self._cb:
+                self._cb.stop()
+        except Exception:
+            pass
+
+        # call base disposal (jobs/events/bokeh watchers)
+        super().dispose()
