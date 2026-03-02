@@ -10,7 +10,6 @@ import holoviews as hv
 from holoviews import opts
 from functools import partial
 
-import astronomicAL.config as config
 import numpy as np
 import pandas as pd
 import panel as pn
@@ -27,7 +26,26 @@ import concurrent.futures
 # from astronomicAL.extensions.astro_data_utility import VLASS_cutout, LoTSS_cutout
 
 
-def get_plot_dict(context = None):
+import uuid
+import traceback
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, List, Optional
+
+try:
+    from astronomicAL.platform.events import Subscription
+except Exception:  # pragma: no cover
+    Subscription = Any  # type: ignore
+
+
+@dataclass
+class _ManagedJob:
+    key: str
+    handle: Any  # JobHandle from JobManager
+
+
+
+def get_plot_dict():
+
 
     plot_dict = {
         #"Debug publish" : CustomPlot(debug_plot_publisher, []),
@@ -51,7 +69,7 @@ def get_plot_dict(context = None):
         #"Mateos 2012 Wedge": CustomPlot(
         #    mateos_2012_wedge, ["Log10(W3_Flux/W2_Flux)", "Log10(W2_Flux/W1_Flux)"]
         #),
-        "BPT Plots": CustomPlot(
+        "BPT Plots" : lambda context : CustomPlot(
             bpt_plot,
             [
                 "Log10(NII_6584_FLUX/H_ALPHA_FLUX)",
@@ -66,19 +84,33 @@ def get_plot_dict(context = None):
 
         #"LOFAR-LoTSS Cutout" : CustomPlot(lotss_cutout_plot, []),
 
-        "Stored Image"  : CustomPlot(local_stored_plot, ["Local_image_path"], context=context)
+
+
+        "Stored Image"  : lambda context : CustomPlot(
+            local_stored_plot, 
+            ["Local_image_path"], 
+            context=context)
     }
 
     return plot_dict
 
 
 class CustomPlot:
-    def __init__(self, plot_fn, extra_features, context = None, **plot_fn_kwargs):
+    def __init__(self, plot_fn, extra_features, context, **plot_fn_kwargs):
 
         self.context = context
-        import astronomicAL.config as config
-        self.config = context.config if (context is not None and getattr(context, "config", None) is not None) else config
-        self.shared = getattr(context, "shared", None)
+
+        if (context is not None and getattr(context, "config", None) is not None):
+            self.config = context.config
+
+        # Lifecycle tracking
+        self._subscriptions: List[Subscription] = []
+        self._jobs: List[_ManagedJob] = []
+        self._bokeh_on_change: list[tuple[Any, str, Callable]] = []
+
+        self._disposed = False
+        self._event_subs = []
+        self._periodic_cbs = []
 
         self.plot_fn = plot_fn
         self.extra_features = extra_features
@@ -86,6 +118,71 @@ class CustomPlot:
         self.plot_fn_kwargs = plot_fn_kwargs
         self.panel_id = str(uuid.uuid4()) 
 
+    def watch_bokeh(self, model, attr: str, callback):
+        """Register and track Bokeh model.on_change callbacks for unified disposal."""
+        if model is None:
+            return
+        try:
+            model.on_change(attr, callback)
+            self._bokeh_on_change.append((model, attr, callback))
+        except Exception:
+            pass
+
+    def unwatch_all_bokeh(self):
+        """Remove all tracked Bokeh callbacks (idempotent)."""
+        for model, attr, callback in list(getattr(self, "_bokeh_on_change", [])):
+            try:
+                model.remove_on_change(attr, callback)
+            except Exception as e:
+                # Ignore double-remove noise
+                if "list.remove(x): x not in list" in str(e):
+                    pass
+            # continue regardless
+        self._bokeh_on_change = []
+
+    def _dispose_impl(self):
+        """Subclass-specific cleanup hook (override if needed)."""
+        return
+
+    def dispose(self):
+        if getattr(self, "_disposed", False):
+            return
+        self._disposed = True
+        print(f"[dispose] CustomPlot panel_id={self.panel_id} plot_fn={getattr(self.plot_fn, '__name__', str(self.plot_fn))}")
+        # 1) subclass cleanup first
+        try:
+            self._dispose_impl()
+        except Exception:
+            pass
+
+        # remove any temp config keys set during unknown column selection
+        try:
+            self.remove_column_selection()
+        except Exception:
+            pass
+
+        # 2) unwatch bokeh callbacks (including src.on_change if registered via watch_bokeh)
+        try:
+            self.unwatch_all_bokeh()
+        except Exception:
+            pass
+
+        # 3) Unsubscribe EventBus
+        if self.context and getattr(self.context, "events", None):
+            for sub in list(getattr(self, "_event_subs", [])):
+                try:
+                    self.context.events.unsubscribe(sub)
+                except Exception:
+                    pass
+        self._event_subs = []
+
+        # 4) Stop periodic callbacks
+        for cb in list(getattr(self, "_periodic_cbs", [])):
+            try:
+                cb.stop()
+            except Exception:
+                pass
+        self._periodic_cbs = []
     
     def create_settings(self, unknown_cols):
         self.waiting = True
@@ -117,43 +214,37 @@ class CustomPlot:
 
     def plot(self, submit_button):
         self.submit_button = submit_button
-        
+
         current_cols = self.config.main_df.columns
-        
         self.unknown_cols = []
-        
+
         for col in self.extra_features:
             if col not in list(self.config.settings.keys()):
                 if col not in current_cols:
                     self.unknown_cols.append(col)
                 else:
                     self.config.settings[col] = col
+
         if len(self.unknown_cols) > 0:
             self.col_selection = self.create_settings(self.unknown_cols)
             return self.render
-        
         else:
             def plot_with_instance(*args, **kwargs):
-                return self.plot_fn(*args, plot_instance = self, **kwargs, **self.plot_fn_kwargs)
-            
+                view = self.plot_fn(context=self.context, *args, plot_instance=self, **kwargs, **self.plot_fn_kwargs)
+                # put the view inside our controller-owned container
+                self.row[0] = view
+                return self.row
             return plot_with_instance
-    
-    def remove_shared_data(self):
-        """Removes subscriptions and published data from the shared data"""
-        self.shared.cleanup_extension_panel(self.panel_id)
-        print(f"[{self.panel_id}] removed from shared data")
 
     def remove_column_selection(self):
-        if hasattr(self, "unknown_columns"):
-            for col in self.unknown_columns:
+        if hasattr(self, "unknown_cols"):
+            for col in self.unknown_cols:
                 if col in self.config.settings:
                     del self.config.settings[col]
             print(f"[{self.panel_id}] unknown columns selected removed from config")
-            
-    def cleanup_panel_plot(self):
-        self.remove_shared_data()
-        self.remove_column_selection()
 
+    def panel(self):
+        return self.row
     
 
 def create_plot(
@@ -176,9 +267,6 @@ def create_plot(
 
     if (context is not None and getattr(context, "config", None) is not None):
         config = context.config
-    else:
-        import astronomicAL.config as config
-        config = config
 
     if bounds is not None:
         data = data[data[x] >= bounds[0]]
@@ -263,12 +351,19 @@ def create_plot(
                     min_y = np.min([min_y, np.min(selected[y])])
 
     if colours:
+
+        label_col = (context.config.settings.get("label_col") if hasattr(context, "config") else config.settings.get("label_col"))
+        has_label = bool(label_col) and (label_col in data.columns)
+
+        agg = ds.by(label_col, ds.count()) if has_label else ds.count()
+
+
         if smaller_axes_limits:
             plot = dynspread(
                 datashade(
                     p,
                     color_key=color_key,
-                    aggregator=ds.by(config.settings["label_col"], ds.count()),
+                    aggregator=agg,
                 ).opts(xlim=(min_x, max_x), ylim=(min_y, max_y), responsive=True),
                 threshold=0.75,
                 how="saturate",
@@ -278,7 +373,7 @@ def create_plot(
                 datashade(
                     p,
                     color_key=color_key,
-                    aggregator=ds.by(config.settings["label_col"], ds.count()),
+                    aggregator=agg,
                 ).opts(responsive=True),
                 threshold=0.75,
                 how="saturate",
@@ -319,11 +414,7 @@ def create_plot(
 
 def bpt_plot(data, selected=None, plot_instance=None, context = None):
 
-    if (context is not None and getattr(context, "config", None) is not None):
-        config = context.config
-    else:
-        import astronomicAL.config as config
-        config = config
+    config = context.config
 
     plot_NII = create_plot(
         data,
@@ -405,9 +496,6 @@ def mateos_2012_wedge(data, selected=None, plot_instance=None, context=None):
 
     if (context is not None and getattr(context, "config", None) is not None):
         config = context.config
-    else:
-        import astronomicAL.config as config
-        config = config
 
     plot = create_plot(
         data,
@@ -469,8 +557,8 @@ class SEDPlot(CustomPlot):
     def __init__(self, plot_fn, extra_features, context = None):
 
         self.context = context
-        import astronomicAL.config as config
-        self.config = context.config if (context is not None and getattr(context, "config", None) is not None) else config
+        if (context is not None and getattr(context, "config", None) is not None):
+            self.config = context.config
 
         self.plot_fn = plot_fn
         self.extra_features = extra_features
@@ -622,9 +710,6 @@ def sed_plot(data, selected=None, context=None):
 
     if (context is not None and getattr(context, "config", None) is not None):
         config = context.config
-    else:
-        import astronomicAL.config as config
-        config = config
     
     df_columns = list(config.main_df.columns)
 
@@ -765,9 +850,9 @@ def empty_panel(message = "Loading error"):
     return pn.pane.Markdown(message)
 
 
-def local_stored_plot(data, selected, plot_instance=None):
+def local_stored_plot(data, selected, plot_instance=None, context = None):
     selected_source = get_selected_source(data=data, selected = selected)
-    path = int(selected_source[config.settings["Local_image_path"]].iloc[0])
+    path = int(selected_source[context.config.settings["Local_image_path"]].iloc[0])
     try:
         return pn.pane.Image(path, width = 500)
     except Exception as e:

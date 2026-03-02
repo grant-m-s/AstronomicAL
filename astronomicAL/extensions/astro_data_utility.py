@@ -38,21 +38,23 @@ class EuclidCutoutsClass:
     
     def __init__(self, ra, dec, 
                  euclid_filters = ["VIS", "NIR_Y", "NIR_J", "NIR_H"],
-                 client = None, 
                  save_dir = "data/cutouts",
                  context = None):
 
         self.context = context
-        import astronomicAL.config as config
-        self.config = context.config if (context is not None and getattr(context, "config", None) is not None) else config
-        self.shared = getattr(context, "shared", None)
+        if (context is not None and getattr(context, "config", None) is not None):
+            self.config = context.config
 
-        if client is None:
-            self.shared.set_data("Euclid_client", EuclidClass(environment="PDR"))
-            print("Initialized EuclidClass")
-            self.client = self.shared.get_data("Euclid_client")
+        svc = getattr(self.context, "services", None) if self.context is not None else None
+        key = "euclid.client"
+
+        if svc is not None and svc.has(key):
+            self.client = svc.get(key)
         else:
-            self.client = client
+            self.client = EuclidClass(environment="PDR")
+            print("Initialized EuclidClass")
+            if svc is not None:
+                svc.set(key, self.client)
         
         self.moc = load_moc("Euclid_Q1")
         self.error_tracker = ErrorTracker()
@@ -440,13 +442,10 @@ class BaseSpectraClass:
     def __init__(self, ra, dec, max_separation = 1, sourceId = None, context = None):
 
         self.context = context
-        self.shared = getattr(context, "shared", None)
 
         if (context is not None and getattr(context, "config", None) is not None):
-            config = context.config
-        else:
-            import astronomicAL.config as config
-            config = config
+            self.config = context.config
+
 
         self.ra = ra
         self.dec = dec
@@ -793,24 +792,27 @@ class DESISpectraClass(BaseSpectraClass):
     """
     def __init__(self, ra, dec, max_separation = 1, 
                  datasets = ["DESI-DR1", "DESI-EDR", "BOSS-DR17", "SDSS-DR17"],
-                 sourceId = None, client = None, context = None):
+                 sourceId = None, context = None):
         super().__init__(ra, dec, max_separation=max_separation, sourceId=sourceId, context = context)
         
         self.context = context
-        import astronomicAL.config as config
-        self.config = context.config if (context is not None and getattr(context, "config", None) is not None) else config
-        self.shared = getattr(context, "shared", None)
+        if (context is not None and getattr(context, "config", None) is not None):
+            self.config = context.config
 
         if isinstance(datasets, str): 
             datasets = [datasets]
         self.datasets = datasets
 
-        if client is None:
-            self.shared.set_data("Sparcl_client", SparclClient(read_timeout=60))
-            print("Initialized SparcClient")
-            self.client = self.shared.get_data("Sparcl_client")
+        svc = getattr(self.context, "services", None) if self.context is not None else None
+        key = "sparcl.client"
+
+        if svc is not None and svc.has(key):
+            self.client = svc.get(key)
         else:
-            self.client = client
+            self.client = SparclClient(read_timeout=60)
+            print("Initialized SparcClient")
+            if svc is not None:
+                svc.set(key, self.client)
 
         if ("DESI-DR1" in self.datasets) | ("DESI-EDR" in self.datasets):
             self.moc = load_moc(survey = "DESI")
@@ -971,20 +973,23 @@ class SpectrumContainer:
 
 class EuclidSpectraClass(BaseSpectraClass):
 
-    def __init__(self, ra, dec, max_separation =1, sourceId = None, client = None, context = None):
+    def __init__(self, ra, dec, max_separation =1, sourceId = None, context = None):
         super().__init__(ra, dec, max_separation = max_separation, sourceId = sourceId, context = context)
 
         self.context = context
-        import astronomicAL.config as config
-        self.config = context.config if (context is not None and getattr(context, "config", None) is not None) else config
-        self.shared = getattr(context, "shared", None)
+        if (context is not None and getattr(context, "config", None) is not None):
+            self.config = context.config
 
-        if client is None:
-            self.shared.set_data("Euclid_client", EuclidClass(environment = "PDR"))
-            print("Initialized EuclidClass")
-            self.client = self.shared.get_data("Euclid_client")
+        svc = getattr(self.context, "services", None) if self.context is not None else None
+        key = "euclid.client"
+
+        if svc is not None and svc.has(key):
+            self.client = svc.get(key)
         else:
-            self.client = client
+            self.client = EuclidClass(environment="PDR")
+            print("Initialized EuclidClass")
+            if svc is not None:
+                svc.set(key, self.client)
         self.moc = load_moc("Euclid_Q1")
     
     def _remove_source_attributes(self):
@@ -1292,28 +1297,28 @@ def load_moc(survey, path = "data/mocs"):
 def check_isin_survey(ra, dec, moc):
     return moc.contains_lonlat(ra*u.deg, dec*u.deg)
 
-def get_ra_dec_DESI():
-    """"
-    Utility function to get ra and dec for a source with DESI spectra.
-    Only useful for testing the routines
-    """
-    client = SparclClient(read_timeout=60)
-    outs = ['sparcl_id', 'ra', 'dec']
-    cons = {'data_release': ['DESI-DR1']}
-    found = client.find(outfields=outs, constraints=cons)
-    ra = found.records[0]["ra"]
-    dec = found.records[0]["dec"]
-    return ra, dec
+# def get_ra_dec_DESI():
+#     """"
+#     Utility function to get ra and dec for a source with DESI spectra.
+#     Only useful for testing the routines
+#     """
+#     client = SparclClient(read_timeout=60)
+#     outs = ['sparcl_id', 'ra', 'dec']
+#     cons = {'data_release': ['DESI-DR1']}
+#     found = client.find(outfields=outs, constraints=cons)
+#     ra = found.records[0]["ra"]
+#     dec = found.records[0]["dec"]
+#     return ra, dec
 
-def get_ra_dec_Euclid():
-    ra = 265.94946 
-    dec = 65.83025    
-    return ra, dec  
+# def get_ra_dec_Euclid():
+#     ra = 265.94946 
+#     dec = 65.83025    
+#     return ra, dec  
 
-def print_Euclid_tables():
-    tables = Euclid.load_tables(only_names=True, include_shared_tables=True)
-    print(f"{len(tables)} tables are available")
-    print(*(table.name for table in tables), sep="\n")
+# def print_Euclid_tables():
+#     tables = Euclid.load_tables(only_names=True, include_shared_tables=True)
+#     print(f"{len(tables)} tables are available")
+#     print(*(table.name for table in tables), sep="\n")
 
 
 #########previous stuff 

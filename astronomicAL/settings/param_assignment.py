@@ -3,7 +3,6 @@ import panel as pn
 import param
 
 from astronomicAL.utils import load_config
-import astronomicAL.config as config
 from astronomicAL.utils.optimise import matches_type, get_series_type
 
 
@@ -50,8 +49,11 @@ class ParameterAssignment(param.Parameterized):
 
     label_strings_param = {}
 
-    def __init__(self, mode = "Labelling"):
+    def __init__(self, mode = "Labelling", context = None):
         super(ParameterAssignment, self).__init__()
+
+        self.context = context
+
         self.column = pn.Column(pn.pane.Str("loading"), sizing_mode = "stretch_both")
         self.src = ColumnDataSource()
         self.df = None
@@ -106,8 +108,8 @@ class ParameterAssignment(param.Parameterized):
 
         updated_settings = self.get_settings()
         for key in updated_settings.keys():
-            config.settings[key] = updated_settings[key]
-        config.settings["confirmed"] = False
+            self.config.settings[key] = updated_settings[key]
+        self.config.settings["confirmed"] = False
         self.confirm_settings_button.name = "Confirmed"
 
 
@@ -125,7 +127,7 @@ class ParameterAssignment(param.Parameterized):
 
         if (self.label_column not in self.df.columns) or (self.label_column == "No Labels"):
             self.labels = []
-            config.settings["labels"] = self.labels
+            self.config.settings["labels"] = self.labels
 
         else:
             self.label_type = get_series_type(self.df[self.label_column])
@@ -143,7 +145,7 @@ class ParameterAssignment(param.Parameterized):
                 return
             
             self.labels = sorted(self.df[self.label_column].unique())
-            config.settings["labels"] = self.labels
+            self.config.settings["labels"] = self.labels
             self.update_colours()
             self._initialise_label_strings_input()
 
@@ -158,7 +160,7 @@ class ParameterAssignment(param.Parameterized):
 
         """
         print("updating colours...")
-        labels = config.settings["labels"]
+        labels = self.config.settings["labels"]
 
         colour_list = [
             "#1f77b4",
@@ -181,7 +183,7 @@ class ParameterAssignment(param.Parameterized):
             )
 
     def _initialise_label_strings_input(self):
-        labels = config.settings["labels"]
+        labels = self.config.settings["labels"]
         for i, data_label in enumerate(labels):
             self.label_strings_param[f"{data_label}"] = pn.widgets.TextInput(
                 name=f"{data_label}", placeholder=f"{data_label}"
@@ -296,8 +298,12 @@ class ParameterAssignment_ML(ParameterAssignment):
 
     ready = param.Boolean(default=False)
 
-    def __init__(self):
+    def __init__(self, context = None):
         super(ParameterAssignment_ML, self).__init__(mode = "Labelling")
+
+        self.context = context
+        self.config = context.config
+
         self._initialise_widgets()
 
     def _initialise_widgets(self):
@@ -437,8 +443,12 @@ class ParameterAssignment_Exploring(ParameterAssignment):
     labels = []
 
 
-    def __init__(self, close_settings_button):
+    def __init__(self, close_settings_button, context = None):
         super(ParameterAssignment_Exploring, self).__init__(mode = "Exploring")
+
+        self.context = context
+        self.config = context.config
+
         self.close_settings_button = close_settings_button
         self._initialise_widgets()
     
@@ -474,11 +484,11 @@ class ParameterAssignment_Exploring(ParameterAssignment):
 
     def _confirm_settings_cb(self, event):
         super()._confirm_settings_cb(event)
-        config.settings["confirmed"] = True
+        self.config.settings["confirmed"] = True
         
         for save_name in ["save_button", "save_panel_button", "save_logbook_button"]:
-            if save_name in config.settings:
-                config.settings[save_name].disabled = False
+            if save_name in self.config.settings:
+                self.config.settings[save_name].disabled = False
 
         self.close_settings_button.disabled = False
         self.close_settings_button.button_type = "success"

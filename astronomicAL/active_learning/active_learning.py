@@ -26,7 +26,6 @@ from sklearn.metrics import (
     recall_score,
 )
 
-import astronomicAL.config as config
 import datashader as ds
 import holoviews as hv
 import numpy as np
@@ -227,14 +226,18 @@ class ActiveLearningModel:
         The current classifier that is being trained. If multiple classifiers exist in `classifier_table_source`, then `learner` will be a ModAL Committee.
     """
 
-    def __init__(self, src, df, label):
+    def __init__(self, src, df, label, context=None):
 
-        self.df = df
+        self.context = context
+        
+        if (context is not None and getattr(context, "config", None) is not None):
+            self.config = context.config
+        self.df = self.config.main_df
 
         self.src = src
-        self.src.on_change("data", self._panel_cb)
+        self.watch_bokeh(self.src, "data", self._panel_cb)
 
-        self._label = config.settings["strings_to_labels"][label]
+        self._label = self.config.settings["strings_to_labels"][label]
         self._label_alias = label
 
         self._training = False
@@ -243,44 +246,44 @@ class ActiveLearningModel:
 
         self._ui_built = False
 
-        if "config_load_level" in list(config.settings.keys()):
-            if (config.settings["config_load_level"] == 2) and (
-                f"{self._label}" in config.settings["classifiers"]
+        if "config_load_level" in list(self.config.settings.keys()):
+            if (self.config.settings["config_load_level"] == 2) and (
+                f"{self._label}" in self.config.settings["classifiers"]
             ):
-                keys = list(config.settings["classifiers"][f"{self._label}"].keys())
+                keys = list(self.config.settings["classifiers"][f"{self._label}"].keys())
                 if ("y" in keys) and ("id" in keys):
                     self.retrain = True
 
-        if len(config.ml_data.keys()) == 0:
+        if len(self.config.ml_data.keys()) == 0:
             print("preprocessing...")
             self._preprocess_data()
 
-            self.x_train_without_unknowns = config.ml_data["x_train_without_unknowns"]
+            self.x_train_without_unknowns = self.config.ml_data["x_train_without_unknowns"]
 
-        elif len(config.ml_data["x_train_with_unknowns"].columns) == 0:
+        elif len(self.config.ml_data["x_train_with_unknowns"].columns) == 0:
             print("preprocessing...")
             self._preprocess_data()
 
-            self.x_train_without_unknowns = config.ml_data["x_train_without_unknowns"]
+            self.x_train_without_unknowns = self.config.ml_data["x_train_without_unknowns"]
         else:
 
-            self.x_train_without_unknowns = config.ml_data["x_train_without_unknowns"]
+            self.x_train_without_unknowns = self.config.ml_data["x_train_without_unknowns"]
 
-            self.y_train_without_unknowns = config.ml_data["y_train_without_unknowns"]
-            self.y_train_with_unknowns = config.ml_data["y_train_with_unknowns"]
-            self.y_val = config.ml_data["y_val"]
-            self.y_test = config.ml_data["y_test"]
+            self.y_train_without_unknowns = self.config.ml_data["y_train_without_unknowns"]
+            self.y_train_with_unknowns = self.config.ml_data["y_train_with_unknowns"]
+            self.y_val = self.config.ml_data["y_val"]
+            self.y_test = self.config.ml_data["y_test"]
 
-            self.id_train_with_unknowns = config.ml_data["id_train_with_unknowns"]
-            self.id_train_without_unknowns = config.ml_data["id_train_without_unknowns"]
-            self.id_val = config.ml_data["id_val"]
-            self.id_test = config.ml_data["id_test"]
+            self.id_train_with_unknowns = self.config.ml_data["id_train_with_unknowns"]
+            self.id_train_without_unknowns = self.config.ml_data["id_train_without_unknowns"]
+            self.id_val = self.config.ml_data["id_val"]
+            self.id_test = self.config.ml_data["id_test"]
 
-            if config.settings["scale_data"]:
+            if self.config.settings["scale_data"]:
 
-                self.scaler = config.ml_data["scaler"]
+                self.scaler = self.config.ml_data["scaler"]
 
-            self.df = config.main_df
+            self.df = self.config.main_df
 
         self._convert_to_one_vs_rest()
 
@@ -300,15 +303,76 @@ class ActiveLearningModel:
         if self.retrain:
             self._start_training_cb(None)
 
+
+    def _dispose_impl(self):
+        """Subclass-specific cleanup hook (override if needed)."""
+        return
+
+    def dispose(self):
+        if getattr(self, "_disposed", False):
+            return
+        self._disposed = True
+
+        # 1) subclass cleanup first
+        try:
+            self._dispose_impl()
+        except Exception:
+            pass
+
+        # 2) unwatch bokeh callbacks (including src.on_change if registered via watch_bokeh)
+        try:
+            self.unwatch_all_bokeh()
+        except Exception:
+            pass
+
+        # 3) Unsubscribe EventBus
+        if self.context and getattr(self.context, "events", None):
+            for sub in list(getattr(self, "_event_subs", [])):
+                try:
+                    self.context.events.unsubscribe(sub)
+                except Exception:
+                    pass
+        self._event_subs = []
+
+        # 4) Stop periodic callbacks
+        for cb in list(getattr(self, "_periodic_cbs", [])):
+            try:
+                cb.stop()
+            except Exception:
+                pass
+        self._periodic_cbs = []
+
+    def watch_bokeh(self, model, attr: str, callback):
+        """Register and track Bokeh model.on_change callbacks for unified disposal."""
+        if model is None:
+            return
+        try:
+            model.on_change(attr, callback)
+            self._bokeh_on_change.append((model, attr, callback))
+        except Exception:
+            pass
+
+    def unwatch_all_bokeh(self):
+        """Remove all tracked Bokeh callbacks (idempotent)."""
+        for model, attr, callback in list(getattr(self, "_bokeh_on_change", [])):
+            try:
+                model.remove_on_change(attr, callback)
+            except Exception as e:
+                # Ignore double-remove noise
+                if "list.remove(x): x not in list" in str(e):
+                    pass
+            # continue regardless
+        self._bokeh_on_change = []
+
     def _resize_plot_scales(self):
 
-        x_axis = config.settings["default_vars"][0]
-        y_axis = config.settings["default_vars"][1]
+        x_axis = self.config.settings["default_vars"][0]
+        y_axis = self.config.settings["default_vars"][1]
 
-        x_sd = np.std(config.ml_data["x_train_without_unknowns"][x_axis])
-        x_mu = np.mean(config.ml_data["x_train_without_unknowns"][x_axis])
-        y_sd = np.std(config.ml_data["x_train_without_unknowns"][y_axis])
-        y_mu = np.mean(config.ml_data["x_train_without_unknowns"][y_axis])
+        x_sd = np.std(self.config.ml_data["x_train_without_unknowns"][x_axis])
+        x_mu = np.mean(self.config.ml_data["x_train_without_unknowns"][x_axis])
+        y_sd = np.std(self.config.ml_data["x_train_without_unknowns"][y_axis])
+        y_mu = np.mean(self.config.ml_data["x_train_without_unknowns"][y_axis])
 
         x_max = x_mu + 4 * x_sd
         x_min = x_mu - 4 * x_sd
@@ -317,50 +381,50 @@ class ActiveLearningModel:
         y_min = y_mu - 4 * y_sd
 
         self._max_x = np.min(
-            [(x_max), np.max(config.ml_data["x_train_without_unknowns"][x_axis])]
+            [(x_max), np.max(self.config.ml_data["x_train_without_unknowns"][x_axis])]
         )
         self._min_x = np.max(
-            [(x_min), np.min(config.ml_data["x_train_without_unknowns"][x_axis])]
+            [(x_min), np.min(self.config.ml_data["x_train_without_unknowns"][x_axis])]
         )
 
         self._max_y = np.min(
-            [(y_max), np.max(config.ml_data["x_train_without_unknowns"][y_axis])]
+            [(y_max), np.max(self.config.ml_data["x_train_without_unknowns"][y_axis])]
         )
         self._min_y = np.max(
-            [(y_min), np.min(config.ml_data["x_train_without_unknowns"][y_axis])]
+            [(y_min), np.min(self.config.ml_data["x_train_without_unknowns"][y_axis])]
         )
 
     def _initialise_placeholders(self):
 
         if (
-            not config.settings["default_vars"][0]
-            in config.ml_data["x_train_without_unknowns"].keys()
+            not self.config.settings["default_vars"][0]
+            in self.config.ml_data["x_train_without_unknowns"].keys()
         ):
-            config.settings["default_vars"] = (
-                config.settings["features_for_training"][0],
-                config.settings["default_vars"][1],
+            self.config.settings["default_vars"] = (
+                self.config.settings["features_for_training"][0],
+                self.config.settings["default_vars"][1],
             )
 
         if (
-            not config.settings["default_vars"][1]
-            in config.ml_data["x_train_without_unknowns"].keys()
+            not self.config.settings["default_vars"][1]
+            in self.config.ml_data["x_train_without_unknowns"].keys()
         ):
-            config.settings["default_vars"] = (
-                config.settings["default_vars"][0],
-                config.settings["features_for_training"][1],
+            self.config.settings["default_vars"] = (
+                self.config.settings["default_vars"][0],
+                self.config.settings["features_for_training"][1],
             )
 
         self._model_output_data_tr = {
-            f'{config.settings["default_vars"][0]}': [],
-            f'{config.settings["default_vars"][1]}': [],
+            f'{self.config.settings["default_vars"][0]}': [],
+            f'{self.config.settings["default_vars"][1]}': [],
             "metric": [],
             "y": [],
             "pred": [],
         }
 
         self._model_output_data_val = {
-            f'{config.settings["default_vars"][0]}': [],
-            f'{config.settings["default_vars"][1]}': [],
+            f'{self.config.settings["default_vars"][0]}': [],
+            f'{self.config.settings["default_vars"][1]}': [],
             "y": [],
             "pred": [],
         }
@@ -401,19 +465,19 @@ class ActiveLearningModel:
 
         options = []
 
-        all_labels = list(config.main_df[config.settings["label_col"]].unique())
+        all_labels = list(self.config.main_df[self.config.settings["label_col"]].unique())
 
         all_labels.sort()
 
         if -1 in all_labels:
             all_labels.remove(-1)
 
-        if config.settings["exclude_labels"]:
-            for i in config.settings["unclassified_labels"]:
-                all_labels.remove(config.settings["strings_to_labels"][f"{i}"])
+        if self.config.settings["exclude_labels"]:
+            for i in self.config.settings["unclassified_labels"]:
+                all_labels.remove(self.config.settings["strings_to_labels"][f"{i}"])
 
         for i in all_labels:
-            options.append(config.settings["labels_to_strings"][f"{i}"])
+            options.append(self.config.settings["labels_to_strings"][f"{i}"])
 
         options.append("Unsure")
         self.assign_label_group = pn.widgets.RadioButtonGroup(
@@ -463,15 +527,15 @@ class ActiveLearningModel:
             height=120,
         )
 
-        if "classifiers" in config.settings.keys():
-            if str(self._label) in config.settings["classifiers"].keys():
+        if "classifiers" in self.config.settings.keys():
+            if str(self._label) in self.config.settings["classifiers"].keys():
                 list_c1 = self.classifier_table_source.data["classifier"]
                 list_c2 = self.classifier_table_source.data["query"]
 
-                imported_classifiers = config.settings["classifiers"][f"{self._label}"][
+                imported_classifiers = self.config.settings["classifiers"][f"{self._label}"][
                     "classifier"
                 ]
-                imported_querys = config.settings["classifiers"][f"{self._label}"][
+                imported_querys = self.config.settings["classifiers"][f"{self._label}"][
                     "query"
                 ]
 
@@ -508,6 +572,7 @@ class ActiveLearningModel:
                 save_config.save_config_file_cb,
                 trigger_text=trigger_for_autosave,
                 autosave=True,
+                context=self.context
             ),
         )
 
@@ -518,6 +583,7 @@ class ActiveLearningModel:
                 save_config.save_config_file_cb,
                 trigger_text=trigger_for_checkout,
                 autosave=False,
+                context=self.context
             ),
         )
 
@@ -597,18 +663,14 @@ class ActiveLearningModel:
 
     def _preprocess_data(self):
 
-        print("self.df before gen features:", self.df.shape)
-
         self.df, self.all_al_data = self.generate_features(self.df)
-
-        print("self.df after gen features:", self.df.shape)
 
         x, y = self.split_x_y_ids(self.all_al_data)
 
         excluded_x = {}
         excluded_y = {}
-        if config.settings["exclude_labels"]:
-            for label in config.settings["unclassified_labels"]:
+        if self.config.settings["exclude_labels"]:
+            for label in self.config.settings["unclassified_labels"]:
                 (
                     x,
                     y,
@@ -616,9 +678,9 @@ class ActiveLearningModel:
                     excluded_y[f"{label}"],
                 ) = self.exclude_unclassified_labels(x, y, label)
 
-        if "-1" in config.settings["labels_to_strings"].keys():
+        if "-1" in self.config.settings["labels_to_strings"].keys():
             print("removing -1")
-            label = config.settings["labels_to_strings"]["-1"]
+            label = self.config.settings["labels_to_strings"]["-1"]
             (
                 x,
                 y,
@@ -635,16 +697,16 @@ class ActiveLearningModel:
             y_test,
         ) = self.train_val_test_split(x, y, excluded_x, excluded_y, 0.6, 0.2)
 
-        if "exclude_unknown_labels" in config.settings.keys():
-            if not config.settings["exclude_unknown_labels"]:
-                if "-1" in config.settings["labels_to_strings"].keys():
-                    if config.settings["labels_to_strings"]["-1"] in excluded_x.keys():
+        if "exclude_unknown_labels" in self.config.settings.keys():
+            if not self.config.settings["exclude_unknown_labels"]:
+                if "-1" in self.config.settings["labels_to_strings"].keys():
+                    if self.config.settings["labels_to_strings"]["-1"] in excluded_x.keys():
                         self.x_train = self.x_train.append(
-                            excluded_x[config.settings["labels_to_strings"]["-1"]],
+                            excluded_x[self.config.settings["labels_to_strings"]["-1"]],
                             ignore_index=True,
                         )
                         y_train = y_train.append(
-                            excluded_y[config.settings["labels_to_strings"]["-1"]],
+                            excluded_y[self.config.settings["labels_to_strings"]["-1"]],
                             ignore_index=True,
                         )
 
@@ -671,11 +733,11 @@ class ActiveLearningModel:
         self.x_cols = x_cols
         self.y_cols = y_cols
 
-        print(f"train: {y_train[config.settings['label_col']].value_counts()}")
-        print(f"val: {y_val[config.settings['label_col']].value_counts()}")
-        print(f"test: {y_test[config.settings['label_col']].value_counts()}")
+        print(f"train: {y_train[self.config.settings['label_col']].value_counts()}")
+        print(f"val: {y_val[self.config.settings['label_col']].value_counts()}")
+        print(f"test: {y_test[self.config.settings['label_col']].value_counts()}")
 
-        if config.settings["scale_data"]:
+        if self.config.settings["scale_data"]:
 
             (self.x_train, self.x_val, self.x_test,) = self.scale_data(
                 self.x_train,
@@ -712,39 +774,44 @@ class ActiveLearningModel:
 
         print(self.x_train.shape)
         print(self.y_train.shape)
-        print(self.y_train[config.settings["label_col"]] != -1)
+        print(self.y_train[self.config.settings["label_col"]] != -1)
 
-        config.ml_data["x_train_without_unknowns"] = self.x_train[
-            self.y_train[config.settings["label_col"]] != -1
+        self.config.ml_data["x_train_without_unknowns"] = self.x_train[
+            self.y_train[self.config.settings["label_col"]] != -1
         ]
 
         self.x_train_without_unknowns = self.x_train[
-            self.y_train[config.settings["label_col"]] != -1
+            self.y_train[self.config.settings["label_col"]] != -1
         ]
 
-        config.ml_data["x_train_with_unknowns"] = self.x_train
-        config.ml_data["x_val"] = self.x_val
-        config.ml_data["x_test"] = self.x_test
+        self.config.ml_data["x_train_with_unknowns"] = self.x_train
+        self.config.ml_data["x_val"] = self.x_val
+        self.config.ml_data["x_test"] = self.x_test
 
-        config.ml_data["y_train_without_unknowns"] = self.y_train[
-            self.y_train[config.settings["label_col"]] != -1
+        self.config.ml_data["y_train_without_unknowns"] = self.y_train[
+            self.y_train[self.config.settings["label_col"]] != -1
         ]
-        config.ml_data["y_train_with_unknowns"] = self.y_train
-        config.ml_data["y_val"] = self.y_val
-        config.ml_data["y_test"] = self.y_test
+        self.config.ml_data["y_train_with_unknowns"] = self.y_train
+        self.config.ml_data["y_val"] = self.y_val
+        self.config.ml_data["y_test"] = self.y_test
 
-        config.ml_data["id_train_without_unknowns"] = self.id_train[
-            self.y_train[config.settings["label_col"]] != -1
+        self.config.ml_data["id_train_without_unknowns"] = self.id_train[
+            self.y_train[self.config.settings["label_col"]] != -1
         ]
-        config.ml_data["id_train_with_unknowns"] = self.id_train
-        config.ml_data["id_val"] = self.id_val
-        config.ml_data["id_test"] = self.id_test
+        self.config.ml_data["id_train_with_unknowns"] = self.id_train
+        self.config.ml_data["id_val"] = self.id_val
+        self.config.ml_data["id_test"] = self.id_test
 
-        if config.settings["scale_data"]:
-            config.ml_data["scaler"] = self.scaler
+        if self.config.settings["scale_data"]:
+            self.config.ml_data["scaler"] = self.scaler
 
-        config.main_df = self.df
-        print("ALModel:assign_global_data has updated config.main_df")
+        self.config.main_df = self.df
+
+        if self.context and self.context.events:
+            self.context.events.publish(
+                "dataset.main.updated",
+                {"reason": "preprocess", "ncols": self.df.shape[1]},
+            )
 
     def remove_from_pool(self, id=None):
         """Remove the current queried source from the active learning pool.
@@ -760,7 +827,7 @@ class ActiveLearningModel:
         else:
             ind_list = list(self.id_pool.index.values)
             df_index = self.id_pool.index[
-                self.id_pool[config.settings["id_col"]] == id
+                self.id_pool[self.config.settings["id_col"]] == id
             ].to_list()[0]
             index = ind_list.index(df_index)
 
@@ -832,7 +899,7 @@ class ActiveLearningModel:
                     dump(model, f"{mod_dir}.joblib")
 
                     if not os.path.isfile(f"{scaler_dir}.joblib") and (
-                        config.settings["scale_data"]
+                        self.config.settings["scale_data"]
                     ):
                         dump(self.scaler, f"{scaler_dir}.joblib")
 
@@ -842,7 +909,7 @@ class ActiveLearningModel:
                     dump(model, f"{filename}/{list_c1[i][:6]}_{i}.joblib")
                     scaler_dir = f"{filename}/SCALER"
                     if not os.path.isfile(f"{scaler_dir}.joblib") and (
-                        config.settings["scale_data"]
+                        self.config.settings["scale_data"]
                     ):
                         dump(self.scaler, f"{scaler_dir}.joblib")
 
@@ -854,14 +921,14 @@ class ActiveLearningModel:
                 dump(model, f"{filename}-{iteration}-{val_f1}-{dt_string}.joblib")
                 scaler_dir = f"{filename}-{iteration}-{val_f1}-{dt_string}-SCALER"
                 if not os.path.isfile(f"{scaler_dir}.joblib") and (
-                    config.settings["scale_data"]
+                    self.config.settings["scale_data"]
                 ):
                     dump(self.scaler, f"{scaler_dir}.joblib")
             else:
                 dump(model, f"{filename}.joblib")
                 scaler_dir = f"{filename}-SCALER"
                 if not os.path.isfile(f"{scaler_dir}.joblib") and (
-                    config.settings["scale_data"]
+                    self.config.settings["scale_data"]
                 ):
                     dump(self.scaler, f"{scaler_dir}.joblib")
 
@@ -889,19 +956,19 @@ class ActiveLearningModel:
 
         data = self.df
 
-        queried_id = self.id_pool.iloc[query_idx][config.settings["id_col"]].copy()
+        queried_id = self.id_pool.iloc[query_idx][self.config.settings["id_col"]].copy()
 
         act_label = self.y_pool[query_idx]
 
         selected_source = self.df[
-            self.df[config.settings["id_col"]] == queried_id.values[0]
+            self.df[self.config.settings["id_col"]] == queried_id.values[0]
         ]
 
-        selected_dict = selected_source.set_index(config.settings["id_col"]).to_dict(
+        selected_dict = selected_source.set_index(self.config.settings["id_col"]).to_dict(
             "list"
         )
 
-        selected_dict[config.settings["id_col"]] = [queried_id.values[0]]
+        selected_dict[self.config.settings["id_col"]] = [queried_id.values[0]]
 
         try:
             self.src.data = selected_dict
@@ -911,17 +978,17 @@ class ActiveLearningModel:
             )
 
         plot_idx = [
-            list(config.ml_data["x_train_without_unknowns"].columns).index(
-                config.settings["default_vars"][0]
+            list(self.config.ml_data["x_train_without_unknowns"].columns).index(
+                self.config.settings["default_vars"][0]
             ),
-            list(config.ml_data["x_train_without_unknowns"].columns).index(
-                config.settings["default_vars"][1]
+            list(self.config.ml_data["x_train_without_unknowns"].columns).index(
+                self.config.settings["default_vars"][1]
             ),
         ]
 
         q = {
-            f'{config.settings["default_vars"][0]}': query_instance[:, plot_idx[0]],
-            f'{config.settings["default_vars"][1]}': [query_instance[:, plot_idx[1]]],
+            f'{self.config.settings["default_vars"][0]}': query_instance[:, plot_idx[0]],
+            f'{self.config.settings["default_vars"][1]}': [query_instance[:, plot_idx[1]]],
         }
 
         self.queried_points.data = q
@@ -978,7 +1045,7 @@ class ActiveLearningModel:
                 list(self.id_pool.iloc[query_idx].values)[0][0]
             )
             self.full_labelled_data["y"].append(
-                config.settings["strings_to_labels"][selected_label]
+                self.config.settings["strings_to_labels"][selected_label]
             )
 
             self._assigned = True
@@ -990,7 +1057,7 @@ class ActiveLearningModel:
 
             self.assign_label_button.name = "Assigned!"
 
-            if int(config.settings["strings_to_labels"][selected_label]) == self._label:
+            if int(self.config.settings["strings_to_labels"][selected_label]) == self._label:
                 selected_label = 1
             else:
                 selected_label = 0
@@ -1024,10 +1091,10 @@ class ActiveLearningModel:
             self.assign_label_button.disabled = False
             self._refresh_ui()
 
-        config.settings["classifiers"][f"{self._label}"][
+        self.config.settings["classifiers"][f"{self._label}"][
             "id"
         ] = self.full_labelled_data["id"]
-        config.settings["classifiers"][f"{self._label}"]["y"] = self.full_labelled_data[
+        self.config.settings["classifiers"][f"{self._label}"]["y"] = self.full_labelled_data[
             "y"
         ]
 
@@ -1044,8 +1111,8 @@ class ActiveLearningModel:
     def _empty_data(self):
 
         empty = {
-            f'{config.settings["default_vars"][0]}': [],
-            f'{config.settings["default_vars"][1]}': [],
+            f'{self.config.settings["default_vars"][0]}': [],
+            f'{self.config.settings["default_vars"][1]}': [],
         }
 
         return empty
@@ -1089,21 +1156,21 @@ class ActiveLearningModel:
         self.num_points_list = []
         self.curr_num_points = self.starting_num_points.value
 
-        if "classifiers" not in config.settings.keys():
-            config.settings["classifiers"] = {}
+        if "classifiers" not in self.config.settings.keys():
+            self.config.settings["classifiers"] = {}
 
         if self.retrain:
             self.curr_num_points = len(
-                config.settings["classifiers"][f"{self._label}"]["y"]
+                self.config.settings["classifiers"][f"{self._label}"]["y"]
             )
 
-        if f"{self._label}" not in config.settings["classifiers"]:
-            config.settings["classifiers"][f"{self._label}"] = {}
+        if f"{self._label}" not in self.config.settings["classifiers"]:
+            self.config.settings["classifiers"][f"{self._label}"] = {}
 
-        config.settings["classifiers"][f"{self._label}"]["classifier"] = table[
+        self.config.settings["classifiers"][f"{self._label}"]["classifier"] = table[
             "classifier"
         ]
-        config.settings["classifiers"][f"{self._label}"]["query"] = table["query"]
+        self.config.settings["classifiers"][f"{self._label}"]["query"] = table["query"]
 
         self.setup_learners()
 
@@ -1168,10 +1235,10 @@ class ActiveLearningModel:
         """
 
         df_data_y_ids = df_data[
-            [config.settings["label_col"], config.settings["id_col"]]
+            [self.config.settings["label_col"], self.config.settings["id_col"]]
         ]
         df_data_x = df_data.drop(
-            columns=[config.settings["label_col"], config.settings["id_col"]]
+            columns=[self.config.settings["label_col"], self.config.settings["id_col"]]
         )
         assert (
             df_data_y_ids.shape[0] == df_data_x.shape[0]
@@ -1205,16 +1272,16 @@ class ActiveLearningModel:
             A subset of `df_data_y` which only has rows with label `excluded`.
 
         """
-        excluded_label = config.settings["strings_to_labels"][excluded]
+        excluded_label = self.config.settings["strings_to_labels"][excluded]
         excluded_x = df_data_x[
-            df_data_y[config.settings["label_col"]] == excluded_label
+            df_data_y[self.config.settings["label_col"]] == excluded_label
         ]
         excluded_y = df_data_y[
-            df_data_y[config.settings["label_col"]] == excluded_label
+            df_data_y[self.config.settings["label_col"]] == excluded_label
         ]
 
-        data_x = df_data_x[df_data_y[config.settings["label_col"]] != excluded_label]
-        data_y = df_data_y[df_data_y[config.settings["label_col"]] != excluded_label]
+        data_x = df_data_x[df_data_y[self.config.settings["label_col"]] != excluded_label]
+        data_y = df_data_y[df_data_y[self.config.settings["label_col"]] != excluded_label]
 
         return data_x, data_y, excluded_x, excluded_y
 
@@ -1260,10 +1327,10 @@ class ActiveLearningModel:
 
         include_test_file = True
 
-        if "test_set_file" not in list(config.settings.keys()):
+        if "test_set_file" not in list(self.config.settings.keys()):
             include_test_file = False
 
-        elif not config.settings["test_set_file"]:
+        elif not self.config.settings["test_set_file"]:
             include_test_file = False
 
         test_ratio = 1 - train_ratio - val_ratio
@@ -1271,7 +1338,7 @@ class ActiveLearningModel:
             df_data_x,
             df_data_y,
             test_size=1 - train_ratio,
-            stratify=df_data_y[config.settings["label_col"]],
+            stratify=df_data_y[self.config.settings["label_col"]],
             random_state=rng,
         )
 
@@ -1279,7 +1346,7 @@ class ActiveLearningModel:
             x_temp,
             y_temp,
             test_size=test_ratio / (test_ratio + val_ratio),
-            stratify=y_temp[config.settings["label_col"]],
+            stratify=y_temp[self.config.settings["label_col"]],
             random_state=rng,
         )
 
@@ -1315,14 +1382,14 @@ class ActiveLearningModel:
         ids_trained_on = []
 
         if self.retrain:
-            for i in config.settings["classifiers"]:
-                if "id" in list(config.settings["classifiers"][i].keys()):
-                    ids_trained_on += config.settings["classifiers"][i]["id"]
+            for i in self.config.settings["classifiers"]:
+                if "id" in list(self.config.settings["classifiers"][i].keys()):
+                    ids_trained_on += self.config.settings["classifiers"][i]["id"]
 
         ids_trained_on = list(dict.fromkeys(ids_trained_on))
 
-        isin_test = y_train[config.settings["id_col"]].isin(ids_test)
-        isin_trained_on = y_train[config.settings["id_col"]].isin(ids_trained_on)
+        isin_test = y_train[self.config.settings["id_col"]].isin(ids_test)
+        isin_trained_on = y_train[self.config.settings["id_col"]].isin(ids_trained_on)
 
         new_x_test = x_train[(isin_test) & (~isin_trained_on)]
         new_y_test = y_train[(isin_test) & (~isin_trained_on)]
@@ -1330,8 +1397,8 @@ class ActiveLearningModel:
         new_x_train = x_train[~((isin_test) & (~isin_trained_on))]
         new_y_train = y_train[~((isin_test) & (~isin_trained_on))]
 
-        isin_test = y_val[config.settings["id_col"]].isin(ids_test)
-        isin_trained_on = y_val[config.settings["id_col"]].isin(ids_trained_on)
+        isin_test = y_val[self.config.settings["id_col"]].isin(ids_test)
+        isin_trained_on = y_val[self.config.settings["id_col"]].isin(ids_trained_on)
 
         new_x_test_temp = x_val[(isin_test) & (~isin_trained_on)]
         new_y_test_temp = y_val[(isin_test) & (~isin_trained_on)]
@@ -1342,8 +1409,8 @@ class ActiveLearningModel:
         new_x_val = x_val[~((isin_test) & (~isin_trained_on))]
         new_y_val = y_val[~((isin_test) & (~isin_trained_on))]
 
-        isin_test = y_test[config.settings["id_col"]].isin(ids_test)
-        isin_trained_on = y_test[config.settings["id_col"]].isin(ids_trained_on)
+        isin_test = y_test[self.config.settings["id_col"]].isin(ids_test)
+        isin_trained_on = y_test[self.config.settings["id_col"]].isin(ids_trained_on)
 
         new_x_test_temp = x_test[(isin_test) & (~isin_trained_on)]
         new_y_test_temp = y_test[(isin_test) & (~isin_trained_on)]
@@ -1362,19 +1429,19 @@ class ActiveLearningModel:
             curr_x = excluded_x[label]
             curr_y = excluded_y[label]
 
-            inc_x = curr_x[curr_y[config.settings["id_col"]].isin(ids_test)]
-            inc_y = curr_y[curr_y[config.settings["id_col"]].isin(ids_test)]
+            inc_x = curr_x[curr_y[self.config.settings["id_col"]].isin(ids_test)]
+            inc_y = curr_y[curr_y[self.config.settings["id_col"]].isin(ids_test)]
 
             new_x_test = new_x_test.append(inc_x)
             new_y_test = new_y_test.append(inc_y)
 
         y_test_temp = []
 
-        for id in list(new_y_test[config.settings["id_col"]].values):
+        for id in list(new_y_test[self.config.settings["id_col"]].values):
 
             y_test_temp.append(labels[id])
 
-        new_y_test[config.settings["label_col"]] = y_test_temp
+        new_y_test[self.config.settings["label_col"]] = y_test_temp
 
         assert len(new_x_test) == len(
             new_y_test
@@ -1478,55 +1545,55 @@ class ActiveLearningModel:
         """
 
         data_y_tr = pd.DataFrame(
-            y_id_train[config.settings["label_col"]],
-            columns=[config.settings["label_col"]],
+            y_id_train[self.config.settings["label_col"]],
+            columns=[self.config.settings["label_col"]],
         )
         data_id_tr = pd.DataFrame(
-            y_id_train[config.settings["id_col"]], columns=[config.settings["id_col"]]
+            y_id_train[self.config.settings["id_col"]], columns=[self.config.settings["id_col"]]
         )
         data_y_val = pd.DataFrame(
-            y_id_val[config.settings["label_col"]],
-            columns=[config.settings["label_col"]],
+            y_id_val[self.config.settings["label_col"]],
+            columns=[self.config.settings["label_col"]],
         )
         data_id_val = pd.DataFrame(
-            y_id_val[config.settings["id_col"]], columns=[config.settings["id_col"]]
+            y_id_val[self.config.settings["id_col"]], columns=[self.config.settings["id_col"]]
         )
         data_y_test = pd.DataFrame(
-            y_id_test[config.settings["label_col"]],
-            columns=[config.settings["label_col"]],
+            y_id_test[self.config.settings["label_col"]],
+            columns=[self.config.settings["label_col"]],
         )
         data_id_test = pd.DataFrame(
-            y_id_test[config.settings["id_col"]], columns=[config.settings["id_col"]]
+            y_id_test[self.config.settings["id_col"]], columns=[self.config.settings["id_col"]]
         )
 
         return data_y_tr, data_id_tr, data_y_val, data_id_val, data_y_test, data_id_test
 
     def _convert_to_one_vs_rest(self):
 
-        y_tr = config.ml_data["y_train_without_unknowns"].copy()
+        y_tr = self.config.ml_data["y_train_without_unknowns"].copy()
         y_val = self.y_val.copy()
         y_test = self.y_test.copy()
 
-        is_label = y_tr[config.settings["label_col"]] == self._label
-        isnt_label = y_tr[config.settings["label_col"]] != self._label
+        is_label = y_tr[self.config.settings["label_col"]] == self._label
+        isnt_label = y_tr[self.config.settings["label_col"]] != self._label
 
-        y_tr.loc[is_label, config.settings["label_col"]] = 1
-        y_tr.loc[isnt_label, config.settings["label_col"]] = 0
+        y_tr.loc[is_label, self.config.settings["label_col"]] = 1
+        y_tr.loc[isnt_label, self.config.settings["label_col"]] = 0
 
-        is_label = y_val[config.settings["label_col"]] == self._label
-        isnt_label = y_val[config.settings["label_col"]] != self._label
+        is_label = y_val[self.config.settings["label_col"]] == self._label
+        isnt_label = y_val[self.config.settings["label_col"]] != self._label
 
-        y_val.loc[is_label, config.settings["label_col"]] = 1
-        y_val.loc[isnt_label, config.settings["label_col"]] = 0
+        y_val.loc[is_label, self.config.settings["label_col"]] = 1
+        y_val.loc[isnt_label, self.config.settings["label_col"]] = 0
 
-        is_label = y_test[config.settings["label_col"]] == self._label
-        isnt_label = y_test[config.settings["label_col"]] != self._label
+        is_label = y_test[self.config.settings["label_col"]] == self._label
+        isnt_label = y_test[self.config.settings["label_col"]] != self._label
 
-        y_test.loc[is_label, config.settings["label_col"]] = 1
-        y_test.loc[isnt_label, config.settings["label_col"]] = 0
+        y_test.loc[is_label, self.config.settings["label_col"]] = 1
+        y_test.loc[isnt_label, self.config.settings["label_col"]] = 0
 
         self.y_train_without_unknowns = y_tr
-        self.y_train_with_unknowns = config.ml_data["y_train_with_unknowns"].copy()
+        self.y_train_with_unknowns = self.config.ml_data["y_train_with_unknowns"].copy()
         self.y_val = y_val
         self.y_test = y_test
 
@@ -1544,27 +1611,27 @@ class ActiveLearningModel:
         is_correct = tr_pred == temp
 
         default_x = (
-            config.ml_data["x_train_without_unknowns"][
-                config.settings["default_vars"][0]
+            self.config.ml_data["x_train_without_unknowns"][
+                self.config.settings["default_vars"][0]
             ]
             .to_numpy()
             .reshape((-1, 1))
         )
         default_y = (
-            config.ml_data["x_train_without_unknowns"][
-                config.settings["default_vars"][1]
+            self.config.ml_data["x_train_without_unknowns"][
+                self.config.settings["default_vars"][1]
             ]
             .to_numpy()
             .reshape((-1, 1))
         )
 
         corr_data = {
-            f'{config.settings["default_vars"][0]}': default_x[is_correct],
-            f'{config.settings["default_vars"][1]}': default_y[is_correct],
+            f'{self.config.settings["default_vars"][0]}': default_x[is_correct],
+            f'{self.config.settings["default_vars"][1]}': default_y[is_correct],
         }
         incorr_data = {
-            f'{config.settings["default_vars"][0]}': default_x[~is_correct],
-            f'{config.settings["default_vars"][1]}': default_y[~is_correct],
+            f'{self.config.settings["default_vars"][0]}': default_x[~is_correct],
+            f'{self.config.settings["default_vars"][1]}': default_y[~is_correct],
         }
 
         self.corr_train.data = corr_data
@@ -1589,30 +1656,30 @@ class ActiveLearningModel:
 
         t_conf = confusion_matrix(self.y_train_without_unknowns, tr_pred)
 
-        val_pred = self.learner.predict(config.ml_data["x_val"]).reshape((-1, 1))
+        val_pred = self.learner.predict(self.config.ml_data["x_val"]).reshape((-1, 1))
 
         temp = self.y_val.to_numpy().reshape((-1, 1))
 
         is_correct = val_pred == temp
 
         default_x = (
-            config.ml_data["x_val"][config.settings["default_vars"][0]]
+            self.config.ml_data["x_val"][self.config.settings["default_vars"][0]]
             .to_numpy()
             .reshape((-1, 1))
         )
         default_y = (
-            config.ml_data["x_val"][config.settings["default_vars"][1]]
+            self.config.ml_data["x_val"][self.config.settings["default_vars"][1]]
             .to_numpy()
             .reshape((-1, 1))
         )
 
         corr_data = {
-            f'{config.settings["default_vars"][0]}': default_x[is_correct],
-            f'{config.settings["default_vars"][1]}': default_y[is_correct],
+            f'{self.config.settings["default_vars"][0]}': default_x[is_correct],
+            f'{self.config.settings["default_vars"][1]}': default_y[is_correct],
         }
         incorr_data = {
-            f'{config.settings["default_vars"][0]}': default_x[~is_correct],
-            f'{config.settings["default_vars"][1]}': default_y[~is_correct],
+            f'{self.config.settings["default_vars"][0]}': default_x[~is_correct],
+            f'{self.config.settings["default_vars"][1]}': default_y[~is_correct],
         }
 
         self.corr_val.data = corr_data
@@ -1637,7 +1704,7 @@ class ActiveLearningModel:
 
         v_conf = confusion_matrix(self.y_val, val_pred)
 
-        test_pred = self.learner.predict(config.ml_data["x_test"]).reshape((-1, 1))
+        test_pred = self.learner.predict(self.config.ml_data["x_test"]).reshape((-1, 1))
 
         temp = self.y_test.to_numpy().reshape((-1, 1))
 
@@ -1694,26 +1761,26 @@ class ActiveLearningModel:
             )
         proba = 1 - np.max(proba, axis=1)
 
-        x_axis = config.ml_data["x_train_without_unknowns"][
-            config.settings["default_vars"][0]
+        x_axis = self.config.ml_data["x_train_without_unknowns"][
+            self.config.settings["default_vars"][0]
         ].to_numpy()
-        y_axis = config.ml_data["x_train_without_unknowns"][
-            config.settings["default_vars"][1]
+        y_axis = self.config.ml_data["x_train_without_unknowns"][
+            self.config.settings["default_vars"][1]
         ].to_numpy()
 
-        self._model_output_data_tr[config.settings["default_vars"][0]] = x_axis
-        self._model_output_data_tr[config.settings["default_vars"][1]] = y_axis
+        self._model_output_data_tr[self.config.settings["default_vars"][0]] = x_axis
+        self._model_output_data_tr[self.config.settings["default_vars"][1]] = y_axis
         self._model_output_data_tr["pred"] = tr_pred.flatten()
         self._model_output_data_tr[
             "y"
         ] = self.y_train_without_unknowns.to_numpy().flatten()
         self._model_output_data_tr["metric"] = proba
 
-        x_axis = config.ml_data["x_val"][config.settings["default_vars"][0]].to_numpy()
-        y_axis = config.ml_data["x_val"][config.settings["default_vars"][1]].to_numpy()
+        x_axis = self.config.ml_data["x_val"][self.config.settings["default_vars"][0]].to_numpy()
+        y_axis = self.config.ml_data["x_val"][self.config.settings["default_vars"][1]].to_numpy()
 
-        self._model_output_data_val[config.settings["default_vars"][0]] = x_axis
-        self._model_output_data_val[config.settings["default_vars"][1]] = y_axis
+        self._model_output_data_val[self.config.settings["default_vars"][0]] = x_axis
+        self._model_output_data_val[self.config.settings["default_vars"][1]] = y_axis
         self._model_output_data_val["pred"] = val_pred.flatten()
         self._model_output_data_val["y"] = self.y_val.to_numpy().flatten()
 
@@ -1735,25 +1802,25 @@ class ActiveLearningModel:
         if preselected is None:
             initial_points = int(self.starting_num_points.value)
 
-            if initial_points >= len(config.ml_data["x_train_without_unknowns"].index):
+            if initial_points >= len(self.config.ml_data["x_train_without_unknowns"].index):
                 self.starting_num_points.value = len(
-                    config.ml_data["x_train_without_unknowns"].index
+                    self.config.ml_data["x_train_without_unknowns"].index
                 )
 
-                initial_points = len(config.ml_data["x_train_without_unknowns"].index)
+                initial_points = len(self.config.ml_data["x_train_without_unknowns"].index)
 
             y_tr = self.y_train_without_unknowns.copy()
 
-            X_pool = config.ml_data["x_train_with_unknowns"].to_numpy()
+            X_pool = self.config.ml_data["x_train_with_unknowns"].to_numpy()
             y_pool = self.y_train_with_unknowns.to_numpy().ravel()
 
-            self.id_train = config.ml_data["id_train_with_unknowns"].copy()
+            self.id_train = self.config.ml_data["id_train_with_unknowns"].copy()
 
             id_pool = self.id_train.to_numpy()
 
             train_idx = list(
                 np.random.choice(
-                    range(len(config.ml_data["x_train_without_unknowns"])),
+                    range(len(self.config.ml_data["x_train_without_unknowns"])),
                     size=initial_points - 2,
                     replace=False,
                 )
@@ -1779,24 +1846,15 @@ class ActiveLearningModel:
             self.y_pool = np.delete(y_pool, train_idx)
             self.id_pool = self.id_train.drop(self.id_train.index[train_idx])
 
-            config.settings["classifiers"][f"{self._label}"]["id"] = self.id_al_train[
-                config.settings["id_col"]
+            self.config.settings["classifiers"][f"{self._label}"]["id"] = self.id_al_train[
+                self.config.settings["id_col"]
             ].values.tolist()
             self.full_labelled_data["id"] = self.id_al_train[
-                config.settings["id_col"]
+                self.config.settings["id_col"]
             ].values.tolist()
 
-            # raw_y_train = []
-            # for id in config.settings["classifiers"][f"{self._label}"]["id"]:
-            #     raw_label = config.main_df[
-            #         config.main_df[config.settings["id_col"]] == id
-            #     ][config.settings["label_col"]].values[0]
-            #
-            #     if raw_label == -1:
-            #         raw_label = 0
-            #     raw_y_train.append(raw_label)
 
-            config.settings["classifiers"][f"{self._label}"][
+            self.config.settings["classifiers"][f"{self._label}"][
                 "y"
             ] = self.y_train_with_unknowns.iloc[train_idx]
 
@@ -1816,9 +1874,9 @@ class ActiveLearningModel:
             new_id = preselected[1]
 
             y_tr = self.y_train_without_unknowns.copy()
-            self.id_train = config.ml_data["id_train_with_unknowns"].copy()
+            self.id_train = self.config.ml_data["id_train_with_unknowns"].copy()
 
-            X_pool = config.ml_data["x_train_with_unknowns"].to_numpy()
+            X_pool = self.config.ml_data["x_train_with_unknowns"].to_numpy()
             y_pool = self.y_train_with_unknowns.to_numpy().ravel()
             id_pool = self.id_train.to_numpy()
 
@@ -1835,10 +1893,10 @@ class ActiveLearningModel:
             self.y_pool = np.delete(y_pool, train_idx)
             self.id_pool = self.id_train.drop(self.id_train.index[train_idx])
 
-            config.settings["classifiers"][f"{self._label}"][
+            self.config.settings["classifiers"][f"{self._label}"][
                 "y"
             ] = self.full_labelled_data["y"]
-            config.settings["classifiers"][f"{self._label}"][
+            self.config.settings["classifiers"][f"{self._label}"][
                 "id"
             ] = self.full_labelled_data["id"]
 
@@ -1866,8 +1924,8 @@ class ActiveLearningModel:
 
         if self.retrain:
 
-            new_y_with_unknowns = config.settings["classifiers"][f"{self._label}"]["y"]
-            new_id_with_unknowns = config.settings["classifiers"][f"{self._label}"][
+            new_y_with_unknowns = self.config.settings["classifiers"][f"{self._label}"]["y"]
+            new_id_with_unknowns = self.config.settings["classifiers"][f"{self._label}"][
                 "id"
             ]
 
@@ -1959,21 +2017,21 @@ class ActiveLearningModel:
         """
         np.random.seed(0)
 
-        bands = config.settings["features_for_training"]
+        bands = self.config.settings["features_for_training"]
 
-        features = bands + [config.settings["label_col"], config.settings["id_col"]]
+        features = bands + [self.config.settings["label_col"], self.config.settings["id_col"]]
 
         oper_dict = feature_generation.get_oper_dict()
 
         print("number of features before: ", len(features))
 
-        if "feature_generation" in list(config.settings.keys()):
-            for generator in config.settings["feature_generation"]:
+        if "feature_generation" in list(self.config.settings.keys()):
+            for generator in self.config.settings["feature_generation"]:
 
                 oper = generator[0]
                 n = generator[1]
 
-                df, generated_features = oper_dict[oper](df, n)
+                df, generated_features = oper_dict[oper](df, n, context = self.context)
                 features = features + generated_features
 
         print("number of features after: ", len(features))
@@ -1991,14 +2049,14 @@ class ActiveLearningModel:
     def _combine_data(self):
 
         data = np.array(
-            self._model_output_data_tr[config.settings["default_vars"][0]]
+            self._model_output_data_tr[self.config.settings["default_vars"][0]]
         ).reshape((-1, 1))
 
         data = np.concatenate(
             (
                 data,
                 np.array(
-                    self._model_output_data_tr[config.settings["default_vars"][1]]
+                    self._model_output_data_tr[self.config.settings["default_vars"][1]]
                 ).reshape((-1, 1)),
             ),
             axis=1,
@@ -2037,12 +2095,12 @@ class ActiveLearningModel:
 
         p = hv.Points(
             df,
-            [config.settings["default_vars"][0], config.settings["default_vars"][1]],
+            [self.config.settings["default_vars"][0], self.config.settings["default_vars"][1]],
         ).opts(toolbar=None, default_tools=[])
 
         if hasattr(self, "x_al_train"):
             x_al_train = pd.DataFrame(
-                self.x_al_train, columns=config.ml_data["x_train_with_unknowns"].columns
+                self.x_al_train, columns=self.config.ml_data["x_train_with_unknowns"].columns
             )
 
         else:
@@ -2051,8 +2109,8 @@ class ActiveLearningModel:
 
         x_al_train_plot = hv.Scatter(
             x_al_train,
-            config.settings["default_vars"][0],
-            config.settings["default_vars"][1],
+            self.config.settings["default_vars"][0],
+            self.config.settings["default_vars"][1],
             label="Trained On",
             # sizing_mode="stretch_width",
         ).opts(
@@ -2068,7 +2126,7 @@ class ActiveLearningModel:
 
             query_point = pd.DataFrame(
                 self.query_instance,
-                columns=config.ml_data["x_train_with_unknowns"].columns,
+                columns=self.config.ml_data["x_train_with_unknowns"].columns,
             )
 
         else:
@@ -2077,8 +2135,8 @@ class ActiveLearningModel:
 
         query_point_plot = hv.Scatter(
             query_point,
-            config.settings["default_vars"][0],
-            config.settings["default_vars"][1],
+            self.config.settings["default_vars"][0],
+            self.config.settings["default_vars"][1],
             label="Queried"
             # sizing_mode="stretch_width",
         ).opts(
@@ -2090,12 +2148,12 @@ class ActiveLearningModel:
             show_legend=True,
         )
 
-        if len(x_al_train[config.settings["default_vars"][0]]) > 0:
+        if len(x_al_train[self.config.settings["default_vars"][0]]) > 0:
 
             max_x_temp = np.max(
                 [
-                    np.max(query_point[config.settings["default_vars"][0]]),
-                    np.max(x_al_train[config.settings["default_vars"][0]]),
+                    np.max(query_point[self.config.settings["default_vars"][0]]),
+                    np.max(x_al_train[self.config.settings["default_vars"][0]]),
                 ]
             )
 
@@ -2103,8 +2161,8 @@ class ActiveLearningModel:
 
             min_x_temp = np.min(
                 [
-                    np.min(query_point[config.settings["default_vars"][0]]),
-                    np.min(x_al_train[config.settings["default_vars"][0]]),
+                    np.min(query_point[self.config.settings["default_vars"][0]]),
+                    np.min(x_al_train[self.config.settings["default_vars"][0]]),
                 ]
             )
 
@@ -2112,8 +2170,8 @@ class ActiveLearningModel:
 
             max_y_temp = np.max(
                 [
-                    np.max(query_point[config.settings["default_vars"][1]]),
-                    np.max(x_al_train[config.settings["default_vars"][1]]),
+                    np.max(query_point[self.config.settings["default_vars"][1]]),
+                    np.max(x_al_train[self.config.settings["default_vars"][1]]),
                 ]
             )
 
@@ -2121,8 +2179,8 @@ class ActiveLearningModel:
 
             min_y_temp = np.min(
                 [
-                    np.min(query_point[config.settings["default_vars"][1]]),
-                    np.min(x_al_train[config.settings["default_vars"][1]]),
+                    np.min(query_point[self.config.settings["default_vars"][1]]),
+                    np.min(x_al_train[self.config.settings["default_vars"][1]]),
                 ]
             )
 
@@ -2182,15 +2240,15 @@ class ActiveLearningModel:
             columns=list(self._model_output_data_val.keys()),
         )
 
-        max_x = np.max(df[f"{config.settings['default_vars'][0]}"])
-        min_x = np.min(df[f"{config.settings['default_vars'][0]}"])
-        max_y = np.max(df[f"{config.settings['default_vars'][1]}"])
-        min_y = np.min(df[f"{config.settings['default_vars'][1]}"])
+        max_x = np.max(df[f"{self.config.settings['default_vars'][0]}"])
+        min_x = np.min(df[f"{self.config.settings['default_vars'][0]}"])
+        max_y = np.max(df[f"{self.config.settings['default_vars'][1]}"])
+        min_y = np.min(df[f"{self.config.settings['default_vars'][1]}"])
 
         df = df[df["acc"].isin(self._val_tab_colour_switch.active)]
         p = hv.Points(
             df,
-            [config.settings["default_vars"][0], config.settings["default_vars"][1]],
+            [self.config.settings["default_vars"][0], self.config.settings["default_vars"][1]],
         ).opts(toolbar=None, default_tools=[])
 
         plot = dynspread(
@@ -2246,7 +2304,7 @@ class ActiveLearningModel:
         )
 
         p = hv.Points(
-            df, [config.settings["default_vars"][0], config.settings["default_vars"][1]]
+            df, [self.config.settings["default_vars"][0], self.config.settings["default_vars"][1]]
         ).opts(toolbar=None, default_tools=[])
 
         plot = dynspread(
@@ -2521,8 +2579,8 @@ class ActiveLearningModel:
         if self._training:
             try:
                 query_idx = self.query_index
-                queried_id = self.id_pool.iloc[query_idx][config.settings["id_col"]].copy()
-                self._queried_is_selected = (self.src.data[config.settings["id_col"]] == list(queried_id))
+                queried_id = self.id_pool.iloc[query_idx][self.config.settings["id_col"]].copy()
+                self._queried_is_selected = (self.src.data[self.config.settings["id_col"]] == list(queried_id))
             except Exception:
                 self._queried_is_selected = False
 

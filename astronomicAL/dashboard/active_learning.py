@@ -25,10 +25,11 @@ class ActiveLearningDashboard:
     def __init__(self, src, df, context = None):
 
         self.context = context
-        import astronomicAL.config as config
-        self.config = context.config if (context is not None and getattr(context, "config", None) is not None) else config
 
-        self.df = df
+        if (context is not None and getattr(context, "config", None) is not None):
+            self.config = context.config
+
+        self.df = self.config.main_df
         self.src = src
         self.row = pn.Row(pn.pane.Str("loading"))
         self.active_learning = []
@@ -48,13 +49,17 @@ class ActiveLearningDashboard:
             raw_label = self.config.settings["strings_to_labels"][label]
             print("AL Dashboard:", label, raw_label)
             self.active_learning.append(
-                ActiveLearningModel(df=self.df, src=self.src, label=label)
+                ActiveLearningModel(df=self.df, src=self.src, label=label, context=self.context)
             )
         self.al_tabs = pn.Tabs(dynamic=True)
         for i, al_tab in enumerate(self.active_learning):
             self.al_tabs.append((al_tab._label_alias, al_tab.panel()))
 
         self.panel()
+
+    def get_toolbar(self):
+        return pn.Spacer(height=1)
+
 
     def panel(self):
         """Render the current view.

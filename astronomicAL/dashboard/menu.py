@@ -91,6 +91,8 @@ class MenuDashboard:
 
         self._plot_selection = pn.pane.Bokeh(dd)
 
+    def get_toolbar(self):
+        return pn.Spacer(height=1)
 
     def _update_main_contents(self, event, main):
         self._plot_selection.label = "Loading..."

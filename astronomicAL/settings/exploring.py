@@ -1,6 +1,5 @@
 from astronomicAL.extensions import feature_generation
 
-import astronomicAL.config as config
 import pandas as pd
 import panel as pn
 import json
@@ -30,7 +29,10 @@ class ExploringSettings(param.Parameterized):
         assigned.
 
     """
-    def __init__(self, close_button, mode):
+    def __init__(self, close_button, mode, context = None):
+        
+        self.context = context
+        self.config = context.config
 
         self.df = None
 
@@ -163,11 +165,11 @@ class ExploringSettings(param.Parameterized):
         if self.df is not None:
             features = list(self.df.columns)
             try:
-                features.remove(config.settings["id_col"])
+                features.remove(self.config.settings["id_col"])
             except ValueError:
                 pass 
             try:
-                features.remove(config.settings["label_col"])
+                features.remove(self.config.settings["label_col"])
             except ValueError:
                 pass 
 
@@ -204,24 +206,24 @@ class ExploringSettings(param.Parameterized):
     def _confirm_settings_cb(self, event):
         print("Saving settings...")
 
-        config.settings["default_vars"] = self.get_default_variables()
-        config.settings["labels_to_train"] = config.settings["labels"]
-        config.settings["features_for_training"] = self.feature_selector.value
+        self.config.settings["default_vars"] = self.get_default_variables()
+        self.config.settings["labels_to_train"] = self.config.settings["labels"]
+        self.config.settings["features_for_training"] = self.feature_selector.value
 
-        config.settings["exclude_labels"] = False
+        self.config.settings["exclude_labels"] = False
 
-        config.settings["exclude_unknown_labels"] = False
+        self.config.settings["exclude_unknown_labels"] = False
 
-        config.settings["unclassified_labels"] = []
-        config.settings["scale_data"] = False
-        config.settings["feature_generation"] = self.feature_generator_selected
-        config.settings["test_set_file"] = False
-        config.settings["confirmed"] = True
-        config.settings["ra_col_name"] = self.ra_column_selector.value
-        config.settings["dec_col_name"] = self.dec_column_selector.value
+        self.config.settings["unclassified_labels"] = []
+        self.config.settings["scale_data"] = False
+        self.config.settings["feature_generation"] = self.feature_generator_selected
+        self.config.settings["test_set_file"] = False
+        self.config.settings["confirmed"] = True
+        self.config.settings["ra_col_name"] = self.ra_column_selector.value
+        self.config.settings["dec_col_name"] = self.dec_column_selector.value
 
-        if "save_button" in config.settings.keys():
-            config.settings["save_button"].disabled = False
+        if "save_button" in self.config.settings.keys():
+            self.config.settings["save_button"].disabled = False
 
         self.completed = True
         self.close_button.disabled = False
@@ -250,6 +252,9 @@ class ExploringSettings(param.Parameterized):
 
         """
         return self.completed
+
+    def get_toolbar(self):
+        return pn.Spacer(height=1)
 
     def panel(self):
         """Render the current settings view.

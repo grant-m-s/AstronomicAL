@@ -14,7 +14,7 @@ initial_setup = True
 settings = {"confirmed": False}
 
 
-def get_save_layout_button(enable_button, from_main):
+def get_save_layout_button(enable_button, from_main, context=None):
     from astronomicAL.utils import save_config
 
     if ("save_button" not in settings.keys()) or from_main:
@@ -29,6 +29,7 @@ def get_save_layout_button(enable_button, from_main):
                 save_config.save_config_file_cb,
                 trigger_text=text_area_input,
                 autosave=False,
+                context=context
             ),
         )
 
@@ -37,7 +38,7 @@ def get_save_layout_button(enable_button, from_main):
             args=dict(text_area_input=text_area_input),
         )
 
-        settings["save_button"].on_click(_save_layout_button_cb)
+        settings["save_button"].on_click(lambda event: _save_layout_button_cb(event, context))
 
         return settings["save_button"]
     if not from_main:
@@ -45,21 +46,21 @@ def get_save_layout_button(enable_button, from_main):
         return settings["save_button"]
 
 
-def _save_layout_button_rename():
-    get_save_layout_button(settings["confirmed"], True).disabled = True
+def _save_layout_button_rename(context):
+    get_save_layout_button(settings["confirmed"], True, context=context).disabled = True
     get_save_layout_button(
-        settings["confirmed"], True
+        settings["confirmed"], True, context=context
     ).name = "Configuration saved to configs folder with current timestamp."
     time.sleep(3)
     get_save_layout_button(
-        settings["confirmed"], True
+        settings["confirmed"], True, context=context
     ).name = "Save Current Configuration"
     if settings["confirmed"]:
-        get_save_layout_button(settings["confirmed"], True).disabled = False
+        get_save_layout_button(settings["confirmed"], True, context=context).disabled = False
 
 
-def _save_layout_button_cb(event):
-    Process(target=_save_layout_button_rename).start()
+def _save_layout_button_cb(event, context):
+    Process(target=_save_layout_button_rename, args=(context,)).start()
 
 def get_save_panel_data_button(enable_button):
     settings["save_panel_button"] = pn.widgets.Button(name="Export Panel Data", disabled = not enable_button, button_type = "default")
@@ -139,7 +140,6 @@ def save_logbook_button_cb(event):
                    
                                           
 
-layout_file = "astronomicAL/layout.json"
 dashboards = {}
 
 source = ColumnDataSource()

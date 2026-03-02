@@ -82,6 +82,9 @@ def _fits_to_df_streaming(filename, hdu=1, p=None, cast_float32=False):
         for i, name in enumerate(names, 1):
             col = arr[name]
 
+            if col.dtype.kind == "S":  # fixed-length bytes
+                col = np.char.decode(col, "utf-8", errors="ignore")
+            
             # endian fix per column if needed
             if col.dtype.byteorder == ">":
                 col = col.byteswap().newbyteorder()

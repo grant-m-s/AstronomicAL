@@ -3,8 +3,6 @@ from astronomicAL.settings.data_selection import DataSelection
 from astronomicAL.settings.param_assignment import ParameterAssignment_ML, ParameterAssignment_Exploring
 from functools import partial
 
-import astronomicAL.config as config
-
 import panel as pn
 
 
@@ -34,8 +32,8 @@ class SettingsDashboard:
         self.src = src
 
         self.context = context
-
-        self.config = context.config if (context is not None and getattr(context, "config", None) is not None) else config
+        if (context is not None and getattr(context, "config", None) is not None):
+            self.config = context.config
 
         self.df = None
 
@@ -75,6 +73,9 @@ class SettingsDashboard:
         self.select_exploring_mode_button.on_click(
             partial(self._create_pipeline_cb, mode="Exploring", main=main)
         )
+
+    def get_toolbar(self):
+        return pn.Spacer(height=1)
 
     def _create_pipeline_cb(self, event, mode, main):
         main.mode = mode
@@ -146,38 +147,38 @@ class SettingsDashboard:
         if mode == "AL":
             self.pipeline.add_stage(
                 "Select Your Data",
-                DataSelection(self.src, mode=mode),
+                DataSelection(self.src, mode=mode, context=self.context),
                 ready_parameter="ready",
             ),
             self.pipeline.add_stage(
-                "Assign Parameters", ParameterAssignment_ML(), ready_parameter="ready"
+                "Assign Parameters", ParameterAssignment_ML(context=self.context), ready_parameter="ready",
             ),
             self.pipeline.add_stage(
                 "Features Settings",
-                ActiveLearningSettings(self._close_settings_button, mode=mode),
+                ActiveLearningSettings(self._close_settings_button, mode=mode, context=self.context),
             )
         elif mode == "Labelling":
             self.pipeline.add_stage(
                 "Select Your Data",
-                DataSelection(self.src, mode=mode),
+                DataSelection(self.src, mode=mode, context=self.context),
                 ready_parameter="ready",
             ),
             self.pipeline.add_stage(
-                "Assign Parameters", ParameterAssignment_ML(), ready_parameter="ready"
+                "Assign Parameters", ParameterAssignment_ML(context=self.context), ready_parameter="ready"
             ),
             self.pipeline.add_stage(
                 "Features Settings",
-                ActiveLearningSettings(self._close_settings_button, mode=mode),
+                ActiveLearningSettings(self._close_settings_button, mode=mode, context=self.context),
             )
 
         elif mode == "Exploring":
             self.pipeline.add_stage(
                 "Select Your Data",
-                DataSelection(self.src, mode=mode),
+                DataSelection(self.src, mode=mode, context=self.context),
                 ready_parameter="ready",
             ),
             self.pipeline.add_stage(
-                "Assign Parameters", ParameterAssignment_Exploring(self._close_settings_button), 
+                "Assign Parameters", ParameterAssignment_Exploring(self._close_settings_button, context=self.context), 
             ),
 
         else:

@@ -46,14 +46,13 @@ class SelectedSourceDashboard:
     def __init__(self, src, close_button, context = None):
 
         self.context = context
-        import astronomicAL.config as config
-        self.config = context.config if (context is not None and getattr(context, "config", None) is not None) else config
+        if (context is not None and getattr(context, "config", None) is not None):
+            self.config = context.config 
 
         self.df = self.config.main_df
 
         self.src = src
-        self.src.on_change("data", self._panel_cb)
-
+        self.watch_bokeh(self.src, "data", self._panel_cb)
         self.close_button = close_button
 
         self.row = pn.Row(pn.pane.Str("loading"))
@@ -63,6 +62,67 @@ class SelectedSourceDashboard:
         self._search_status = ""
 
         self._add_selected_info()
+
+
+    def watch_bokeh(self, model, attr: str, callback):
+        """Register and track Bokeh model.on_change callbacks for unified disposal."""
+        if model is None:
+            return
+        try:
+            model.on_change(attr, callback)
+            self._bokeh_on_change.append((model, attr, callback))
+        except Exception:
+            pass
+
+    def unwatch_all_bokeh(self):
+        """Remove all tracked Bokeh callbacks (idempotent)."""
+        for model, attr, callback in list(getattr(self, "_bokeh_on_change", [])):
+            try:
+                model.remove_on_change(attr, callback)
+            except Exception as e:
+                # Ignore double-remove noise
+                if "list.remove(x): x not in list" in str(e):
+                    pass
+            # continue regardless
+        self._bokeh_on_change = []
+
+    def _dispose_impl(self):
+        """Subclass-specific cleanup hook (override if needed)."""
+        return
+
+    def dispose(self):
+        if getattr(self, "_disposed", False):
+            return
+        self._disposed = True
+
+        # 1) subclass cleanup first
+        try:
+            self._dispose_impl()
+        except Exception:
+            pass
+
+        # 2) unwatch bokeh callbacks (including src.on_change if registered via watch_bokeh)
+        try:
+            self.unwatch_all_bokeh()
+        except Exception:
+            pass
+
+        # 3) Unsubscribe EventBus
+        if self.context and getattr(self.context, "events", None):
+            for sub in list(getattr(self, "_event_subs", [])):
+                try:
+                    self.context.events.unsubscribe(sub)
+                except Exception:
+                    pass
+        self._event_subs = []
+
+        # 4) Stop periodic callbacks
+        for cb in list(getattr(self, "_periodic_cbs", [])):
+            try:
+                cb.stop()
+            except Exception:
+                pass
+        self._periodic_cbs = []
 
 
     def _add_selected_info(self):
@@ -162,6 +222,16 @@ class SelectedSourceDashboard:
 
         self.src.data = empty
 
+    def get_toolbar(self):
+        
+        toolbar = pn.Row(self.close_button, max_width=300, max_height=50)
+
+        if self._check_valid_selected():
+            self.deselect_button = pn.widgets.Button(name="Deselect")
+            self.deselect_button.on_click(self._deselect_source_cb)
+            toolbar = pn.Row(self.close_button, self.deselect_button, max_width=300, max_height=50)
+        
+        return toolbar
 
     def panel(self):
         """Render the current view.
@@ -181,12 +251,6 @@ class SelectedSourceDashboard:
 
             self._add_selected_to_history()
 
-            button_row = pn.Row()
-
-
-            self.deselect_button = pn.widgets.Button(name="Deselect")
-            self.deselect_button.on_click(self._deselect_source_cb)
-
             extra_data_list = [
                 ["Source ID", self.src.data[self.config.settings["id_col"]][0]]
             ]
@@ -200,17 +264,14 @@ class SelectedSourceDashboard:
                 extra_data_df, index=False,
             )
 
-            toolbar = pn.Row(self.close_button, self.deselect_button, max_width=300, max_height=50)
             body = pn.Row(extra_data_pn, max_height=250, max_width=300)
             self.row[0] = pn.Column(
-                toolbar,
+                self.get_toolbar(),
                 body
                 )
-
    
 
         else:
-            toolbar = pn.Row(self.close_button, max_width=300, max_height=50)
             body = pn.Column(
                     self.search_id,
                     self._search_status,
@@ -225,7 +286,7 @@ class SelectedSourceDashboard:
                     ),
                 )
             self.row[0] = pn.Column(
-                toolbar,
+                self.get_toolbar(),
                 body
             )
 

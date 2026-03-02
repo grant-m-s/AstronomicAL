@@ -20,11 +20,9 @@ class ExplorationDashboard(param.Parameterized):
         self.src = src
         self.context = context
         
-        import astronomicAL.config as config
-
-        self.config = context.config if (context is not None and getattr(context, "config", None) is not None) else config
-        self.shared = getattr(context, "shared", None)
-        self.df = df
+        if (context is not None and getattr(context, "config", None) is not None):
+            self.config = context.config
+        self.df = self.config.main_df
         self._running_panels = set() #elements of the set indicate the panel currently using multithreading
         self.visited_indices = [self.index]  
         self.panel_id = str(uuid.uuid4()) 
@@ -145,12 +143,77 @@ class ExplorationDashboard(param.Parameterized):
         self.next_button.disabled = any_running
        
     def _subscribe_to_shared(self):
-        panels_using_multithread = ["EuclidCutout", "EuclidSpec", "DESI", "SDSS", "VLASS", "LoTSS"]
-        for panel in panels_using_multithread:
-            self.shared.replace_subscribe(self.panel_id, f"{panel}_running", 
-                                          lambda is_running, panel_name=panel: self._multithread_running_cb(is_running, panel_name))
-        self.shared.replace_subscribe(self.panel_id, "selected_sourceid", self._selected_src_from_plot_cb)
-         
+        """
+        Replacement for shared_data subscriptions using EventBus.
+
+        Expects events:
+        - astro.spectra.running: {"source": "...", "running": bool, "panel_id": "..."}
+        - astro.cutout.running: {"source": "Euclid", "running": bool, "panel_id": "..."}
+        - astro.radio.running:  {"source": "VLASS"/"LoTSS"/..., "running": bool, "panel_id": "..."}
+        - astro.sdss.running:   {"running": bool, "panel_id": "..."}   (or include source)
+        - selection.sourceid.changed: {"sourceId": <id>, "origin": "..."}
+        """
+        if not getattr(self, "context", None) or not getattr(self.context, "events", None):
+            return
+
+        bus = self.context.events
+
+        # Track subscriptions so you can unsubscribe if needed (or rely on dashboard dispose)
+        self._event_subs = getattr(self, "_event_subs", [])
+
+        def _sub(topic, fn):
+            sub = bus.subscribe(topic, fn)
+            self._event_subs.append(sub)
+
+        # --- running status aggregator ---
+        def _handle_running(payload, panel_name: str):
+            if not payload:
+                return
+            running = payload.get("running")
+            if running is None:
+                return
+            self._multithread_running_cb(bool(running), panel_name)
+
+        # # spectra running: source will be DESI/SDSS/EuclidSpec
+        # def _spectra_running(_topic, payload):
+        #     src = (payload or {}).get("source", "Spectra")
+        #     _handle_running(payload, panel_name=str(src))
+
+        # _sub("astro.spectra.running", _spectra_running)
+
+        # # euclid cutout running
+        # def _cutout_running(_topic, payload):
+        #     src = (payload or {}).get("source", "EuclidCutout")
+        #     # normalize to your old names if you want:
+        #     panel_name = "EuclidCutout" if str(src).lower().startswith("euclid") else str(src)
+        #     _handle_running(payload, panel_name=panel_name)
+
+        # _sub("astro.cutout.running", _cutout_running)
+
+        # # radio running (VLASS/LoTSS)
+        # def _radio_running(_topic, payload):
+        #     src = (payload or {}).get("source", "Radio")
+        #     _handle_running(payload, panel_name=str(src))
+
+        # _sub("astro.radio.running", _radio_running)
+
+        # # SDSS cutout running (if you publish it separately)
+        # def _sdss_running(_topic, payload):
+        #     _handle_running(payload, panel_name="SDSS")
+
+        # _sub("astro.sdss.running", _sdss_running)
+
+        # --- selected source id (from plots) ---
+        def _selected_sourceid(_topic, payload):
+            if not payload:
+                return
+            source_id = payload.get("sourceId", None)
+            if source_id is None:
+                return
+            self._selected_src_from_plot_cb(source_id)
+
+        _sub("selection.sourceid.changed", _selected_sourceid)
+
     def _update_navigation_flags(self):
         self.prev_button.disabled = self.current_position == 0
         self.next_button.disabled = False
@@ -260,14 +323,14 @@ class ExplorationDashboard(param.Parameterized):
             for generator in self.config.settings["feature_generation"]:
                 oper = generator[0]
                 n = generator[1]
-                df, generated_features = oper_dict[oper](df, n)
+                df, generated_features = oper_dict[oper](df, n, context = self.context)
                 features = features + generated_features
         return df
     
     def _generate_fake_label_column(self, df):
         """This is not very elegant but allows to keep the code as it is.
            If No labels is selected, it creates a column No labels with all Nan"""
-        if (self.config.settings["label_col"] not in df.columns) and (config.settings["label_col"] == "No Labels"):
+        if (self.config.settings["label_col"] not in df.columns) and (self.config.settings["label_col"] == "No Labels"):
             df[self.config.settings["label_col"]] = np.nan
         return df
     
@@ -402,23 +465,18 @@ class ExplorationDashboard(param.Parameterized):
                          pn.Row(self.prev_button,self.next_button, self.search_button), 
                          pn.Row(self.label_selector, pn.Column(self.colorpickers_layout, self.strings_to_label_layout), self.confirm_label_button),
                          sizing_mode = "stretch_both")
-    
 
-    def mypanel(self):
+
+    def get_toolbar(self):
+        return pn.Spacer(height=1)
+
+    def panel(self):
         layout = self.get_layout()
-        toolbar = pn.Row(pn.Spacer(width=25,), max_height=50)
+        toolbar = self.get_toolbar()
+
         body = layout
         return pn.Column(toolbar,body,
                sizing_mode="stretch_both")
-    
-
-    def remove_shared_data(self):
-        """Removes subscriptions and published data from the shared data"""
-        self.shared.cleanup_extension_panel(self.panel_id)
-        print(f"[{self.panel_id}] removed from shared data")
-            
-    def cleanup_panel_plot(self):
-        self.remove_shared_data()
 
 
 

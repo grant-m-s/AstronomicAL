@@ -1,6 +1,5 @@
 from datetime import datetime
 
-import astronomicAL.config as config
 from astropy.table import Table
 import json
 import numpy as np
@@ -64,8 +63,8 @@ class NumpyEncoder(json.JSONEncoder):
 
 
 
-def save_config_file_cb(attr, old, new, trigger_text, autosave):
-    save_config_file(new, trigger_text=trigger_text, autosave=autosave)
+def save_config_file_cb(attr, old, new, trigger_text, autosave, context = None):
+    save_config_file(new, trigger_text=trigger_text, autosave=autosave, context = context)
 
 
 
@@ -75,7 +74,9 @@ def update_export_config(export_config, settings, key):
     return export_config
 
 
-def save_config_file(layout_from_js, trigger_text, autosave=False, test=False):
+def save_config_file(layout_from_js, trigger_text, autosave=False, test=False, context = None):
+
+    config = context.config
 
     if layout_from_js == "":
         return

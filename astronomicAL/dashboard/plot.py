@@ -29,11 +29,14 @@ class BasePlotClass(param.Parameterized):
         super().__init__()
 
         self.context = context
-        import astronomicAL.config as config
-        self.config = context.config if (context is not None and getattr(context, "config", None) is not None) else config
-        self.shared = getattr(context, "shared", None)
+        if (context is not None and getattr(context, "config", None) is not None):
+            self.config = context.config
         self.df = self.config.main_df
 
+        self._disposed = False
+        self._event_subs = []      # EventBus Subscription handles
+        self._periodic_cbs = []    # pn.state periodic callbacks (if you ever add them)
+        self._bokeh_on_change = []  # list of (model, attr, callback)
 
         self.panel_id = str(uuid.uuid4()) 
         self.src = src
@@ -42,6 +45,77 @@ class BasePlotClass(param.Parameterized):
         self.settings_button = pn.widgets.Button(name="Open Settings", button_type="primary",  max_height = 40, max_width=100)
         self.settings_button.on_click(self._toggle_settings_panel)
     
+    def watch_bokeh(self, model, attr: str, callback):
+        """Register and track Bokeh model.on_change callbacks for unified disposal."""
+        if model is None:
+            return
+        try:
+            model.on_change(attr, callback)
+            self._bokeh_on_change.append((model, attr, callback))
+        except Exception:
+            pass
+
+    def unwatch_all_bokeh(self):
+        """Remove all tracked Bokeh callbacks (idempotent)."""
+        for model, attr, callback in list(getattr(self, "_bokeh_on_change", [])):
+            try:
+                model.remove_on_change(attr, callback)
+            except Exception as e:
+                # Ignore double-remove noise
+                if "list.remove(x): x not in list" in str(e):
+                    pass
+            # continue regardless
+        self._bokeh_on_change = []
+
+    def subscribe_event(self, topic: str, callback):
+        """
+        Subscribe to EventBus and track the subscription so dispose() can unsubscribe.
+        """
+        if not self.context or not getattr(self.context, "events", None):
+            return None
+        sub = self.context.events.subscribe(topic, callback)
+        self._event_subs.append(sub)
+        return sub
+    
+    def _dispose_impl(self):
+        """Subclass-specific cleanup hook (override if needed)."""
+        return
+
+    def dispose(self):
+        if getattr(self, "_disposed", False):
+            return
+        self._disposed = True
+
+        # 1) subclass cleanup first
+        try:
+            self._dispose_impl()
+        except Exception:
+            pass
+
+        # 2) unwatch bokeh callbacks (including src.on_change if registered via watch_bokeh)
+        try:
+            self.unwatch_all_bokeh()
+        except Exception:
+            pass
+
+        # 3) Unsubscribe EventBus
+        if self.context and getattr(self.context, "events", None):
+            for sub in list(getattr(self, "_event_subs", [])):
+                try:
+                    self.context.events.unsubscribe(sub)
+                except Exception:
+                    pass
+        self._event_subs = []
+
+        # 4) Stop periodic callbacks
+        for cb in list(getattr(self, "_periodic_cbs", [])):
+            try:
+                cb.stop()
+            except Exception:
+                pass
+        self._periodic_cbs = []
+
+
     def update_df(self):
         self.df = self.config.main_df
 
@@ -119,26 +193,18 @@ class BasePlotClass(param.Parameterized):
                     log_yscale = self._get_from_settings_dictionary("log_y", False),
                     **extra_params
                 )
-
-    def remove_shared_data(self):
-        """Removes subscriptions and published data from the shared data"""
-        self.shared.cleanup_extension_panel(self.panel_id)
-        print(f"[{self.panel_id}] removed from shared data")
-
-    def remove_src_listener(self):
-        """Removes the callback to a change in the selected source"""
-        if self.src is not None and hasattr(self, "_src_callback"):
-            try:
-                self.src.remove_on_change("data", self._src_callback)
-                print(f"[{self.panel_id}] Listener removed")
-            except Exception as e:
-                print(f"[{self.panel_id}] Error removing src listener: {e}")
-
-    def cleanup_panel_plot(self):
-        self.remove_shared_data()
-        self.remove_src_listener()
     
+    def get_toolbar(self):
 
+        toolbar = pn.Row(
+                        pn.Spacer(width=25,),
+                        self.close_button,
+                        pn.Row(self.param.X_variable, max_width=100),
+                        self.settings_button,
+                        max_width=400, max_height=50
+                    )
+
+        return toolbar
 
 class ScatterPlotDashboard(BasePlotClass):
     """A Dashboard used for rendering dynamic scatter plots of the data.
@@ -165,8 +231,11 @@ class ScatterPlotDashboard(BasePlotClass):
 
     def __init__(self, src, close_button, context = None):
         super().__init__(src, close_button, context = context)
+
+        self.context = context
+
         self._src_callback = self._change_source_cb
-        self.src.on_change("data", self._src_callback)
+        self.watch_bokeh(self.src, "data", self._src_callback)
         self.available_columns = self.get_column_list(excluded_columns = ["id_col", "label_col", "ra_dec"])
         
         #In exploring mode there is no default variable in settings. Kept the config.settings.get for consistency
@@ -291,12 +360,21 @@ class ScatterPlotDashboard(BasePlotClass):
             sel_stream = streams.Selection1D(source=points)
 
             def tap_callback(event):
-                if event.new:
-                   self.shared.publish(self.panel_id, "selected_sourceid", str(sourceid[event.new[0]]))
-                   for idx in event.new:
-                       print(sourceid[idx])
+                if not event.new:
+                    return
 
-            sel_stream.param.watch(tap_callback, 'index')
+                src_id = str(sourceid[event.new[0]])
+
+                if getattr(self, "context", None) and getattr(self.context, "events", None):
+                    self.context.events.publish(
+                        "selection.sourceid.changed",
+                        {"sourceId": src_id, "origin": "ScatterPlotDashboard", "panel_id": self.panel_id},
+                    )
+
+                for idx in event.new:
+                    print(sourceid[idx])
+
+            sel_stream.param.watch(tap_callback, "index")
                    
         else:
             points = hv.Points((x, y), kdims=["x", "y"]).opts( logx = self.log_xscale,
@@ -371,10 +449,9 @@ class ScatterPlotDashboard(BasePlotClass):
                 logy=self.log_yscale,
             )
             return selected_plot
-        
 
-    def panel(self):
-        self._update_plot()
+
+    def get_toolbar(self):
 
         toolbar = pn.Row(
                         pn.Spacer(width=25,),
@@ -384,6 +461,14 @@ class ScatterPlotDashboard(BasePlotClass):
                         self.settings_button,
                         max_width=400, max_height=50
                     )
+
+        return toolbar
+
+    def panel(self):
+        self._update_plot()
+
+        toolbar = self.get_toolbar()
+
         body = pn.Column(
                       pn.Row(self.figure, sizing_mode="scale_both"),
                         self.settings_panel, scroll = True)
@@ -402,10 +487,12 @@ class HistoDashboard(BasePlotClass):
     range_max = param.Number(default= None, bounds=(-np.inf, np.inf), allow_None= True, doc= "Range max")
 
     def __init__(self, src, close_button, context = None):
-        
         super().__init__(src, close_button, context = context)
+
+        self.context = context
+
         self._src_callback = self._change_source_cb
-        self.src.on_change("data", self._src_callback)
+        self.watch_bokeh(self.src, "data", self._src_callback)
         self.available_columns = self.get_column_list(excluded_columns = ["id_col", "ra_dec"])
         
         self._initialise_settings_dictionary(key_name = "Histogram_plot_settings",
@@ -612,15 +699,21 @@ class HistoDashboard(BasePlotClass):
                                   )
             return selected_plot
 
-    def panel(self):
-        self._update_plot()
-
+    def get_toolbar(self):
         toolbar = pn.Row(
                     pn.Spacer(width=25),
                     self.close_button,
                     pn.Row(self.param.X_variable, max_width=100),
                     self.settings_button, max_height=50
                 )
+        
+        return toolbar
+
+    def panel(self):
+        self._update_plot()
+
+        toolbar = self.get_toolbar()
+
         body = pn.Column(
                     pn.Row(self.figure, sizing_mode="scale_both"),
                     self.settings_panel, scroll = True)
@@ -628,8 +721,6 @@ class HistoDashboard(BasePlotClass):
                     toolbar, body,
                         sizing_mode="stretch_both",
                     )
-    
-
 
 class DensityPlotDashboard(BasePlotClass):
 
@@ -646,8 +737,11 @@ class DensityPlotDashboard(BasePlotClass):
 
     def __init__(self, src, close_button, context = None):
         super().__init__(src, close_button, context = context)
+
+        self.context = context
+
         self._src_callback = self._change_source_cb
-        self.src.on_change("data", self._src_callback)
+        self.watch_bokeh(self.src, "data", self._src_callback)
         self.available_columns = self.get_column_list(excluded_columns = ["id_col", "label_col", "ra_dec"])
         
         self._initialise_settings_dictionary(key_name = "Density_plot_settings",
@@ -840,10 +934,9 @@ class DensityPlotDashboard(BasePlotClass):
                 logx = self.log_xscale,
                 logy = self.log_yscale)
             return selected_plot
-        
+    
+    def get_toolbar(self):
 
-    def panel(self):
-        self._update_plot()
         toolbar = pn.Row(
                         pn.Spacer(width=25,),
                         self.close_button,
@@ -852,6 +945,14 @@ class DensityPlotDashboard(BasePlotClass):
                         self.settings_button,
                         max_width=400, max_height=50
                     )
+        
+        return toolbar
+
+    def panel(self):
+        self._update_plot()
+
+        toolbar = self.get_toolbar()
+
         body = pn.Column(
                     pn.Row(self.figure, sizing_mode="scale_both"),
                     self.settings_panel, scroll = True)

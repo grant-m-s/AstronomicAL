@@ -70,7 +70,7 @@ from astronomicAL.platform.jobs import JobManager
 from astronomicAL.platform.artifacts import ArtifactStore
 from astronomicAL.platform.datasets import DatasetManager
 from astronomicAL.platform.workspace import WorkspaceManager
-from astronomicAL.extensions.shared_data import shared_data
+from astronomicAL.platform.services import ServiceRegistry
 
 import holoviews as hv
 hv.extension("bokeh")
@@ -89,7 +89,7 @@ jobs = JobManager(max_workers=16)
 artifacts = ArtifactStore(cache_dir="data/cache_artifacts")
 datasets = DatasetManager()
 workspace = WorkspaceManager(react_template=react, grid=grid)
-
+services = ServiceRegistry()
 
 context = AppContext(
     events=events,
@@ -97,16 +97,15 @@ context = AppContext(
     artifacts=artifacts,
     datasets=datasets,
     workspace=workspace,
+    services=services,
     config=config,
 )
 
-context.shared = shared_data # temp
-
-print("shared data at startup: ", context.shared)
+context.config.layout_file = getattr(context.config, "layout_file", "astronomicAL/layout.json")
 
 react._app_context = context
 
-required = ["config", "shared", "events", "jobs", "artifacts", "datasets", "workspace"]
+required = ["config", "events", "jobs", "artifacts", "datasets", "workspace"]
 missing = [name for name in required if getattr(context, name, None) is None]
 if missing:
     raise RuntimeError(f"AppContext missing services: {missing}")

@@ -1,16 +1,11 @@
-import astronomicAL.config as config
-
 # List of keys defined for the global shared_data dictionary
 # is_global : bool,  debug key to see that the dictionary is seen from the dashboards
 # Sparcl_client : object, The client to access NOIR-DataLab spectra
 # DESI_coordinates : dictionary {"ra" : [ra], "dec" : [dec]}, coordinates of DESI spectra retrieved
 # SDSS_coordinates : dictionary {"ra" : [ra], "dec" : [dec]}, coordinates of SDSS spectra retrieved
 # EuclidSpec_coordinates : dictionary {"ra" : [ra], "dec" : [dec]}, coordinates of Euclid spectra retrieved
-# Euclid_radius : float, radius of the Euclid cutout
 # selected_sourceid: str, the sourceId of the source selected from the scatter plot
 # *_running: boolean, whether one of the panles is running in multithread
-
-
 
 class SharedDataManager:
 
@@ -128,7 +123,3 @@ class SharedDataManager:
             self.subscribe(panel_id, key, new_callback)
         else:
             print(f"Subscription for panel_id '{panel_id}' and key '{key}' replaced successfully.")
-    
-    
-shared_data = SharedDataManager(is_global = True)
-shared_data.set_data("Euclid_radius",  config.settings.get('Euclid_radius', 5.0))

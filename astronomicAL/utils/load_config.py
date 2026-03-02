@@ -13,7 +13,7 @@ from datetime import datetime
 import numpy as np
 import pandas as pd
 from astropy.table import Table
-import astronomicAL.config as config
+from astronomicAL.config import get_save_layout_button, get_save_logbook_button, get_save_panel_data_button
 from astronomicAL.dashboard.dashboard import Dashboard
 from astronomicAL.extensions.dynamic_react_layout import DynamicReactGrid
 from astronomicAL.extensions.extension_plots import get_plot_dict
@@ -46,8 +46,8 @@ def create_header(react, grid, context):
         raise ValueError("create_header requires a non-null context")
 
     # Keep backward compatibility: still rely on config-provided button factories
-    cfg = context.config
-    if cfg is None:
+    config = context.config
+    if config is None:
         raise ValueError("context.config is required for current header buttons")
 
     if not hasattr(react, "_header_box"):
@@ -77,7 +77,7 @@ def create_header(react, grid, context):
         list_ids: list[str] = []
         list_labels: list[str] = []
 
-        settings = getattr(cfg, "settings", {}) or {}
+        settings = getattr(config, "settings", {}) or {}
 
         if settings.get("confirmed"):
             # include labels from classifiers in settings
@@ -143,13 +143,13 @@ def create_header(react, grid, context):
 
     add_menu_btn.on_click(_on_add_menu)
 
-    confirmed = bool(getattr(cfg, "settings", {}).get("confirmed", False))
+    confirmed = bool(getattr(config, "settings", {}).get("confirmed", False))
 
     header_row = pn.Row(
-        cfg.get_save_layout_button(confirmed, True),
+        get_save_layout_button(confirmed, True, context=context),
         export_fits_file_button,
-        cfg.get_save_panel_data_button(confirmed),
-        cfg.get_save_logbook_button(confirmed),
+        get_save_panel_data_button(confirmed),
+        get_save_logbook_button(confirmed),
         add_menu_btn,
         sizing_mode="stretch_width",
     )
@@ -224,8 +224,8 @@ def add_menu_panel(grid, context):
     if context is None or context.workspace is None:
         raise ValueError("add_menu_panel requires context with workspace")
 
-    cfg = context.config
-    if cfg is None:
+    config = context.config
+    if config is None:
         raise ValueError("add_menu_panel requires context.config (for Dashboard src/config)")
 
     # Ensure counter starts above any existing numeric ids
@@ -248,7 +248,7 @@ def add_menu_panel(grid, context):
 
     new_id = str(counter)
     
-    dash = Dashboard(src=cfg.source, contents="Menu", context=context)
+    dash = Dashboard(src=config.source, contents="Menu", context=context)
     try:
         view = dash.panel(in_grid=True)
     except TypeError:
@@ -274,7 +274,10 @@ def add_menu_panel(grid, context):
     layout_item = {"x": x, "y": y, "w": w, "h": h}
     
     context.workspace.add_panel(new_id, view, title="Menu", layout_item=layout_item)
-def verify_import_config(curr_config_file):
+
+def verify_import_config(curr_config_file, context):
+
+    config = context.config
 
     has_error = False
     error_message = ""
@@ -319,7 +322,7 @@ def verify_import_config(curr_config_file):
 
         if len(missing_settings) > 0:
             has_error = True
-            error_message += f"**Unable to import file due to the following errors:**\n\n\n\nThe config file is missing these settings: \n\n{missing_settings} \n\n **[Rerun astronomicAL and assign the settings yourself or manually edit `{config.layout_file}`, to include the missing settings]**\n\n\n"
+            error_message += f"**Unable to import file due to the following errors:**\n\n\n\nThe config file is missing these settings: \n\n{missing_settings} \n\n **[Rerun astronomicAL and assign the settings yourself or manually edit `{layout_file}`, to include the missing settings]**\n\n\n"
             return has_error, error_message
 
         if "classifiers" not in list(curr_config_file.keys()):
@@ -329,7 +332,7 @@ def verify_import_config(curr_config_file):
                     "\n Switching to load level 1 as classifier data missing from imported config file\n"
                 )
 
-        update_config_settings(curr_config_file)
+        update_config_settings(curr_config_file, config=config)
         filename = config.settings["dataset_filepath"]
 
         if not os.path.exists(filename):
@@ -477,7 +480,7 @@ def verify_import_config(curr_config_file):
     return has_error, error_message
 
 
-def update_config_settings(imported_config):
+def update_config_settings(imported_config, config):
 
     ignore_keys = ["Author", "doi", "layout"]
     for key in imported_config.keys():
@@ -514,14 +517,17 @@ def create_layout_from_file(
         return_grid: bool = False,
     ):
 
-    with open(config.layout_file) as layout_file:
-        curr_config_file = json.load(layout_file)
+    config = context.config
+
+    with open(config.layout_file) as lf:
+        curr_config_file = json.load(lf)
+
 
     # ---- keep your existing config/data loading exactly as-is ----
     if len(curr_config_file.keys()) > 1:
         if config.settings["config_load_level"] > 0:
-            update_config_settings(curr_config_file)
-            load_data = DataSelection(config.source, mode=config.mode)
+            update_config_settings(curr_config_file, config=config)
+            load_data = DataSelection(config.source, mode=config.mode, context = context)
             config.main_df = load_data.get_dataframe_from_fits_file(
                 curr_config_file["dataset_filepath"],
                 optimise_data=curr_config_file["optimise_data"],

@@ -9,7 +9,7 @@ from astronomicAL.platform.jobs import JobManager
 from astronomicAL.platform.artifacts import ArtifactStore
 from astronomicAL.platform.datasets import DatasetManager
 from astronomicAL.platform.workspace import WorkspaceManager
-
+from astronomicAL.platform.services import ServiceRegistry
 
 @dataclass
 class AppContext:
@@ -24,4 +24,5 @@ class AppContext:
     artifacts: ArtifactStore
     datasets: DatasetManager
     workspace: WorkspaceManager
+    services: ServiceRegistry
     config: Optional[Any] = None

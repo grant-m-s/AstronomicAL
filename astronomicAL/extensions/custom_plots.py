@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import holoviews as hv
-import astronomicAL.config as config
+
 import numpy as np
 import os
 import html
@@ -110,7 +110,6 @@ class CustomPlotClass(param.Parameterized):
         self.datasets = getattr(context, "datasets", None)
         self.workspace = getattr(context, "workspace", None)
         self.config = getattr(context, "config", None)
-        self.shared = getattr(context, "shared", None)   # bridge for legacy shared_data
 
         # Lifecycle tracking
         self._subscriptions: List[Subscription] = []
@@ -120,7 +119,7 @@ class CustomPlotClass(param.Parameterized):
         self._disposed = False
 
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
-        print(f"Creating a {self.panel_name} panel")
+
         if self.extra_features:
             self._get_unknown_columns(columns_needed = self.extra_features)
             self._change_state_if_unknown_columns(ready_stage=ready_stage)
@@ -135,8 +134,9 @@ class CustomPlotClass(param.Parameterized):
         if self.close_button is not None:
             try:
                 self.close_button.on_click(lambda _e: self.dispose())
-            except Exception:
+            except Exception as e:
                 # Some button types / contexts may not support on_click in tests
+                print("CustomPlotClass.dispose() Errored", e)
                 pass
 
     # -----------------------
@@ -269,32 +269,60 @@ class CustomPlotClass(param.Parameterized):
     # -----------------------
     # Lifecycle
     # -----------------------
-    def dispose(self) -> None:
+    def _dispose_impl(self) -> None:
         """
-        Called when the panel is closed.
+        Subclass-specific cleanup hook.
+        Override in subclasses if needed.
+        """
+        return
 
-        - Cancels outstanding jobs
-        - Unsubscribes events
-        - (Later) remove published artifacts / panel-owned state if desired
-        """
+    def dispose(self) -> None:
         if getattr(self, "_disposed", False):
             return
         self._disposed = True
 
-        # Cancel jobs & unsubscribe events (your current logic)
         print(f"[dispose] {self.__class__.__name__} panel_id={getattr(self, 'panel_id', None)}")
-        self.cancel_jobs()
-        self.unsubscribe_all()
 
-        self.unwatch_all_bokeh()
+        # 1) subclass hook first (still has access to state)
+        try:
+            self._dispose_impl()
+        except Exception:
+            pass
 
-    # -----------------------
-    # Compatibility shim: some code may call cleanup_* names
-    # -----------------------
-    def cleanup_panel_plot(self) -> None:
-        """Backwards-compatible alias."""
-        self.dispose()
+        # 2) Remove any tracked bokeh callbacks (including src.on_change)
+        try:
+            self.unwatch_all_bokeh()
+        except Exception:
+            pass
 
+        # 3) Remove column-selection callbacks / widgets if present
+        if hasattr(self, "remove_column_selection"):
+            try:
+                self.remove_column_selection()
+            except Exception:
+                pass
+
+        # 4) Cancel outstanding jobs submitted via context.jobs
+        try:
+            self.cancel_jobs()
+        except Exception:
+            pass
+
+        # 5) Unsubscribe EventBus subscriptions
+        try:
+            self.unsubscribe_all()
+        except Exception:
+            pass
+
+        # 6) Shut down legacy per-panel executors if any remain
+        # (Eventually you should remove these entirely and rely on context.jobs)
+        ex = getattr(self, "executor", None)
+        if ex is not None:
+            try:
+                ex.shutdown(wait=False)
+                print(f"[{self.panel_id}] Thread executor shutdown.")
+            except Exception:
+                pass
 
     def run_multithread(
         self,
@@ -346,17 +374,6 @@ class CustomPlotClass(param.Parameterized):
             **func_kwargs,
         )
 
-    def subscribe_to_shared(self, key: str, callback):
-        """
-        Compatibility for existing shared_data subscriptions.
-
-        Expects `context.shared` to expose `.subscribe(panel_id, key, callback)`
-        like your current SharedDataManager.
-        """
-        if self.shared is None:
-            return None
-        return self.shared.subscribe(self.panel_id, key, callback)
-
     def watch_bokeh(self, model: Any, attr: str, callback: Callable) -> None:
         """
         Register a Bokeh on_change callback and track it for cleanup.
@@ -369,9 +386,6 @@ class CustomPlotClass(param.Parameterized):
         except Exception:
             # If this is called in a non-bokeh context/tests, fail silently
             pass
-
-        print("on create:", self._bokeh_on_change)
-
 
     def unwatch_all_bokeh(self) -> None:
         """
@@ -497,7 +511,7 @@ class CustomPlotClass(param.Parameterized):
         else:
            card_content = settings_grid
 
-        toolbar = pn.Row(pn.Spacer(width=25), self.close_button, skip_button, submit_button, max_height=50)
+        toolbar = self.get_layout(submit_button=submit_button, skip_button=skip_button)
         return pn.Column(toolbar, card_content,
                                 sizing_mode="stretch_both", scroll=True, min_height = 300 )
 
@@ -606,16 +620,6 @@ class CustomPlotClass(param.Parameterized):
         self.message_pane.visible = True 
         self.figure.objects = [self.get_empty_image()]
 
-    def subscribe_to_shared(self, key, function):
-        if self.shared:
-            if not self.shared.is_subscribed(self.panel_id, key):
-                self.shared.subscribe(self.panel_id, key, function)
-
-    def remove_shared_data(self):
-        """Removes subscriptions and published data from the shared data"""
-        if self.shared: self.shared.cleanup_extension_panel(self.panel_id)
-        print(f"[{self.panel_id}] removed from shared data")
-
     def remove_src_listener(self):
         """Removes the callback to a change in the selected source"""
         if self.src is not None and hasattr(self, "_src_callback"):
@@ -631,15 +635,6 @@ class CustomPlotClass(param.Parameterized):
                 if col in self.config.settings:
                     del self.config.settings[col]
             print(f"[{self.panel_id}] unknown columns selected removed from config")
-            
-    def cleanup_panel_plot(self):
-        self.remove_shared_data()
-        self.remove_src_listener()
-        self.remove_column_selection()
-        if hasattr(self, "executor"):
-            self.executor.shutdown(wait=False)
-            print(f"[{self.panel_id}] Thread executor shutdown.")
-
 
     ##Example method
     def plot(self, N=20):
@@ -661,14 +656,33 @@ class CustomPlotClass(param.Parameterized):
         return pn.Column(self.message_pane, self.figure, self.plot_settings_panel, 
                          sizing_mode="stretch_both", min_height = 450, styles={'background': 'lightgreen'})
     
+
+    def get_toolbar(self, skip_button=None, submit_button=None):
+
+        if self.stage == "columns_selection":
+            toolbar = pn.Row(
+                pn.Spacer(width=25), 
+                self.close_button, 
+                skip_button, 
+                submit_button, 
+                max_height=50)
+        else:
+            toolbar = pn.Row(
+                pn.Spacer(width=25,), 
+                self.close_button, 
+                self.plot_settings_button, 
+                max_height=50)
+        
+        return toolbar
+
     def plot_panel(self):
         self.layout = self.get_layout()
-        toolbar = pn.Row(pn.Spacer(width=25,),self.close_button, self.plot_settings_button, max_height=50)
+        toolbar = self.get_toolbar()
 
         return pn.Column(toolbar, self.layout, sizing_mode="stretch_both", min_height =450,)
     
     @param.depends("stage")                
-    def mypanel(self):
+    def panel(self):
         if self.stage == "columns_selection":
             return self.columns_selection_panel(self.unknown_columns)
         else:
@@ -687,9 +701,8 @@ class EuclidPlotClass(CustomPlotClass):
                          **params)
         
         self.context = context
-        import astronomicAL.config as config
-        self.config = context.config if (context is not None and getattr(context, "config", None) is not None) else config
-        self.shared = getattr(context, "shared", None)
+        if (context is not None and getattr(context, "config", None) is not None):
+            self.config = context.config
 
         self._src_callback = self._change_source_cb
         self.watch_bokeh(self.src, "data", self._src_callback)
@@ -823,7 +836,7 @@ class EuclidPlotClass(CustomPlotClass):
         except AttributeError:
             self.euclid_object = EuclidCutoutsClass(self.ra, self.dec, 
                              euclid_filters= ["VIS", "NIR_Y", "NIR_J", "NIR_H"],
-                             client = self.shared.get_data("Euclid_client", None), context = self.context)
+                             context = self.context)
         
         self.overplotted_coordinates = []
         return True
@@ -976,7 +989,11 @@ class EuclidPlotClass(CustomPlotClass):
         if event.new: 
             self.radius = event.new
             self._update_settings_dictionary("radius", self.radius)
-            if self.shared: self.shared.publish(self.panel_id, "Euclid_radius", self.radius)
+            if self.context and self.context.events:
+                self.context.events.publish(
+                    "astro.euclid.radius.changed",
+                    {"radius": self.radius, "panel_id": self.panel_id},
+                )
             self._run_euclid()
         else:
             print("Input a valid value for radius")
@@ -1102,7 +1119,9 @@ class EuclidPlotClass(CustomPlotClass):
         self.euclid_object.change_environment(environment=self.environment,
                                                 user = self.config.settings["EuclidAccountUser"], 
                                                 password = self.config.settings["EuclidAccountPassword"])
-        if self.shared: self.shared.publish(self.panel_id, "Euclid_client", self.euclid_object.client)
+        svc = getattr(self.context, "services", None) if self.context else None
+        if svc is not None:
+            svc.set("euclid.client", self.euclid_object.client)
     
     def _open_color_settings_cb(self, event):
         self.color_settings_column.visible  = not self.color_settings_column.visible
@@ -1252,11 +1271,19 @@ class EuclidPlotClass(CustomPlotClass):
         """Wrapper for multithreading"""
         self.message_pane.object = "## Loading..."
         self.message_pane.visible = True
-        if self.shared: self.shared.publish(self.panel_id, "EuclidCutout_running", True)
+        if self.context and self.context.events:
+            self.context.events.publish(
+                "astro.cutout.running",
+                {"source": "Euclid", "running": True, "panel_id": self.panel_id},
+            )
  
         def callback(future_obj=None):
-            result = future_obj.result() # result = self.euclid_object.plot_data[self.filter] or None
-            if self.shared: self.shared.publish(self.panel_id, "EuclidCutout_running", False)
+            result = future_obj.result()
+            if self.context and self.context.events:
+                self.context.events.publish(
+                    "astro.cutout.running",
+                    {"source": "Euclid", "running": False, "panel_id": self.panel_id},
+                )
             
             if self.euclid_object.error_tracker.has_error:
                 message =  f"# Euclid cutout unavailable:\n"
@@ -1324,38 +1351,18 @@ class EuclidPlotClass(CustomPlotClass):
         ax.axis("off")
         fig.subplots_adjust(left=0.0, right=1, top=1, bottom=0)
         return fig
-               
-    # def _manage_subscriptions(self):
-    #     """It manages all the subscriptions to the shared dictionary. not very flexible but it works"""
-    #     desi_callback = lambda coords: self._add_coordinates(coords, "DESI")
-    #     sdss_callback = lambda coords: self._add_coordinates(coords, "SDSS")
-    #     euclid_callback = lambda coords: self._add_coordinates(coords, "EuclidSpec")
-    #     self.subscribe_to_shared("DESI_coordinates", desi_callback)
-    #     self.subscribe_to_shared("SDSS_coordinates", sdss_callback)
-    #     self.subscribe_to_shared("EuclidSpec_coordinates", euclid_callback)
-    #     #If DESI/SDSS panel are already initialized, I need to pass the coordinates directly
-    #     if self.shared.get_data("DESI_coordinates"):
-    #         self._add_coordinates(self.shared.get_data("DESI_coordinates"), "DESI")
-    #     if self.shared.get_data("SDSS_coordinates"):
-    #         self._add_coordinates(self.shared.get_data("SDSS_coordinates"), "SDSS")
-    #     if self.shared.get_data("EuclidSpec_coordinates"):
-    #         self._add_coordinates(self.shared.get_data("EuclidSpec_coordinates"), "EuclidSpec")
 
     def _manage_subscriptions(self):
-        """
-        Subscribe to coordinate updates via EventBus + ArtifactStore.
+        if not self.context or not getattr(self.context, "events", None) or not getattr(self.context, "artifacts", None):
+            return
 
-        Expects events:
-        topic: "astro.coords.updated"
-        payload: {"source": "...", "artifact_id": "...", "dataset_id": "..."}
-        """
-
-        # Subscribe once
         def _coords_updated(topic, payload):
             if not payload:
                 return
+
             source = payload.get("source")
             artifact_id = payload.get("artifact_id")
+            dataset_id = payload.get("dataset_id", "default")
             if not source or not artifact_id:
                 return
 
@@ -1365,24 +1372,24 @@ class EuclidPlotClass(CustomPlotClass):
                 print(f"Failed to load coords artifact {artifact_id}: {e}")
                 return
 
-            # coords should be {"ra": [...], "dec": [...]}
-            dataset_name = source  # re-use your existing labels ("DESI", "SDSS", "EuclidSpec")
-            self._add_coordinates(coords, dataset_name)
+            self._add_coordinates(coords, source)
 
-        # Use base class subscribe helper if you have it, otherwise:
         self.subscribe("astro.coords.updated", _coords_updated)
 
-        # OPTIONAL: if you want EuclidPlot to immediately show the latest known coords
-        # from each source on initialisation, you can query artifacts:
+        # Late-join: load latest coords for each source (newest-first is guaranteed by ArtifactStore.find)
+        active_dataset_id = "default"
         for src_name in ("DESI", "SDSS", "EuclidSpec"):
-            refs = self.context.artifacts.find(type="astro.coords", params_subset={"source": src_name})
+            refs = self.context.artifacts.find(
+                type="astro.coords",
+                dataset_id=active_dataset_id,
+                params_subset={"source": src_name},
+            )
             if refs:
                 try:
-                    coords = self.context.artifacts.get(refs[0].artifact_id)  # newest first
+                    coords = self.context.artifacts.get(refs[0].artifact_id)
                     self._add_coordinates(coords, src_name)
                 except Exception:
                     pass
-
 
 class SpectrumPlotClass(CustomPlotClass):
     
@@ -1393,13 +1400,9 @@ class SpectrumPlotClass(CustomPlotClass):
         
 
         self.context = context
-        self.shared = getattr(context, "shared", None)
 
         if (context is not None and getattr(context, "config", None) is not None):
-            config = context.config
-        else:
-            import astronomicAL.config as config
-            config = config
+            self.config = context.config
 
         self.figure = pn.Column(scroll = True, sizing_mode = "stretch_both", margin =(5, 20))
         self.dataset = dataset
@@ -1414,6 +1417,117 @@ class SpectrumPlotClass(CustomPlotClass):
         self.mode_options = ["Use TargetId", "Cone Search"]
         self.chosen_mode = self.mode_options[1]
    
+    def _to_list(self, x):
+        """Convert numpy/array-like to plain python list safely."""
+        if x is None:
+            return None
+        try:
+            # numpy arrays, astropy columns, etc.
+            return list(x)
+        except Exception:
+            return x  # scalar
+
+    def _get_attr_or_key(self, obj, name, default=None):
+        """Get attribute (Euclid SpectrumContainer) or dict key (DESI record)."""
+        if obj is None:
+            return default
+        if isinstance(obj, dict):
+            return obj.get(name, default)
+        return getattr(obj, name, default)
+
+    def _build_spectrum_artifact_payload(self) -> dict:
+        """
+        Build a JSON-ish artifact payload from self.spectrum_object.spectra
+        for either DESI (dict-like records) or Euclid (SpectrumContainer objects).
+        """
+        spectra = getattr(self.spectrum_object, "spectra", None)
+        if spectra is None:
+            return {"source": self.dataset, "spectra": []}
+
+        payload = {
+            "source": self.dataset,
+            # target/source coords (the clicked object), if you want them:
+            "ra0": getattr(self.spectrum_object, "ra", None),
+            "dec0": getattr(self.spectrum_object, "dec", None),
+            "spectra": [],
+        }
+
+        for sp in spectra:
+            # identify spectrum id consistently
+            sid = (
+                self._get_attr_or_key(sp, "specid", None)
+                or self._get_attr_or_key(sp, "sourceId", None)
+                or self._get_attr_or_key(sp, "sparcl_id", None)
+            )
+
+            rec = {
+                "id": sid,
+                "wavelength": self._to_list(self._get_attr_or_key(sp, "wavelength", None)),
+                "flux": self._to_list(self._get_attr_or_key(sp, "flux", None)),
+            }
+
+            # optional fields (common across your include list / SpectrumContainer)
+            mask = self._get_attr_or_key(sp, "mask", None)
+            if mask is not None:
+                rec["mask"] = self._to_list(mask)
+
+            model = self._get_attr_or_key(sp, "model", None)
+            if model is not None:
+                rec["model"] = self._to_list(model)
+
+            redshift = self._get_attr_or_key(sp, "redshift", None)
+            if redshift is not None:
+                try:
+                    rec["redshift"] = float(redshift)
+                except Exception:
+                    rec["redshift"] = redshift
+
+            spectype = self._get_attr_or_key(sp, "spectype", None)
+            if spectype is not None:
+                rec["spectype"] = str(spectype)
+
+            ra = self._get_attr_or_key(sp, "ra", None)
+            dec = self._get_attr_or_key(sp, "dec", None)
+            if ra is not None:
+                try:
+                    rec["ra"] = float(ra)
+                except Exception:
+                    rec["ra"] = ra
+            if dec is not None:
+                try:
+                    rec["dec"] = float(dec)
+                except Exception:
+                    rec["dec"] = dec
+
+            # DESI-specific useful metadata if present
+            dr = self._get_attr_or_key(sp, "data_release", None)
+            if dr is not None:
+                rec.setdefault("meta", {})["data_release"] = dr
+
+            payload["spectra"].append(rec)
+
+        return payload
+
+    def publish_spectrum_artifact(self, dataset_id: str = "default"):
+        """
+        Store a spectrum artifact + publish a spectrum.updated event.
+        """
+        if self.context is None:
+            return
+        spec_payload = self._build_spectrum_artifact_payload()
+
+        artifact_id = self.context.artifacts.put(
+            type="astro.spectrum",
+            payload=spec_payload,
+            dataset_id=dataset_id,
+            params={"source": self.dataset},
+        )
+
+        self.context.events.publish(
+            "astro.spectrum.updated",
+            {"source": self.dataset, "artifact_id": artifact_id, "dataset_id": dataset_id},
+        )
+
     def _initialize_settings_dictionary(self):
         self.max_separation = self.config.settings.get("spectrumRadius", 5)
 
@@ -1483,22 +1597,24 @@ class SpectrumPlotClass(CustomPlotClass):
 
         except AttributeError:
             if self._is_euclid_spec:
-                self.spectrum_object = EuclidSpectraClass(self.ra, self.dec, 
-                                                          max_separation = self.max_separation,
-                                                          sourceId = self.sourceId,
-                                                          client = self.shared.get_data("Euclid_client", None),
-                                                          context = self.context
-                                                          )
+                self.spectrum_object = EuclidSpectraClass(
+                    self.ra, self.dec,
+                    max_separation=self.max_separation,
+                    sourceId=self.sourceId,
+                    context=self.context,
+                )
             else:
                 datasets = (["DESI-DR1"] if self.dataset == "DESI"
                             else ["BOSS-DR17", "SDSS-DR17"] if self.dataset == "SDSS"
-                             else None)
-                self.spectrum_object = DESISpectraClass(self.ra, self.dec, datasets = datasets,
-                                                        max_separation = self.max_separation,
-                                                        sourceId = self.sourceId,
-                                                        client = self.shared.get_data("Sparcl_client", None),
-                                                        context = self.context
-                                                        )
+                            else None)
+
+                self.spectrum_object = DESISpectraClass(
+                    self.ra, self.dec,
+                    datasets=datasets,
+                    max_separation=self.max_separation,
+                    sourceId=self.sourceId,
+                    context=self.context,
+                )
         return True
 
     def _add_coordinates_to_shared(self, ra, dec):
@@ -1506,7 +1622,6 @@ class SpectrumPlotClass(CustomPlotClass):
         ra and dec are lists
         """
         coords_dict = {"ra":list(ra), "dec":list(dec)}
-        # if self.shared: self.shared.publish(self.panel_id, f"{self.dataset}_coordinates", coords_dict)
         self.publish_coords(f"{self.dataset}", coords_dict["ra"], coords_dict["dec"])
 
         return None
@@ -1527,43 +1642,14 @@ class SpectrumPlotClass(CustomPlotClass):
         self.context.events.publish(
             "astro.coords.updated",
             {"source": source, "artifact_id": artifact_id, "dataset_id": dataset_id},
-        )    
-
-    # def _run_spectrum(self, max_separation = None):
-    #     self.message_pane.object = "## Loading..."
-    #     self.message_pane.visible = True
-    #     if self.shared: self.shared.publish(self.panel_id, f"{self.dataset}_running", True)
-    #     if max_separation is None:
-    #         max_separation = self.max_separation
-        
-    #     def callback(future_result = None):
-    #         if self.shared: self.shared.publish(self.panel_id, f"{self.dataset}_running", False)
-    #         if self.spectrum_object.error_tracker.has_error:
-    #             message = "# Spectrum unavailable:\n"
-    #             message += f"## {self.spectrum_object.error_tracker.error_message}"
-    #             self.message_pane.object = message
-    #             self.message_pane.visible = True 
-    #             self.figure.objects = [self.get_empty_image()]
-    #         else:
-    #             if self.redshift_column_selector.value != "None":
-    #                 redshift_value = self.get_value_from_df(self.redshift_column_selector.value)
-    #                 if redshift_value is not None:
-    #                    self.redshift_input.value = redshift_value
-    #             self._update_plot()
-    #             self._add_coordinates_to_shared(*self.spectrum_object.get_coordinates())
-    #             self.message_pane.visible = False
-
-
-    #     self.run_multithread(self.spectrum_object.get_spectra, 
-    #                          func_kwargs = {"max_separation" : max_separation, "return_object" : True},
-    #                          callback=callback)
+        )
 
     def _run_spectrum(self, max_separation=None):
         self.message_pane.object = "## Loading..."
         self.message_pane.visible = True
 
-        # NEW: running state via EventBus
-        if self.context is not None and getattr(self.context, "events", None) is not None:
+        # running event
+        if self.context and getattr(self.context, "events", None):
             self.context.events.publish(
                 "astro.spectra.running",
                 {"source": self.dataset, "running": True, "panel_id": self.panel_id},
@@ -1573,7 +1659,7 @@ class SpectrumPlotClass(CustomPlotClass):
             max_separation = self.max_separation
 
         def _set_running(val: bool):
-            if self.context is not None and getattr(self.context, "events", None) is not None:
+            if self.context and getattr(self.context, "events", None):
                 self.context.events.publish(
                     "astro.spectra.running",
                     {"source": self.dataset, "running": val, "panel_id": self.panel_id},
@@ -1591,7 +1677,7 @@ class SpectrumPlotClass(CustomPlotClass):
                     self.figure.objects = [self.get_empty_image()]
                     return
 
-                # Success path
+                # success
                 if self.redshift_column_selector.value != "None":
                     redshift_value = self.get_value_from_df(self.redshift_column_selector.value)
                     if redshift_value is not None:
@@ -1599,14 +1685,16 @@ class SpectrumPlotClass(CustomPlotClass):
 
                 self._update_plot()
 
-                # Publishes coords via artifacts+events (your helper)
+                # coords artifact+event (you already implemented publish_coords)
                 ra_list, dec_list = self.spectrum_object.get_coordinates()
                 self._add_coordinates_to_shared(ra_list, dec_list)
+
+                # NEW: spectrum artifact+event
+                self.publish_spectrum_artifact(dataset_id="default")
 
                 self.message_pane.visible = False
 
             except Exception as e:
-                # Ensure UI doesn't get stuck
                 self.message_pane.object = f"# Error updating spectrum panel\n## {e}"
                 self.message_pane.visible = True
                 _set_running(False)
@@ -1617,14 +1705,26 @@ class SpectrumPlotClass(CustomPlotClass):
             callback=callback,
         )
 
+    def _get_euclid_radius_arcsec(self, default: float = 0.5) -> float:
+        try:
+            settings = self.config.settings or {}
+            eu = settings.get("Euclid_cutout_settings", {}) or {}
+            return float(eu.get("radius", default))
+        except Exception:
+            return float(default)
 
     def _initialize_settings_panel(self):
         self.retrieve_mode_button = pn.widgets.RadioButtonGroup(name="How to retrieve spectrum", options=self.mode_options, 
                                             value = self.chosen_mode, sizing_mode = "stretch_both", max_height = 40)
         
-        self.max_separation_input = pn.widgets.FloatInput(name = "Cone Radius [arcsec]", value = self.shared.get_data("Euclid_radius", 0.5), 
-                                                          step = 0.5, start = 1, end = 100, max_width = 200, max_height = 40,
-                                                          sizing_mode="stretch_both")
+        self.max_separation_input = pn.widgets.FloatInput(
+            name="Cone Radius [arcsec]",
+            value=self._get_euclid_radius_arcsec(0.5),
+            step=0.5, start=1, end=100,
+            max_width=200, max_height=40,
+            sizing_mode="stretch_both",
+        )
+        
         self.link_to_cutout_checkbox = pn.widgets.Checkbox(name = "Use radius from Euclid cutout",  value = False, align = "center")
         self.max_separation_input.disabled = (self.chosen_mode == self.mode_options[0])
         self.link_to_cutout_checkbox.disabled = (self.chosen_mode == self.mode_options[0])
@@ -1702,11 +1802,39 @@ class SpectrumPlotClass(CustomPlotClass):
             self._run_spectrum(self.max_separation)
 
     def _link_to_cutout_cb(self, event):
+        # If linking is enabled, listen to radius change events
         if event.new:
-            if not self.from_sourceId:
-                self.subscribe_to_shared("Euclid_radius", self._update_max_separation )
+            if not self.from_sourceId and self.context and self.context.events:
+                # subscribe once; keep handle so we can disable link without closing panel
+                if not hasattr(self, "_euclid_radius_sub"):
+                    self._euclid_radius_sub = None
+
+                if self._euclid_radius_sub is None:
+                    def _on_radius(topic, payload):
+                        if not payload:
+                            return
+                        radius = payload.get("radius")
+                        if radius is None:
+                            return
+                        # update input and trigger your existing logic
+                        try:
+                            self.max_separation_input.value = float(radius)
+                        except Exception:
+                            pass
+                        self._update_max_separation(float(radius))
+
+                    self._euclid_radius_sub = self.context.events.subscribe(
+                        "astro.euclid.radius.changed",
+                        _on_radius
+                    )
         else:
-            if self.shared: self.shared.unsubscribe(self.panel_id, "Euclid_radius")
+            # unlink: unsubscribe from event
+            if getattr(self, "_euclid_radius_sub", None) is not None and self.context and self.context.events:
+                try:
+                    self.context.events.unsubscribe(self._euclid_radius_sub)
+                except Exception:
+                    pass
+                self._euclid_radius_sub = None
 
     def _update_smoothing_cb(self, event):
         if self.spectrum_object.spectra is not None:
@@ -1762,7 +1890,7 @@ class SpectrumPlotClass(CustomPlotClass):
 
     
     @param.depends("stage")                        
-    def mypanel(self):
+    def panel(self):
         if self.stage == "columns_selection":
             return self.columns_selection_panel(self.unknown_columns, allowed_types = ["int"],
                                                 info_text= "## Select column with TargetID")
@@ -1784,13 +1912,10 @@ class SEDPlotClass(CustomPlotClass):
 
 
         self.context = context
-        self.shared = getattr(context, "shared", None)
 
         if (context is not None and getattr(context, "config", None) is not None):
-            config = context.config
-        else:
-            import astronomicAL.config as config
-            config = config
+            self.config = context.config
+
 
         self._src_callback = self._change_source_cb
         self.watch_bokeh(self.src, "data", self._src_callback)
@@ -1816,7 +1941,8 @@ class SEDPlotClass(CustomPlotClass):
         submit_button = pn.widgets.Button(name='Confirm', button_type='primary', max_height=120)
         submit_button.on_click(self._submit_button_cb)
 
-        toolbar = pn.Row(pn.Spacer(width=25), self.close_button, submit_button, max_height=50)
+        toolbar = self.get_toolbar()
+
         body = pn.Column( pn.pane.Markdown("## Select the bands to plot in the SED"),
             pn.Row(pn.Column("## Available Bands", self.checkbox_pane, scroll = True),
                    pn.Column(self.add_band_button, self.add_band_pane, scroll = True)))
@@ -1989,8 +2115,9 @@ class SEDPlotClass(CustomPlotClass):
 
         master_select_widget = pn.widgets.Select(name= "Apply same units to all columns", options=available_units, max_height=120, sizing_mode = "stretch_width")
         master_select_widget.param.watch(change_all_selections, "value")
-         
-        toolbar = pn.Row(pn.Spacer(width=25), self.close_button, skip_button, submit_button, max_height=50)
+
+        toolbar = self.get_toolbar(skip_button=skip_button, submit_button=submit_button)
+
         body = pn.Column(pn.pane.Markdown("## Select the columns units", sizing_mode = "stretch_width",
                                                   margin=(15,0,15,15)),
                                 master_select_widget,
@@ -2240,15 +2367,56 @@ class SEDPlotClass(CustomPlotClass):
             except FileNotFoundError:
                 print(f"Cold not find the saving directory: {directory_path}")     
 
+    def get_toolbar(self, skip_button=None, submit_button=None):
+
+        if self.stage == self.available_stages[0]:
+            toolbar = pn.Row(
+                pn.Spacer(width=25),
+                self.close_button,
+                submit_button,
+                max_height=50)
+        
+        if self.stage == self.available_stages[1]:
+            toolbar = pn.Row(
+                pn.Spacer(width=25), 
+                self.close_button, 
+                skip_button, 
+                submit_button, 
+                max_height=50)
+
+        elif self.stage == self.available_stages[2]:
+            toolbar = pn.Row(
+                pn.Spacer(width=25), 
+                self.close_button, 
+                skip_button, 
+                submit_button, 
+                max_height=50)
+
+        elif self.stage == self.available_stages[3]:
+            toolbar = pn.Row(
+                pn.Spacer(width=25), 
+                self.close_button, 
+                skip_button, 
+                submit_button, 
+                max_height=50)
+        else:
+            toolbar = pn.Row(
+                pn.Spacer(width=25,),
+                self.close_button,
+                self.plot_settings_button,
+                max_height=50)
+
+        return toolbar
+
     def plot_panel(self):
         self.layout = self.get_layout()
-        toolbar = pn.Row(pn.Spacer(width=25,), self.close_button, self.plot_settings_button, max_height=50)
+        toolbar = self.get_toolbar()
         return pn.Column(toolbar, self.layout,
                          sizing_mode="stretch_both", min_height =450,)  
 
 
     @param.depends("stage")
-    def mypanel(self):
+    def panel(self):
 
         if self.stage == self.available_stages[0]:
             return self.filters_selection_panel()
@@ -2276,13 +2444,9 @@ class RadioClass(CustomPlotClass):
         super().__init__(data, src, close_button, extra_features, context = context)
 
         self.context = context
-        self.shared = getattr(context, "shared", None)
 
         if (context is not None and getattr(context, "config", None) is not None):
-            config = context.config
-        else:
-            import astronomicAL.config as config
-            config = config
+            self.config = context.config
 
 
         self._src_callback = self._change_source_cb
@@ -2328,10 +2492,18 @@ class RadioClass(CustomPlotClass):
 
     def _run_radio(self, radius = 20):
         self.message_pane.visible = True
-        if self.shared: self.shared.publish(self.panel_id, f"Radio_running", True)
+        if self.context and self.context.events:
+            self.context.events.publish(
+                "astro.radio.running",
+                {"source": getattr(self, "dataset", "Radio"), "running": True, "panel_id": self.panel_id},
+            )
 
         def callback(future_obj = None):
-            if self.shared: self.shared.publish(self.panel_id, "Radio_running", False)
+            if self.context and self.context.events:
+                self.context.events.publish(
+                    "astro.radio.running",
+                    {"source": getattr(self, "dataset", "Radio"), "running": False, "panel_id": self.panel_id},
+                )
             print("I am calling the radio callback ")
             result = future_obj.result() 
             if result is None:
@@ -2373,13 +2545,10 @@ class SDSSClass(CustomPlotClass):
         super().__init__(data, src, close_button, extra_features, context = context)
 
         self.context = context
-        self.shared = getattr(context, "shared", None)
 
         if (context is not None and getattr(context, "config", None) is not None):
-            config = context.config
-        else:
-            import astronomicAL.config as config
-            config = config
+            self.config = context.config
+
 
         self._src_callback = self._change_source_cb
         self.watch_bokeh(self.src, "data", self._src_callback)
@@ -2423,11 +2592,19 @@ class SDSSClass(CustomPlotClass):
 
     def _run_sdss(self, radius = 25.6):
         self.message_pane.visible = True
-        if self.shared: self.shared.publish(self.panel_id, f"SDSS_running", True)
+        if self.context and self.context.events:
+            self.context.events.publish(
+                "astro.sdss.running",
+                {"running": True, "panel_id": self.panel_id},
+            )
 
         def callback(future_obj = None):
             print("Ended SDSS query")
-            if self.shared: self.shared.publish(self.panel_id, "SDSS_running", False)
+            if self.context and self.context.events:
+                self.context.events.publish(
+                    "astro.sdss.running",
+                    {"running": False, "panel_id": self.panel_id},
+                )
             result = future_obj.result() 
             if result is None:
                 self.message_pane.object = f"## {self.dataset} cutout query failed"
@@ -2465,13 +2642,9 @@ class AladinClass(CustomPlotClass):
         super().__init__(data, src, close_button, extra_features, panel_name = "Aladin Panel", context = context)
 
         self.context = context
-        self.shared = getattr(context, "shared", None)
 
         if (context is not None and getattr(context, "config", None) is not None):
-            config = context.config
-        else:
-            import astronomicAL.config as config
-            config = config
+            self.config = context.config
 
         self._src_callback = self._change_source_cb
         self.watch_bokeh(self.src, "data", self._src_callback)
@@ -2561,13 +2734,9 @@ class LogBookClass(CustomPlotClass):
         super().__init__(data, src, close_button, extra_features, panel_name = "Notes Panel", context = context)
 
         self.context = context
-        self.shared = getattr(context, "shared", None)
 
         if (context is not None and getattr(context, "config", None) is not None):
-            config = context.config
-        else:
-            import astronomicAL.config as config
-            config = config
+            self.config = context.config
 
         self._src_callback = self._change_source_cb
         self.watch_bokeh(self.src, "data", self._src_callback)
@@ -2627,13 +2796,15 @@ class EventMonitorClass(CustomPlotClass):
 
         self.events_table = pn.widgets.Tabulator(
             pd.DataFrame(columns=["time", "topic", "payload"]),
-            height=360,
+            height=120,
+            max_height=250,
             sizing_mode="stretch_both",
         )
 
         self.subs_table = pn.widgets.Tabulator(
             pd.DataFrame(columns=["topic", "subscribers"]),
-            height=220,
+            height=110,
+            max_height=220,
             sizing_mode="stretch_both",
         )
 

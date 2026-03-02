@@ -11,8 +11,6 @@ from bokeh.models import TextAreaInput
 from bokeh.models.callbacks import CustomJS
 from functools import partial
 
-import astronomicAL.config as config
-
 import glob
 import json
 import numpy as np
@@ -51,15 +49,20 @@ class DataSelection(param.Parameterized):
 
     ready = param.Boolean(default=False)
 
-    def __init__(self, src, mode, context=None):
+    def __init__(self, src, mode, context):
         super(DataSelection, self).__init__()
 
+        self.context = context
+        
         self.mode = mode
         self.src = src
         self.error_message = ""
-        self.context = context
-
-        self.config = context.config if (context is not None and getattr(context, "config", None) is not None) else config
+        
+        if (context is not None and getattr(context, "config", None) is not None):
+            self.config = context.config
+        else:
+            print("config doesn't exist")
+            print(context)
 
         # Guarantee settings dict exists
         if getattr(self.config, "settings", None) is None:
@@ -199,7 +202,7 @@ class DataSelection(param.Parameterized):
             verify_import_config,
         )  # causes circular import error at top
         
-        has_error, error_message = verify_import_config(curr_config_file)
+        has_error, error_message = verify_import_config(curr_config_file, context=self.context)
 
         if has_error:
             self.config.settings = {} # empty all assigned configurations parameters

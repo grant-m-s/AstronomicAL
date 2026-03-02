@@ -65,26 +65,94 @@ class LabellingDashboard(param.Parameterized):
 
         self.row = pn.Row(pn.pane.Str("loading"))
         self.context = context
-        import astronomicAL.config as config
 
-        self.config = context.config if (context is not None and getattr(context, "config", None) is not None) else config
+        if (context is not None and getattr(context, "config", None) is not None):
+            self.config = context.config
 
-        self.df = df
-        self.sample_region = df
+        self.df = self.config.main_df
+
+        self._sub = self.context.events.subscribe("dataset.main.updated", self._on_df_updated)
+
+        self.sample_region = self.df
         self.region_criteria_df = pd.DataFrame([], columns=["column", "oper", "value"])
         self.region_message = ""
         self.src = src
-        self.src.on_change("data", self._panel_cb)
-
+        self.watch_bokeh(self.src, "data", self._panel_cb)
         self.labels = self.get_previous_labels()
         self._construct_panel()
 
-        ActiveLearningModel(self.src, df, self.config.settings["labels_to_train"][0], context=context)
+        ActiveLearningModel(self.src, self.df, self.config.settings["labels_to_train"][0], context=self.context)
 
         self._update_variable_lists()
         self.select_random_point()
-        
-        
+
+    def _on_df_updated(self, topic, payload):
+
+        self.df = self.config.main_df
+        self._update_variable_lists()
+
+    def get_toolbar(self):
+        return pn.Spacer(height=1)
+
+    def watch_bokeh(self, model, attr: str, callback):
+        """Register and track Bokeh model.on_change callbacks for unified disposal."""
+        if model is None:
+            return
+        try:
+            model.on_change(attr, callback)
+            self._bokeh_on_change.append((model, attr, callback))
+        except Exception:
+            pass
+
+    def unwatch_all_bokeh(self):
+        """Remove all tracked Bokeh callbacks (idempotent)."""
+        for model, attr, callback in list(getattr(self, "_bokeh_on_change", [])):
+            try:
+                model.remove_on_change(attr, callback)
+            except Exception as e:
+                # Ignore double-remove noise
+                if "list.remove(x): x not in list" in str(e):
+                    pass
+            # continue regardless
+        self._bokeh_on_change = []
+
+    def _dispose_impl(self):
+        """Subclass-specific cleanup hook (override if needed)."""
+        return
+
+    def dispose(self):
+        if getattr(self, "_disposed", False):
+            return
+        self._disposed = True
+
+        # 1) subclass cleanup first
+        try:
+            self._dispose_impl()
+        except Exception:
+            pass
+
+        # 2) unwatch bokeh callbacks (including src.on_change if registered via watch_bokeh)
+        try:
+            self.unwatch_all_bokeh()
+        except Exception:
+            pass
+
+        # 3) Unsubscribe EventBus
+        if self.context and getattr(self.context, "events", None):
+            for sub in list(getattr(self, "_event_subs", [])):
+                try:
+                    self.context.events.unsubscribe(sub)
+                except Exception:
+                    pass
+        self._event_subs = []
+
+        # 4) Stop periodic callbacks
+        for cb in list(getattr(self, "_periodic_cbs", [])):
+            try:
+                cb.stop()
+            except Exception:
+                pass
+        self._periodic_cbs = []
 
     def _construct_panel(self):
 
@@ -347,8 +415,8 @@ class LabellingDashboard(param.Parameterized):
 
         # color_points = hv.NdOverlay(
         #     {
-        #         config.settings["labels_to_strings"][f"{n}"]: hv.Points(
-        #             [0, 0], label=config.settings["labels_to_strings"][f"{n}"]
+        #         self.config.settings["labels_to_strings"][f"{n}"]: hv.Points(
+        #             [0, 0], label=self.config.settings["labels_to_strings"][f"{n}"]
         #         ).opts(style=dict(color=color_key[n], size=0))
         #         for n in color_key
         #     }
@@ -556,7 +624,8 @@ class LabellingDashboard(param.Parameterized):
         self.new_labelled_button.disabled = False
 
     def _panel_cb(self, attr, old, new):
-        print("_panel_cb callback")
+
+        self.sample_region = self.df
         self.panel()
 
     def _apply_format(self, plot, element):
@@ -577,33 +646,56 @@ class LabellingDashboard(param.Parameterized):
 
         """
 
+        # ---- Table ----
         col_names = self.region_criteria_df.columns.tolist()
+        widths = {}
+        if len(col_names) > 0:
+            widths[col_names[0]] = 140
+        if len(col_names) > 1:
+            widths[col_names[1]] = 70
+        if len(col_names) > 2:
+            widths[col_names[2]] = 70
 
-        df_pane = pn.widgets.Tabulator(self.region_criteria_df, widths={col_names[0]:80,col_names[1]:50,col_names[2]:50})
-
-        buttons_row = pn.Row(
-            self.assign_label_group,
-            pn.Row(
-                self.assign_label_button,
-                max_height=30,
-            ),
-            max_height=30,
-            max_width=600,
+        df_pane = pn.widgets.Tabulator(
+            self.region_criteria_df,
+            sizing_mode="stretch_both",   # <-- allow it to grow vertically
+            widths=widths,
         )
 
-        plot = pn.Row(self.plot, height=400, width=500, sizing_mode="fixed")
+        # Compact assign button
+        try:
+            self.assign_label_button.sizing_mode = "fixed"
+            self.assign_label_button.width = 130
+        except Exception:
+            pass
+
+        try:
+            self.assign_label_group.sizing_mode = "fixed"
+        except Exception:
+            pass
+
+        # A centered cluster that wraps if the window gets narrow
+        buttons_row = pn.FlexBox(
+            self.assign_label_group,
+            self.assign_label_button,
+            flex_wrap="wrap",
+            justify_content="center",   # <-- center in the available width
+            align_items="center",
+            sizing_mode="stretch_width",
+            height=44,
+            margin=(6, 0, 0, 0),
+        )
+
+        # ---- Your indexing/enable/disable logic (kept) ----
         total = len(self.labels.keys())
-
         index = self.get_current_index_in_labelled_data()
-
-        print("current index: ", index, type(index))
-
         self._reset_index_buttons()
 
         if (index == 0) or (total == 0):
             self.first_labelled_button.disabled = True
             self.prev_labelled_button.disabled = True
-        if type(index) == int:
+
+        if isinstance(index, (int, np.integer)):
             if index >= (total - 1):
                 self.next_labelled_button.disabled = True
         else:
@@ -612,21 +704,15 @@ class LabellingDashboard(param.Parameterized):
         if len(self.sample_region) == 0:
             self.new_labelled_button.disabled = True
 
-        if self.src.data[self.config.settings["id_col"]][0] in list(self.labels.keys()):
+        # ---- Labels info ----
+        src_id = self.src.data[self.config.settings["id_col"]][0]
 
-            raw_label = self.labels[self.src.data[self.config.settings["id_col"]][0]]
-
+        if src_id in self.labels:
+            raw_label = self.labels[src_id]
             label = self.config.settings["labels_to_strings"][f"{raw_label}"]
-
-            previous_label = pn.widgets.StaticText(
-                name="Current Label",
-                value=f"{label}",
-            )
+            previous_label = pn.widgets.StaticText(name="Current Label", value=str(label))
         else:
-            previous_label = pn.widgets.StaticText(
-                name="Current Label",
-                value=f"Unlabelled",
-            )
+            previous_label = pn.widgets.StaticText(name="Current Label", value="Unlabelled")
 
         dataset_raw_label = self.src.data[self.config.settings["label_col"]][0]
         dataset_label = self.config.settings["labels_to_strings"][f"{dataset_raw_label}"]
@@ -636,65 +722,128 @@ class LabellingDashboard(param.Parameterized):
         else:
             index_tally = f"{index+1}/{total}"
 
-        labelling_info_col = pn.Column(
-            pn.Column(
-                pn.Row(self.region_message, max_height=50),
-                pn.Row(
-                    df_pane, max_height=130, sizing_mode="stretch_width", scroll=True
-                ),
-                max_height=100,
-                margin=(0, 0, 50, 0),
-                max_width=400,
-            ),
-            pn.Row(
-                self.column_dropdown,
-                self.operation_dropdown,
-                self.input_value,
-            ),
+        # ---- Sidebar (fixed width, scrolls) ----
+        sidebar_width = 450
+
+        # ---- Header + message (compact) ----
+        title = pn.pane.HTML(
+            "<div style='margin:0; padding:0; line-height:1; font-weight:600;'>All Sources Matching</div>",
+            margin=(0, 0, 0, 0),
+        )
+
+        # Force the message component to have no margin (works for most panes/widgets)
+        try:
+            self.region_message.margin = (0, 0, 0, 0)
+        except Exception:
+            pass
+
+        criteria_header = pn.Column(
+            title,
+            self.region_message,
+            sizing_mode="stretch_width",
+            margin=(0, 0, 0, 0),
+            max_height=50,
+        )
+
+        # ---- Growable table container (this is what fills height) ----
+        table_box = pn.Column(
+            df_pane,
+            sizing_mode="stretch_both",
+            min_height=130,          # keeps it usable in small windows
+            margin=(0, 0, 6, 0),
+        )
+
+        df_pane.row_height = 28  # try 28–34 if needed
+
+        filter_row = pn.Row(
+            self.column_dropdown,
+            self.operation_dropdown,
+            self.input_value,
+            sizing_mode="stretch_width",
+            margin=(0, 0, 5, 0),
+        )
+
+        # ---- Compact controls + info (bunched) ----
+        compact_info = pn.Column(
+            filter_row,
             self.add_sample_criteria_button,
             self.remove_sample_selection_dropdown,
             self.remove_sample_criteria_button,
             pn.widgets.StaticText(name="Labelled Point", value=index_tally),
-            pn.widgets.StaticText(
-                name="Source ID", value=f"{self.src.data[self.config.settings['id_col']][0]}"
-            ),
-            pn.widgets.StaticText(
-                name="Original Dataset Label",
-                value=f"{dataset_label}",
-            ),
-            pn.Row(previous_label, max_height=25),
-            pn.Row(
-                self.first_labelled_button,
-                self.prev_labelled_button,
-                self.next_labelled_button,
-                self.new_labelled_button,
-            ),
+            pn.widgets.StaticText(name="Source ID", value=str(src_id)),
+            pn.widgets.StaticText(name="Original Dataset Label", value=str(dataset_label)),
+            previous_label,
+            sizing_mode="stretch_width",
+            margin=(0, 0, 0, 0),
         )
 
+        # ---- Nav row (bottom pinned) ----
+        nav_row = pn.Row(
+            self.first_labelled_button,
+            self.prev_labelled_button,
+            self.next_labelled_button,
+            self.new_labelled_button,
+            sizing_mode="stretch_width",
+            margin=(0, 0, 0, 0),
+        )
+
+        # ---- Sidebar: table grows, nav sticks to bottom ----
+        labelling_info_col = pn.Column(
+            criteria_header,
+            table_box,              # <-- only this grows
+            compact_info,           # <-- stays compact
+            pn.Spacer(),            # <-- pushes nav_row to the bottom
+            nav_row,                # <-- glued to bottom
+            sizing_mode="stretch_height",
+            width=sidebar_width,
+            min_width=sidebar_width,
+            max_width=sidebar_width,
+            scroll=False,
+            margin=(0, 0, 0, 10),
+        )
+
+        try:
+            self.plot = self.plot.opts(responsive=True)
+        except Exception:
+            pass
+        
+        # ---- Plot (DynamicMap via HoloViews pane) ----
+        plot_pane = pn.pane.HoloViews(
+            self.plot,
+            sizing_mode="stretch_both",
+            min_width=0,
+            min_height=380,
+        )
+
+        # ---- Toolbar (stretch width; no tiny max_width) ----
+        toolbar = pn.Row(
+            self.param.X_variable,
+            self.param.Y_variable,
+            pn.Spacer(),
+            sizing_mode="stretch_width",
+            height=50,          # was 50
+            margin=(0, 0, 5, 0) # was (0, 0, 5, 0)
+        )
+
+        # ---- Main body ----
+        body = pn.Row(
+            plot_pane,
+            labelling_info_col,
+            sizing_mode="stretch_both",
+            min_height=0,
+            min_width=0,
+            margin=(0, 0, 0, 0),
+        )
+
+        # Enable label assignment
         self.assign_label_button.disabled = False
 
-        print("row before", self.row[0])
-        toolbar = pn.Row(
-                pn.Spacer(width=25,
-                        #    sizing_mode="fixed"
-                           ),
-                pn.Row(self.param.X_variable, max_width=100),
-                pn.Row(self.param.Y_variable, max_width=100),
-                max_width=100, max_height=50
-                # sizing_mode="fixed",
-            )
-        body = pn.Row(
-                plot,
-                labelling_info_col,
-                margin=(0, 20),
-            )
         self.row[0] = pn.Column(
             toolbar,
             body,
             buttons_row,
             sizing_mode="stretch_both",
+            min_height=0,
+            margin=(0, 0, 0, 0),
         )
         return self.row
-
-
-

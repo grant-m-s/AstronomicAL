@@ -1,7 +1,6 @@
 import numpy as np
 import pandas as pd
 from itertools import combinations
-import astronomicAL.config as config
 
 def get_oper_dict():
 
@@ -19,7 +18,10 @@ def _ensure_float32(arr):
     # optional: keep memory down for huge data
     return arr.astype(np.float32, copy=False) if arr.dtype == np.float64 else arr
 
-def add(df, n, batch_size=64):
+def add(df, n, batch_size=64, context = None):
+    # if (context is not None and getattr(context, "config", None) is not None):
+    config = context.config
+    
     bands = config.settings["features_for_training"]
     combs = list(combinations(bands, n))
 
@@ -53,7 +55,9 @@ def add(df, n, batch_size=64):
     df = df.copy()
     return df, generated
 
-def subtract(df, n, batch_size=64):
+def subtract(df, n, batch_size=64, context = None):
+    # if (context is not None and getattr(context, "config", None) is not None):
+    config = context.config
     bands = config.settings["features_for_training"]
     combs = list(combinations(bands, n))
     new_cols, generated = {}, []
@@ -80,7 +84,11 @@ def subtract(df, n, batch_size=64):
     return df, generated
 
 
-def multiply(df, n, batch_size=64):
+def multiply(df, n, batch_size=64, context = None):
+
+    # if (context is not None and getattr(context, "config", None) is not None):
+    config = context.config
+
     bands = config.settings["features_for_training"]
     combs = list(combinations(bands, n))
     new_cols, generated = {}, []
@@ -107,7 +115,10 @@ def multiply(df, n, batch_size=64):
     return df, generated
 
 
-def divide(df, n, batch_size=64, eps=0.0):
+def divide(df, n, batch_size=64, eps=0.0, context = None):
+    # if (context is not None and getattr(context, "config", None) is not None):
+    config = context.config
+
     bands = config.settings["features_for_training"]
     combs = list(combinations(bands, n))
     new_cols, generated = {}, []
@@ -137,9 +148,12 @@ def divide(df, n, batch_size=64, eps=0.0):
     df = df.copy()
     return df, generated
 
-def color(df, n=2, batch_size=64):
+def color(df, n=2, batch_size=64, context = None):
     if n != 2:
         raise ValueError("color only makes sense for n=2")
+
+    # if (context is not None and getattr(context, "config", None) is not None):
+    config = context.config
 
     bands = config.settings["features_for_training"]
     combs = list(combinations(bands, 2))

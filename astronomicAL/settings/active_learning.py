@@ -1,6 +1,5 @@
 from astronomicAL.extensions import models, query_strategies, feature_generation
 
-import astronomicAL.config as config
 import pandas as pd
 import panel as pn
 import json
@@ -40,8 +39,12 @@ class ActiveLearningSettings(param.Parameterized):
 
     """
 
-    def __init__(self, close_button, mode):
+    def __init__(self, close_button, mode, context = None):
 
+        self.context = context
+
+        self.config = context.config
+        
         self.df = None
 
         self.feature_generator_selected = []
@@ -292,18 +295,18 @@ class ActiveLearningSettings(param.Parameterized):
 
         if self.df is not None:
 
-            labels = config.settings["labels"]
+            labels = self.config.settings["labels"]
             if -1 in labels:
                 labels.remove(-1)
             options = []
             for label in labels:
-                options.append(config.settings["labels_to_strings"][f"{label}"])
+                options.append(self.config.settings["labels_to_strings"][f"{label}"])
             self.label_selector.options = options
 
             features = list(self.df.columns)
 
-            features.remove(config.settings["id_col"])
-            features.remove(config.settings["label_col"])
+            features.remove(self.config.settings["id_col"])
+            features.remove(self.config.settings["label_col"])
 
             self.feature_selector.options = features
 
@@ -329,7 +332,7 @@ class ActiveLearningSettings(param.Parameterized):
 
         selected_features = self.feature_selector.value
 
-        config.settings["features_for_training"] = selected_features
+        self.config.settings["features_for_training"] = selected_features
 
         if selected_features == []:
             return
@@ -342,7 +345,9 @@ class ActiveLearningSettings(param.Parameterized):
                 n = generator[1]
 
                 _, generated_features = oper_dict[oper](
-                    pd.DataFrame(columns=selected_features), n
+                    pd.DataFrame(columns=selected_features), 
+                    n,
+                    context = self.context
                 )
                 selected_features = selected_features + generated_features
             #selected_features = list(dict.fromkeys(selected_features)) # Removes duplicates (currently the same operation can be performed more than once)
@@ -379,16 +384,16 @@ class ActiveLearningSettings(param.Parameterized):
     def _confirm_settings_cb(self, event):
         print("Saving settings...")
 
-        config.settings["default_vars"] = self.get_default_variables()
-        config.settings["labels_to_train"] = self.label_selector.value
-        config.settings["features_for_training"] = self.feature_selector.value
+        self.config.settings["default_vars"] = self.get_default_variables()
+        self.config.settings["labels_to_train"] = self.label_selector.value
+        self.config.settings["features_for_training"] = self.feature_selector.value
 
         if not self.exclude_labels_checkbox.disabled:
-            config.settings["exclude_labels"] = self.exclude_labels_checkbox.value
+            self.config.settings["exclude_labels"] = self.exclude_labels_checkbox.value
         else:
-            config.settings["exclude_labels"] = False
+            self.config.settings["exclude_labels"] = False
 
-        config.settings[
+        self.config.settings[
             "exclude_unknown_labels"
         ] = self.exclude_unknown_labels_checkbox.value
 
@@ -397,13 +402,13 @@ class ActiveLearningSettings(param.Parameterized):
             if label not in self.label_selector.value:
                 unclassified_labels.append(label)
 
-        config.settings["unclassified_labels"] = unclassified_labels
-        config.settings["scale_data"] = self.scale_features_checkbox.value
-        config.settings["feature_generation"] = self.feature_generator_selected
-        config.settings["test_set_file"] = self.test_set_checkbox.value
-        config.settings["confirmed"] = True
-        if "save_button" in config.settings.keys():
-            config.settings["save_button"].disabled = False
+        self.config.settings["unclassified_labels"] = unclassified_labels
+        self.config.settings["scale_data"] = self.scale_features_checkbox.value
+        self.config.settings["feature_generation"] = self.feature_generator_selected
+        self.config.settings["test_set_file"] = self.test_set_checkbox.value
+        self.config.settings["confirmed"] = True
+        if "save_button" in self.config.settings.keys():
+            self.config.settings["save_button"].disabled = False
 
         self.completed = True
 

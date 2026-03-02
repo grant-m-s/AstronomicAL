@@ -134,7 +134,8 @@ class WorkspaceManager:
         self._normalize_grid_state()
 
         panel_id = str(panel_id)
-        if panel_id not in (self.grid.keys or []):
+        keys = list(self.grid.keys or [])
+        if panel_id not in keys:
             try:
                 self.grid.close_key = ""
             except Exception:
@@ -142,23 +143,30 @@ class WorkspaceManager:
             self._panels.pop(panel_id, None)
             return
 
-        idx = list(self.grid.keys).index(panel_id)
+        idx = keys.index(panel_id)
 
         rec = self._panels.get(panel_id)
         view = rec.view if rec else None
         controller = rec.controller if rec else None
 
-        # If controller not explicitly stored, try to recover it from the view
+        # Recover controller from the view if not explicitly stored
         if controller is None and view is not None:
             controller = getattr(view, "_al_controller", None)
 
-        target = controller if controller is not None else view
+        # Dispose controller first (preferred), then view if it's different
+        def _safe_dispose(obj):
+            if obj is not None and hasattr(obj, "dispose"):
+                try:
+                    obj.dispose()
+                except Exception:
+                    pass
 
-        if target is not None and hasattr(target, "dispose"):
-            try:
-                target.dispose()
-            except Exception:
-                pass
+        if controller is not None:
+            _safe_dispose(controller)
+
+        # If view has its own dispose and isn't the same object, dispose it too.
+        if view is not None and view is not controller:
+            _safe_dispose(view)
 
         # Remove from layouts
         new_layouts = {}
@@ -167,9 +175,10 @@ class WorkspaceManager:
 
         self._panels.pop(panel_id, None)
 
+        # Update grid in one go
         self.grid.param.update(
-            keys=[k for k in self.grid.keys if k != panel_id],
-            objects=[o for i, o in enumerate(self.grid.objects) if i != idx],
+            keys=[k for k in keys if k != panel_id],
+            objects=[o for i, o in enumerate(self.grid.objects or []) if i != idx],
             layouts=new_layouts,
             close_key="",
         )
