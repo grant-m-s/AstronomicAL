@@ -25,7 +25,7 @@ from astronomicAL.extensions.astro_data_utility import VLASS_cutout, LoTSS_cutou
 import uuid
 import traceback
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Union, Iterable
 
 try:
     from astronomicAL.platform.events import Subscription
@@ -115,6 +115,7 @@ class CustomPlotClass(param.Parameterized):
         self._subscriptions: List[Subscription] = []
         self._jobs: List[_ManagedJob] = []
         self._bokeh_on_change: list[tuple[Any, str, Callable]] = []
+        self._param_watchers = []
 
         self._disposed = False
 
@@ -295,6 +296,11 @@ class CustomPlotClass(param.Parameterized):
         except Exception:
             pass
 
+        try:
+            self.remove_all_param_watches()
+        except Exception:
+            pass
+
         # 3) Remove column-selection callbacks / widgets if present
         if hasattr(self, "remove_column_selection"):
             try:
@@ -374,6 +380,48 @@ class CustomPlotClass(param.Parameterized):
             **func_kwargs,
         )
 
+    def add_param_watch(
+        self,
+        owner: Any,
+        callback: Callable,
+        what: Union[str, Iterable[str]],
+        *,
+        onlychanged: bool = True,
+        queued: bool = False,
+        precedence: int = 0,
+    ):
+        """
+        Register owner.param.watch(...) and track it for later cleanup.
+        Returns the Watcher object (or None on failure).
+        """
+        if owner is None or not hasattr(owner, "param"):
+            return None
+        try:
+            w = owner.param.watch(
+                callback,
+                what,
+                onlychanged=onlychanged,
+                queued=queued,
+                precedence=precedence,
+            )
+            self._param_watchers.append((owner, w))
+            return w
+        except Exception:
+            return None
+
+    def remove_all_param_watches(self) -> None:
+        """Idempotently unwatch everything added via add_param_watch()."""
+        for owner, w in list(getattr(self, "_param_watchers", [])):
+            try:
+                owner.param.unwatch(w)
+            except Exception:
+                pass
+        self._param_watchers.clear()
+
+    def add_param_watch_many(self, owners, callback, what="value", **kw):
+        for owner in owners:
+            self.add_param_watch(owner, callback, what, **kw)
+
     def watch_bokeh(self, model: Any, attr: str, callback: Callable) -> None:
         """
         Register a Bokeh on_change callback and track it for cleanup.
@@ -452,27 +500,26 @@ class CustomPlotClass(param.Parameterized):
         return column in self.df.columns
     
 
-    def get_column_list(self, excluded_columns = ["id_col", "ra_dec", "label_col"],
-                              excluded_types = ["object"], allowed_types = None):
-        """
-        Returns the list of columns used for panel.widgets.Selector according to their type
-        -----
-        excluded_columns : list of columns which are removed regardless of their type
-        allowed_types : list ["float", "numeric", "int"], if not None, only columns with this type are kept
-        excluded_types = list ["float", "object"] list, columns with this types are removed
-        """
+    def get_column_list(
+        self,
+        excluded_columns=("id_col", "ra_dec", "label_col"),
+        excluded_types=("object",),
+        allowed_types=None,
+    ):
+        cols = list(getattr(self.df, "columns", []))
 
-        cols = list(self.df.columns)
-        
+        # remove excluded columns by name or config alias
         for excluded_col in excluded_columns:
             col_name = self.config.settings.get(excluded_col, excluded_col)
             if col_name in cols:
-               cols.remove(col_name)
-        
+                cols.remove(col_name)
+
+        # type filtering
         if allowed_types:
-            cols = [col for col in cols if matches_type(self.df[col].dtype, allowed_types)]
+            cols = [c for c in cols if matches_type(self.df[c].dtype, allowed_types)]
         if excluded_types:
-            cols = [col for col in cols if not matches_type(self.df[col].dtype, excluded_types)]
+            cols = [c for c in cols if not matches_type(self.df[c].dtype, excluded_types)]
+
         return cols
 
 
@@ -527,7 +574,7 @@ class CustomPlotClass(param.Parameterized):
             If provided, checks within config.settings[settings_key].keys().
             Otherwise, checks directly against config.settings.
         """
-        current_cols = getattr(config.main_df, "columns", [])
+        current_cols = getattr(self.config.main_df, "columns", [])
         self.unknown_columns = []
 
         if settings_key is not None:
@@ -581,29 +628,6 @@ class CustomPlotClass(param.Parameterized):
                 except AttributeError:
                     pass
         return paths
-            
-    def run_multithread(self, function, func_kwargs=None, callback=None, allowed_exceptions=(Exception,)):
-        if func_kwargs is None:
-            func_kwargs = {}
-
-        def wrapper():
-            try:
-                result = function(**func_kwargs)
-                return result
-            except allowed_exceptions as e:
-                 print(f"[{self.__class__.__name__}] Exception in thread: {e}")
-            return None
-        
-        future = self.executor.submit(wrapper)
-
-        if callback:
-            current_doc = pn.state.curdoc
-            if current_doc is not None:
-                future.add_done_callback(lambda fut: current_doc.add_next_tick_callback(lambda: callback(fut)))
-            else:
-                print(f"[{self.__class__.__name__}] Warning: pn.state.curdoc was None when scheduling callback.")
-
-        return future
     
     @staticmethod
     def get_empty_image():
@@ -651,7 +675,8 @@ class CustomPlotClass(param.Parameterized):
             N = points_input.value
             self.plot(N)
         self.plot_settings_panel.objects = [points_input]
-        points_input.param.watch(update_points, 'value')
+
+        self.add_param_watch(points_input, update_points, what = "value")
         self.plot(points_input.value)
         return pn.Column(self.message_pane, self.figure, self.plot_settings_panel, 
                          sizing_mode="stretch_both", min_height = 450, styles={'background': 'lightgreen'})
@@ -911,21 +936,23 @@ class EuclidPlotClass(CustomPlotClass):
                                                        max_width = 80, button_type= "primary")
     
         
-        self.radius_input.param.watch(self._update_radius, "value")
-        self.stretching_input.param.watch(self._update_stretching, "value")
-        self.contrast_scaler.param.watch(self._general_parameter_callback, "value")  
-        self.scale_input.param.watch(self._general_parameter_callback, "value")  
-        self.filter_input.param.watch(self._general_parameter_callback, "value")
-        self.overplot_source_coords_widget.param.watch(self._general_parameter_callback, "value")
-        self.overplot_coords_widget.param.watch(self._overplot_coordinates_callback, "value")
-        self.contour_levels_input.param.watch(self._general_parameter_callback, "value")
-        self.contour_levels_scale_input.param.watch(self._general_parameter_callback, "value")
+        self.add_param_watch_many(
+            [self.contrast_scaler,
+            self.scale_input,
+            self.filter_input,
+            self.overplot_source_coords_widget,
+            self.contour_levels_input,
+            self.contour_levels_scale_input],
+            self._general_parameter_callback,
+            what="value",
+        )
 
-
-
+        self.add_param_watch(self.radius_input, self._update_radius, "value")
+        self.add_param_watch(self.stretching_input, self._update_stretching, "value")
+        self.add_param_watch(self.overplot_coords_widget, self._overplot_coordinates_callback, "value")
     
+        self.add_param_watch(self.environment_input, self._change_euclid_environment, "value")
 
-        self.environment_input.param.watch(self._change_euclid_environment, "value")
         self.confirm_login_button.on_click(self._confirm_login_credentials_cb)
         self.color_settings_button.on_click(self._open_color_settings_cb)
 
@@ -972,12 +999,19 @@ class EuclidPlotClass(CustomPlotClass):
                                                   step = 0.1, start = 0, end = 5, max_width = 100,
                                                   sizing_mode="stretch_both")
         
-        self.contrast_scaler_red.param.watch(self._color_specific_callabck, "value_throttled")  
-        self.contrast_scaler_green.param.watch(self._color_specific_callabck, "value_throttled")  
-        self.contrast_scaler_blue.param.watch(self._color_specific_callabck, "value_throttled")  
-        self.gamma_red_input.param.watch(self._color_specific_callabck, "value")
-        self.gamma_green_input.param.watch(self._color_specific_callabck, "value")
-        self.gamma_blue_input.param.watch(self._color_specific_callabck, "value")
+
+        self.add_param_watch_many(
+            [self.contrast_scaler_red, self.contrast_scaler_green, self.contrast_scaler_blue],
+            self._color_specific_callback,
+            what = "value_throttled",
+            )
+        
+        self.add_param_watch_many(
+            [self.gamma_red_input, self.gamma_green_input, self.gamma_blue_input],
+            self._color_specific_callback,
+            what = "value",
+            )
+
         
         return pn.Column(pn.Column(self.contrast_scaler_red, self.contrast_scaler_green, self.contrast_scaler_blue),
                          pn.Row(self.gamma_red_input, self.gamma_green_input, self.gamma_blue_input),
@@ -1021,7 +1055,7 @@ class EuclidPlotClass(CustomPlotClass):
         self.get_euclid_figure_hv(scaled_image, show_coordinates = self.overplot_source_coords_widget.value)
         self._update_image()
 
-    def _color_specific_callabck(self, event):
+    def _color_specific_callback(self, event):
         if self.filter == "Color":
             if hasattr(self.euclid_object, "plot_data"):
                 scaled_image = self._get_scaled_image()
@@ -1159,7 +1193,8 @@ class EuclidPlotClass(CustomPlotClass):
                                          cmap = "grey",
                                          )
         self.image_stream = hv.streams.Tap(source=image, x=np.nan, y=np.nan)
-        self.image_stream.param.watch(self._light_profile_callback, ["x"])
+
+        self.add_param_watch(self.image_stream, self._light_profile_callback, what=["x"])
         
         self.euclid_fig = [image]
 
@@ -1262,8 +1297,13 @@ class EuclidPlotClass(CustomPlotClass):
         layout = hv.Layout(plot_x + plot_y).cols(1).opts(sizing_mode = "stretch_both")
         row_stream = hv.streams.Tap(source=plot_x, x=np.nan, y=np.nan)
         col_stream = hv.streams.Tap(source=plot_y, x=np.nan, y=np.nan)
-        row_stream.param.watch(self._light_profile_callback_reverse, ["x"])
-        col_stream.param.watch(self._light_profile_callback_reverse, ["x"])
+        
+        self.add_param_watch_many(
+            [row_stream, col_stream],
+            self._light_profile_callback_reverse,
+            what= ["x"]
+        )
+
         self.figure.object = layout
     
 
@@ -1757,19 +1797,26 @@ class SpectrumPlotClass(CustomPlotClass):
         self.redshift_column_selector.disabled = not self._is_euclid_spec
 
       
-        self.retrieve_mode_button.param.watch(self._retrieve_mode_cb, "value")
-        self.max_separation_input.param.watch(self._max_separation_input_cb, "value")
-        self.link_to_cutout_checkbox.param.watch(self._link_to_cutout_cb, "value")
+        self.add_param_watch(self.retrieve_mode_button, self._retrieve_mode_cb, what="value")
+        self.add_param_watch(self.max_separation_input, self._max_separation_input_cb, what="value")
+        self.add_param_watch(self.link_to_cutout_checkbox, self._link_to_cutout_cb, what="value")
 
-        
-        self.plot_lines_checkbox.param.watch(self._general_parameter_cb, "value") 
-        self.plot_model_checkbox.param.watch(self._general_parameter_cb, "value") 
-        self.smoothing_function_input.param.watch(self._update_smoothing_cb, "value")
-        self.smoothing_window_input.param.watch(self._update_smoothing_cb, "value")
+        self.add_param_watch_many(
+            [self.plot_lines_checkbox, self.plot_model_checkbox],
+            self._general_parameter_cb,
+            "value"
+        )
+
+        self.add_param_watch_many(
+            [self.smoothing_function_input, self.smoothing_window_input],
+            self._update_smoothing_cb,
+            "value"
+        )
+
         self.query_redshift_button.on_click(self._query_redshift_cb)
-        self.redshift_input.param.watch(self._redshift_input_cb, "value")
-        self.redshift_column_selector.param.watch(self._redshift_column_selector_cb, "value")
-        
+
+        self.add_param_watch(self.redshift_input, self._redshift_input_cb, what="value")
+        self.add_param_watch(self.redshift_column_selector, self._redshift_column_selector_cb, what="value")
             
         self.plot_settings_panel = pn.Column(self.retrieve_mode_button, 
                                              pn.Row(self.max_separation_input, pn.Column(pn.Spacer(height=23), self.link_to_cutout_checkbox), align = "center"),
@@ -2114,7 +2161,8 @@ class SEDPlotClass(CustomPlotClass):
                 self.select_widgets[col].value = value
 
         master_select_widget = pn.widgets.Select(name= "Apply same units to all columns", options=available_units, max_height=120, sizing_mode = "stretch_width")
-        master_select_widget.param.watch(change_all_selections, "value")
+        
+        self.add_param_watch(master_select_widget, change_all_selections, "value")
 
         toolbar = self.get_toolbar(skip_button=skip_button, submit_button=submit_button)
 
@@ -2339,7 +2387,9 @@ class SEDPlotClass(CustomPlotClass):
         output_units = {"microJy" : "fnu", "erg/s/cm2" : "nufnu"}  #first one should be always microJy                                                                           
         self.unit_selector = pn.widgets.Select(name = "Output Units", options = output_units, max_width = 200, max_height = 40, 
                                                sizing_mode="stretch_both")
-        self.unit_selector.param.watch(self._update_plot, "value")                                                           
+        
+        self.add_param_watch(self.unit_selector, self._update_plot, "value")
+
         self.plot_settings_panel = pn.Column(self.unit_selector, visible = False)
                                                                                                                                                    
 
@@ -2478,7 +2528,8 @@ class RadioClass(CustomPlotClass):
         self.radius_input = pn.widgets.FloatInput(name = "Radius [arcsec]", value = self.radius, 
                                                   step = 1, start = 1, end = 100, max_width = 200,
                                                   sizing_mode="stretch_both", max_height =30)
-        self.radius_input.param.watch(self._update_radius, "value")
+        
+        self.add_param_watch(self.radius_input, self._update_radius, what="value")
         
         self.plot_settings_panel = pn.Column(self.radius_input, 
                                              scroll = True, visible = False)
@@ -2578,7 +2629,8 @@ class SDSSClass(CustomPlotClass):
         self.radius_input = pn.widgets.FloatInput(name = "Radius [arcsec]", value = self.radius, 
                                                   step = 1, start = 1, end = 100, max_width = 200,
                                                   sizing_mode="stretch_both", max_height =30)
-        self.radius_input.param.watch(self._update_radius, "value")
+        
+        self.add_param_watch(self.radius_input, self._update_radius, what="value")
         
         self.plot_settings_panel = pn.Column(self.radius_input, 
                                              scroll = True, visible = False)
@@ -2703,7 +2755,10 @@ class AladinClass(CustomPlotClass):
                                                  groups = {"X-rays" : xray_surveys,
                                                            "Optical/UV" : optical_surveys,
                                                            "IR" : ir_surveys})
-        self.survey_selector.param.watch(self._update_image, "value")
+        
+        self.add_param_watch(self.survey_selector, self._update_image, what="value")
+
+
         self.plot_settings_panel = pn.Column(self.survey_selector, 
                                              scroll = True, visible = False, min_height=50,max_height=80)
 
@@ -2808,6 +2863,11 @@ class EventMonitorClass(CustomPlotClass):
             sizing_mode="stretch_both",
         )
 
+        self.follow_toggle = pn.widgets.Checkbox(name="Follow newest", value=False)
+
+        self._events_df = pd.DataFrame(columns=["time", "topic", "payload"])
+        self._last_key = None
+
         self.status = pn.pane.Markdown("", sizing_mode="stretch_width")
 
         self.refresh_btn.on_click(lambda _e: self.refresh())
@@ -2824,34 +2884,72 @@ class EventMonitorClass(CustomPlotClass):
             self.status.object = "### Event bus not available on context."
             return
 
-        # Toggle trace if supported
         try:
             self.context.events.enable_trace(bool(self.trace_toggle.value))
         except Exception:
             pass
 
-        # Pull recent events
         n = int(self.limit_input.value or 200)
+
         try:
             events = self.context.events.recent_events(n)
         except Exception:
-            # If tracing not implemented, show a helpful message
             self.status.object = "### Event tracing not implemented on EventBus. Add recent_events()/enable_trace()."
             return
 
-        df = pd.DataFrame(
-            [
-                {
-                    "time": time.strftime("%H:%M:%S", time.localtime(t)),
-                    "topic": topic,
-                    "payload": (str(payload)[:240] if payload is not None else ""),
-                }
-                for (t, topic, payload) in events
-            ]
-        )
-        self.events_table.value = df
+        # Build rows in a stable way
+        rows = []
+        for (t, topic, payload) in events:
+            payload_str = (str(payload)[:240] if payload is not None else "")
+            rows.append({
+                "t": t,
+                "time": time.strftime("%H:%M:%S", time.localtime(t)),
+                "topic": topic,
+                "payload": payload_str,
+            })
 
-        # Pull subscriber counts
+        # Find only the new rows since last refresh
+        new_rows = []
+        if rows:
+            if self._last_key is None:
+                # first fill: set once (this will scroll to top once, at startup)
+                self._events_df = pd.DataFrame([{k: r[k] for k in ["time","topic","payload"]} for r in rows])
+                self.events_table.value = self._events_df
+                last = rows[-1]
+                self._last_key = (last["t"], last["topic"], last["payload"])
+            else:
+                # scan from the end to find last_key
+                last_t, last_topic, last_payload = self._last_key
+                idx = -1
+                for i in range(len(rows) - 1, -1, -1):
+                    r = rows[i]
+                    if (r["t"], r["topic"], r["payload"]) == (last_t, last_topic, last_payload):
+                        idx = i
+                        break
+
+                if idx == -1:
+                    # buffer mismatch (rollover changed / tracing restarted) -> reset table once
+                    self._events_df = pd.DataFrame([{k: r[k] for k in ["time","topic","payload"]} for r in rows])
+                    self.events_table.value = self._events_df
+                else:
+                    # append only truly new rows
+                    new_rows = rows[idx + 1 :]
+
+                    if new_rows:
+                        append_df = pd.DataFrame([{k: r[k] for k in ["time","topic","payload"]} for r in new_rows])
+
+                        # keep our buffer and enforce max size n
+                        self._events_df = pd.concat([self._events_df, append_df], ignore_index=True)
+                        if len(self._events_df) > n:
+                            self._events_df = self._events_df.iloc[-n:].reset_index(drop=True)
+
+                        # stream to Tabulator without resetting scroll
+                        # rollover keeps Tabulator in sync too
+                        self.events_table.stream(append_df, rollover=n, follow=bool(self.follow_toggle.value))
+
+                        last = new_rows[-1]
+                        self._last_key = (last["t"], last["topic"], last["payload"])
+
         try:
             subs = self.context.events.subscribers()
             df2 = pd.DataFrame([{"topic": k, "subscribers": v} for k, v in sorted(subs.items())])
@@ -2859,11 +2957,11 @@ class EventMonitorClass(CustomPlotClass):
         except Exception:
             pass
 
-        self.status.object = f"### Showing last {len(df)} events • {time.strftime('%H:%M:%S')}"
+        self.status.object = f"### Showing last {len(self._events_df)} events • {time.strftime('%H:%M:%S')}"
 
     def get_layout(self):
         return pn.Column(
-            pn.Row(self.refresh_btn, self.trace_toggle, self.limit_input),
+            pn.Row(self.refresh_btn, self.trace_toggle, self.follow_toggle, self.limit_input),
             self.status,
             pn.pane.Markdown("#### Recent published events"),
             self.events_table,
