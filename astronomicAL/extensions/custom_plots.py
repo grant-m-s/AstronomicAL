@@ -73,6 +73,10 @@ def get_customplot_dict():
             data, src, close_button, extra_features=[], context=context
         ),
 
+        "spec_analyser": lambda data, src, close_button, context : SpecAnalyser(
+            data, src, close_button, extra_features=[], context=context
+        )
+
         #"SDSS Cutout"  : lambda data, src, close_button, context : SDSSClass(data, src, close_button,
         #                                                    extra_features=[], dataset="SDSS", context=context)                                                                                                      
 
@@ -2980,4 +2984,1091 @@ class EventMonitorClass(CustomPlotClass):
             pass
 
         # call base disposal (jobs/events/bokeh watchers)
+        super().dispose()
+
+
+# Constants and Configuration
+EMISSION_LINES = {
+    'Lyalpha': 1215.67,
+    '[OII]': 3727.09,
+    'Hbeta': 4861.32,
+    '[OIII]4959': 4958.91,
+    '[OIII]5007': 5006.84,
+    'Halpha': 6562.80,
+    '[SII]6716': 6716.44,
+    '[SII]6731': 6730.82
+}
+
+CLASSIFICATION_COLOURS = {
+    '[OII]': 'deep sky blue',
+    '[OIII]5007': 'green',
+    'Halpha': 'blue',
+    'Unclear': 'orange',
+    'Noisy/Bad': 'red',
+    'Unclassified': 'black'
+}
+
+class AnalysisDefaults:
+    SIGNAL_WINDOW_WIDTH = 50
+    NOISE_OFFSET = 100
+    NOISE_WINDOW_WIDTH = 150
+    PEAK_HEIGHT_THRESHOLD_SIGMA = 2
+    PEAK_MIN_DISTANCE = 30
+    CONTINUUM_BUFFER = 20
+    UPDATE_DEBOUNCE_MS = 250
+    # Euclid-specific: typical resolution R~380 at 1.1-2.0 microns
+    MIN_LINE_WIDTH_ANGSTROM = 2.0  # Minimum physical line width
+    MAX_LINE_WIDTH_ANGSTROM = 100.0  # Maximum to catch broad lines
+
+class SpecAnalyser(CustomPlotClass):
+
+    EMISSION_LINES = {
+        "OII": 3727.0,
+        "Hbeta": 4861.0,
+        "OIII": 5007.0,
+        "Halpha": 6563.0,
+    }
+
+    def __init__(self, data, src, close_button=None, extra_features=None, context=None, **params):
+        super().__init__(
+            data=data,
+            src=src,
+            close_button=close_button,
+            extra_features=extra_features,
+            context=context,
+            panel_name="SpecAnalyser",
+            **params,
+        )
+
+        import logging
+
+        from bokeh.events import Tap
+        from bokeh.models import (
+            BoxAnnotation,
+            ColumnDataSource,
+            CrosshairTool,
+            HoverTool,
+            Label,
+            LabelSet,
+        )
+        from bokeh.plotting import figure
+
+        from astronomicAL.extensions.gui_analyser import (
+            AnalysisError,
+            AnalysisRegions,
+            PlotState,
+            ResultsManager,
+            SpectrumAnalyser,
+            SpectrumData,
+        )
+
+        self.logging = logging
+        self.np = np
+        self.pd = pd
+        self.pn = pn
+
+        self.AnalysisError = AnalysisError
+        self.SpectrumData = SpectrumData
+
+        self.subscribe("astro.spectrum.updated", self._spectra_updated)
+
+        self.doc = pn.state.curdoc
+
+        # -------------------------
+        # State
+        # -------------------------
+        self._spectra_cache = {}
+        self._current_spec_key = None
+        self._current_spectrum_data = None
+        self._regions = AnalysisRegions()
+        self._plot_state = PlotState()
+        self._locked_fits = []
+        self._analysis_results = None
+        self._continuum_model = None
+        self._continuum = None
+        self._corrected_flux = None
+        self._analyser = SpectrumAnalyser()
+        self._results_manager = ResultsManager()
+        self._pending_region_click = None
+
+        self._signal_region_defined = False
+        self._noise_region_defined = False
+
+        # -------------------------
+        # Data sources
+        # -------------------------
+        self.raw_source = ColumnDataSource(data=dict(wavelength=[], flux=[]))
+        self.continuum_source = ColumnDataSource(data=dict(wavelength=[], flux=[]))
+        self.corrected_source = ColumnDataSource(data=dict(wavelength=[], flux=[]))
+        self.fit_source = ColumnDataSource(data=dict(wavelength=[], flux=[]))
+        self.locked_fit_source = ColumnDataSource(data=dict(wavelength=[], flux=[]))
+        self.residuals_source = ColumnDataSource(data=dict(wavelength=[], flux=[]))
+
+        self.emission_line_source = ColumnDataSource(
+            data=dict(x=[], y0=[], y1=[], y=[], label=[])
+        )
+
+        # -------------------------
+        # Figures
+        # -------------------------
+        from bokeh.models import HoverTool, TapTool, WheelZoomTool, PanTool, ResetTool, SaveTool, CrosshairTool
+
+        source_tap = TapTool()
+        source_wheel = WheelZoomTool()
+
+        self.source_plot = figure(
+            height=280,
+            title="Spectrum",
+            tools=[CrosshairTool(), PanTool(), ResetTool(), SaveTool(), source_wheel, source_tap],
+            active_scroll=source_wheel,
+            active_tap=source_tap,
+            output_backend="webgl",
+            sizing_mode="stretch_width",
+            toolbar_location="above",
+        )
+
+        residuals_tap = TapTool()
+        residuals_wheel = WheelZoomTool()
+
+        self.residuals_plot = figure(
+            height=280,
+            title="Residuals / Zoomed View",
+            tools=[CrosshairTool(), PanTool(), ResetTool(), SaveTool(), residuals_wheel, residuals_tap],
+            active_scroll=residuals_wheel,
+            active_tap=residuals_tap,
+            x_range=self.source_plot.x_range,
+            output_backend="webgl",
+            sizing_mode="stretch_width",
+            toolbar_location="above",
+        )
+        self.residuals_plot.xaxis.axis_label = "Wavelength (Å)"
+        self.residuals_plot.yaxis.axis_label = "Flux"
+
+        self.spectrum_plot = self.source_plot
+
+        # -------------------------
+        # Region overlays
+        # -------------------------
+        self.signal_box = BoxAnnotation(fill_alpha=0.18, fill_color="green", visible=False)
+        self.noise_box = BoxAnnotation(fill_alpha=0.15, fill_color="gray", visible=False)
+        self.residuals_plot.add_layout(self.signal_box)
+        self.residuals_plot.add_layout(self.noise_box)
+
+        # -------------------------
+        # Renderers
+        # -------------------------
+        self.raw_renderer = self.source_plot.line(
+            "wavelength", "flux", source=self.raw_source, line_width=1, line_alpha=0.5, legend_label="Original Spectrum"
+        )
+        self.continuum_renderer = self.source_plot.line(
+            "wavelength", "flux", source=self.continuum_source, line_width=2, line_dash="dashed", legend_label="Continuum Fit"
+        )
+        self.corrected_renderer = self.source_plot.line(
+            "wavelength", "flux", source=self.corrected_source, line_width=1, legend_label="Continuum Subtracted"
+        )
+        self.locked_renderer = self.source_plot.line(
+            "wavelength", "flux", source=self.locked_fit_source, line_width=2, legend_label="Locked Fits"
+        )
+
+        self.residuals_renderer = self.residuals_plot.line(
+            "wavelength", "flux", source=self.residuals_source, line_width=1, legend_label="Residual / Corrected Flux"
+        )
+        self.fit_renderer = self.residuals_plot.line(
+            "wavelength", "flux", source=self.fit_source, line_width=2, line_dash="dashed", legend_label="Fit"
+        )
+
+        self.emission_renderer = self.source_plot.segment(
+            x0="x",
+            y0="y0",
+            x1="x",
+            y1="y1",
+            source=self.emission_line_source,
+            line_dash="dashed",
+            line_alpha=0.6,
+            legend_label="Emission Lines",
+        )
+        self.emission_label_set = LabelSet(
+            x="x",
+            y="y",
+            text="label",
+            source=self.emission_line_source,
+            angle=1.5708,
+            text_font_size="8pt",
+        )
+        self.source_plot.add_layout(self.emission_label_set)
+
+        for plot in (self.source_plot, self.residuals_plot):
+            plot.legend.click_policy = "hide"
+            plot.add_tools(HoverTool(tooltips=[("Wavelength", "@wavelength"), ("Flux", "@flux")]))
+
+        # Fit / status annotations
+        self.fit_status_label = Label(
+            x=10,
+            y=10,
+            x_units="screen",
+            y_units="screen",
+            text="",
+            text_color="red",
+            text_font_size="11pt",
+            visible=False,
+        )
+        self.residuals_plot.add_layout(self.fit_status_label)
+
+        # -------------------------
+        # UI
+        # -------------------------
+
+        SIDEBAR_WIDTH = 380
+        FIELD_WIDTH = 340
+        SMALL_FIELD_WIDTH = 120
+
+        LABEL_HEIGHT = 20
+        LABEL_MARGIN_TOP = 6
+        LABEL_MARGIN_BOTTOM = 4
+        BLOCK_MARGIN_BOTTOM = 14
+
+
+        def field_label(text):
+            return pn.pane.HTML(
+                f"""
+                <div style="
+                    font-weight: 600;
+                    font-size: 13px;
+                    line-height: {LABEL_HEIGHT}px;
+                    padding-left: 2px;
+                    margin: 0;
+                ">
+                    {text}
+                </div>
+                """,
+                width=FIELD_WIDTH,
+                height=LABEL_HEIGHT,
+                margin=(LABEL_MARGIN_TOP, 0, LABEL_MARGIN_BOTTOM, 0),
+                sizing_mode="fixed",
+            )
+
+
+        def field_block(text, widget, bottom=BLOCK_MARGIN_BOTTOM):
+            return pn.Column(
+                field_label(text),
+                pn.Row(
+                    widget,
+                    width=FIELD_WIDTH,
+                    margin=(0, 0, 0, 0),
+                    sizing_mode="fixed",
+                ),
+                width=FIELD_WIDTH,
+                margin=(0, 0, bottom, 0),
+                sizing_mode="fixed",
+            )
+
+        self.redshift_slider = pn.widgets.FloatSlider(
+            name="",
+            value=0.0,
+            start=0.0,
+            end=5.0,
+            step=0.01,
+            width=FIELD_WIDTH,
+            margin=0,
+        )
+
+        self.redshift_box = pn.widgets.FloatInput(
+            name="",
+            value=0.0,
+            start=0.0,
+            end=5.0,
+            step=0.001,
+            width=SMALL_FIELD_WIDTH,
+            margin=0,
+        )
+
+        self.finder_mode_checkbox = pn.widgets.Checkbox(
+            name="",
+            value=False,
+            width=24,
+            margin=0,
+        )
+
+        self.finder_mode_row = pn.Row(
+            self.finder_mode_checkbox,
+            pn.pane.HTML(
+                "<div style='line-height:24px; padding-left:6px;'>Finder Mode</div>",
+                width=FIELD_WIDTH - 30,
+                height=24,
+                margin=0,
+            ),
+            width=FIELD_WIDTH,
+            height=24,
+            margin=(0, 0, 16, 0),
+            sizing_mode="fixed",
+        )
+
+        self.plot_settings_checkbox = pn.widgets.CheckBoxGroup(
+            name="",
+            value=["Show original spectrum", "Show continuum subtracted spectrum"],
+            options=[
+                "Show original spectrum",
+                "Show continuum subtracted spectrum",
+                "Show continuum fit",
+            ],
+            inline=False,
+            width=FIELD_WIDTH,
+            margin=0,
+        )
+
+        self.fitting_mode_buttons = pn.widgets.RadioButtonGroup(
+            name="",
+            value="Single fit",
+            options=["Single fit", "Multiline fit"],
+            button_type="default",
+            width=FIELD_WIDTH,
+            margin=0,
+        )
+
+        self.line_name_input = pn.widgets.TextInput(
+            name="",
+            placeholder="Line Name",
+            width=FIELD_WIDTH,
+            margin=0,
+        )
+
+        self.line_profile_selector = pn.widgets.Select(
+            name="",
+            options=["Gaussian", "Lorentzian", "Voigt"],
+            value="Gaussian",
+            width=FIELD_WIDTH,
+            margin=0,
+        )
+
+        self.line_name_selector = pn.widgets.Select(
+            name="",
+            options=self.EMISSION_LINES,
+            value=3727.0,
+            width=FIELD_WIDTH,
+            margin=0,
+        )
+
+        self.select_region_buttons = pn.widgets.RadioButtonGroup(
+            name="",
+            value=None,
+            options=["Signal region", "Noise region"],
+            button_type="default",
+            width=FIELD_WIDTH,
+            margin=0,
+        )
+
+        self.available_spectra = pn.widgets.Select(
+            name="",
+            options=[],
+            width=FIELD_WIDTH,
+            margin=0,
+        )
+
+        self.spectra_number_message = pn.widgets.StaticText(
+            name="",
+            value="",
+            width=FIELD_WIDTH,
+            margin=0,
+        )
+
+        self.fit_button = pn.widgets.Button(
+            name="Fit and Lock",
+            button_type="success",
+            width=FIELD_WIDTH,
+            height=38,
+            margin=(0, 0, 16, 0),
+        )
+
+        self.reset_button = pn.widgets.Button(
+            name="Reset fit",
+            button_type="warning",
+            width=FIELD_WIDTH,
+            height=38,
+            margin=(0, 0,  16, 0),
+        )
+
+        self.undo_lock_button = pn.widgets.Button(
+            name="Undo last lock",
+            button_type="default",
+            width=FIELD_WIDTH,
+            height=38,
+            margin=(0, 0, 16, 0),
+        )
+
+        self.status_message = pn.pane.Alert(
+            "",
+            alert_type="info",
+            visible=False,
+            width=FIELD_WIDTH,
+            margin=(0, 0, 16, 0),
+        )
+
+        self.derived_properties_table = pn.pane.DataFrame(
+            self.pd.DataFrame(
+                columns=[
+                    "Line",
+                    "SNR",
+                    "Flux Integral",
+                    "FWHM (obs, Å)",
+                    "EW (Å)",
+                ]
+            ),
+            width=FIELD_WIDTH,
+            height=190,
+            sizing_mode="fixed",
+            margin=(0, 0, 0, 0),
+        )
+
+        self.comments_input = pn.widgets.TextAreaInput(
+            name="",
+            placeholder="Comments",
+            height=120,
+            width=FIELD_WIDTH,
+            margin=0,
+        )
+
+        analysis_form = pn.WidgetBox(
+            pn.Spacer(height=10),
+            field_block("Redshift value", self.redshift_box, bottom=16),
+            field_block("Redshift slider", self.redshift_slider, bottom=18),
+            self.finder_mode_row,
+            field_block("Plot settings", self.plot_settings_checkbox, bottom=18),
+            field_block("Fitting mode", self.fitting_mode_buttons, bottom=18),
+            field_block("Line name", self.line_name_input, bottom=16),
+            field_block("Line profile", self.line_profile_selector, bottom=16),
+            field_block("Go to line", self.line_name_selector, bottom=16),
+            field_block("Region selection", self.select_region_buttons, bottom=18),
+            self.fit_button,
+            self.reset_button,
+            self.undo_lock_button,
+            field_label("Derived properties"),
+            pn.Spacer(height=4),
+            self.derived_properties_table,
+            pn.Spacer(height=18),
+            field_block("Comments", self.comments_input, bottom=16),
+            self.status_message,
+            width=SIDEBAR_WIDTH,
+            sizing_mode="fixed",
+        )
+
+        self.analysis_tab = pn.Column(
+            analysis_form,
+            width=SIDEBAR_WIDTH,
+            min_width=SIDEBAR_WIDTH,
+            max_width=SIDEBAR_WIDTH,
+            height=700,
+            scroll=True,
+            sizing_mode="fixed",
+        )
+
+        self.settings_tabs = pn.Tabs(
+            ("Analysis", self.analysis_tab),
+            width=SIDEBAR_WIDTH,
+            min_width=SIDEBAR_WIDTH,
+            max_width=SIDEBAR_WIDTH,
+            sizing_mode="fixed",
+            dynamic=False,
+        )
+        # -------------------------
+        # Wiring
+        # -------------------------
+        self.available_spectra.param.watch(self._on_spectrum_selected, "value")
+        self.redshift_slider.link(self.redshift_box, value="value")
+        self.redshift_box.link(self.redshift_slider, value="value")
+        self.redshift_slider.param.watch(self._on_redshift_changed, "value")
+        self.plot_settings_checkbox.param.watch(self._on_plot_settings_changed, "value")
+        self.line_name_selector.param.watch(self._on_line_selected, "value")
+        self.select_region_buttons.param.watch(self._on_region_mode_changed, "value")
+
+        self.fit_button.on_click(self._on_fit_clicked)
+        self.reset_button.on_click(self._on_reset_clicked)
+        self.undo_lock_button.on_click(self._on_undo_lock_clicked)
+
+        self.residuals_plot.on_event(Tap, self._on_plot_tap)
+
+        self._on_plot_settings_changed(None)
+        self._update_region_overlays()
+        self._update_results_table(None)
+        self._set_status("", visible=False)
+
+    # ------------------------------------------------------------------
+    # Data conversion
+    # ------------------------------------------------------------------
+    def _artifact_to_spectrum_data(self, spec, source_name):
+        s0 = spec["spectra"][0]
+
+        wv = self.np.asarray(s0["wavelength"], dtype=float)
+        flux = self.np.asarray(s0["flux"], dtype=float)
+
+        finite = self.np.isfinite(wv) & self.np.isfinite(flux)
+
+        flux_err = None
+        if "flux_err" in s0:
+            arr = self.np.asarray(s0["flux_err"], dtype=float)
+            flux_err = arr[finite]
+
+        lsf_var = None
+        if "lsf_var" in s0:
+            arr = self.np.asarray(s0["lsf_var"], dtype=float)
+            lsf_var = arr[finite]
+
+        return self.SpectrumData(
+            wv=wv[finite],
+            flux=flux[finite],
+            flux_err=flux_err,
+            lsf_var=lsf_var,
+            source_id=s0.get("id", source_name),
+            error=None,
+        )
+
+    # ------------------------------------------------------------------
+    # External event handling
+    # ------------------------------------------------------------------
+    def _spectra_updated(self, topic, payload):
+        active_dataset_id = "default"
+        spectra_by_source = {}
+
+        for src_name in ("DESI", "SDSS", "EuclidSpec"):
+            refs = self.context.artifacts.find(
+                type="astro.spectrum",
+                dataset_id=active_dataset_id,
+                params_subset={"source": src_name},
+            )
+            if refs:
+                spec = self.context.artifacts.get(refs[0].artifact_id)
+                spectra_by_source[src_name] = spec
+
+        avail_spectra = list(spectra_by_source.keys())
+
+        def update_models():
+            self._spectra_cache = spectra_by_source
+            self.available_spectra.options = avail_spectra
+
+            if not avail_spectra:
+                self.spectra_number_message.value = "No available spectra for this source."
+                self._clear_all_sources()
+                self._current_spec_key = None
+                self._current_spectrum_data = None
+                self._update_emission_lines()
+                self._update_results_table(None)
+                self._set_status("No available spectra for this source.", level="warning", visible=True)
+                return
+
+            self.spectra_number_message.value = (
+                "Only one available spectrum for this source."
+                if len(avail_spectra) == 1
+                else "More than one available spectrum for this source."
+            )
+
+            selected = (
+                self.available_spectra.value
+                if self.available_spectra.value in avail_spectra
+                else avail_spectra[0]
+            )
+            self.available_spectra.value = selected
+            self._load_selected_spectrum(selected)
+            self._set_status("", visible=False)
+
+        self.doc.add_next_tick_callback(update_models)
+
+    # ------------------------------------------------------------------
+    # Source / plot state updates
+    # ------------------------------------------------------------------
+    def _clear_all_sources(self):
+        empty = {"wavelength": [], "flux": []}
+        self.raw_source.data = empty
+        self.corrected_source.data = empty
+        self.continuum_source.data = empty
+        self.residuals_source.data = empty
+        self.fit_source.data = empty
+        self.locked_fit_source.data = empty
+        self.emission_line_source.data = dict(x=[], y0=[], y1=[], y=[], label=[])
+
+    def _load_selected_spectrum(self, selected):
+        self._current_spec_key = selected
+        spec = self._spectra_cache[selected]
+        spectrum_data = self._artifact_to_spectrum_data(spec, selected)
+        self._current_spectrum_data = spectrum_data
+
+        raw_data = {
+            "wavelength": spectrum_data.wv.tolist(),
+            "flux": spectrum_data.flux.tolist(),
+        }
+
+        self.raw_source.data = raw_data
+        self.residuals_source.data = raw_data.copy()
+        self.corrected_source.data = {"wavelength": [], "flux": []}
+        self.continuum_source.data = {"wavelength": [], "flux": []}
+        self.fit_source.data = {"wavelength": [], "flux": []}
+        self.locked_fit_source.data = {"wavelength": [], "flux": []}
+
+        self._analysis_results = None
+        self._continuum_model = None
+        self._continuum = None
+        self._corrected_flux = None
+        self._locked_fits = []
+
+        self._update_emission_lines()
+
+        self._signal_region_defined = False
+        self._noise_region_defined = False
+
+        self._update_region_overlays()
+        self._update_results_table(None)
+        self._clear_fit_status()
+
+        if spectrum_data.wv.size:
+            self.residuals_plot.x_range.start = float(spectrum_data.wv.min())
+            self.residuals_plot.x_range.end = float(spectrum_data.wv.max())
+
+    def _update_region_overlays(self):
+        if self._signal_region_defined:
+            self.signal_box.left = float(self._regions.signal_start)
+            self.signal_box.right = float(self._regions.signal_end)
+            self.signal_box.visible = True
+        else:
+            self.signal_box.visible = False
+            self.signal_box.left = None
+            self.signal_box.right = None
+
+        if self._noise_region_defined:
+            self.noise_box.left = float(self._regions.noise_start)
+            self.noise_box.right = float(self._regions.noise_end)
+            self.noise_box.visible = True
+        else:
+            self.noise_box.visible = False
+            self.noise_box.left = None
+            self.noise_box.right = None
+
+    def _update_emission_lines(self):
+        if self._current_spectrum_data is None or self._current_spectrum_data.wv.size == 0:
+            self.emission_line_source.data = dict(x=[], y0=[], y1=[], y=[], label=[])
+            return
+
+        wv = self._current_spectrum_data.wv
+        flux = self._current_spectrum_data.flux
+        z = float(self.redshift_slider.value)
+
+        wv_min, wv_max = float(wv.min()), float(wv.max())
+        y0 = float(self.np.nanmin(flux))
+        y1 = float(self.np.nanmax(flux))
+        if y0 == y1:
+            y1 = y0 + 1.0
+        y_text = y0 + 0.80 * (y1 - y0)
+
+        xs, ys0, ys1, ys_text, labels = [], [], [], [], []
+        for name, rest_wl in self.EMISSION_LINES.items():
+            obs_wl = rest_wl * (1.0 + z)
+            if wv_min <= obs_wl <= wv_max:
+                xs.append(obs_wl)
+                ys0.append(y0)
+                ys1.append(y1)
+                ys_text.append(y_text)
+                labels.append(name)
+
+        self.emission_line_source.data = dict(
+            x=xs,
+            y0=ys0,
+            y1=ys1,
+            y=ys_text,
+            label=labels,
+        )
+
+    def _rebuild_locked_fit_source(self):
+        if self._current_spectrum_data is None or not self._locked_fits:
+            self.locked_fit_source.data = {"wavelength": [], "flux": []}
+            return
+
+        wv = self._current_spectrum_data.wv
+        total = self.np.zeros_like(wv, dtype=float)
+
+        for fit_result in self._locked_fits:
+            model = fit_result.get("model")
+            if model is not None:
+                total += model(wv)
+
+        self.locked_fit_source.data = {
+            "wavelength": wv.tolist(),
+            "flux": total.tolist(),
+        }
+
+    def _update_results_table(self, results):
+        cols = [
+            "Line",
+            "SNR",
+            "Flux Integral",
+            "FWHM (obs, Å)",
+            "FWHM (int, Å)",
+            "FWHM (km/s)",
+            "EW (Å)",
+            "χ² reduced",
+        ]
+
+        if not results or results.get("fit_failed"):
+            df = self.pd.DataFrame(columns=cols)
+        else:
+            df = self.pd.DataFrame([{
+                "Line": self.line_name_input.value or "Unknown",
+                "SNR": results.get("snr"),
+                "Flux Integral": results.get("flux_integral"),
+                "FWHM (obs, Å)": results.get("fwhm_obs_A"),
+                "FWHM (int, Å)": results.get("fwhm_int_A"),
+                "FWHM (km/s)": results.get("fwhm_kms"),
+                "EW (Å)": results.get("ew"),
+                "χ² reduced": results.get("chi_squared_red"),
+            }])
+
+        self.derived_properties_table.object = df
+
+    def _set_status(self, text="", level="info", visible=False):
+        self.status_message.object = text
+        self.status_message.alert_type = level
+        self.status_message.visible = visible
+
+    def _show_fit_status(self, text):
+        self.fit_status_label.text = text
+        self.fit_status_label.visible = True
+
+    def _clear_fit_status(self):
+        self.fit_status_label.text = ""
+        self.fit_status_label.visible = False
+
+    # ------------------------------------------------------------------
+    # Callbacks
+    # ------------------------------------------------------------------
+    def _on_spectrum_selected(self, event):
+        if not event.new or event.new not in self._spectra_cache:
+            return
+        self._load_selected_spectrum(event.new)
+
+    def _on_plot_settings_changed(self, event):
+        selected = set(self.plot_settings_checkbox.value or [])
+
+        self._plot_state.show_original = "Show original spectrum" in selected
+        self._plot_state.show_continuum_sub = "Show continuum subtracted spectrum" in selected
+        self._plot_state.show_continuum = "Show continuum fit" in selected
+
+        self.raw_renderer.visible = self._plot_state.show_original
+        self.corrected_renderer.visible = self._plot_state.show_continuum_sub
+        self.continuum_renderer.visible = self._plot_state.show_continuum
+
+    def _on_redshift_changed(self, event):
+        self._update_emission_lines()
+
+    def _on_line_selected(self, event):
+        if event.new is None or self._current_spectrum_data is None:
+            return
+
+        z = float(self.redshift_slider.value)
+        obs = float(event.new) * (1.0 + z)
+        self.residuals_plot.x_range.start = obs - 100.0
+        self.residuals_plot.x_range.end = obs + 100.0
+
+    def _on_region_mode_changed(self, event):
+        self._pending_region_click = None
+        if event.new:
+            self._set_status(
+                f"{event.new}: click two positions on the residual plot to define start and end.",
+                level="info",
+                visible=True,
+            )
+        else:
+            self._set_status("", visible=False)
+
+    def _on_plot_tap(self, event):
+        if not self.select_region_buttons.value:
+            self._set_status(
+                "Choose 'Signal region' or 'Noise region' first, then click twice on the residual plot.",
+                level="warning",
+                visible=True,
+            )
+            return
+
+        if event.x is None:
+            self._set_status(
+                "Click inside the residual plot frame to define a region.",
+                level="warning",
+                visible=True,
+            )
+            return
+
+        x = float(event.x)
+
+        if self._current_spectrum_data is None or self._current_spectrum_data.wv.size == 0:
+            self._set_status(
+                "No spectrum loaded.",
+                level="warning",
+                visible=True,
+            )
+            return
+
+        if self._pending_region_click is None:
+            self._pending_region_click = x
+            self._set_status(
+                f"{self.select_region_buttons.value}: first edge set at {x:.2f}. Click the second edge.",
+                level="info",
+                visible=True,
+            )
+            return
+
+        x0 = self._pending_region_click
+        x1 = x
+        left, right = sorted([x0, x1])
+
+        if self.select_region_buttons.value == "Signal region":
+            self._regions.signal_start = left
+            self._regions.signal_end = right
+            self._signal_region_defined = True
+
+        elif self.select_region_buttons.value == "Noise region":
+            self._regions.noise_start = left
+            self._regions.noise_end = right
+            self._noise_region_defined = True
+
+        self._pending_region_click = None
+        chosen_mode = self.select_region_buttons.value
+        self.select_region_buttons.value = None
+
+        self._update_region_overlays()
+
+        self._set_status(
+            f"{chosen_mode} updated: start={left:.2f}, end={right:.2f}",
+            level="success",
+            visible=True,
+        )
+
+    # ------------------------------------------------------------------
+    # Continuum / fitting
+    # ------------------------------------------------------------------
+    def _estimate_continuum(self, spectrum_data):
+
+        wv = spectrum_data.wv
+        flux = spectrum_data.flux
+
+        if wv.size < 2:
+            return np.poly1d([0.0, float(np.nanmedian(flux)) if flux.size else 0.0])
+
+        mask_signal = (wv >= self._regions.signal_start) & (wv <= self._regions.signal_end)
+        fit_mask = ~mask_signal
+
+        if fit_mask.sum() < 2:
+            fit_mask = np.ones_like(wv, dtype=bool)
+
+        coeffs = np.polyfit(wv[fit_mask], flux[fit_mask], deg=1)
+        return np.poly1d(coeffs)
+
+    def _build_residual_flux(self):
+        if self._current_spectrum_data is None:
+            return None
+
+        if self._corrected_flux is not None:
+            residual_flux = self._corrected_flux.copy()
+        else:
+            residual_flux = self._current_spectrum_data.flux.copy()
+
+        if self._locked_fits:
+            total_locked = self.np.zeros_like(residual_flux)
+            for fit_result in self._locked_fits:
+                model = fit_result.get("model")
+                if model is not None:
+                    total_locked += model(self._current_spectrum_data.wv)
+            residual_flux = residual_flux - total_locked
+
+        return residual_flux
+
+    def _on_fit_clicked(self, event):
+        if self._current_spectrum_data is None:
+            self._set_status("No spectrum loaded.", level="warning", visible=True)
+            return
+
+        try:
+            if not self._regions.is_valid():
+                raise self.AnalysisError("Invalid region definitions.")
+
+            continuum_model = self._estimate_continuum(self._current_spectrum_data)
+            continuum = continuum_model(self._current_spectrum_data.wv)
+            corrected_flux = self._current_spectrum_data.flux - continuum
+
+            self._current_spectrum_data.continuum = continuum
+            self._current_spectrum_data.corrected_flux = corrected_flux
+
+            self._continuum_model = continuum_model
+            self._continuum = continuum
+            self._corrected_flux = corrected_flux
+
+            self.continuum_source.data = {
+                "wavelength": self._current_spectrum_data.wv.tolist(),
+                "flux": continuum.tolist(),
+            }
+            self.corrected_source.data = {
+                "wavelength": self._current_spectrum_data.wv.tolist(),
+                "flux": corrected_flux.tolist(),
+            }
+
+            results = self._analyser.analyse(
+                self._current_spectrum_data,
+                self._regions,
+                self.line_profile_selector.value,
+                continuum_model,
+                corrected_flux,
+            )
+            self._analysis_results = results
+
+            mask_signal = (
+                (self._current_spectrum_data.wv >= self._regions.signal_start) &
+                (self._current_spectrum_data.wv <= self._regions.signal_end)
+            )
+            x_fit = self._current_spectrum_data.wv[mask_signal]
+            y_fit = results["model"](x_fit)
+
+            self.fit_source.data = {
+                "wavelength": x_fit.tolist(),
+                "flux": y_fit.tolist(),
+            }
+
+            lock_record = dict(results)
+            lock_record["line_name"] = self.line_name_input.value or "Unknown"
+            lock_record["comment"] = self.comments_input.value
+            lock_record["z"] = float(self.redshift_slider.value)
+            lock_record["classification"] = "locked_fit"
+            lock_record["model_name"] = self.line_profile_selector.value
+            self._locked_fits.append(lock_record)
+
+            self._results_manager.add_result({
+                "source_id": results.get("source_id"),
+                "classification": "locked_fit",
+                "z": float(self.redshift_slider.value),
+                "flux_integral": results.get("flux_integral"),
+                "snr": results.get("snr"),
+                "fwhm_obs_A": results.get("fwhm_obs_A"),
+                "fwhm_int_A": results.get("fwhm_int_A"),
+                "fwhm_kms": results.get("fwhm_kms"),
+                "ew": results.get("ew"),
+                "chi_squared_red": results.get("chi_squared_red"),
+                "signal_range": results.get("signal_range"),
+                "noise_range": results.get("noise_range"),
+                "comment": self.comments_input.value,
+                "line_name": self.line_name_input.value or "Unknown",
+            })
+
+            self._rebuild_locked_fit_source()
+
+            residual_flux = self._build_residual_flux()
+            self.residuals_source.data = {
+                "wavelength": self._current_spectrum_data.wv.tolist(),
+                "flux": residual_flux.tolist(),
+            }
+
+            self._update_results_table(results)
+            self._clear_fit_status()
+            self._set_status(
+                f"Fit locked successfully. "
+                f"SNR={results.get('snr', 0):.2f}, "
+                f"FWHM={results.get('fwhm_obs_A', 0):.2f} Å, "
+                f"χ²ᵣ={results.get('chi_squared_red', 0):.2f}",
+                level="success",
+                visible=True,
+            )
+
+        except Exception as e:
+            self.logging.warning("Fitting failed: %s", e)
+            self._analysis_results = {
+                "fit_failed": True,
+                "fail_reason": str(e),
+            }
+            self.fit_source.data = {"wavelength": [], "flux": []}
+            self._update_results_table(None)
+            self._show_fit_status(f"FIT FAILED ({e})")
+            self._set_status(f"Fit failed: {e}", level="danger", visible=True)
+
+    def _on_reset_clicked(self, event):
+        if self._current_spectrum_data is None:
+            return
+
+        empty = {"wavelength": [], "flux": []}
+        self.continuum_source.data = empty
+        self.corrected_source.data = empty
+        self.fit_source.data = empty
+        self.locked_fit_source.data = empty
+
+        self.residuals_source.data = {
+            "wavelength": self._current_spectrum_data.wv.tolist(),
+            "flux": self._current_spectrum_data.flux.tolist(),
+        }
+
+        self._analysis_results = None
+        self._continuum_model = None
+        self._continuum = None
+        self._corrected_flux = None
+        self._locked_fits = []
+
+        self._signal_region_defined = False
+        self._noise_region_defined = False
+        self._update_region_overlays()
+
+        self._update_results_table(None)
+        self._clear_fit_status()
+        self._set_status("Fit state reset.", level="info", visible=True)
+
+    def _on_undo_lock_clicked(self, event):
+        if not self._locked_fits:
+            self._set_status("No locked fits to undo.", level="warning", visible=True)
+            return
+
+        self._locked_fits.pop()
+        self._results_manager.undo_last()
+
+        self._rebuild_locked_fit_source()
+
+        if self._current_spectrum_data is not None:
+            residual_flux = self._build_residual_flux()
+            self.residuals_source.data = {
+                "wavelength": self._current_spectrum_data.wv.tolist(),
+                "flux": residual_flux.tolist(),
+            }
+
+        self._set_status("Removed last locked fit.", level="info", visible=True)
+
+    # ------------------------------------------------------------------
+    # Layout / lifecycle
+    # ------------------------------------------------------------------
+    def get_layout(self):
+        sidebar = self.pn.Column(
+            self.settings_tabs,
+            width=380,
+            min_width=380,
+            max_width=380,
+            height=760,
+            sizing_mode="fixed",
+            align="start",
+            margin=(0, 0, 0, 12),
+        )
+
+        main_area = self.pn.Column(
+            pn.pane.HTML("<div style='font-weight:600; margin-bottom:4px;'>Available Spectra</div>"),
+            self.available_spectra,
+            self.spectra_number_message,
+            pn.Spacer(height=8),
+            self.source_plot,
+            pn.Spacer(height=8),
+            self.residuals_plot,
+            sizing_mode="stretch_width",
+            min_width=700,
+            align="start",
+        )
+
+        return self.pn.Row(
+            main_area,
+            sidebar,
+            sizing_mode="stretch_width",
+            align="start",
+        )
+
+    def dispose(self) -> None:
+        try:
+            if hasattr(self, "_cb") and self._cb:
+                self._cb.stop()
+        except Exception:
+            pass
+
         super().dispose()
