@@ -309,30 +309,41 @@ class SettingsDashboard:
 
         current_stage_title = list(self.pipeline._stages)[self._pipeline_stage]
 
+        self._close_settings_button.width = 150
+        self._close_settings_button.height = 44
+        self._close_settings_button.min_height = 44
+
         close_row = pn.Row(
             pn.layout.HSpacer(),
             self._close_settings_button,
             sizing_mode="stretch_width",
-            margin=(6, 12, 2, 12),
-            height=34,
+            margin=(6, 12, 0, 12),
         )
 
         settings_text = pn.pane.Markdown(
-            "**Settings Panel:** Choose the appropriate settings for your data",
+            "**Settings panel:** Choose the appropriate settings for your data",
             sizing_mode="stretch_width",
-            margin=(4, 12, 10, 12),
+            styles={
+                "font-size": "14px",
+                "color": "#5E6C84",
+            },
+            margin=(2, 12, 4, 12),
         )
 
         stage_title = pn.pane.Markdown(
-            f"### {current_stage_title}",
+            f"## {current_stage_title}",
             sizing_mode="stretch_width",
-            margin=(0, 12, 12, 12),
+            styles={
+                "line-height": "1.2",
+                "color": "#172B4D",
+            },
+            margin=(0, 12, 8, 12),
         )
 
         stage_body = pn.Column(
             self.pipeline.stage,
             sizing_mode="stretch_width",
-            margin=(0, 12, 20, 12),
+            margin=(0, 12, 16, 12),
         )
 
         self.row[0] = pn.Column(
@@ -341,6 +352,9 @@ class SettingsDashboard:
             stage_title,
             stage_body,
             sizing_mode="stretch_both",
+            styles={
+                "background": "#F7F8FA",
+            },
         )
 
         return self.row

@@ -74,6 +74,7 @@ class DataSelection(param.Parameterized):
             value=self.dataset,
             width=320,
             margin=0,
+            height=34,
         )
 
         self.config_file_widget = pn.widgets.Select(
@@ -81,6 +82,7 @@ class DataSelection(param.Parameterized):
             value=self.config_file,
             width=320,
             margin=0,
+            height=30,
         )
 
         self.load_config_select_widget = pn.widgets.Select(
@@ -88,20 +90,12 @@ class DataSelection(param.Parameterized):
             value=self.load_config_select,
             width=320,
             margin=0,
+            height=30,
         )
 
         self.load_data_button = pn.widgets.Button(
-            name="Load Data File",
+            name="Load data file",
             button_type="primary",
-            width=220,
-            height=38,
-            margin=0,
-        )
-
-        self.load_data_button_js = pn.widgets.Button(
-            name="Select values from dropdown to continue",
-            button_type="success",
-            disabled=True,
             width=220,
             height=38,
             margin=0,
@@ -110,7 +104,17 @@ class DataSelection(param.Parameterized):
         self.load_layout_widget = pn.widgets.Checkbox(
             name="Load custom configuration?",
             value=self.load_layout_check,
-            margin=(0, 0, 0, 0),
+            margin=0,
+            height=20,
+        )
+
+        self.load_data_button_js = pn.widgets.Button(
+            name="Select values from dropdown to continue",
+            button_type="primary",
+            disabled=True,
+            width=220,
+            height=38,
+            margin=0,
         )
 
         self.memory_optimisation_check = pn.widgets.Checkbox(
@@ -128,7 +132,7 @@ class DataSelection(param.Parameterized):
             """,
             width=24,
             height=24,
-            margin=(0, 0, 0, 2),
+            margin=(0, 0, 0, 1),
         )
 
         self.dataset_widget.param.watch(self._sync_dataset, "value")
@@ -325,43 +329,39 @@ class DataSelection(param.Parameterized):
         if self.error_message == "":
             return pn.pane.Markdown(
                 """
-### Information
+    Welcome to AstronomicAL, an interactive dashboard for visualisation,
+    integration and classification of data using active learning methods.
 
-Welcome to AstronomicAL, an interactive dashboard for visualisation,
-integration and classification of data using active learning methods.
+    For tutorials and API reference documents, please visit our
+    documentation [here](https://astronomical.readthedocs.io).
 
-For tutorials and API reference documents, please visit our
-documentation [here](https://astronomical.readthedocs.io).
+    AstronomicAL provides both an example dataset and an example
+    configuration file to allow you to jump right into the software and
+    give it a test run.
 
-AstronomicAL provides both an example dataset and an example
-configuration file to allow you to jump right into the software and
-give it a test run.
+    To begin training you simply have to select **Load custom configuration**
+    and choose your config file.
 
-To begin training you simply have to select **Load Custom Configuration**
-and choose your config file.
-
-The **Load Config Select** option allows you to choose the extent to
-which to reload the configuration.
+    The **Load config select** option allows you to choose the extent to
+    which to reload the configuration.
                 """,
                 sizing_mode="stretch_width",
-                margin=(0, 0, 0, 0),
+                styles={
+                    "font-size": "14px",
+                    "line-height": "1.6",
+                    "color": "#253858",
+                },
+                margin=0,
             )
 
         return pn.pane.Alert(
             self.error_message,
             alert_type="danger",
             sizing_mode="stretch_width",
-            margin=(0, 0, 0, 0),
+            margin=0,
         )
 
     def _build_controls(self):
-        load_config_block = pn.Row(
-            self.load_layout_widget,
-            sizing_mode="stretch_width",
-            margin=0,
-            min_height=14,
-        )
-
         memory_row = pn.Row(
             self.memory_optimisation_check,
             self._memory_opt_tooltip,
@@ -369,28 +369,63 @@ which to reload the configuration.
             margin=0,
         )
 
+        label_styles = {
+            "font-size": "13px",
+            "color": "#44546A",
+        }
+
         dataset_block = pn.Column(
-            pn.pane.Markdown("**Data file**", margin=(0, 0, 4, 0)),
+            pn.pane.Markdown(
+                "**Data file**",
+                margin=(0, 0, 2, 0),
+                styles=label_styles,
+            ),
             self.dataset_widget,
             sizing_mode="stretch_width",
             margin=0,
-            min_height=52,
+            min_height=42,
         )
 
         config_file_block = pn.Column(
-            pn.pane.Markdown("**Configuration file**", margin=(0, 0, 4, 0)),
+            pn.pane.HTML(
+                """
+                <div style="
+                    font-size:13px;
+                    color:#44546A;
+                    font-weight:600;
+                    line-height:13px;
+                    margin:0;
+                    padding:0;
+                    display:inline-block;
+                ">Configuration file</div>
+                """,
+                margin=0,
+                height=16,
+            ),
             self.config_file_widget,
             sizing_mode="stretch_width",
             margin=0,
-            min_height=52,
         )
 
         load_option_block = pn.Column(
-            pn.pane.Markdown("**Load config options**", margin=(0, 0, 4, 0)),
+            pn.pane.HTML(
+                """
+                <div style="
+                    font-size:13px;
+                    color:#44546A;
+                    font-weight:600;
+                    line-height:13px;
+                    margin:0;
+                    padding:0;
+                    display:inline-block;
+                ">Load config options</div>
+                """,
+                margin=0,
+                height=16,
+            ),
             self.load_config_select_widget,
             sizing_mode="stretch_width",
             margin=0,
-            min_height=52,
         )
 
         button_block = pn.Row(
@@ -402,33 +437,39 @@ which to reload the configuration.
 
         if self.load_layout_check:
             return pn.Column(
-                load_config_block,
-                pn.Spacer(height=8),
+                self.load_layout_widget,
                 config_file_block,
-                pn.Spacer(height=8),
+                pn.Spacer(height=1),
                 load_option_block,
-                pn.Spacer(height=10),
+                pn.Spacer(height=6),
                 button_block,
                 sizing_mode="stretch_width",
-                max_width=360,
-                margin=(0, 20, 14, 20),
+                max_width=380,
+                margin=(0, 20, 10, 20),
             )
 
         return pn.Column(
             self.load_layout_widget,
             memory_row,
-            pn.Spacer(height=4),
+            pn.Spacer(height=2),
             dataset_block,
             pn.Spacer(height=8),
             button_block,
             sizing_mode="stretch_width",
-            max_width=360,
+            max_width=380,
             margin=(0, 20, 10, 20),
         )
 
     def _build_info(self):
         return pn.Column(
-            pn.layout.Divider(margin=(8, 0, 12, 0)),
+            pn.pane.Markdown(
+                "### Information",
+                styles={
+                    "line-height": "1.2",
+                    "color": "#172B4D",
+                },
+                margin=(0, 0, 8, 0),
+            ),
             self._welcome_message(),
             sizing_mode="stretch_width",
             margin=(0, 20, 16, 20),
@@ -437,6 +478,7 @@ which to reload the configuration.
     def _refresh_layout(self):
         self.view.objects = [
             self._build_controls(),
+            pn.layout.Divider(margin=(8, 20, 12, 20)),
             self._build_info(),
         ]
 
