@@ -1,84 +1,58 @@
 from astronomicAL.utils.optimise import (
-    PrintProgress, 
-    optimise_streaming, 
-    _fits_to_df_streaming, 
-    _decode_bytes_columns, 
-    df_mem_gib, 
-    rss_gib
-    )
+    PrintProgress,
+    optimise_streaming,
+    _fits_to_df_streaming,
+    _decode_bytes_columns,
+    df_mem_gib,
+    rss_gib,
+)
 from astropy.table import Table
-from bokeh.models import TextAreaInput
-from bokeh.models.callbacks import CustomJS
-from functools import partial
 
 import glob
 import json
-import numpy as np
+import os
 import pandas as pd
 import panel as pn
 import param
-import time
-import os
 
 
 class DataSelection(param.Parameterized):
-    """The Data Selection Stage used in the settings pipeline.
-
-    Parameters
-    ----------
-    src : ColumnDataSource
-        The shared data source which holds the current selected source.
-
-    Attributes
-    ----------
-    dataset : FileSelector
-        Dropdown list of .FITS files within `data/` folder.
-    memory_optimisation_check : Panel Checkbox
-        Flag for whether to memory optimise the loaded in DataFrame.
-    ready : bool
-        Flag for whether the data has been loaded in and ready to progress to
-        the next settings stage.
-
-    """
+    """The Data Selection Stage used in the settings pipeline."""
 
     dataset = param.ObjectSelector(default="", objects=[""])
     config_file = param.ObjectSelector(default="", objects=[""])
     load_config_select = param.ObjectSelector(default="", objects=[""])
-
     load_layout_check = param.Boolean(False, label="Load Custom Configuration?")
-
     ready = param.Boolean(default=False)
 
     def __init__(self, src, mode, context, close_settings_button):
         super(DataSelection, self).__init__()
 
         self.context = context
-        
         self.mode = mode
         self.src = src
         self.error_message = ""
-
         self.close_settings_button = close_settings_button
-        
-        if (context is not None and getattr(context, "config", None) is not None):
+        self.df = pd.DataFrame()
+
+        if context is not None and getattr(context, "config", None) is not None:
             self.config = context.config
         else:
             print("config doesn't exist")
             print(context)
+            self.config = None
 
-        # Guarantee settings dict exists
-        if getattr(self.config, "settings", None) is None:
+        if self.config is not None and getattr(self.config, "settings", None) is None:
             self.config.settings = {}
 
         self._initialise_widgets()
 
-        self.panel_col = pn.Column("Loading...")
+        self.view = pn.Column(sizing_mode="stretch_width")
+        self._refresh_layout()
 
     def _initialise_widgets(self):
-
         data_files = self._get_data_files()
-
-        if len(data_files) == 0:
+        if not data_files:
             data_files = [""]
 
         config_files = self._get_config_files()
@@ -88,150 +62,192 @@ class DataSelection(param.Parameterized):
         load_config_options = [""] + load_config_options
 
         self.param.dataset.objects = data_files
-        self.param.load_config_select.objects = load_config_options
         self.param.config_file.objects = config_files
-        self.param.dataset.default = data_files[0]
-        self.param.load_config_select.default = load_config_options[0]
-        self.param.config_file.default = config_files[0]
-        self.dataset = data_files[0]
-        self.load_config_select = load_config_options[0]
-        self.config_file = config_files[0]
+        self.param.load_config_select.objects = load_config_options
 
-        print("CONFIG:")
-        print(self.config.layout_file)
-        self.memory_optimisation_check = pn.widgets.Checkbox(
-            name="Optimise for memory?", value=True
+        self.dataset = data_files[0]
+        self.config_file = config_files[0]
+        self.load_config_select = load_config_options[0]
+
+        self.dataset_widget = pn.widgets.Select(
+            options=data_files,
+            value=self.dataset,
+            width=320,
+            margin=0,
         )
-        self._memory_opt_tooltip = pn.pane.HTML(
-            "<span data-toggle='tooltip' title='(up to 0.5x memory consumption, however initial loading of data can take up to 10x longer).' styles='border-radius: 15px;padding: 5px; background: #5e5e5e; ' >❔</span> ",
-            max_width=5,
+
+        self.config_file_widget = pn.widgets.Select(
+            options=config_files,
+            value=self.config_file,
+            width=320,
+            margin=0,
+        )
+
+        self.load_config_select_widget = pn.widgets.Select(
+            options=load_config_options,
+            value=self.load_config_select,
+            width=320,
+            margin=0,
         )
 
         self.load_data_button = pn.widgets.Button(
-            name="Load Data File", max_height=30, margin=(45, 0, 0, 0)
+            name="Load Data File",
+            button_type="primary",
+            width=220,
+            height=38,
+            margin=0,
         )
-        self.load_data_button.on_click(self._load_data_cb)
 
         self.load_data_button_js = pn.widgets.Button(
             name="Select values from dropdown to continue",
-            max_height=30,
-            margin=(45, 0, 0, 0),
             button_type="success",
             disabled=True,
+            width=220,
+            height=38,
+            margin=0,
         )
+
+        self.load_layout_widget = pn.widgets.Checkbox(
+            name="Load custom configuration?",
+            value=self.load_layout_check,
+            margin=(0, 0, 0, 0),
+        )
+
+        self.memory_optimisation_check = pn.widgets.Checkbox(
+            name="Optimise for memory?",
+            value=True,
+            margin=(0, 0, 0, 0),
+        )
+
+        self._memory_opt_tooltip = pn.pane.HTML(
+            """
+            <span title="Up to around 0.5x memory consumption, but initial loading may take much longer."
+                style="display:inline-block; border-radius:12px; padding:2px 6px; background:#5e5e5e; color:white; cursor:help;">
+                ?
+            </span>
+            """,
+            width=24,
+            height=24,
+            margin=(0, 0, 0, 2),
+        )
+
+        self.dataset_widget.param.watch(self._sync_dataset, "value")
+        self.config_file_widget.param.watch(self._sync_config_file, "value")
+        self.load_config_select_widget.param.watch(self._sync_load_config_select, "value")
+        self.load_layout_widget.param.watch(self._sync_load_layout_check, "value")
+
+        self.load_data_button.on_click(self._load_data_cb)
 
         self.load_data_button_js.jscallback(
             clicks="""
-
-                        console.log('Reloading...')
-
-                        button.label = 'Loading New Layout - Please Wait, This may take a minute.'
-                        button.disabled = true
-
-                        var i;
-                        for (i = 0; i < 40; i++) {
-                          if (i % 3 === 0) {
-                              setTimeout(() => {  button.label = 'Loading New Layout - Please Wait, This may take a minute.'; }, 500*i);
-                           } else if (i % 3 === 1) {
-                              setTimeout(() => {  button.label = 'Loading New Layout - Please Wait, This may take a minute..'; }, 500*i);
-                           } else {
-                              setTimeout(() => {  button.label = 'Loading New Layout - Please Wait, This may take a minute...'; }, 500*i);
-                           }
-                        }
-                        setTimeout(() => {  location.reload(); }, 2000);
-                    """,
+                button.label = 'Loading New Layout - Please Wait...'
+                button.disabled = true
+                setTimeout(() => { location.reload(); }, 2000);
+            """,
             args=dict(button=self.load_data_button_js),
         )
 
+    def _sync_load_layout_check(self, event):
+        self.load_layout_check = event.new
+        self._refresh_layout()
+
+    def _sync_dataset(self, event):
+        self.dataset = event.new
+
+    def _sync_config_file(self, event):
+        self.config_file = event.new
+        self.update_available_loading_options()
+        self._update_layout_file_cb()
+
+    def _sync_load_config_select(self, event):
+        self.load_config_select = event.new
+        self._update_layout_file_cb()
+
     def _get_data_files(self):
-        files = glob.glob("data/*.*")
-        return files
+        return glob.glob("data/*.*")
 
     def _get_config_files(self):
         files = glob.glob("configs/*.json")
         exploring_file = "configs/exploring_default.json"
         files = [f for f in files if f != exploring_file]
         if self.mode == "Exploring" and os.path.exists(exploring_file):
-            files = [exploring_file] + sorted(files)     
-        return files 
-
+            files = [exploring_file] + sorted(files)
+        return files
 
     def _init_load_config_options(self):
         if self.mode == "AL":
-            options = [
+            return [
                 "Only load layout. Let me choose all my own settings",
                 "Load all settings but let me train the model from scratch.",
                 "Load all settings and train model with provided labels.",
             ]
-
         elif self.mode == "Labelling":
-            options = [
+            return [
                 "Only load layout. Let me choose all my own settings",
                 "Load all settings and begin labelling data.",
             ]
-        
         elif self.mode == "Exploring":
-            options = [
+            return [
                 "Only load layout. Let me choose all my own settings",
                 "Load all settings and begin exploring data.",
             ]
-        else:
-            options = []
+        return []
 
-        return options
-
-    @param.depends("load_config_select", "config_file", watch=True)
-    def _update_layout_file_cb(self):
+    def _update_layout_file_cb(self, *events):
+        if not self.load_layout_check:
+            self.error_message = ""
+            self._refresh_layout()
+            return
 
         if (self.load_config_select == "") or (self.config_file == ""):
             self.error_message = ""
             self.load_data_button_js.name = "Select values from dropdown to continue"
             self.load_data_button_js.disabled = True
+            self._refresh_layout()
             return
 
         self.load_data_button_js.name = "Verifying Config..."
 
         self.config.layout_file = self.config_file
         self.config.settings["config_load_level"] = (
-            list(self.param.load_config_select.objects).index(self.load_config_select)
-            - 1
+            list(self.load_config_select_widget.options).index(self.load_config_select) - 1
         )
 
         with open(self.config.layout_file) as layout_file:
             curr_config_file = json.load(layout_file)
 
-        from astronomicAL.utils.load_config import (
-            verify_import_config,
-        )  # causes circular import error at top
-        
-        has_error, error_message = verify_import_config(curr_config_file, context=self.context)
+        from astronomicAL.utils.load_config import verify_import_config
+
+        has_error, error_message = verify_import_config(
+            curr_config_file, context=self.context
+        )
 
         if has_error:
-            self.config.settings = {} # empty all assigned configurations parameters
-            print(f"has error - {error_message}")
+            self.config.settings = {}
             self.error_message = error_message
             self.load_data_button_js.name = "Unable to load config"
             self.load_data_button_js.disabled = True
         else:
-            self.error_message = "verified"
             self.error_message = ""
             self.load_data_button_js.name = "Load Data"
             self.load_data_button_js.disabled = False
-        
-        self.panel_col = self.panel()
 
-        print(f"Config load level: {self.config.settings['config_load_level']}")
+        self._refresh_layout()
 
-    @param.depends("config_file", watch=True)
     def update_available_loading_options(self):
         if self.config_file.endswith("exploring_default.json"):
-            self.param.load_config_select.objects = ["", "Only load layout. Let me choose all my own settings"]
+            options = ["", "Only load layout. Let me choose all my own settings"]
         else:
-            self.param.load_config_select.objects = [""] + self._init_load_config_options()
+            options = [""] + self._init_load_config_options()
+
+        current = self.load_config_select if self.load_config_select in options else options[0]
+        self.load_config_select_widget.options = options
+        self.load_config_select_widget.value = current
+        self.param.load_config_select.objects = options
+        self.load_config_select = current
 
     def get_dataframe_from_fits_file(self, filename, optimise_data=None):
         p = PrintProgress(every=2.0)
-
         ext = filename[filename.rindex(".") + 1 :].lower()
 
         if optimise_data is None:
@@ -256,7 +272,6 @@ class DataSelection(param.Parameterized):
             p.log(f"DataFrame built: rows={len(df):,}, cols={df.shape[1]:,}")
             p.log(f"After table built: mem≈{df_mem_gib(df):.2f} GiB, RSS≈{rss_gib():.2f} GiB")
 
-
         if optimise_data:
             df = optimise_streaming(df, p=p, log_every=10)
             p.log(f"After optimise: mem≈{df_mem_gib(df):.2f} GiB, RSS≈{rss_gib():.2f} GiB")
@@ -268,17 +283,11 @@ class DataSelection(param.Parameterized):
     def _load_data_cb(self, event):
         self.load_data_button.disabled = True
         self.load_data_button.name = "Loading File..."
-        print("loading new dataset")
 
         self.config.settings["dataset_filepath"] = self.dataset
-
-        print(self.config.settings)
-
         self.config.main_df = self.get_dataframe_from_fits_file(self.dataset)
         self.df = self.config.main_df
         self.src.data = dict(pd.DataFrame())
-
-        print(f" dataset shape: {self.df.shape}")
 
         self._initialise_src()
         self.ready = True
@@ -287,132 +296,149 @@ class DataSelection(param.Parameterized):
         self.close_settings_button.button_type = "success"
 
     def add_ra_dec_col(self, df):
-
         new_df = df
-
-        #we should add this option at some point in the config/settings pipeline
         ra_col_name = self.config.settings.get("ra_col_name", "ra")
         dec_col_name = self.config.settings.get("dec_col_name", "dec")
 
-        has_loc = (ra_col_name in list(new_df.columns)) and (dec_col_name in list(new_df.columns))
- 
+        has_loc = (
+            (ra_col_name in list(new_df.columns))
+            and (dec_col_name in list(new_df.columns))
+        )
+
         if has_loc:
-           new_df["ra_dec"] = df[ra_col_name].astype(str) + "," + df[dec_col_name].astype(str)
+            new_df["ra_dec"] = (
+                df[ra_col_name].astype(str) + "," + df[dec_col_name].astype(str)
+            )
         else:
             print("Columns selected as Ra and Dec are not in the table")
 
         return new_df
 
     def get_df(self):
-        """Return the dataframe that has been loaded in from a file.
-
-        Returns
-        -------
-        df : DataFrame
-            DataFrame containing the dataset loaded in by a file chosen by the
-            user.
-
-        """
         return self.df
 
     def _initialise_src(self):
-
         new_df = pd.DataFrame([[0, 0], [0, 0]], columns=["test", "test"])
         self.src.data = dict(new_df)
 
-    @param.depends("load_layout_check", watch=True)
-    def _panel_cb(self):
-        self.panel_col = self.panel()
-
-    def panel(self):
-        """Render the current settings view.
-
-        Returns
-        -------
-        column : Panel Column
-            The panel is housed in a column which can then be rendered by the
-            settings Dashboard.
-
-        """
-        if (self.error_message == "") or (self.error_message == "verified"):
-            message = pn.pane.Markdown(
+    def _welcome_message(self):
+        if self.error_message == "":
+            return pn.pane.Markdown(
                 """
-                Welcome to AstronomicAL, an interactive dashboard for visualisation, integration and classification of data using active learning methods.
+### Information
 
-                For tutorials and API reference documents, please visit our documentation [here](https://astronomical.readthedocs.io).
+Welcome to AstronomicAL, an interactive dashboard for visualisation,
+integration and classification of data using active learning methods.
 
-                AstronomicAL provides both an example dataset and an example configuration file to allow you to jump right into the software and give it a test run.
+For tutorials and API reference documents, please visit our
+documentation [here](https://astronomical.readthedocs.io).
 
-                To begin training you simply have to select **Load Custom Configuration** checkbox and select your config file. Here we have chosen to use the `example_config.json` file.
+AstronomicAL provides both an example dataset and an example
+configuration file to allow you to jump right into the software and
+give it a test run.
 
-                The **Load Config Select** option allows use to choose the extent to which to reload the configuration.
+To begin training you simply have to select **Load Custom Configuration**
+and choose your config file.
 
-                #### Referencing the Package
-
-                Please remember to cite our software and user guide whenever relevant. See the [Citing page](https://astronomical.readthedocs.io/en/latest/content/other/citing.html) in the documentation for instructions about referencing and citing the astronomicAL software.
+The **Load Config Select** option allows you to choose the extent to
+which to reload the configuration.
                 """,
                 sizing_mode="stretch_width",
                 margin=(0, 0, 0, 0),
             )
-        else:
-            message = pn.pane.Markdown(self.error_message)
+
+        return pn.pane.Alert(
+            self.error_message,
+            alert_type="danger",
+            sizing_mode="stretch_width",
+            margin=(0, 0, 0, 0),
+        )
+
+    def _build_controls(self):
+        load_config_block = pn.Row(
+            self.load_layout_widget,
+            sizing_mode="stretch_width",
+            margin=0,
+            min_height=14,
+        )
+
+        memory_row = pn.Row(
+            self.memory_optimisation_check,
+            self._memory_opt_tooltip,
+            sizing_mode="stretch_width",
+            margin=0,
+        )
+
+        dataset_block = pn.Column(
+            pn.pane.Markdown("**Data file**", margin=(0, 0, 4, 0)),
+            self.dataset_widget,
+            sizing_mode="stretch_width",
+            margin=0,
+            min_height=52,
+        )
+
+        config_file_block = pn.Column(
+            pn.pane.Markdown("**Configuration file**", margin=(0, 0, 4, 0)),
+            self.config_file_widget,
+            sizing_mode="stretch_width",
+            margin=0,
+            min_height=52,
+        )
+
+        load_option_block = pn.Column(
+            pn.pane.Markdown("**Load config options**", margin=(0, 0, 4, 0)),
+            self.load_config_select_widget,
+            sizing_mode="stretch_width",
+            margin=0,
+            min_height=52,
+        )
+
+        button_block = pn.Row(
+            self.load_data_button if not self.load_layout_check else self.load_data_button_js,
+            sizing_mode="stretch_width",
+            margin=0,
+            min_height=38,
+        )
 
         if self.load_layout_check:
-            self.panel_col[0] = pn.Row(
-                pn.Column(
-                    pn.layout.VSpacer(max_height=10),
-                    pn.Row(self.param.load_layout_check, max_height=30),
-                    pn.Row(self.param.config_file, max_width=300),
-                    pn.Row(self.param.load_config_select),
-                    pn.Row(self.load_data_button_js),
-                    pn.layout.VSpacer(),
-                    pn.layout.VSpacer(),
-                    pn.layout.VSpacer(),
-                ),
-                pn.Row(message, scroll=True, sizing_mode="stretch_width"),
-                pn.layout.VSpacer(),
-                pn.layout.VSpacer(),
-                pn.layout.VSpacer(),
+            return pn.Column(
+                load_config_block,
+                pn.Spacer(height=8),
+                config_file_block,
+                pn.Spacer(height=8),
+                load_option_block,
+                pn.Spacer(height=10),
+                button_block,
                 sizing_mode="stretch_width",
+                max_width=360,
+                margin=(0, 20, 14, 20),
             )
 
-        else:
-            self.panel_col[0] = pn.Row(
-                pn.Column(
-                    pn.layout.VSpacer(max_height=10),
-                    pn.Row(self.param.load_layout_check, max_height=30),
-                    pn.Row(self.param.dataset, max_width=300),
-                    pn.Row(
-                        self.memory_optimisation_check,
-                        self._memory_opt_tooltip,
-                        max_width=300,
-                    ),
-                    pn.Row(self.load_data_button, max_width=300),
-                    pn.layout.VSpacer(max_width=300),
-                    pn.layout.VSpacer(max_width=300),
-                    pn.layout.VSpacer(max_width=300),
-                ),
-                pn.Row(
-                    pn.pane.Markdown(
-                        """
-                    Welcome to AstronomicAL, an interactive dashboard for visualisation, integration and classification of data using active learning methods.
+        return pn.Column(
+            self.load_layout_widget,
+            memory_row,
+            pn.Spacer(height=4),
+            dataset_block,
+            pn.Spacer(height=8),
+            button_block,
+            sizing_mode="stretch_width",
+            max_width=360,
+            margin=(0, 20, 10, 20),
+        )
 
-                    For tutorials and API reference documents, please visit our documentation [here](https://astronomical.readthedocs.io).
+    def _build_info(self):
+        return pn.Column(
+            pn.layout.Divider(margin=(8, 0, 12, 0)),
+            self._welcome_message(),
+            sizing_mode="stretch_width",
+            margin=(0, 20, 16, 20),
+        )
 
-                    AstronomicAL provides both an example dataset and an example configuration file to allow you to jump right into the software and give it a test run.
+    def _refresh_layout(self):
+        self.view.objects = [
+            self._build_controls(),
+            self._build_info(),
+        ]
 
-                    To begin training you simply have to select **Load Custom Configuration** checkbox and select your config file. Here we have chosen to use the `example_config.json` file.
-
-                    The **Load Config Select** option allows use to choose the extent to which to reload the configuration.
-
-                    #### Referencing the Package
-
-                    Please remember to cite our software and user guide whenever relevant. See the [Citing page](https://astronomical.readthedocs.io/en/latest/content/other/citing.html) in the documentation for instructions about referencing and citing the astronomicAL software.
-                    """,
-                        sizing_mode="stretch_width",
-                        margin=(0, 0, 0, 0),
-                    )
-                ),
-            )
-
-        return self.panel_col
+    def panel(self):
+        return self.view

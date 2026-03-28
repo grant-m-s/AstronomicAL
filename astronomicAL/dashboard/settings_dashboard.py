@@ -297,49 +297,50 @@ class SettingsDashboard:
         self.panel()
 
     def panel(self):
-        """Render the current view.
-
-        Returns
-        -------
-        row : Panel Row
-            The panel is housed in a row which can then be rendered by the
-            parent Dashboard.
-
-        """
+        """Render the current view."""
 
         if not self.pipeline_initialised:
             self.row[0] = self.create_mode_selection_menu()
             return self.row
 
-        else:
-            
-            if "Features Settings" in self.pipeline._stages:
-                if self.pipeline["Features Settings"].is_complete():
-                    self._close_settings_button.disabled = False
-            toolbar = pn.Row(
-                    pn.widgets.StaticText(
-                        name="Settings Panel",
-                        value="Please choose the appropriate settings for your data",
-                    ),
-                    pn.pane.Markdown(
-                        "### " + list(self.pipeline._stages)[self._pipeline_stage],
-                    ),
-                    self._close_settings_button,
-                    max_height=50
-                )
-            body = pn.Column(
-                    pn.Row(self.pipeline.stage, sizing_mode = "stretch_both"),
-                    pn.Row(
-                        pn.layout.HSpacer(),
-                        pn.layout.HSpacer(),
-                        self.pipeline.buttons[1],
-                        max_height=50,
-                        # max_width=500,
-                    ),
-                    sizing_mode = "stretch_both"
-                )
-            self.row[0] = pn.Column(
-                toolbar, body,
-                sizing_mode = "stretch_both"
-            )
-            return self.row
+        if "Features Settings" in self.pipeline._stages:
+            if self.pipeline["Features Settings"].is_complete():
+                self._close_settings_button.disabled = False
+
+        current_stage_title = list(self.pipeline._stages)[self._pipeline_stage]
+
+        close_row = pn.Row(
+            pn.layout.HSpacer(),
+            self._close_settings_button,
+            sizing_mode="stretch_width",
+            margin=(6, 12, 2, 12),
+            height=34,
+        )
+
+        settings_text = pn.pane.Markdown(
+            "**Settings Panel:** Choose the appropriate settings for your data",
+            sizing_mode="stretch_width",
+            margin=(4, 12, 10, 12),
+        )
+
+        stage_title = pn.pane.Markdown(
+            f"### {current_stage_title}",
+            sizing_mode="stretch_width",
+            margin=(0, 12, 12, 12),
+        )
+
+        stage_body = pn.Column(
+            self.pipeline.stage,
+            sizing_mode="stretch_width",
+            margin=(0, 12, 20, 12),
+        )
+
+        self.row[0] = pn.Column(
+            close_row,
+            settings_text,
+            stage_title,
+            stage_body,
+            sizing_mode="stretch_both",
+        )
+
+        return self.row
