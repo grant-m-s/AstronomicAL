@@ -83,49 +83,72 @@ class SettingsDashboard:
         self.create_pipeline(mode=mode)
 
     def create_mode_selection_menu(self):
-        layout = pn.Row(
-                pn.Spacer(min_width=10,max_width=50),
-                self._make_mode_column("images/classification.png", self.select_labelling_mode_button),
-                pn.Spacer(min_width=10,max_width=50),
-                self._make_mode_column("images/cluster.png", self.select_AL_mode_button),
-                pn.Spacer(min_width=10,max_width=50),
-                self._make_mode_column("images/exploration.png", self.select_exploring_mode_button),
-                pn.Spacer(min_width=10,max_width=50),
-                sizing_mode = "stretch_both"
-                )
-        return layout
+        return pn.FlexBox(
+            self._make_mode_column("images/classification.png", self.select_labelling_mode_button),
+            self._make_mode_column("images/cluster.png", self.select_AL_mode_button),
+            self._make_mode_column("images/exploration.png", self.select_exploring_mode_button),
+            flex_direction="row",
+            flex_wrap="wrap",
+            justify_content="center",
+            align_items="flex-start",
+            gap="24px",
+            sizing_mode="stretch_width",
+            margin=(20, 0, 0, 0),
+        )
     
-    def _make_mode_row(self, image_path, button):
-        return pn.Row(pn.pane.PNG(
-                                   image_path,
-                                   width = 200,
-                                   height = 200,          
-                                   margin=(0, 0, 5, 0),
-                                   ),
-                                   button,)      
+    # def _make_mode_row(self, image_path, button):
+    #     return pn.Row(pn.pane.PNG(
+    #                                image_path,
+    #                                width = 200,
+    #                                height = 200,          
+    #                                margin=(0, 0, 5, 0),
+    #                                ),
+    #                                button,)      
            
-    
     def _make_mode_column(self, image_path, button):
-        button.align = "center"  # centers within its container
+        button.width = 150
+        button.height = 36
+        button.sizing_mode = "fixed"
+        button.margin = (0, 0, 0, 0)
+
+        image = pn.pane.PNG(
+            image_path,
+            width=160,
+            height=160,
+            sizing_mode="fixed",
+            margin=(0, 0, 12, 0),
+        )
+
+        image_box = pn.Column(
+            image,
+            width=200,
+            height=200,
+            sizing_mode="fixed",
+            styles={
+                "display": "flex",
+                "justify-content": "center",
+                "align-items": "center",
+            },
+            margin=(0, 0, 0, 0),
+        )
+
+        button_row = pn.Row(
+            pn.layout.HSpacer(),
+            button,
+            pn.layout.HSpacer(),
+            width=220,
+            height=40,
+            sizing_mode="fixed",
+            margin=(0, 0, 0, 0),
+        )
 
         return pn.Column(
-            pn.pane.PNG(
-                image_path,
-                sizing_mode="stretch_width",
-                aspect_ratio=1.0,
-                margin=(0, 0, 5, 0),
-                max_height=250,
-                max_width=250,
-            ),
-            pn.Spacer(height=10),
-            pn.Row(
-                button,
-                sizing_mode="stretch_width",
-                styles={"justifyContent": "center"},
-                min_height=40,
-            ),
-            sizing_mode="stretch_width",
-            max_width=250,
+            image_box,
+            button_row,
+            width=200,
+            height=250,
+            sizing_mode="fixed",
+            margin=(0, 0, 0, 0),
         )
 
 
@@ -174,12 +197,12 @@ class SettingsDashboard:
         elif mode == "Exploring":
             self.pipeline.add_stage(
                 "Select Your Data",
-                DataSelection(self.src, mode=mode, context=self.context),
-                ready_parameter="ready",
+                DataSelection(self.src, mode=mode, context=self.context, close_settings_button=self._close_settings_button),
+                # ready_parameter="ready",
             ),
-            self.pipeline.add_stage(
-                "Assign Parameters", ParameterAssignment_Exploring(self._close_settings_button, context=self.context), 
-            ),
+            # self.pipeline.add_stage(
+            #     "Assign Parameters", ParameterAssignment_Exploring(self._close_settings_button, context=self.context), 
+            # ),
 
         else:
             valid_mode = False

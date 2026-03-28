@@ -74,7 +74,7 @@ def get_customplot_dict():
         ),
 
         "spec_analyser": lambda data, src, close_button, context : SpecAnalyser(
-            data, src, close_button, extra_features=[], context=context
+            data, src, close_button, extra_features=[], context=context, require_settings=False
         )
 
         #"SDSS Cutout"  : lambda data, src, close_button, context : SDSSClass(data, src, close_button,
@@ -95,6 +95,7 @@ class CustomPlotClass(param.Parameterized):
                  panel_name = "custom_plot",
                  ready_stage = "plot",
                  context = None,
+                 require_settings = True,
                  **params):
         super().__init__(**params)
 
@@ -132,9 +133,12 @@ class CustomPlotClass(param.Parameterized):
             self.stage = ready_stage
         self.figure = pn.pane.HoloViews(sizing_mode="stretch_both")
         self.message_pane = pn.pane.Markdown("## Loading...", sizing_mode="stretch_width", height = 80)
-        self.plot_settings_button = pn.widgets.Button(name="Open Settings", button_type="primary", max_height = 40, max_width=100, sizing_mode="stretch_both" )
+
+        self.plot_settings_button = pn.widgets.Button(name="Open Settings", button_type="primary", max_height = 40, max_width=100, sizing_mode="stretch_width" )
         self.plot_settings_button.on_click(self._toggle_settings_panel)
         self.plot_settings_panel = pn.Column(visible = False)
+
+        self.require_settings = require_settings
 
         if self.close_button is not None:
             try:
@@ -694,13 +698,19 @@ class CustomPlotClass(param.Parameterized):
                 self.close_button, 
                 skip_button, 
                 submit_button, 
-                max_height=50)
+                height=40)
         else:
-            toolbar = pn.Row(
-                pn.Spacer(width=25,), 
-                self.close_button, 
-                self.plot_settings_button, 
-                max_height=50)
+            if self.require_settings:
+                toolbar = pn.Row(
+                    pn.Spacer(width=25,), 
+                    self.close_button, 
+                    self.plot_settings_button, 
+                    height=40)
+            else:
+                toolbar = pn.Row(
+                    pn.Spacer(width=25,), 
+                    self.close_button, 
+                    height=40) 
         
         return toolbar
 
@@ -3218,15 +3228,26 @@ class SpecAnalyser(CustomPlotClass):
         # UI
         # -------------------------
 
-        SIDEBAR_WIDTH = 380
-        FIELD_WIDTH = 340
+        SIDEBAR_WIDTH = 360
+        FIELD_WIDTH = 320
         SMALL_FIELD_WIDTH = 120
 
-        LABEL_HEIGHT = 20
-        LABEL_MARGIN_TOP = 6
-        LABEL_MARGIN_BOTTOM = 4
-        BLOCK_MARGIN_BOTTOM = 14
+        CONTROL_HEIGHT = 34
+        BUTTON_HEIGHT = 34
+        TEXTAREA_HEIGHT = 90
 
+        LABEL_HEIGHT = 16
+        LABEL_MARGIN_TOP = 2
+        LABEL_MARGIN_BOTTOM = 2
+        BLOCK_MARGIN_BOTTOM = 6
+
+        def fix_height(widget, width, height=CONTROL_HEIGHT):
+            widget.width = width
+            widget.height = height
+            widget.min_height = height
+            widget.max_height = height
+            widget.sizing_mode = "fixed"
+            return widget
 
         def field_label(text):
             return pn.pane.HTML(
@@ -3251,12 +3272,7 @@ class SpecAnalyser(CustomPlotClass):
         def field_block(text, widget, bottom=BLOCK_MARGIN_BOTTOM):
             return pn.Column(
                 field_label(text),
-                pn.Row(
-                    widget,
-                    width=FIELD_WIDTH,
-                    margin=(0, 0, 0, 0),
-                    sizing_mode="fixed",
-                ),
+                widget,
                 width=FIELD_WIDTH,
                 margin=(0, 0, bottom, 0),
                 sizing_mode="fixed",
@@ -3270,16 +3286,19 @@ class SpecAnalyser(CustomPlotClass):
             step=0.01,
             width=FIELD_WIDTH,
             margin=0,
+            sizing_mode="fixed",
         )
 
-        self.redshift_box = pn.widgets.FloatInput(
-            name="",
-            value=0.0,
-            start=0.0,
-            end=5.0,
-            step=0.001,
-            width=SMALL_FIELD_WIDTH,
-            margin=0,
+        self.redshift_box = fix_height(
+            pn.widgets.FloatInput(
+                name="",
+                value=0.0,
+                start=0.0,
+                end=5.0,
+                step=0.001,
+                margin=0,
+            ),
+            SMALL_FIELD_WIDTH,
         )
 
         self.finder_mode_checkbox = pn.widgets.Checkbox(
@@ -3292,14 +3311,14 @@ class SpecAnalyser(CustomPlotClass):
         self.finder_mode_row = pn.Row(
             self.finder_mode_checkbox,
             pn.pane.HTML(
-                "<div style='line-height:24px; padding-left:6px;'>Finder Mode</div>",
+                "<div style='line-height:20px; padding-left:6px;'>Finder Mode</div>",
                 width=FIELD_WIDTH - 30,
-                height=24,
+                height=20,
                 margin=0,
             ),
             width=FIELD_WIDTH,
-            height=24,
-            margin=(0, 0, 16, 0),
+            height=20,
+            margin=(0, 0, 8, 0),
             sizing_mode="fixed",
         )
 
@@ -3313,7 +3332,9 @@ class SpecAnalyser(CustomPlotClass):
             ],
             inline=False,
             width=FIELD_WIDTH,
+            height=60,
             margin=0,
+            sizing_mode="fixed",
         )
 
         self.fitting_mode_buttons = pn.widgets.RadioButtonGroup(
@@ -3322,30 +3343,38 @@ class SpecAnalyser(CustomPlotClass):
             options=["Single fit", "Multiline fit"],
             button_type="default",
             width=FIELD_WIDTH,
+            height=30,
             margin=0,
+            sizing_mode="fixed",
         )
 
-        self.line_name_input = pn.widgets.TextInput(
-            name="",
-            placeholder="Line Name",
-            width=FIELD_WIDTH,
-            margin=0,
+        self.line_name_input = fix_height(
+            pn.widgets.TextInput(
+                name="",
+                placeholder="Line Name",
+                margin=0,
+            ),
+            FIELD_WIDTH,
         )
 
-        self.line_profile_selector = pn.widgets.Select(
-            name="",
-            options=["Gaussian", "Lorentzian", "Voigt"],
-            value="Gaussian",
-            width=FIELD_WIDTH,
-            margin=0,
+        self.line_profile_selector = fix_height(
+            pn.widgets.Select(
+                name="",
+                options=["Gaussian", "Lorentzian", "Voigt"],
+                value="Gaussian",
+                margin=0,
+            ),
+            FIELD_WIDTH,
         )
 
-        self.line_name_selector = pn.widgets.Select(
-            name="",
-            options=self.EMISSION_LINES,
-            value=3727.0,
-            width=FIELD_WIDTH,
-            margin=0,
+        self.line_name_selector = fix_height(
+            pn.widgets.Select(
+                name="",
+                options=self.EMISSION_LINES,
+                value=3727.0,
+                margin=0,
+            ),
+            FIELD_WIDTH,
         )
 
         self.select_region_buttons = pn.widgets.RadioButtonGroup(
@@ -3354,53 +3383,84 @@ class SpecAnalyser(CustomPlotClass):
             options=["Signal region", "Noise region"],
             button_type="default",
             width=FIELD_WIDTH,
+            height=34,
+            min_height=34,
+            max_height=34,
             margin=0,
+            sizing_mode="fixed",
         )
 
-        self.available_spectra = pn.widgets.Select(
-            name="",
-            options=[],
-            width=FIELD_WIDTH,
-            margin=0,
+        self.available_spectra = fix_height(
+            pn.widgets.Select(
+                name="",
+                options=[],
+                margin=0,
+            ),
+            FIELD_WIDTH,
         )
 
         self.spectra_number_message = pn.widgets.StaticText(
             name="",
             value="",
             width=FIELD_WIDTH,
+            height=22,
             margin=0,
+            sizing_mode="fixed",
         )
+
+        ACTION_BUTTON_WIDTH = 100
 
         self.fit_button = pn.widgets.Button(
             name="Fit and Lock",
             button_type="success",
-            width=FIELD_WIDTH,
-            height=38,
-            margin=(0, 0, 16, 0),
+            width=ACTION_BUTTON_WIDTH,
+            height=BUTTON_HEIGHT,
+            min_height=BUTTON_HEIGHT,
+            max_height=BUTTON_HEIGHT,
+            margin=0,
+            sizing_mode="fixed",
         )
 
         self.reset_button = pn.widgets.Button(
             name="Reset fit",
             button_type="warning",
-            width=FIELD_WIDTH,
-            height=38,
-            margin=(0, 0,  16, 0),
+            width=ACTION_BUTTON_WIDTH,
+            height=BUTTON_HEIGHT,
+            min_height=BUTTON_HEIGHT,
+            max_height=BUTTON_HEIGHT,
+            margin=0,
+            sizing_mode="fixed",
         )
 
         self.undo_lock_button = pn.widgets.Button(
             name="Undo last lock",
-            button_type="default",
-            width=FIELD_WIDTH,
-            height=38,
-            margin=(0, 0, 16, 0),
+            button_type="light",
+            width=ACTION_BUTTON_WIDTH,
+            height=BUTTON_HEIGHT,
+            min_height=BUTTON_HEIGHT,
+            max_height=BUTTON_HEIGHT,
+            margin=0,
+            sizing_mode="fixed",
         )
 
-        self.status_message = pn.pane.Alert(
+        self.action_buttons_row = pn.Row(
+            self.fit_button,
+            self.reset_button,
+            self.undo_lock_button,
+            width=FIELD_WIDTH,
+            margin=(0, 0, 10, 0),
+            sizing_mode="fixed",
+        )
+
+        self.status_message = pn.pane.HTML(
             "",
-            alert_type="info",
             visible=False,
             width=FIELD_WIDTH,
-            margin=(0, 0, 16, 0),
+            height=56,
+            min_height=56,
+            max_height=56,
+            margin=(0, 0, 8, 0),
+            sizing_mode="fixed",
         )
 
         self.derived_properties_table = pn.pane.DataFrame(
@@ -3422,31 +3482,32 @@ class SpecAnalyser(CustomPlotClass):
         self.comments_input = pn.widgets.TextAreaInput(
             name="",
             placeholder="Comments",
-            height=120,
+            height=TEXTAREA_HEIGHT,
+            min_height=TEXTAREA_HEIGHT,
+            max_height=TEXTAREA_HEIGHT,
             width=FIELD_WIDTH,
             margin=0,
+            sizing_mode="fixed",
         )
 
-        analysis_form = pn.WidgetBox(
-            pn.Spacer(height=10),
-            field_block("Redshift value", self.redshift_box, bottom=16),
-            field_block("Redshift slider", self.redshift_slider, bottom=18),
+        analysis_form = pn.Column(
+            pn.Spacer(height=6),
+            field_block("Redshift value", self.redshift_box, bottom=8),
+            field_block("Redshift slider", self.redshift_slider, bottom=2),
             self.finder_mode_row,
-            field_block("Plot settings", self.plot_settings_checkbox, bottom=18),
-            field_block("Fitting mode", self.fitting_mode_buttons, bottom=18),
-            field_block("Line name", self.line_name_input, bottom=16),
-            field_block("Line profile", self.line_profile_selector, bottom=16),
-            field_block("Go to line", self.line_name_selector, bottom=16),
-            field_block("Region selection", self.select_region_buttons, bottom=18),
-            self.fit_button,
-            self.reset_button,
-            self.undo_lock_button,
-            field_label("Derived properties"),
-            pn.Spacer(height=4),
-            self.derived_properties_table,
-            pn.Spacer(height=18),
-            field_block("Comments", self.comments_input, bottom=16),
+            field_block("Plot settings", self.plot_settings_checkbox, bottom=2),
+            field_block("Fitting mode", self.fitting_mode_buttons, bottom=10),
+            field_block("Line name", self.line_name_input, bottom=8),
+            field_block("Line profile", self.line_profile_selector, bottom=8),
+            field_block("Go to line", self.line_name_selector, bottom=8),
             self.status_message,
+            field_block("Region selection", self.select_region_buttons, bottom=10),
+            self.action_buttons_row,
+            field_label("Derived properties"),
+            pn.Spacer(height=2),
+            self.derived_properties_table,
+            pn.Spacer(height=10),
+            field_block("Comments", self.comments_input, bottom=8),
             width=SIDEBAR_WIDTH,
             sizing_mode="fixed",
         )
@@ -3456,19 +3517,21 @@ class SpecAnalyser(CustomPlotClass):
             width=SIDEBAR_WIDTH,
             min_width=SIDEBAR_WIDTH,
             max_width=SIDEBAR_WIDTH,
-            height=700,
+            height=660,
             scroll=True,
             sizing_mode="fixed",
         )
 
-        self.settings_tabs = pn.Tabs(
-            ("Analysis", self.analysis_tab),
-            width=SIDEBAR_WIDTH,
-            min_width=SIDEBAR_WIDTH,
-            max_width=SIDEBAR_WIDTH,
-            sizing_mode="fixed",
-            dynamic=False,
-        )
+        # self.settings_tabs = pn.Tabs(
+        #     ("Analysis", self.analysis_tab),
+        #     width=SIDEBAR_WIDTH,
+        #     min_width=SIDEBAR_WIDTH,
+        #     max_width=SIDEBAR_WIDTH,
+        #     height=700,
+        #     sizing_mode="fixed",
+        #     dynamic=False,
+        # )
+
         # -------------------------
         # Wiring
         # -------------------------
@@ -3720,9 +3783,52 @@ class SpecAnalyser(CustomPlotClass):
 
         self.derived_properties_table.object = df
 
-    def _set_status(self, text="", level="info", visible=False):
-        self.status_message.object = text
-        self.status_message.alert_type = level
+    def _set_status(self, text="", level="info", visible=False, field_width=320):
+        styles = {
+            "info": {
+                "background": "#eff6ff",
+                "border": "1px solid #93c5fd",
+                "color": "#1d4ed8",
+            },
+            "success": {
+                "background": "#ecfdf5",
+                "border": "1px solid #86efac",
+                "color": "#166534",
+            },
+            "warning": {
+                "background": "#fffbeb",
+                "border": "1px solid #fcd34d",
+                "color": "#92400e",
+            },
+            "danger": {
+                "background": "#fef2f2",
+                "border": "1px solid #fca5a5",
+                "color": "#991b1b",
+            },
+        }
+
+        style = styles.get(level, styles["info"])
+
+        self.status_message.object = f"""
+        <div style="
+            width: {field_width}px;
+            height: 56px;
+            box-sizing: border-box;
+            display: flex;
+            align-items: center;
+            padding: 0 12px;
+            margin: 0;
+            border-radius: 4px;
+            background: {style['background']};
+            border: {style['border']};
+            color: {style['color']};
+            font-size: 13px;
+            line-height: 1.35;
+            overflow: hidden;
+        ">
+            {text}
+        </div>
+        """
         self.status_message.visible = visible
 
     def _show_fit_status(self, text):
@@ -4034,26 +4140,39 @@ class SpecAnalyser(CustomPlotClass):
     # ------------------------------------------------------------------
     def get_layout(self):
         sidebar = self.pn.Column(
-            self.settings_tabs,
-            width=380,
-            min_width=380,
-            max_width=380,
-            height=760,
+            self.analysis_tab,
+            width=360,
+            min_width=360,
+            max_width=360,
+            height=700,
             sizing_mode="fixed",
             align="start",
             margin=(0, 0, 0, 12),
         )
 
-        main_area = self.pn.Column(
-            pn.pane.HTML("<div style='font-weight:600; margin-bottom:4px;'>Available Spectra</div>"),
+        spectra_header = pn.Column(
+            pn.Spacer(height=10),
+            pn.pane.HTML(
+                "<div style='font-weight:600; margin-bottom:4px;'>Available Spectra</div>",
+                height=20,
+                margin=(0, 0, 2, 0),
+                sizing_mode="fixed",
+            ),
             self.available_spectra,
             self.spectra_number_message,
-            pn.Spacer(height=8),
+            width=360,
+            height=78,
+            sizing_mode="fixed",
+            margin=(0, 0, 6, 0),
+        )
+
+        main_area = self.pn.Column(
+            spectra_header,
             self.source_plot,
-            pn.Spacer(height=8),
+            pn.Spacer(height=6),
             self.residuals_plot,
             sizing_mode="stretch_width",
-            min_width=700,
+            min_width=520,
             align="start",
         )
 

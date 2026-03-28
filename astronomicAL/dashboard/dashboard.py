@@ -69,6 +69,16 @@ class Dashboard(param.Parameterized):
         self.cust_plot_dict = custom_plots.get_customplot_dict()
         self.contents = contents
 
+    def _dataset_is_loaded(self) -> bool:
+        return getattr(self.config, "main_df", None) is not None and not self.config.main_df.empty
+
+    def _require_loaded_dataset(self) -> bool:
+        if not self._dataset_is_loaded():
+            self.contents = "Menu"
+            print("Please load a dataset before accessing this view.")
+            return False
+        return True
+
     def watch_bokeh(self, model, attr: str, callback):
         """Register and track Bokeh model.on_change callbacks for unified disposal."""
         if model is None:
@@ -180,78 +190,67 @@ class Dashboard(param.Parameterized):
     def _update_contents(self):
 
         if self.contents == "Settings":
-
             self.mode = ""
             self.panel_contents = SettingsDashboard(self, self.src, context=self.context)
 
         elif self.contents == "Menu":
-
             self.panel_contents = MenuDashboard(self)
 
         elif self.contents == "Active Learning":
-
+            if not self._require_loaded_dataset():
+                return
             self.df = self.config.main_df
             self.panel_contents = ActiveLearningDashboard(self.src, self.df, context=self.context)
 
         elif self.contents == "Histogram Plot":
-            if not self.config.settings["confirmed"]:
-                self.contents = "Menu"
-                print("Please Complete Settings before accessing this view.")
+            if not self._require_loaded_dataset():
                 return
             self.panel_contents = HistoDashboard(self.src, self._close_button, context=self.context)
-        
+
         elif self.contents == "Basic Plot":
-            if not self.config.settings["confirmed"]:
-                self.contents = "Menu"
-                print("Please Complete Settings before accessing this view.")
+            if not self._require_loaded_dataset():
                 return
             self.panel_contents = ScatterPlotDashboard(self.src, self._close_button, context=self.context)
-        
+
         elif self.contents == "Density Plot":
-            if not self.config.settings["confirmed"]:
-                self.contents = "Menu"
-                print("Please Complete Settings before accessing this view.")
+            if not self._require_loaded_dataset():
                 return
             self.panel_contents = DensityPlotDashboard(self.src, self._close_button, context=self.context)
 
         elif self.contents == "Labelling":
+            if not self._require_loaded_dataset():
+                return
             self.df = self.config.main_df
             self.panel_contents = LabellingDashboard(self.src, self.df, context=self.context)
-        
+
         elif self.contents == "Exploring":
+            if not self._require_loaded_dataset():
+                return
             self.df = self.config.main_df
             self.panel_contents = ExplorationDashboard(self.src, self.df, context=self.context)
 
         elif self.contents == "Selected Source Info":
-            if not self.config.settings["confirmed"]:
-                self.contents = "Menu"
-                print("Please Complete Settings before accessing this view.")
+            if not self._require_loaded_dataset():
                 return
             self.panel_contents = SelectedSourceDashboard(self.src, self._close_button, context=self.context)
-        
+
         elif self.contents in self.cust_plot_dict:
-            if not self.config.settings["confirmed"]:
-                self.contents = "Menu"
-                print("Please Complete Settings before accessing this view.")
+            if not self._require_loaded_dataset():
                 return
-            self.panel_contents = self.cust_plot_dict[self.contents](self.config.main_df, self.src, self._close_button, context=self.context)
-        
-        # elif self.contents in self.plot_dict:
-        #     if not self.config.settings["confirmed"]:
-        #         self.contents = "Menu"
-        #         print("Please Complete Settings before accessing this view.")
-        #         return
-        #     self.panel_contents = self.plot_dict[self.contents](context=self.context)
-        
+            self.panel_contents = self.cust_plot_dict[self.contents](
+                self.config.main_df, self.src, self._close_button, context=self.context
+            )
+
         else:
+            if not self._require_loaded_dataset():
+                return
 
-            ctrl = self.plot_dict[self.contents](context=self.context)          # CustomPlot controller
-
+            ctrl = self.plot_dict[self.contents](context=self.context)
             self.current_extension_plot = ctrl
-            self.panel_contents = ctrl                    # MUST be controller
+            self.panel_contents = ctrl
 
             render_fn = ctrl.plot(self._submit_button)
-            render_fn(self.config.main_df, self.src)      # populate ctrl.row
+            render_fn(self.config.main_df, self.src)
 
         self.panel()
 

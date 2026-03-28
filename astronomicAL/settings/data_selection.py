@@ -49,7 +49,7 @@ class DataSelection(param.Parameterized):
 
     ready = param.Boolean(default=False)
 
-    def __init__(self, src, mode, context):
+    def __init__(self, src, mode, context, close_settings_button):
         super(DataSelection, self).__init__()
 
         self.context = context
@@ -57,6 +57,8 @@ class DataSelection(param.Parameterized):
         self.mode = mode
         self.src = src
         self.error_message = ""
+
+        self.close_settings_button = close_settings_button
         
         if (context is not None and getattr(context, "config", None) is not None):
             self.config = context.config
@@ -259,8 +261,6 @@ class DataSelection(param.Parameterized):
             df = optimise_streaming(df, p=p, log_every=10)
             p.log(f"After optimise: mem≈{df_mem_gib(df):.2f} GiB, RSS≈{rss_gib():.2f} GiB")
 
-        p.log("Adding RA/DEC…")
-        df = self.add_ra_dec_col(df)
         p.log(f"After add_ra_dec: mem≈{df_mem_gib(df):.2f} GiB, RSS≈{rss_gib():.2f} GiB")
         p.log("All done")
         return df
@@ -283,6 +283,8 @@ class DataSelection(param.Parameterized):
         self._initialise_src()
         self.ready = True
         self.load_data_button.name = "File Loaded."
+        self.close_settings_button.disabled = False
+        self.close_settings_button.button_type = "success"
 
     def add_ra_dec_col(self, df):
 

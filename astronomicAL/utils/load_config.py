@@ -22,6 +22,7 @@ from astronomicAL.extensions.feature_generation import get_oper_dict
 from astronomicAL.extensions.models import get_classifiers
 from astronomicAL.extensions.query_strategies import get_strategy_dict
 from astronomicAL.settings.data_selection import DataSelection
+from astronomicAL.platform.mapping_header import MappingAlertController
 
 import os
 import json
@@ -30,7 +31,6 @@ from datetime import datetime
 
 import pandas as pd
 import panel as pn
-
 
 def create_header(react, grid, context):
     """
@@ -145,11 +145,38 @@ def create_header(react, grid, context):
 
     confirmed = bool(getattr(config, "settings", {}).get("confirmed", False))
 
+    react.config.raw_css.append("""
+    #pn-Modal {
+    background: transparent !important;
+    }
+
+    #pn-Modal .pn-modal-content {
+    background: transparent !important;
+    box-shadow: none !important;
+    border: none !important;
+    padding: 0 !important;
+    width: auto !important;
+    max-width: none !important;
+    overflow: visible !important;
+    display: flex !important;
+    justify-content: center !important;
+    align-items: flex-start !important;
+    }
+
+
+    #pn-Modal .pn-modalclose {
+    display: none !important;
+    }
+    """)
+
+    mapping_alert = MappingAlertController(context=context, template=react)
+
     header_row = pn.Row(
         get_save_layout_button(confirmed, True, context=context),
-        export_fits_file_button,
-        get_save_panel_data_button(confirmed),
-        get_save_logbook_button(confirmed),
+        # export_fits_file_button,
+        # get_save_panel_data_button(confirmed),
+        # get_save_logbook_button(confirmed),
+        mapping_alert.view,
         add_menu_btn,
         sizing_mode="stretch_width",
     )
@@ -520,6 +547,7 @@ def create_layout_from_file(
     config = context.config
 
     with open(config.layout_file) as lf:
+        print(f"Loading layout file: {lf}")
         curr_config_file = json.load(lf)
 
 
