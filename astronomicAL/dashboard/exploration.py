@@ -6,15 +6,16 @@ import pandas as pd
 import numpy as np
 
 from typing import Any, Dict, List
-
 from functools import partial
 
 from astronomicAL.extensions import feature_generation
 from astronomicAL.utils.optimise import matches_type, get_series_type
 
+
 class ExplorationDashboard(param.Parameterized):
 
     index = param.Integer(default=0, bounds=(0, 0))
+
     def __init__(self, src, df, context=None, **params):
         super().__init__(**params)
 
@@ -31,16 +32,17 @@ class ExplorationDashboard(param.Parameterized):
         self._event_subs = []
         self._mapping_requests_sent = set()
         self._built = False
+        self.main_layout = None
+        self.labels_expanded = False
 
         self.visited_indices = [self.index]
         self.current_position = 0
 
-        self._root = pn.Column(sizing_mode="stretch_both")
+        self._root = pn.Column(sizing_mode="stretch_both", scroll=True)
 
         self._ensure_dataset_registered()
         self._subscribe_to_mapping_events()
         self._try_build_dashboard()
-
 
     def _dataset_id(self) -> str:
         return "main"
@@ -98,16 +100,71 @@ class ExplorationDashboard(param.Parameterized):
             },
         ]
 
-    def _flex_row(self, *objects, gap="8px", margin=(0, 0, 8, 0)):
+    def _escape_html(self, value):
+        return (
+            str(value)
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+        )
+
+    def _get_extra_info_html(self):
+        df = self._get_extra_info_df()
+
+        if df.empty:
+            return "<div style='color:#666;'>No record information available.</div>"
+
+        rows = []
+        for _, row in df.iterrows():
+            key = self._escape_html(row.iloc[0])
+            value = self._escape_html(row.iloc[1] if len(row) > 1 else "")
+            rows.append(
+                f"""
+                <tr>
+                    <td style="padding:6px 10px; font-weight:600; white-space:nowrap; vertical-align:top; border-bottom:1px solid #eee;">{key}</td>
+                    <td style="padding:6px 10px; vertical-align:top; border-bottom:1px solid #eee; word-break:break-word;">{value}</td>
+                </tr>
+                """
+            )
+
+        return f"""
+        <div style="border:1px solid #ddd; border-radius:6px; overflow:hidden; background:white;">
+        <table style="width:100%; border-collapse:collapse; font-size:13px;">
+            <tbody>
+            {''.join(rows)}
+            </tbody>
+        </table>
+        </div>
+        """
+
+    def _refresh_extra_info_view(self):
+        self.extra_info_html.object = self._get_extra_info_html()
+
+    def _flex_row(self, *objects, gap="8px", margin=(0, 0, 8, 0), justify_content="flex-start"):
         return pn.FlexBox(
             *objects,
             flex_direction="row",
             flex_wrap="wrap",
             gap=gap,
             align_items="center",
+            justify_content=justify_content,
             sizing_mode="stretch_width",
             margin=margin,
         )
+
+    def _vspace(self, height=8):
+        return pn.Spacer(height=height)
+
+    def _field_block(self, label, widget, help_text=None, width=None):
+        items = [pn.pane.Markdown(f"**{label}**", margin=(0, 0, 4, 0)), widget]
+        if help_text:
+            items.append(
+                pn.pane.Markdown(
+                    f"<div style='color:#666; font-size:0.9em;'>{help_text}</div>",
+                    margin=(4, 0, 0, 0),
+                )
+            )
+        return pn.Column(*items, width=width, margin=(0, 0, 0, 0))
 
     def _guess_column(self, names: List[str]):
         lowered = {col.lower(): col for col in self.df.columns}
@@ -126,7 +183,6 @@ class ExplorationDashboard(param.Parameterized):
             mapped = self.context.datasets.get_mapping(dataset_id, semantic_name)
             existing = self.config.settings.get(config_key)
 
-            # Compatibility: if an old config value already exists, seed the DatasetManager from it.
             if mapped is None and existing in spec["candidates"]:
                 self.context.datasets.set_mapping(dataset_id, semantic_name, existing)
                 mapped = existing
@@ -134,7 +190,6 @@ class ExplorationDashboard(param.Parameterized):
             if mapped is not None:
                 self.config.settings[config_key] = mapped
 
-        # Exploration should still run even if the optional label is not mapped yet.
         self.config.settings.setdefault("label_col", "No Labels")
 
     def _publish_mapping_request(self, spec: Dict[str, Any]) -> None:
@@ -159,9 +214,6 @@ class ExplorationDashboard(param.Parameterized):
         self._mapping_requests_sent.add(key)
 
     def _request_missing_mappings(self) -> bool:
-        """
-        Returns True if any REQUIRED mapping is still missing.
-        """
         self._sync_config_from_dataset_mappings()
 
         missing_required = False
@@ -204,7 +256,6 @@ class ExplorationDashboard(param.Parameterized):
             if config_key:
                 self.config.settings[config_key] = column_name
 
-            # Optional live-update for label mapping after build.
             if semantic_name == "target_label" and self._built:
                 self.config.settings["label_col"] = column_name
                 if hasattr(self, "label_selector"):
@@ -223,32 +274,144 @@ class ExplorationDashboard(param.Parameterized):
         if missing_required:
             self._root[:] = [
                 pn.Column(
-                    self.get_toolbar(),
                     pn.pane.Alert(
                         "Exploration Mode needs dataset mappings before it can open. "
                         "Use the header alert to map the ID, RA and DEC columns.",
                         alert_type="warning",
                     ),
                     sizing_mode="stretch_width",
+                    margin=(0, 0, 0, 0),
                 )
             ]
             return
 
-        # At this point the required mappings exist.
         self._sync_config_from_dataset_mappings()
 
         if not self._built:
             self._build_dashboard_ui()
+            self._root[:] = [self.main_layout]
             self._built = True
 
-        self._root[:] = [
-            pn.Column(
-                self.get_toolbar(),
-                self.get_layout(),
+    def _rerender_main_layout(self):
+        self.main_layout = self._build_main_layout()
+        self._root[:] = [self.main_layout]
+
+    def _toggle_labels_section(self, event=None):
+        self.labels_expanded = not self.labels_expanded
+        if self.main_layout is not None:
+            self._rerender_main_layout()
+
+    def _build_labels_card(self, body_fn, field_label_fn, card_fn):
+        self.labels_toggle_button = pn.widgets.Button(
+            name="Labels ▾" if self.labels_expanded else "Labels ▸",
+            button_type="light",
+            sizing_mode="stretch_width",
+            height=30,
+            margin=(0, 0, 0, 0),
+        )
+        self.labels_toggle_button.on_click(self._toggle_labels_section)
+
+        collapsed_styles = {
+            "border": "1px solid #d9d9d9",
+            "border-radius": "8px",
+            "background": "#ffffff",
+            "padding": "4px 8px",
+            "box-sizing": "border-box",
+            "width": "100%",
+        }
+
+        expanded_styles = {
+            "border": "1px solid #d9d9d9",
+            "border-radius": "8px",
+            "background": "#ffffff",
+            "padding": "10px 12px",
+            "box-sizing": "border-box",
+            "width": "100%",
+        }
+
+        if not self.labels_expanded:
+            return pn.Column(
+                self.labels_toggle_button,
                 sizing_mode="stretch_width",
-                margin=(0, 0, 0, 0),
+                min_width=0,
+                margin=(0, 0, 8, 0),
+                styles=collapsed_styles,
             )
+
+        label_items = [
+            body_fn("Choose a label column, then optionally rename labels and set their colours."),
+            pn.Spacer(height=6),
+            pn.Column(
+                field_label_fn("Label column"),
+                self.label_selector,
+                sizing_mode="stretch_width",
+                min_width=0,
+                margin=(0, 0, 0, 0),
+            ),
         ]
+
+        if len(self.label_editor_layout.objects) > 0:
+            label_items.extend([
+                pn.Spacer(height=6),
+                pn.Column(
+                    field_label_fn("Label display settings"),
+                    self.label_editor_layout,
+                    sizing_mode="stretch_width",
+                    min_width=0,
+                    margin=(0, 0, 0, 0),
+                ),
+            ])
+
+        if self.confirm_label_button.visible:
+            label_items.extend([
+                pn.Spacer(height=6),
+                pn.Row(
+                    self.confirm_label_button,
+                    sizing_mode="stretch_width",
+                    min_width=0,
+                    margin=(0, 0, 0, 0),
+                ),
+            ])
+
+        labels_body = pn.Column(
+            *label_items,
+            sizing_mode="stretch_width",
+            min_width=0,
+            height=220,
+            scroll=True,
+            styles={
+                "overflow-x": "hidden",
+                "padding-right": "2px",
+                "box-sizing": "border-box",
+            },
+            margin=(0, 0, 0, 0),
+        )
+
+        return pn.Column(
+            self.labels_toggle_button,
+            pn.Spacer(height=6),
+            labels_body,
+            sizing_mode="stretch_width",
+            min_width=0,
+            margin=(0, 0, 8, 0),
+            styles=expanded_styles,
+        )
+
+    def _extra_info_height(self):
+        n_rows = len(self._get_extra_info_df())
+        header = 30
+        row_h = 28
+        min_h = 56
+        max_h = 180
+        return max(min_h, min(max_h, header + n_rows * row_h))
+
+    def _index_input_cb(self, event):
+        if event.new != self.index:
+            self.index = event.new
+
+    def _sync_index_widget_cb(self, event):
+        if hasattr(self, "index_input") and self.index_input.value != event.new:
+            self.index_input.value = event.new
 
     def _build_dashboard_ui(self) -> None:
         self.param.index.bounds = (0, len(self.df) - 1)
@@ -257,51 +420,69 @@ class ExplorationDashboard(param.Parameterized):
         self._create_extra_info_cols_list()
         self._update_selected_src()
 
+        self.index_input = pn.widgets.IntInput(
+            name="",
+            value=self.index,
+            start=0,
+            end=len(self.df) - 1,
+            width=88,
+            height=28,
+            sizing_mode="fixed",
+            margin=(0, 0, 0, 0),
+        )
+
+        self.sourceid_input = pn.widgets.TextInput(
+            name="",
+            placeholder="Enter full or partial ID",
+            value="",
+            sizing_mode="stretch_width",
+            max_width=320,
+            margin=(0, 0, 0, 0),
+        )
+
+        self.index_input.param.watch(self._index_input_cb, "value")
+        self.param.watch(self._sync_index_widget_cb, "index")
+
         self.prev_button = pn.widgets.Button(
             name="Previous",
-            button_type="primary",
-            width=84,
-            height=34,
+            button_type="default",
+            width=80,
+            height=30,
+            margin=(0, 0, 0, 0),
         )
+
         self.next_button = pn.widgets.Button(
             name="Next",
             button_type="primary",
-            width=84,
-            height=34,
-        )
-        self.search_button = pn.widgets.Button(
-            name="Search",
-            button_type="primary",
-            width=84,
-            height=34,
-        )
-        self.sourceid_input = pn.widgets.TextInput(
-            name="SourceId",
-            value="",
-            width=180,
+            width=80,
+            height=30,
+            margin=(0, 0, 0, 0),
         )
 
-        self.extra_info_pane = pn.pane.DataFrame(
-            self._get_extra_info_df(),
-            index=False,
-            header=False,
-            sizing_mode="stretch_both",
+        self.search_button = pn.widgets.Button(
+            name="Find",
+            button_type="primary",
+            width=80,
+            height=30,
+            margin=(0, 0, 0, 0),
+        )
+
+        self.extra_info_html = pn.pane.HTML(
+            self._get_extra_info_html(),
+            sizing_mode="stretch_width",
+            margin=(0, 0, 0, 0),
         )
 
         self.prev_button.on_click(self._go_previous)
         self.next_button.on_click(self._go_next)
         self.search_button.on_click(self._search_button_cb)
-        self.sourceid_watcher = self.sourceid_input.param.watch(
-            self._sourceid_input_cb,
-            "value",
-            onlychanged=False,
-        )
 
         self._initialise_add_remove_columns_widgets()
         self._initialise_label_selector()
         self._update_navigation_flags()
         self._subscribe_to_shared()
 
+        self.main_layout = self._build_main_layout()
 
     @param.depends('index', watch=True)
     def _update_history(self):
@@ -312,15 +493,13 @@ class ExplorationDashboard(param.Parameterized):
 
         self.current_position = len(self.visited_indices) - 1
         self._update_navigation_flags()
-        self.sourceid_input.value =""
-
+        self.sourceid_input.value = ""
 
     def _go_previous(self, event):
         if self.current_position > 0:
             self.current_position -= 1
             self.index = self.visited_indices[self.current_position]
         self._update_navigation_flags()
-
 
     def _go_next(self, event):
         if self.current_position < len(self.visited_indices) - 1:
@@ -333,47 +512,46 @@ class ExplorationDashboard(param.Parameterized):
             else:
                 self.index = 0
         self._update_navigation_flags()
-    
+
     def _search_button_cb(self, event):
         sourceid = self.sourceid_input.value
         if sourceid:
             self._find_from_id(sourceid)
 
-
     def _sourceid_input_cb(self, event):
         sourceid = event.new
         if sourceid:
-             self._find_from_id(sourceid)
+            self._find_from_id(sourceid)
 
     def _get_id(self):
-        """Returns all ids in the table"""
         id_col = self.config.settings["id_col"]
         if id_col == "Use Index":
-            return pd.Series(self.df.index, index=self.df.index)  # Ensures it's a Series
+            return pd.Series(self.df.index, index=self.df.index)
         else:
             return self.df[id_col]
-        
+
     def _get_selected_id(self):
-        """Returns the sourceID for the selected source"""
         id_col = self.config.settings["id_col"]
         if len(self.src.data[id_col]) > 0:
             return str(self.src.data[id_col][0])
         
+        
+    
+
     
     def _find_from_id(self, sourceid):
-        sourceid = sourceid.strip() 
+        sourceid = sourceid.strip()
         try:
-            matches = self._get_id().str.contains(sourceid, case = True)
+            matches = self._get_id().str.contains(sourceid, case=True)
         except AttributeError:
-            matches = self._get_id().astype(str).str.contains(sourceid, case = True)
-        
+            matches = self._get_id().astype(str).str.contains(sourceid, case=True)
+
         N_matches = matches.sum()
         if N_matches == 1:
             self.index = self.df[matches].index[0]
         elif N_matches == 0:
             print("No matches found")
         else:
-            #avoid cases where the exact Id is also contained in some other ids
             exact_matches = self._get_id().astype(str) == sourceid
             N_exact = exact_matches.sum()
             if N_exact == 1:
@@ -381,80 +559,28 @@ class ExplorationDashboard(param.Parameterized):
             elif N_exact > 1:
                 print(f"There are {N_exact} sources which exactly match the provided sourceId")
             else:
-               print(f"There are {N_matches} sources containing the provided sourceId, be more specific") 
+                print(f"There are {N_matches} sources containing the provided sourceId, be more specific")
 
-    
     def _multithread_running_cb(self, is_running, panel_name):
         if is_running:
             self._running_panels.add(panel_name)
         else:
             self._running_panels.discard(panel_name)
         any_running = bool(self._running_panels)
-        self.prev_button.disabled = any_running
+        self.prev_button.disabled = any_running or self.current_position == 0
         self.next_button.disabled = any_running
-       
-    def _subscribe_to_shared(self):
-        """
-        Replacement for shared_data subscriptions using EventBus.
 
-        Expects events:
-        - astro.spectra.running: {"source": "...", "running": bool, "panel_id": "..."}
-        - astro.cutout.running: {"source": "Euclid", "running": bool, "panel_id": "..."}
-        - astro.radio.running:  {"source": "VLASS"/"LoTSS"/..., "running": bool, "panel_id": "..."}
-        - astro.sdss.running:   {"running": bool, "panel_id": "..."}   (or include source)
-        - selection.sourceid.changed: {"sourceId": <id>, "origin": "..."}
-        """
+    def _subscribe_to_shared(self):
         if not getattr(self, "context", None) or not getattr(self.context, "events", None):
             return
 
         bus = self.context.events
-
-        # Track subscriptions so you can unsubscribe if needed (or rely on dashboard dispose)
         self._event_subs = getattr(self, "_event_subs", [])
 
         def _sub(topic, fn):
             sub = bus.subscribe(topic, fn)
             self._event_subs.append(sub)
 
-        # --- running status aggregator ---
-        def _handle_running(payload, panel_name: str):
-            if not payload:
-                return
-            running = payload.get("running")
-            if running is None:
-                return
-            self._multithread_running_cb(bool(running), panel_name)
-
-        # # spectra running: source will be DESI/SDSS/EuclidSpec
-        # def _spectra_running(_topic, payload):
-        #     src = (payload or {}).get("source", "Spectra")
-        #     _handle_running(payload, panel_name=str(src))
-
-        # _sub("astro.spectra.running", _spectra_running)
-
-        # # euclid cutout running
-        # def _cutout_running(_topic, payload):
-        #     src = (payload or {}).get("source", "EuclidCutout")
-        #     # normalize to your old names if you want:
-        #     panel_name = "EuclidCutout" if str(src).lower().startswith("euclid") else str(src)
-        #     _handle_running(payload, panel_name=panel_name)
-
-        # _sub("astro.cutout.running", _cutout_running)
-
-        # # radio running (VLASS/LoTSS)
-        # def _radio_running(_topic, payload):
-        #     src = (payload or {}).get("source", "Radio")
-        #     _handle_running(payload, panel_name=str(src))
-
-        # _sub("astro.radio.running", _radio_running)
-
-        # # SDSS cutout running (if you publish it separately)
-        # def _sdss_running(_topic, payload):
-        #     _handle_running(payload, panel_name="SDSS")
-
-        # _sub("astro.sdss.running", _sdss_running)
-
-        # --- selected source id (from plots) ---
         def _selected_sourceid(_topic, payload):
             if not payload:
                 return
@@ -482,37 +608,45 @@ class ExplorationDashboard(param.Parameterized):
                     extra_data_list.append([col, value])
                 except KeyError:
                     continue
-            return  pd.DataFrame(extra_data_list, columns=["Column", "Value"])
+            return pd.DataFrame(extra_data_list, columns=["Column", "Value"])
         else:
             cols = ["SourceId"] + self.config.settings["extra_info_cols"]
-            return  pd.DataFrame(cols, columns=["Column"])
-        
-    
+            return pd.DataFrame(cols, columns=["Column"])
+
     def _save_extra_info_df(self):
         return self._get_extra_info_df()
-    
+
     def _initialise_add_remove_columns_widgets(self):
+
         self.add_column_button = pn.widgets.Button(
-            name="Add",
+            name="Add field",
             button_type="light",
-            width=64,
-            height=32,
+            width=92,
+            height=30,
+            margin=(0, 0, 0, 0),
         )
+
         self.remove_column_button = pn.widgets.Button(
-            name="Remove",
+            name="Remove field",
             button_type="light",
-            width=82,
-            height=32,
+            width=112,
+            height=30,
+            margin=(0, 0, 0, 0),
         )
+
         self.column_selector = pn.widgets.Select(
+            name="",
             options=[],
-            width=130,
+            sizing_mode="stretch_width",
+            max_width=320,
             visible=False,
+            margin=(0, 0, 0, 0),
         )
+
         self.selector_watcher = None
         self.add_column_button.on_click(self._add_column_callback)
-        self.remove_column_button.on_click(self._remove_column_callback)       
-    
+        self.remove_column_button.on_click(self._remove_column_callback)
+
     def _add_column_callback(self, event):
         self.column_selector.value = None
         options = [""] + [i for i in self.df.columns if i not in self.config.settings["extra_info_cols"]]
@@ -521,7 +655,8 @@ class ExplorationDashboard(param.Parameterized):
         if self.selector_watcher is not None:
             self.column_selector.param.unwatch(self.selector_watcher)
         self.selector_watcher = self.column_selector.param.watch(self._add_extra_feature, "value")
-    
+        self._rerender_main_layout()
+
     def _remove_column_callback(self, event):
         self.column_selector.value = None
         options = [""] + list(self.config.settings["extra_info_cols"])
@@ -530,75 +665,55 @@ class ExplorationDashboard(param.Parameterized):
         if self.selector_watcher is not None:
             self.column_selector.param.unwatch(self.selector_watcher)
         self.selector_watcher = self.column_selector.param.watch(self._remove_extra_feature, "value")
+        self._rerender_main_layout()
 
     def _add_extra_feature(self, event):
         column = event.new
         if column and column not in self.config.settings["extra_info_cols"]:
             self.config.settings["extra_info_cols"].append(column)
-            self.extra_info_pane.object = self._get_extra_info_df()
+            self._refresh_extra_info_view()
             self.column_selector.visible = False
+            self._rerender_main_layout()
 
     def _remove_extra_feature(self, event):
         column = event.new
         if column and column in self.config.settings["extra_info_cols"]:
             self.config.settings["extra_info_cols"].remove(column)
-            self.extra_info_pane.object = self._get_extra_info_df()
+            self._refresh_extra_info_view()
             self.column_selector.visible = False
+            self._rerender_main_layout()
 
-    
     def _selected_src_from_plot_cb(self, sourceid):
-        self.sourceid_input.param.unwatch(self.sourceid_watcher)
-        self.sourceid_input.value = sourceid
-        self.sourceid_watcher = self.sourceid_input.param.watch(self._sourceid_input_cb, "value", onlychanged=False)
-        
- 
-    @param.depends('index', watch=True)
+        self.sourceid_input.value = str(sourceid)
+
+    @param.depends("index", watch=True)
     def _update_src_cb(self):
         self._update_selected_src()
-        self.extra_info_pane.object = self._get_extra_info_df()
+        self._refresh_extra_info_view()
 
     def _update_selected_src(self):
         selected_dict = self.df.iloc[[self.index]].to_dict("list")
         if self.config.settings["id_col"] not in selected_dict:
-                selected_dict[self.config.settings["id_col"]] = [self.index]
+            selected_dict[self.config.settings["id_col"]] = [self.index]
         self.src.data = selected_dict
 
-
     def _generate_features(self, df):
-        """Create the feature combinations that the user specified.
-        Parameters
-        ----------
-        df : DataFrame
-            A dataframe containing all of the dataset.
-
-        Returns
-        -------
-        df : DataFrame
-            An expanding dataframe of `df` with the inclusion of the feature
-            combinations.
-        """
-
         bands = self.config.settings["features_for_training"]
-
         features = bands + [self.config.settings["label_col"], self.config.settings["id_col"]]
-
         oper_dict = feature_generation.get_oper_dict()
 
         if "feature_generation" in list(self.config.settings.keys()):
             for generator in self.config.settings["feature_generation"]:
                 oper = generator[0]
                 n = generator[1]
-                df, generated_features = oper_dict[oper](df, n, context = self.context)
+                df, generated_features = oper_dict[oper](df, n, context=self.context)
                 features = features + generated_features
         return df
-    
+
     def _generate_fake_label_column(self, df):
-        """This is not very elegant but allows to keep the code as it is.
-           If No labels is selected, it creates a column No labels with all Nan"""
         if (self.config.settings["label_col"] not in df.columns) and (self.config.settings["label_col"] == "No Labels"):
             df[self.config.settings["label_col"]] = np.nan
         return df
-    
 
     def _add_ra_dec_col(self, df):
         new_df = df
@@ -609,132 +724,376 @@ class ExplorationDashboard(param.Parameterized):
         return new_df
 
     def _preprocess_data(self):
-        """Process all the data according to the config file. In exploring panel it just"
-           compute combination of features and creating ra and dec column"""
-        #self.df = self._generate_fake_label_column(self.df)
-        #self.df = self._generate_features(self.df)
         self.df = self._add_ra_dec_col(self.df)
 
-    def _create_extra_info_cols_list(self):  
-        if "extra_info_cols" not in  self.config.settings:
+    def _create_extra_info_cols_list(self):
+        if "extra_info_cols" not in self.config.settings:
             self.config.settings["extra_info_cols"] = []
 
-    
     def _initialise_label_selector(self):
         label_column_options = ["No Labels"] + list(self.df.columns)
 
         self.label_selector = pn.widgets.Select(
+            name="",
             options=label_column_options,
             value=self.config.settings["label_col"],
-            width=110,
-            visible=True,
-        )
-        self.label_selector.param.watch(self._update_labels_cb, "value")
-
-        self.colorpickers_layout = pn.FlexBox(
-            flex_direction="row",
-            flex_wrap="wrap",
-            gap="6px",
-            align_items="center",
             sizing_mode="stretch_width",
+            max_width=320,
+            visible=True,
             margin=(0, 0, 0, 0),
         )
 
-        self.strings_to_label_layout = pn.FlexBox(
-            flex_direction="row",
-            flex_wrap="wrap",
-            gap="6px",
-            align_items="center",
+        self.label_editor_layout = pn.Column(
             sizing_mode="stretch_width",
             margin=(0, 0, 0, 0),
         )
 
         self.confirm_label_button = pn.widgets.Button(
-            name="Confirm",
+            name="Apply label settings",
             button_type="success",
-            width=82,
-            height=34,
+            width=130,
+            height=30,
             visible=False,
+            margin=(0, 0, 0, 0),
         )
         self.confirm_label_button.on_click(self._confirm_labels_change_cb)
-    
+
+        self.label_selector.param.watch(self._update_labels_cb, "value")
+
+        self.labels = []
+        self._sync_label_editor_state(self.label_selector.value, keep_button_visible=True)
+
     def _update_labels_cb(self, event):
-        selected_label_column = event.new
-        if (selected_label_column not in self.df.columns) or (selected_label_column == "No Labels"):
-            self.labels = []
-        else:
-            self.label_type = get_series_type(self.df[selected_label_column])
-            if self.label_type == "mixed": # strings and numbers are in the column
-                self.df[selected_label_column] = self.df[selected_label_column].astype(str)
-                self.label_type = "string"
-            elif self.label_type == "bool":
-                self.df[selected_label_column] = self.df[selected_label_column].astype(int)
-                self.label_type = "int"
-            if len(self.df[selected_label_column].unique()) > 20:
-                print(
-                """You have chosen a column with too many unique values (possibly continous) please choose a column with a smaller set of labels (<=20)"""
-                )
-                return
-            
-            self.labels = sorted(self.df[selected_label_column].unique())
-            self._update_label_strings_input()
-            self._update_colours_input()
-        self.confirm_label_button.visible = True
+        self._sync_label_editor_state(event.new, keep_button_visible=True)
+        self._rerender_main_layout()
 
     def _confirm_labels_change_cb(self, event):
-        self.strings_to_label_layout.clear()
-        self.colorpickers_layout.clear()
         self.config.settings["label_col"] = self.label_selector.value
         self.config.settings["labels"] = self.labels
         self.config.settings["labels_to_strings"], self.config.settings["strings_to_labels"] = self.get_label_strings()
         self.config.settings["label_colours"] = self.get_label_colours()
-        self.confirm_label_button.visible = False
-            
+        self.confirm_label_button.visible = bool(self.labels)
+        self._rerender_main_layout()
 
-    def _update_label_strings_input(self):
-        self.strings_to_label_layout.clear()
-        self.label_to_strings_param = {}
+    def _label_editor_height(self):
+        n = len(getattr(self, "labels", []))
+        if n == 0:
+            return 0
 
-        widgets = []
-        for data_label in self.labels:
-            text_input = pn.widgets.TextInput(
-                name=str(data_label),
-                placeholder=str(data_label),
-                width=80,
+        header_h = 16
+        row_h = 30
+        gap_h = 3
+        padding_h = 8
+
+        total = header_h + padding_h + n * row_h + max(0, n - 1) * gap_h
+        return min(118, total)
+
+    def _sync_label_editor_state(self, selected_label_column, keep_button_visible=True):
+        if (selected_label_column not in self.df.columns) or (selected_label_column == "No Labels"):
+            self.labels = []
+            self.label_editor_layout[:] = []
+            self.confirm_label_button.visible = False
+            return
+
+        self.label_type = get_series_type(self.df[selected_label_column])
+
+        if self.label_type == "mixed":
+            self.df[selected_label_column] = self.df[selected_label_column].astype(str)
+            self.label_type = "string"
+        elif self.label_type == "bool":
+            self.df[selected_label_column] = self.df[selected_label_column].astype(int)
+            self.label_type = "int"
+
+        if len(self.df[selected_label_column].unique()) > 20:
+            print(
+                "You have chosen a column with too many unique values (possibly continuous); "
+                "please choose a column with a smaller set of labels (<=20)"
             )
-            self.label_to_strings_param[f"{data_label}"] = text_input
-            widgets.append(text_input)
+            self.labels = []
+            self.label_editor_layout[:] = []
+            self.confirm_label_button.visible = False
+            return
 
-        self.strings_to_label_layout[:] = widgets
+        self.labels = sorted(self.df[selected_label_column].unique())
+        self._build_label_editor_rows()
+        self.confirm_label_button.visible = keep_button_visible
 
-    def _update_colours_input(self):
-        self.colorpickers_layout.clear()
+    def _build_label_editor_rows(self):
+        self.label_to_strings_param = {}
         self.colours_param = {}
 
         colour_list = [
-            "#1f77b4",
-            "#ff7f0e",
-            "#2ca02c",
-            "#d62728",
-            "#9467bd",
-            "#8c564b",
-            "#e377c2",
-            "#7f7f7f",
-            "#bcbd22",
-            "#17becf",
+            "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
+            "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf",
         ]
 
-        pickers = []
-        for i, label in enumerate(self.labels):
-            picker = pn.widgets.ColorPicker(
-                name=str(label),
-                value=colour_list[i % len(colour_list)],
-                width=78,
-            )
-            self.colours_param[label] = picker
-            pickers.append(picker)
+        raw_w = 70
+        colour_w = 40
 
-        self.colorpickers_layout[:] = pickers
+        def header_cell(text):
+            return pn.pane.HTML(
+                f"""
+                <div style="
+                    font-size:10px;
+                    font-weight:600;
+                    color:#666;
+                    white-space:nowrap;
+                    overflow:hidden;
+                    text-overflow:ellipsis;
+                ">
+                    {text}
+                </div>
+                """,
+                margin=(0, 0, 0, 0),
+                sizing_mode="stretch_width",
+            )
+
+        rows = [
+            pn.Row(
+                pn.Column(header_cell("Raw label"), width=raw_w, min_width=raw_w, max_width=raw_w, margin=(0, 0, 0, 0)),
+                pn.Column(header_cell("Display name"), sizing_mode="stretch_width", min_width=0, margin=(0, 0, 0, 0)),
+                pn.Column(header_cell("Colour"), width=colour_w, min_width=colour_w, max_width=colour_w, margin=(0, 0, 0, 0)),
+                sizing_mode="stretch_width",
+                min_width=0,
+                margin=(0, 0, 3, 0),
+            )
+        ]
+
+        for i, label in enumerate(self.labels):
+            text_input = pn.widgets.TextInput(
+                name="",
+                value=str(label),
+                placeholder="Display name",
+                sizing_mode="stretch_width",
+                min_width=0,
+                height=24,
+                margin=(0, 0, 0, 0),
+            )
+
+            picker = pn.widgets.ColorPicker(
+                name="",
+                value=colour_list[i % len(colour_list)],
+                width=30,
+                height=24,
+                margin=(0, 0, 0, 0),
+            )
+
+            self.label_to_strings_param[f"{label}"] = text_input
+            self.colours_param[label] = picker
+
+            raw_chip = pn.pane.HTML(
+                f"""
+                <div style="
+                    display:inline-block;
+                    max-width:54px;
+                    padding:1px 7px;
+                    border:1px solid #d8d8d8;
+                    border-radius:999px;
+                    background:#f7f7f7;
+                    color:#333;
+                    font-size:12px;
+                    font-weight:600;
+                    white-space:nowrap;
+                    overflow:hidden;
+                    text-overflow:ellipsis;
+                    box-sizing:border-box;
+                    line-height:16px;
+                ">
+                    {self._escape_html(label)}
+                </div>
+                """,
+                width=raw_w,
+                margin=(0, 0, 0, 0),
+            )
+
+            row = pn.Row(
+                pn.Column(raw_chip, width=raw_w, min_width=raw_w, max_width=raw_w, margin=(0, 0, 0, 0)),
+                pn.Column(text_input, sizing_mode="stretch_width", min_width=0, margin=(0, 0, 0, 0)),
+                pn.Column(picker, width=colour_w, min_width=colour_w, max_width=colour_w, margin=(0, 0, 0, 0)),
+                sizing_mode="stretch_width",
+                min_width=0,
+                margin=(0, 0, 3, 0),
+                styles={
+                    "width": "100%",
+                    "max-width": "100%",
+                    "border": "1px solid #e8e8e8",
+                    "border-radius": "7px",
+                    "padding": "2px 5px",
+                    "background": "#ffffff",
+                    "box-sizing": "border-box",
+                    "align-items": "center",
+                    "overflow": "hidden",
+                },
+            )
+
+            rows.append(row)
+
+        self.label_editor_layout[:] = rows
+
+    def _build_main_layout(self):
+        def heading(text, size=15, weight=700, color="#2f2f2f", margin_bottom=0):
+            return pn.pane.HTML(
+                (
+                    f"<div style='font-size:{size}px; font-weight:{weight}; "
+                    f"color:{color}; margin:0 0 {margin_bottom}px 0;'>{text}</div>"
+                ),
+                sizing_mode="stretch_width",
+                margin=(0, 0, 0, 0),
+            )
+
+        def body(text):
+            return pn.pane.HTML(
+                f"<div style='font-size:12px; line-height:1.35; color:#4a4a4a; margin:0;'>{text}</div>",
+                sizing_mode="stretch_width",
+                margin=(0, 0, 0, 0),
+            )
+
+        def field_label(text):
+            return pn.pane.HTML(
+                f"<div style='font-size:11px; font-weight:600; color:#2f2f2f; margin:0 0 4px 0;'>{text}</div>",
+                sizing_mode="stretch_width",
+                margin=(0, 0, 0, 0),
+            )
+
+        def divider():
+            return pn.pane.HTML(
+                "<div style='height:1px; background:#e8e8e8; margin:0;'></div>",
+                sizing_mode="stretch_width",
+                margin=(0, 0, 0, 0),
+            )
+
+        card_styles = {
+            "border": "1px solid #d9d9d9",
+            "border-radius": "8px",
+            "background": "#ffffff",
+            "padding": "10px 12px",
+            "box-sizing": "border-box",
+            "width": "100%",
+            "overflow": "hidden",
+        }
+
+        def subsection(title, description, *content):
+            items = [
+                heading(title, size=14, weight=700, margin_bottom=4),
+                body(description),
+            ]
+            for obj in content:
+                items.extend([pn.Spacer(height=5), obj])
+
+            return pn.Column(
+                *items,
+                sizing_mode="stretch_width",
+                min_width=0,
+                margin=(0, 0, 0, 0),
+            )
+
+        def card(*objects):
+            return pn.Column(
+                *objects,
+                sizing_mode="stretch_width",
+                min_width=0,
+                styles=card_styles,
+                margin=(0, 0, 8, 0),
+            )
+
+        browse_controls = pn.Row(
+            self.search_button,
+            self.prev_button,
+            self.next_button,
+            sizing_mode="stretch_width",
+            min_width=0,
+            margin=(0, 0, 0, 0),
+        )
+
+        metadata_controls = pn.Row(
+            self.add_column_button,
+            self.remove_column_button,
+            sizing_mode="stretch_width",
+            min_width=0,
+            margin=(0, 0, 0, 0),
+        )
+
+        index_block = pn.Column(
+            field_label("Record index"),
+            pn.Row(
+                self.index_input,
+                sizing_mode="fixed",
+                width=88,
+                height=28,
+                margin=(0, 0, 0, 0),
+            ),
+            sizing_mode="fixed",
+            width=110,
+            min_height=46,
+            max_height=46,
+            margin=(0, 0, 0, 0),
+        )
+
+        current_record_block = subsection(
+            "Current record",
+            "Review the selected record.",
+            index_block,
+            pn.Column(
+                field_label("Visible record information"),
+                self.extra_info_html,
+                sizing_mode="stretch_width",
+                min_width=0,
+                margin=(0, 0, 0, 0),
+            ),
+        )
+
+        browse_block = subsection(
+            "Browse records",
+            "Search for a record or move backward and forward through your navigation history.",
+            pn.Column(
+                field_label("Find record"),
+                self.sourceid_input,
+                sizing_mode="stretch_width",
+                min_width=0,
+                margin=(0, 0, 0, 0),
+            ),
+            browse_controls,
+        )
+
+        record_card = card(
+            current_record_block,
+            pn.Spacer(height=5),
+            divider(),
+            pn.Spacer(height=5),
+            browse_block,
+        )
+
+        metadata_items = [metadata_controls]
+        if self.column_selector.visible:
+            metadata_items.extend([
+                pn.Spacer(height=5),
+                pn.Column(
+                    field_label("Field"),
+                    self.column_selector,
+                    sizing_mode="stretch_width",
+                    min_width=0,
+                    margin=(0, 0, 0, 0),
+                )
+            ])
+
+        metadata_block = subsection(
+            "Visible metadata",
+            "Choose which extra fields appear in the summary above.",
+            *metadata_items,
+        )
+
+        settings_card = card(metadata_block)
+
+        labels_card = self._build_labels_card(body, field_label, card)
+
+        return pn.Column(
+            record_card,
+            settings_card,
+            labels_card,
+            sizing_mode="stretch_width",
+            min_width=0,
+            margin=(0, 0, 0, 0),
+        )
 
     def get_label_strings(self):
         labels_to_strings = {}
@@ -747,77 +1106,26 @@ class ExplorationDashboard(param.Parameterized):
             labels_to_strings[f"{label}"] = value
             strings_to_labels[f"{value}"] = label
         return labels_to_strings, strings_to_labels
-    
+
 
     def get_label_colours(self):
-        colours = {key : param_obj.value for key, param_obj in self.colours_param.items()}
-        return colours
+        return {key: param_obj.value for key, param_obj in self.colours_param.items()}
 
     def get_layout(self):
-        index_widget = pn.Param(
-            self,
-            parameters=["index"],
-            widgets={"index": {"type": pn.widgets.IntInput, "width": 80}},
-            show_name=False,
-            sizing_mode="fixed",
-        )
-
-        extra_info_section = pn.Column(
-            self.extra_info_pane,
-            height=100,
-            sizing_mode="stretch_width",
-            scroll=True,
-            margin=(0, 0, 6, 0),
-        )
-
-        column_controls = self._flex_row(
-            self.add_column_button,
-            self.remove_column_button,
-            self.column_selector,
-            margin=(0, 0, 6, 0),
-        )
-
-        nav_controls = self._flex_row(
-            self.sourceid_input,
-            self.search_button,
-            self.prev_button,
-            self.next_button,
-            margin=(0, 0, 6, 0),
-        )
-
-        label_controls = self._flex_row(
-            self.label_selector,
-            self.colorpickers_layout,
-            self.confirm_label_button,
-            margin=(0, 0, 4, 0),
-        )
-
-        label_string_controls = pn.FlexBox(
-            self.strings_to_label_layout,
-            flex_direction="row",
-            flex_wrap="wrap",
-            gap="6px",
-            align_items="center",
-            sizing_mode="stretch_width",
-            margin=(0, 0, 0, 0),
-        )
-
-        return pn.Column(
-            index_widget,
-            extra_info_section,
-            column_controls,
-            nav_controls,
-            label_controls,
-            label_string_controls,
-            sizing_mode="stretch_width",
-            margin=(0, 0, 0, 0),
-        )
-
+        return self.main_layout
 
     def get_toolbar(self):
-        return pn.Spacer(height=1)
+        return None
 
     def panel(self):
+        self._root.sizing_mode = "stretch_both"
+        self._root.scroll = True
+        self._root.margin = (0, 0, 0, 0)
+        self._root.min_width = 0
+        self._root.styles = {
+            "padding": "4px",
+            "box-sizing": "border-box",
+        }
         return self._root
 
     def dispose(self):
@@ -828,5 +1136,3 @@ class ExplorationDashboard(param.Parameterized):
                 except Exception:
                     pass
         self._event_subs = []
-
-

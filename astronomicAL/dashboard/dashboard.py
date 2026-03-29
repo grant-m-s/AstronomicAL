@@ -269,26 +269,6 @@ class Dashboard(param.Parameterized):
         """
 
         self.contents = updated
-
-    def panel(self):
-        """
-        Render the current view into self.row[0].
-        Always includes the dashboard toolbar (Close button etc.).
-        """
-        pc = getattr(self, "panel_contents", None)
-
-        # Only show the dashboard Close button when NOT on Menu
-        show_close = getattr(self, "contents", None) not in (None, "Menu", "Settings", "Active Learning", "Labelling", "Exploring")
-        toolbar = pn.Row(self._close_button, max_height=50) if show_close else pn.Spacer(height=1)
-
-        if pc is not None and hasattr(pc, "panel"):
-            body = pc.panel()
-            self.row[0] = pn.Column(toolbar, body, sizing_mode="stretch_both")
-        else:
-            body = pc
-            self.row[0] = pn.Column(toolbar, body, sizing_mode="stretch_both")
-
-        return self.row
     
     def panel(self):
         pc = getattr(self, "panel_contents", None)

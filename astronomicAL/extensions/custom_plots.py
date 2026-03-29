@@ -1641,7 +1641,7 @@ class SpectrumPlotClass(CustomPlotClass):
             self.sourceId = None
             self.ra, self.dec = self.get_ra_dec()
             if (self.ra is None) or (self.dec is None):
-                self.get_error_panel("Spectrum unavailable", "Missing Missing RA or DEC values")
+                self.get_error_panel("Spectrum unavailable", "Missing RA or DEC values")
                 return False
 
         try:

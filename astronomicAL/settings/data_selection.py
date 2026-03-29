@@ -299,25 +299,6 @@ class DataSelection(param.Parameterized):
         self.close_settings_button.disabled = False
         self.close_settings_button.button_type = "success"
 
-    def add_ra_dec_col(self, df):
-        new_df = df
-        ra_col_name = self.config.settings.get("ra_col_name", "ra")
-        dec_col_name = self.config.settings.get("dec_col_name", "dec")
-
-        has_loc = (
-            (ra_col_name in list(new_df.columns))
-            and (dec_col_name in list(new_df.columns))
-        )
-
-        if has_loc:
-            new_df["ra_dec"] = (
-                df[ra_col_name].astype(str) + "," + df[dec_col_name].astype(str)
-            )
-        else:
-            print("Columns selected as Ra and Dec are not in the table")
-
-        return new_df
-
     def get_df(self):
         return self.df
 
