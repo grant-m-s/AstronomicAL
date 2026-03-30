@@ -12,7 +12,7 @@ from functools import lru_cache
 
 #Matplotlib and Astropy/Scipy Imports
 import matplotlib
-matplotlib.use('TkAgg')
+
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.widgets import RectangleSelector
@@ -220,6 +220,7 @@ class LineFitter:
         # Create masks
         mask_signal = (wv >= regions.signal_start) & (wv <= regions.signal_end)
         mask_noise = (wv >= regions.noise_start) & (wv <= regions.noise_end)
+        mask_noise = mask_noise & ~mask_signal
 
         x_fit = wv[mask_signal]
         y_fit = corrected_flux[mask_signal]

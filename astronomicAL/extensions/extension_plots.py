@@ -8,7 +8,6 @@ from holoviews.operation.datashader import (
 import datashader as ds
 import holoviews as hv
 from holoviews import opts
-from functools import partial
 
 import numpy as np
 import pandas as pd
@@ -16,20 +15,11 @@ import panel as pn
 import glob
 import json
 import os
-import param
-
-import matplotlib.pyplot as plt
-from matplotlib.figure import Figure
-import concurrent.futures 
-
-# from astronomicAL.extensions.astro_data_utility import DESISpectraClass, EuclidCutoutsClass, EuclidSpectraClass
-# from astronomicAL.extensions.astro_data_utility import VLASS_cutout, LoTSS_cutout
 
 
 import uuid
-import traceback
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, List
 
 try:
     from astronomicAL.platform.events import Subscription

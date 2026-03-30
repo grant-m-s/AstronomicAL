@@ -15,8 +15,7 @@ import matplotlib.pyplot as plt
 from matplotlib.ticker import ScalarFormatter
 import concurrent.futures 
 from panel.io import save
-from bokeh.models import  NormalHead
-from bokeh.models import Range1d, LinearAxis
+from bokeh.models import Legend, LinearAxis, NormalHead, Range1d
 from astronomicAL.utils.optimise import matches_type
 from astronomicAL.extensions.astro_data_utility import DESISpectraClass, EuclidCutoutsClass, EuclidSpectraClass
 from astronomicAL.extensions.astro_data_utility import VLASS_cutout, LoTSS_cutout, make_srcdoc_aladin_lite, SDSS_cutout
@@ -275,6 +274,26 @@ class CustomPlotClass(param.Parameterized):
         )
 
 
+    def _get_active_dataset_id(self):
+        try:
+            if self.context and getattr(self.context, "datasets", None):
+                active = self.context.datasets.active_id()
+                if active:
+                    return active
+        except Exception:
+            pass
+        return "default"
+
+
+    def _get_selected_source_id(self):
+        try:
+            selected_id = self._get_selected_id()
+            if selected_id is None:
+                return None
+            return str(selected_id)
+        except Exception:
+            return None
+
     # -----------------------
     # Lifecycle
     # -----------------------
@@ -456,11 +475,6 @@ class CustomPlotClass(param.Parameterized):
         self._bokeh_on_change.clear()
 
         print("on delete:", self._bokeh_on_change)
-
-
-
-
-
 
     def _submit_button_cb(self, event):
         for col, widget in self.select_widgets.items():
@@ -763,13 +777,26 @@ class EuclidPlotClass(CustomPlotClass):
         initialised = self._initialise_euclid_object()
         self._initialise_widgets()
         self._manage_subscriptions()
+
+        # Keep the image compact and aspect-preserving in small panels
+        self.figure.sizing_mode = "stretch_width"
+        self.figure.min_height = 120
+        self.figure.max_height = 260
+        self.figure.margin = (0, 0, 10, 0)
+
         if initialised:
             self._run_euclid()
+
         self.message_pane.visible = False
 
-        return  pn.Column(self.message_pane, self.figure, self.plot_settings_panel, 
-                          scroll = True, sizing_mode = "stretch_both")
-    
+        return pn.Column(
+            self.message_pane,
+            self.figure,
+            self.plot_settings_panel,
+            sizing_mode="stretch_both",
+            min_height=0,
+            scroll=False,
+        )
 
     def _initialize_settings_dictionary(self):
         euclid_settings = self.config.settings.setdefault("Euclid_cutout_settings", {})
@@ -879,84 +906,265 @@ class EuclidPlotClass(CustomPlotClass):
         
         self.overplotted_coordinates = []
         return True
-            
+
+    def _field_label(self, text, width=320):
+        return pn.pane.HTML(
+            f"""
+            <div style="
+                font-weight: 600;
+                font-size: 13px;
+                line-height: 16px;
+                padding-left: 2px;
+                margin: 0;
+            ">
+                {text}
+            </div>
+            """,
+            width=width,
+            height=16,
+            margin=(2, 0, 2, 0),
+            sizing_mode="fixed",
+        )
+
+    def _field_block(self, text, widget, width=320, bottom=8):
+        return pn.Column(
+            self._field_label(text, width=width),
+            widget,
+            width=width,
+            margin=(0, 0, bottom, 0),
+            sizing_mode="fixed",
+        )
+
+    def _fix_width(self, widget, width=320, height=34):
+        widget.width = width
+        widget.min_width = width
+        widget.max_width = width
+        if hasattr(widget, "height"):
+            widget.height = height
+            widget.min_height = height
+            widget.max_height = height
+        widget.sizing_mode = "fixed"
+        return widget
 
     def _initialise_widgets(self):
+        CONTROL_HEIGHT = 34
+        SMALL_WIDTH = 72
 
-        self.radius_input = pn.widgets.FloatInput(name = "Radius [arcsec]", value = self.radius, 
-                                                  step = 0.5, start = 1, end = 100, max_width = 200,
-                                                  sizing_mode="stretch_both")
-        
-        self.stretching_input = pn.widgets.Select(name = "Stretching function", 
-                                                options=  ['Linear', 'Sqrt', 'Log', 'Asinh', 'PowerLaw'],
-                                                value = self._get_from_settings_dictionary("stretching", "Linear"),
-                                                sizing_mode = "stretch_both")
-        
-        self.scale_input = pn.widgets.Select(name = "Scaling Mode", 
-                                             options =  ["MinMax", "Expand"],
-                                             value = self._get_from_settings_dictionary("scaling", "MinMax"),
-                                            sizing_mode = "stretch_both")
+        def fix_control(widget, height=CONTROL_HEIGHT):
+            widget.height = height
+            widget.min_height = height
+            widget.max_height = height
+            widget.sizing_mode = "stretch_width"
+            return widget
 
-        
-        self.contrast_scaler = pn.widgets.RangeSlider(name = "Image Clipping", 
-                                                     start = 0, end = 1, step = 0.004, 
-                                                     value = self._get_from_settings_dictionary("clipping", (0,1)),
-                                                     sizing_mode = "stretch_both")
-        
-        self.filter_input = pn.widgets.Select(name = "Euclid Filter", 
-                                                options =  {"VIS" : "VIS", 'Y' : "NIR_Y", 'J' : "NIR_J", 
-                                                        'H' : "NIR_H", 'Color' : "Color"},
-                                                value  = self.filter,
-                                                max_width = 200,
-                                                sizing_mode = "stretch_both")
-        
-        self.overplot_source_coords_widget = pn.widgets.Checkbox(name = "Source Coordinates",
-                                                                 value = self._get_from_settings_dictionary("source_coordinates", "False"))
-        
-        self.overplot_coords_widget = pn.widgets.Checkbox(name = "Spectrum Coordinates")
-    
-        self.contour_levels_input = pn.widgets.IntInput(name = "Contour Levels", value = self._get_from_settings_dictionary("levels", 0), 
-                                                  step =1, start = 0, end = 15, max_width = 200,
-                                                  sizing_mode="stretch_both")
-        self.contour_levels_scale_input = pn.widgets.Select(name= "Contours drop",
-                                                            options= {"Sqrt(2)" : (np.sqrt(2), 1), "2" : (2, 1), "10" : (10,1),
-                                                                      "Exponential" : (np.exp(1),1), "Gaussian" : (np.exp(1),2),
-                                                                      "de Vaucouleurs" : (np.exp(1), 0.25)},  
-                                                            value=1, sizing_mode = "stretch_both",
-                                                            max_width = 150)
-          
+        def section_title(text):
+            return pn.pane.HTML(
+                f"""
+                <div style="
+                    font-weight: 600;
+                    font-size: 13px;
+                    line-height: 18px;
+                    margin: 0;
+                    padding: 0 0 2px 0;
+                ">
+                    {text}
+                </div>
+                """,
+                height=18,
+                margin=(0, 0, 4, 0),
+                sizing_mode="stretch_width",
+            )
 
-        self.environment_input = pn.widgets.Select(name = "Euclid Science Archive Environment", 
-                                            options =  {"Public Data Release" : "PDR", "Internal Data Release" : "IDR", 
-                                                        "On The Fly" : "OTF", "REG" : "REG"},
-                                            value  = "PDR",
-                                            disabled_options=["REG"],
-                                            sizing_mode = "stretch_both")
-        
-        self.user_input = pn.widgets.TextInput(name = 'Euclid Science Archive username', 
-                                               placeholder = 'Enter your Euclid Science Archive username here',
-                                               sizing_mode = "stretch_both")
-        self.password_input = pn.widgets.PasswordInput(name = "Password", 
-                                                placeholder = 'Enter your Euclid Science Archive password here',
-                                                sizing_mode = "stretch_both")
-        
-        self.confirm_login_button = pn.widgets.Button(name = "Confirm", sizing_mode = "stretch_both", max_height = 30, 
-                                                       max_width = 80, button_type= "primary")
-        
-        self.login_column = pn.Column(self.user_input, self.password_input, self.confirm_login_button, visible = False)
-        
+        def field_label(text):
+            return pn.pane.HTML(
+                f"""
+                <div style="
+                    font-size: 12px;
+                    line-height: 16px;
+                    margin: 0;
+                    padding: 0;
+                ">
+                    {text}
+                </div>
+                """,
+                height=16,
+                margin=(0, 0, 2, 0),
+                sizing_mode="stretch_width",
+            )
+
+        def field_block(text, widget, bottom=8):
+            return pn.Column(
+                field_label(text),
+                widget,
+                margin=(0, 0, bottom, 0),
+                sizing_mode="stretch_width",
+            )
+
+        self.radius_input = fix_control(
+            pn.widgets.FloatInput(
+                name="",
+                value=self.radius,
+                step=0.5,
+                start=1,
+                end=100,
+                margin=0,
+            )
+        )
+
+        self.filter_input = fix_control(
+            pn.widgets.Select(
+                name="",
+                options={
+                    "VIS": "VIS",
+                    "Y": "NIR_Y",
+                    "J": "NIR_J",
+                    "H": "NIR_H",
+                    "Color": "Color",
+                },
+                value=self.filter,
+                margin=0,
+            )
+        )
+
+        self.stretching_input = fix_control(
+            pn.widgets.Select(
+                name="",
+                options=["Linear", "Sqrt", "Log", "Asinh", "PowerLaw"],
+                value=self._get_from_settings_dictionary("stretching", "Linear"),
+                margin=0,
+            )
+        )
+
+        self.scale_input = fix_control(
+            pn.widgets.Select(
+                name="",
+                options=["MinMax", "Expand"],
+                value=self._get_from_settings_dictionary("scale", "MinMax"),
+                margin=0,
+            )
+        )
+
+        self.contrast_scaler = pn.widgets.RangeSlider(
+            name="",
+            start=0,
+            end=1,
+            step=0.004,
+            value=self._get_from_settings_dictionary("clipping", (0, 1)),
+            margin=0,
+            sizing_mode="stretch_width",
+        )
+
+        self.overplot_source_coords_widget = pn.widgets.Checkbox(
+            name="Source Coordinates",
+            value=self._get_from_settings_dictionary("source_coordinates", False),
+            margin=0,
+            sizing_mode="stretch_width",
+        )
+
+        self.overplot_coords_widget = pn.widgets.Checkbox(
+            name="Spectrum Coordinates",
+            value=False,
+            margin=0,
+            sizing_mode="stretch_width",
+        )
+
+        self.contour_levels_input = fix_control(
+            pn.widgets.IntInput(
+                name="",
+                value=self._get_from_settings_dictionary("levels", 0),
+                step=1,
+                start=0,
+                end=15,
+                margin=0,
+            )
+        )
+
+        self.contour_levels_scale_input = fix_control(
+            pn.widgets.Select(
+                name="",
+                options={
+                    "Sqrt(2)": (np.sqrt(2), 1),
+                    "2": (2, 1),
+                    "10": (10, 1),
+                    "Exponential": (np.exp(1), 1),
+                    "Gaussian": (np.exp(1), 2),
+                    "de Vaucouleurs": (np.exp(1), 0.25),
+                },
+                value=1,
+                margin=0,
+            )
+        )
+
+        self.environment_input = fix_control(
+            pn.widgets.Select(
+                name="",
+                options={
+                    "Public Data Release": "PDR",
+                    "Internal Data Release": "IDR",
+                    "On The Fly": "OTF",
+                    "REG": "REG",
+                },
+                value="PDR",
+                disabled_options=["REG"],
+                margin=0,
+            )
+        )
+
+        self.user_input = fix_control(
+            pn.widgets.TextInput(
+                name="",
+                placeholder="ESA username",
+                margin=0,
+            )
+        )
+
+        self.password_input = fix_control(
+            pn.widgets.PasswordInput(
+                name="",
+                placeholder="Password",
+                margin=0,
+            )
+        )
+
+        self.confirm_login_button = pn.widgets.Button(
+            name="Confirm login",
+            button_type="primary",
+            height=CONTROL_HEIGHT,
+            min_height=CONTROL_HEIGHT,
+            max_height=CONTROL_HEIGHT,
+            margin=(0, 0, 0, 0),
+            sizing_mode="stretch_width",
+        )
+
+        self.login_column = pn.Column(
+            field_block("Username", self.user_input, bottom=8),
+            field_block("Password", self.password_input, bottom=8),
+            self.confirm_login_button,
+            visible=False,
+            margin=(4, 0, 0, 0),
+            sizing_mode="stretch_width",
+        )
+
         self.color_settings_column = self._initialise_color_settings()
-        self.color_settings_button = pn.widgets.Button(name = "Color image settings", sizing_mode = "stretch_both", max_height = 30, 
-                                                       max_width = 80, button_type= "primary")
-    
-        
+        self.color_settings_button = pn.widgets.Button(
+            name="Color settings ▾",
+            button_type="default",
+            height=CONTROL_HEIGHT,
+            min_height=CONTROL_HEIGHT,
+            max_height=CONTROL_HEIGHT,
+            margin=(0, 0, 4, 0),
+            sizing_mode="stretch_width",
+        )
+
         self.add_param_watch_many(
-            [self.contrast_scaler,
-            self.scale_input,
-            self.filter_input,
-            self.overplot_source_coords_widget,
-            self.contour_levels_input,
-            self.contour_levels_scale_input],
+            [
+                self.contrast_scaler,
+                self.scale_input,
+                self.filter_input,
+                self.overplot_source_coords_widget,
+                self.contour_levels_input,
+                self.contour_levels_scale_input,
+            ],
             self._general_parameter_callback,
             what="value",
         )
@@ -964,75 +1172,175 @@ class EuclidPlotClass(CustomPlotClass):
         self.add_param_watch(self.radius_input, self._update_radius, "value")
         self.add_param_watch(self.stretching_input, self._update_stretching, "value")
         self.add_param_watch(self.overplot_coords_widget, self._overplot_coordinates_callback, "value")
-    
         self.add_param_watch(self.environment_input, self._change_euclid_environment, "value")
 
         self.confirm_login_button.on_click(self._confirm_login_credentials_cb)
         self.color_settings_button.on_click(self._open_color_settings_cb)
 
+        self.plot_settings_panel = pn.Column(
+            section_title("Basic"),
+            field_block("Radius [arcsec]", self.radius_input),
+            field_block("Euclid Filter", self.filter_input),
+            field_block("Stretching", self.stretching_input),
+            field_block("Scaling Mode", self.scale_input),
+            field_block("Image Clipping", self.contrast_scaler, bottom=10),
 
-        self.plot_settings_panel = pn.Column(self.contrast_scaler, self.radius_input, 
-                                             pn.Row(self.stretching_input, self.scale_input),
-                                             self.filter_input,
-                                             pn.Row(self.overplot_source_coords_widget,self.overplot_coords_widget),
-                                             pn.Row(self.contour_levels_input, self.contour_levels_scale_input),
-                                             self.color_settings_column,
-                                             self.color_settings_button,
-                                             self.environment_input, 
-                                             self.login_column, 
-                                             scroll = True, visible = False)
-        
+            section_title("Overlays"),
+            pn.Column(
+                self.overplot_source_coords_widget,
+                pn.Spacer(height=4),
+                self.overplot_coords_widget,
+                margin=(0, 0, 10, 0),
+                sizing_mode="stretch_width",
+            ),
+
+            section_title("Contours"),
+            field_block("Contour Levels", self.contour_levels_input),
+            field_block("Contours drop", self.contour_levels_scale_input, bottom=10),
+
+            section_title("Color"),
+            self.color_settings_button,
+            self.color_settings_column,
+            pn.Spacer(height=10),
+
+            section_title("Archive"),
+            field_block("Archive Environment", self.environment_input, bottom=6),
+            self.login_column,
+
+            visible=False,
+            scroll=False,
+            sizing_mode="stretch_width",
+            margin=(0, 0, 0, 0),
+        )
 
     def _initialise_color_settings(self):
-        self.contrast_scaler_red = pn.widgets.RangeSlider(name = "Image Red scaling", 
-                                                     start = 0, end = 1, step = 0.004, 
-                                                     value = (0,1), bar_color = "red",
-                                                     max_width = 400,
-                                                     sizing_mode = "stretch_both")
-        self.contrast_scaler_green = pn.widgets.RangeSlider(name = "Image Green scaling", 
-                                                     start = 0, end = 1, step = 0.004, 
-                                                     value = (0,1), bar_color = "green",
-                                                     max_width = 400,
-                                                     sizing_mode = "stretch_both")
-        self.contrast_scaler_blue = pn.widgets.RangeSlider(name = "Image Blue scaling", 
-                                                     start = 0, end = 1, step = 0.004, 
-                                                     value = (0,1), bar_color = "blue",
-                                                     max_width = 400,
-                                                     sizing_mode = "stretch_both")
-        
-        self.gamma_red_input = pn.widgets.FloatInput(name = "Γ [R]", 
-                                                  value = self._get_from_settings_dictionary("gamma", [1,1,1])[0],
-                                                  step = 0.1, start = 0, end = 5, max_width = 100,
-                                                  sizing_mode="stretch_both")
-        self.gamma_green_input = pn.widgets.FloatInput(name = "Γ [G]", 
-                                                  value = self._get_from_settings_dictionary("gamma", [1,1,1])[1],
-                                                  step = 0.1, start = 0, end = 5, max_width = 100,
-                                                  sizing_mode="stretch_both")
-        self.gamma_blue_input = pn.widgets.FloatInput(name = "Γ [B]", 
-                                                  value = self._get_from_settings_dictionary("gamma", [1,1,1])[2],
-                                                  step = 0.1, start = 0, end = 5, max_width = 100,
-                                                  sizing_mode="stretch_both")
-        
+        CONTROL_HEIGHT = 34
+
+        def fix_control(widget, height=CONTROL_HEIGHT):
+            widget.height = height
+            widget.min_height = height
+            widget.max_height = height
+            widget.sizing_mode = "stretch_width"
+            return widget
+
+        def field_label(text):
+            return pn.pane.HTML(
+                f"""
+                <div style="
+                    font-size: 12px;
+                    line-height: 16px;
+                    margin: 0;
+                    padding: 0;
+                ">
+                    {text}
+                </div>
+                """,
+                height=16,
+                margin=(0, 0, 2, 0),
+                sizing_mode="stretch_width",
+            )
+
+        def field_block(text, widget, bottom=8):
+            return pn.Column(
+                field_label(text),
+                widget,
+                margin=(0, 0, bottom, 0),
+                sizing_mode="stretch_width",
+            )
+
+        gamma = self._get_from_settings_dictionary("gamma", [1, 1, 1])
+
+        self.contrast_scaler_red = pn.widgets.RangeSlider(
+            name="",
+            start=0,
+            end=1,
+            step=0.004,
+            value=(0, 1),
+            bar_color="red",
+            margin=0,
+            sizing_mode="stretch_width",
+        )
+
+        self.contrast_scaler_green = pn.widgets.RangeSlider(
+            name="",
+            start=0,
+            end=1,
+            step=0.004,
+            value=(0, 1),
+            bar_color="green",
+            margin=0,
+            sizing_mode="stretch_width",
+        )
+
+        self.contrast_scaler_blue = pn.widgets.RangeSlider(
+            name="",
+            start=0,
+            end=1,
+            step=0.004,
+            value=(0, 1),
+            bar_color="blue",
+            margin=0,
+            sizing_mode="stretch_width",
+        )
+
+        self.gamma_red_input = fix_control(
+            pn.widgets.FloatInput(
+                name="",
+                value=gamma[0],
+                step=0.1,
+                start=0,
+                end=5,
+                margin=0,
+            )
+        )
+
+        self.gamma_green_input = fix_control(
+            pn.widgets.FloatInput(
+                name="",
+                value=gamma[1],
+                step=0.1,
+                start=0,
+                end=5,
+                margin=0,
+            )
+        )
+
+        self.gamma_blue_input = fix_control(
+            pn.widgets.FloatInput(
+                name="",
+                value=gamma[2],
+                step=0.1,
+                start=0,
+                end=5,
+                margin=0,
+            )
+        )
 
         self.add_param_watch_many(
             [self.contrast_scaler_red, self.contrast_scaler_green, self.contrast_scaler_blue],
             self._color_specific_callback,
-            what = "value_throttled",
-            )
-        
+            what="value_throttled",
+        )
+
         self.add_param_watch_many(
             [self.gamma_red_input, self.gamma_green_input, self.gamma_blue_input],
             self._color_specific_callback,
-            what = "value",
-            )
+            what="value",
+        )
 
-        
-        return pn.Column(pn.Column(self.contrast_scaler_red, self.contrast_scaler_green, self.contrast_scaler_blue),
-                         pn.Row(self.gamma_red_input, self.gamma_green_input, self.gamma_blue_input),
-                         visible = False)
-                              
+        return pn.Column(
+            field_block("Red clipping", self.contrast_scaler_red),
+            field_block("Green clipping", self.contrast_scaler_green),
+            field_block("Blue clipping", self.contrast_scaler_blue),
+            field_block("Gamma R", self.gamma_red_input),
+            field_block("Gamma G", self.gamma_green_input),
+            field_block("Gamma B", self.gamma_blue_input),
+            visible=False,
+            scroll=False,
+            sizing_mode="stretch_width",
+            margin=(0, 0, 8, 0),
+        )
 
-        
     def _update_radius(self, event):
         if event.new: 
             self.radius = event.new
@@ -1076,11 +1384,16 @@ class EuclidPlotClass(CustomPlotClass):
                 self.get_euclid_figure_hv(scaled_image, show_coordinates = self.overplot_source_coords_widget.value)
                 self._update_image()
 
-    def _update_image(self): 
+    def _update_image(self):
         try:
-             self.figure.object = hv.Overlay(self.euclid_fig + self.overplotted_coordinates)
-             self.message_pane.visible = False
-        except Exception as e:         #too generic
+            overlay = hv.Overlay(self.euclid_fig + self.overplotted_coordinates).opts(
+                responsive=True,
+                aspect="equal",
+                toolbar=None,
+            )
+            self.figure.object = overlay
+            self.message_pane.visible = False
+        except Exception as e:
             print(f"Euclid image unavailable:\n {e}")
  
     def _add_coordinates(self, coordinates, dataset):
@@ -1141,23 +1454,38 @@ class EuclidPlotClass(CustomPlotClass):
 
     def _change_euclid_environment(self, event):
         self.environment = event.new
-        if self.environment in  ["IDR", "OTF", "REG"]:
+
+        # Public release never needs login fields
+        if self.environment == "PDR":
+            self.login_column.visible = False
+            self.euclid_object.change_environment(environment="PDR")
+            return
+
+        # Private / authenticated environments
+        if self.environment in ["IDR", "OTF", "REG"]:
             if os.path.isfile("euclid_credentials.login"):
+                self.login_column.visible = False
                 print("I found the credential file")
-                self.euclid_object.change_environment(environment=self.environment,
-                                                      user = None, password = None, 
-                                                      credentials_filepath = "euclid_credentials.login")
-                
+                self.euclid_object.change_environment(
+                    environment=self.environment,
+                    user=None,
+                    password=None,
+                    credentials_filepath="euclid_credentials.login",
+                )
+                return
+
+            user = self.config.settings.get("EuclidAccountUser", None)
+            password = self.config.settings.get("EuclidAccountPassword", None)
+
+            if (user is None) or (password is None) or (str(user).strip() == "") or (str(password).strip() == ""):
+                self.login_column.visible = True
             else:
-                user = self.config.settings.get("EuclidAccountUser", None)
-                password = self.config.settings.get("EuclidAccountUser", None)
-                if (user is None) or (password is None):
-                    self.login_column.visible = True
-                else:
-                    self.euclid_object.change_environment(environment=self.environment,
-                                                      user = user, password = password)
-        else:
-            self.euclid_object.change_environment(environment = self.environment)        
+                self.login_column.visible = False
+                self.euclid_object.change_environment(
+                    environment=self.environment,
+                    user=user,
+                    password=password,
+                )      
 
 
     def _confirm_login_credentials_cb(self, event):
@@ -1172,8 +1500,10 @@ class EuclidPlotClass(CustomPlotClass):
             svc.set("euclid.client", self.euclid_object.client)
     
     def _open_color_settings_cb(self, event):
-        self.color_settings_column.visible  = not self.color_settings_column.visible
-
+        self.color_settings_column.visible = not self.color_settings_column.visible
+        self.color_settings_button.name = (
+            "Color settings ▴" if self.color_settings_column.visible else "Color settings ▾"
+        )
 
     def get_plot_scale(self):
         bar_length_arcsecond = self.bar_length_pixels * self.euclid_object.arcsec_per_pix[self.filter]
@@ -1410,15 +1740,29 @@ class EuclidPlotClass(CustomPlotClass):
         if not self.context or not getattr(self.context, "events", None) or not getattr(self.context, "artifacts", None):
             return
 
+        # Avoid duplicate subscriptions if get_layout() is called more than once
+        if getattr(self, "_coords_subscription_ready", False):
+            return
+        self._coords_subscription_ready = True
+
         def _coords_updated(topic, payload):
             if not payload:
                 return
 
             source = payload.get("source")
             artifact_id = payload.get("artifact_id")
-            dataset_id = payload.get("dataset_id", "default")
+            dataset_id = payload.get("dataset_id", self._get_active_dataset_id())
+            payload_selected_id = payload.get("selected_id")
+
+            current_selected_id = self._get_selected_source_id()
+
             if not source or not artifact_id:
                 return
+
+            # Ignore coords for a different selected source if source scoping is present
+            if current_selected_id is not None and payload_selected_id is not None:
+                if str(payload_selected_id) != str(current_selected_id):
+                    return
 
             try:
                 coords = self.context.artifacts.get(artifact_id)
@@ -1430,20 +1774,34 @@ class EuclidPlotClass(CustomPlotClass):
 
         self.subscribe("astro.coords.updated", _coords_updated)
 
-        # Late-join: load latest coords for each source (newest-first is guaranteed by ArtifactStore.find)
-        active_dataset_id = "default"
+        # Late-join: load latest coords already in the artifact store
+        active_dataset_id = self._get_active_dataset_id()
+        current_selected_id = self._get_selected_source_id()
+
+        dataset_ids_to_try = [active_dataset_id]
+        if active_dataset_id != "default":
+            dataset_ids_to_try.append("default")
+
         for src_name in ("DESI", "SDSS", "EuclidSpec"):
-            refs = self.context.artifacts.find(
-                type="astro.coords",
-                dataset_id=active_dataset_id,
-                params_subset={"source": src_name},
-            )
-            if refs:
+            for dsid in dataset_ids_to_try:
                 try:
-                    coords = self.context.artifacts.get(refs[0].artifact_id)
-                    self._add_coordinates(coords, src_name)
-                except Exception:
-                    pass
+                    params_subset = {"source": src_name}
+                    if current_selected_id is not None:
+                        params_subset["selected_id"] = current_selected_id
+
+                    refs = self.context.artifacts.find(
+                        type="astro.coords",
+                        dataset_id=dsid,
+                        params_subset=params_subset,
+                    )
+
+                    if refs:
+                        coords = self.context.artifacts.get(refs[0].artifact_id)
+                        self._add_coordinates(coords, src_name)
+                        break
+
+                except Exception as e:
+                    print(f"Late-join coords lookup failed for {src_name} in dataset {dsid}: {e}")
 
 class SpectrumPlotClass(CustomPlotClass):
     
@@ -1458,7 +1816,12 @@ class SpectrumPlotClass(CustomPlotClass):
         if (context is not None and getattr(context, "config", None) is not None):
             self.config = context.config
 
-        self.figure = pn.Column(scroll = True, sizing_mode = "stretch_both", margin =(5, 20))
+        self.figure = pn.Column(
+            sizing_mode="stretch_both",
+            min_height=0,
+            margin=(5, 20),
+            scroll=False,
+        )
         self.dataset = dataset
         self._is_euclid_spec = self.dataset == "EuclidSpec" 
 
@@ -1488,6 +1851,16 @@ class SpectrumPlotClass(CustomPlotClass):
         if isinstance(obj, dict):
             return obj.get(name, default)
         return getattr(obj, name, default)
+
+    def _get_active_dataset_id(self):
+        try:
+            if self.context and getattr(self.context, "datasets", None):
+                active = self.context.datasets.active_id()
+                if active:
+                    return active
+        except Exception:
+            pass
+        return "default"
 
     def _build_spectrum_artifact_payload(self) -> dict:
         """
@@ -1563,23 +1936,31 @@ class SpectrumPlotClass(CustomPlotClass):
         return payload
 
     def publish_spectrum_artifact(self, dataset_id: str = "default"):
-        """
-        Store a spectrum artifact + publish a spectrum.updated event.
-        """
         if self.context is None:
             return
+
+        selected_id = self._get_selected_id()
         spec_payload = self._build_spectrum_artifact_payload()
 
         artifact_id = self.context.artifacts.put(
             type="astro.spectrum",
             payload=spec_payload,
             dataset_id=dataset_id,
-            params={"source": self.dataset},
+            row_ids=[str(selected_id)] if selected_id is not None else None,
+            params={
+                "source": self.dataset,
+                "selected_id": str(selected_id) if selected_id is not None else None,
+            },
         )
 
         self.context.events.publish(
             "astro.spectrum.updated",
-            {"source": self.dataset, "artifact_id": artifact_id, "dataset_id": dataset_id},
+            {
+                "source": self.dataset,
+                "artifact_id": artifact_id,
+                "dataset_id": dataset_id,
+                "selected_id": str(selected_id) if selected_id is not None else None,
+            },
         )
 
     def _initialize_settings_dictionary(self):
@@ -1591,7 +1972,15 @@ class SpectrumPlotClass(CustomPlotClass):
         initialized = self._initialize_spectrum_object()
         if initialized:
             self._run_spectrum()
-        return pn.Column(self.message_pane, self.figure, self.plot_settings_panel,  scroll = True)
+
+        return pn.Column(
+            self.message_pane,
+            self.figure,
+            self.plot_settings_panel,
+            sizing_mode="stretch_both",
+            min_height=0,
+            scroll=False,
+        )
     
     def _change_source_cb(self, attr, old, new):
         if self.stage == "plot":
@@ -1672,30 +2061,41 @@ class SpectrumPlotClass(CustomPlotClass):
         return True
 
     def _add_coordinates_to_shared(self, ra, dec):
-        """
-        ra and dec are lists
-        """
-        coords_dict = {"ra":list(ra), "dec":list(dec)}
-        self.publish_coords(f"{self.dataset}", coords_dict["ra"], coords_dict["dec"])
-
+        coords_dict = {"ra": list(ra), "dec": list(dec)}
+        self.publish_coords(
+            f"{self.dataset}",
+            coords_dict["ra"],
+            coords_dict["dec"],
+            dataset_id=self._get_active_dataset_id(),
+        )
         return None
 
     def publish_coords(self, source: str, ra: list[float], dec: list[float], dataset_id: str = "default"):
         if self.context is None:
             return
 
+        selected_id = self._get_selected_id()
         coords = {"ra": ra, "dec": dec}
 
         artifact_id = self.context.artifacts.put(
             type="astro.coords",
             payload=coords,
             dataset_id=dataset_id,
-            params={"source": source},
+            row_ids=[str(selected_id)] if selected_id is not None else None,
+            params={
+                "source": source,
+                "selected_id": str(selected_id) if selected_id is not None else None,
+            },
         )
 
         self.context.events.publish(
             "astro.coords.updated",
-            {"source": source, "artifact_id": artifact_id, "dataset_id": dataset_id},
+            {
+                "source": source,
+                "artifact_id": artifact_id,
+                "dataset_id": dataset_id,
+                "selected_id": str(selected_id) if selected_id is not None else None,
+            },
         )
 
     def _run_spectrum(self, max_separation=None):
@@ -1739,13 +2139,10 @@ class SpectrumPlotClass(CustomPlotClass):
 
                 self._update_plot()
 
-                # coords artifact+event (you already implemented publish_coords)
                 ra_list, dec_list = self.spectrum_object.get_coordinates()
                 self._add_coordinates_to_shared(ra_list, dec_list)
 
-                # NEW: spectrum artifact+event
-                self.publish_spectrum_artifact(dataset_id="default")
-
+                self.publish_spectrum_artifact(dataset_id=self._get_active_dataset_id())
                 self.message_pane.visible = False
 
             except Exception as e:
@@ -1940,10 +2337,22 @@ class SpectrumPlotClass(CustomPlotClass):
     def _update_plot(self):
         plot_model = self.plot_model_checkbox.value
         plot_lines = "class" if self.plot_lines_checkbox.value else False
-        kwargs = {"aspect" : 3.8 if self.spectrum_object.available_spectra > 1 else 3.17, "responsive" : True}
-        plot = self.spectrum_object.plot_all_spectra_hv(plot_model = plot_model, plot_lines = plot_lines,
-                                                                **kwargs)
-        self.figure.objects = [plot]
+
+        plot = self.spectrum_object.plot_all_spectra_hv(
+            plot_model=plot_model,
+            plot_lines=plot_lines,
+            responsive=True,
+        ).opts(
+            sizing_mode="stretch_both"
+        )
+
+        self.figure.objects = [
+            pn.pane.HoloViews(
+                plot,
+                sizing_mode="stretch_both",
+                min_height=0,
+            )
+        ]
 
     
     def _update_max_separation(self, new_separation):
@@ -3205,11 +3614,39 @@ class SpecAnalyser(CustomPlotClass):
             angle=1.5708,
             text_font_size="8pt",
         )
+
+
         self.source_plot.add_layout(self.emission_label_set)
 
+        self.emission_renderer.on_change("visible", self._on_emission_renderer_visible)
+        self._sync_emission_label_visibility()
+
         for plot in (self.source_plot, self.residuals_plot):
+            if plot.legend:
+                plot.legend.visible = False
             plot.legend.click_policy = "hide"
             plot.add_tools(HoverTool(tooltips=[("Wavelength", "@wavelength"), ("Flux", "@flux")]))
+
+
+        self.source_legend = self._make_compact_external_legend(
+            self.source_plot,
+            [
+                ("Original Spectrum", [self.raw_renderer]),
+                ("Continuum Fit", [self.continuum_renderer]),
+                ("Continuum Subtracted", [self.corrected_renderer]),
+                ("Locked Fits", [self.locked_renderer]),
+                ("Emission Lines", [self.emission_renderer]),
+            ],
+        )
+
+        self.residuals_legend = self._make_compact_external_legend(
+            self.residuals_plot,
+            [
+                ("Residual / Corrected Flux", [self.residuals_renderer]),
+                ("Fit", [self.fit_renderer]),
+            ],
+        )
+
 
         # Fit / status annotations
         self.fit_status_label = Label(
@@ -3240,6 +3677,7 @@ class SpecAnalyser(CustomPlotClass):
         LABEL_MARGIN_TOP = 2
         LABEL_MARGIN_BOTTOM = 2
         BLOCK_MARGIN_BOTTOM = 6
+
 
         def fix_height(widget, width, height=CONTROL_HEIGHT):
             widget.width = width
@@ -3549,14 +3987,96 @@ class SpecAnalyser(CustomPlotClass):
 
         self.residuals_plot.on_event(Tap, self._on_plot_tap)
 
+        self._src_callback = self._change_source_cb
+        self.watch_bokeh(self.src, "data", self._src_callback)
+
         self._on_plot_settings_changed(None)
         self._update_region_overlays()
         self._update_results_table(None)
         self._set_status("", visible=False)
 
+        self._refresh_spectra_from_artifacts()
+
+    def _sync_emission_label_visibility(self):
+        data = self.emission_line_source.data or {}
+        has_lines = len(data.get("x", [])) > 0
+        self.emission_label_set.visible = bool(self.emission_renderer.visible and has_lines)
+
+    def _on_emission_renderer_visible(self, attr, old, new):
+        self._sync_emission_label_visibility()
+
+    def _make_compact_external_legend(self, plot, items, side="right"):
+        legend = Legend(
+            items=items,
+            location="top_left",
+            orientation="vertical",
+            label_text_font_size="8pt",
+            glyph_width=10,
+            glyph_height=10,
+            spacing=2,
+            padding=4,
+            margin=0,
+            label_standoff=4,
+            background_fill_alpha=0.0,
+            border_line_alpha=0.0,
+            click_policy="hide",
+        )
+        plot.add_layout(legend, side)
+        return legend
+
     # ------------------------------------------------------------------
     # Data conversion
     # ------------------------------------------------------------------
+
+    def _extract_artifact_redshift(self, spec):
+        try:
+            s0 = spec["spectra"][0]
+        except Exception:
+            return None
+
+        z = s0.get("redshift", None)
+
+        try:
+            z = float(z)
+        except Exception:
+            return None
+
+        if not self.np.isfinite(z):
+            return None
+
+        return z
+
+    def _resolve_redshift_for_selected(self, selected):
+        # 1) Prefer the selected spectrum's own redshift
+        selected_spec = self._spectra_cache.get(selected)
+        selected_z = self._extract_artifact_redshift(selected_spec) if selected_spec else None
+        if selected_z is not None:
+            return selected_z
+
+        # Collect all valid redshifts from loaded spectra
+        valid_redshifts = {}
+        for key, spec in self._spectra_cache.items():
+            z = self._extract_artifact_redshift(spec)
+            if z is not None:
+                valid_redshifts[key] = z
+
+        # 2) If current slider value matches one of the loaded valid redshifts, preserve it
+        try:
+            current_z = float(self.redshift_slider.value)
+            if self.np.isfinite(current_z):
+                for z in valid_redshifts.values():
+                    if abs(z - current_z) < 1e-10:
+                        return current_z
+        except Exception:
+            pass
+
+        # 3) Otherwise use any other available valid redshift
+        if valid_redshifts:
+            return next(iter(valid_redshifts.values()))
+
+        # 4) Nothing available -> reset
+        return 0.0
+
     def _artifact_to_spectrum_data(self, spec, source_name):
         s0 = spec["spectra"][0]
 
@@ -3587,52 +4107,130 @@ class SpecAnalyser(CustomPlotClass):
     # ------------------------------------------------------------------
     # External event handling
     # ------------------------------------------------------------------
-    def _spectra_updated(self, topic, payload):
-        active_dataset_id = "default"
+
+    def _change_source_cb(self, attr, old, new):
+        self._refresh_spectra_from_artifacts(
+            dataset_id=self._get_active_dataset_id(),
+            selected_id=self._get_selected_source_id(),
+        )
+
+    def _get_active_dataset_id(self):
+        try:
+            if self.context and getattr(self.context, "datasets", None):
+                active = self.context.datasets.active_id()
+                if active:
+                    return active
+        except Exception:
+            pass
+        return "default"
+
+    def _get_selected_source_id(self):
+        try:
+            selected_id = self._get_selected_id()
+            if selected_id is None:
+                return None
+            return str(selected_id)
+        except Exception:
+            return None
+
+    def _collect_spectra_from_artifacts(self, dataset_id=None, selected_id=None):
+        dataset_id = dataset_id or self._get_active_dataset_id()
+        selected_id = selected_id if selected_id is not None else self._get_selected_source_id()
+
         spectra_by_source = {}
 
-        for src_name in ("DESI", "SDSS", "EuclidSpec"):
-            refs = self.context.artifacts.find(
-                type="astro.spectrum",
-                dataset_id=active_dataset_id,
-                params_subset={"source": src_name},
-            )
-            if refs:
-                spec = self.context.artifacts.get(refs[0].artifact_id)
-                spectra_by_source[src_name] = spec
+        if not (self.context and getattr(self.context, "artifacts", None)):
+            return spectra_by_source
 
+        for src_name in ("DESI", "SDSS", "EuclidSpec"):
+            try:
+                params_subset = {"source": src_name}
+                if selected_id is not None:
+                    params_subset["selected_id"] = selected_id
+
+                refs = self.context.artifacts.find(
+                    type="astro.spectrum",
+                    dataset_id=dataset_id,
+                    params_subset=params_subset,
+                )
+
+                if refs:
+                    spec = self.context.artifacts.get(refs[0].artifact_id)
+                    if spec and spec.get("spectra"):
+                        spectra_by_source[src_name] = spec
+
+            except Exception as e:
+                self.logging.warning(
+                    "Failed loading %s spectrum artifact for selected_id=%s: %s",
+                    src_name, selected_id, e
+                )
+
+        return spectra_by_source
+
+
+    def _apply_spectra_models(self, spectra_by_source):
         avail_spectra = list(spectra_by_source.keys())
 
-        def update_models():
-            self._spectra_cache = spectra_by_source
-            self.available_spectra.options = avail_spectra
+        self._spectra_cache = spectra_by_source
+        self.available_spectra.options = avail_spectra
 
-            if not avail_spectra:
-                self.spectra_number_message.value = "No available spectra for this source."
-                self._clear_all_sources()
-                self._current_spec_key = None
-                self._current_spectrum_data = None
-                self._update_emission_lines()
-                self._update_results_table(None)
-                self._set_status("No available spectra for this source.", level="warning", visible=True)
-                return
+        if not avail_spectra:
+            self.spectra_number_message.value = "No available spectra for this source."
+            self._clear_all_sources()
+            self._current_spec_key = None
+            self._current_spectrum_data = None
+            self._update_emission_lines()
+            self._update_results_table(None)
+            self._set_status("No available spectra for this source.", level="warning", visible=True)
+            return
 
-            self.spectra_number_message.value = (
-                "Only one available spectrum for this source."
-                if len(avail_spectra) == 1
-                else "More than one available spectrum for this source."
-            )
+        self.spectra_number_message.value = (
+            "Only one available spectrum for this source."
+            if len(avail_spectra) == 1
+            else "More than one available spectrum for this source."
+        )
 
-            selected = (
-                self.available_spectra.value
-                if self.available_spectra.value in avail_spectra
-                else avail_spectra[0]
-            )
-            self.available_spectra.value = selected
-            self._load_selected_spectrum(selected)
-            self._set_status("", visible=False)
+        selected = (
+            self.available_spectra.value
+            if self.available_spectra.value in avail_spectra
+            else avail_spectra[0]
+        )
 
-        self.doc.add_next_tick_callback(update_models)
+        self.available_spectra.value = selected
+        self._load_selected_spectrum(selected)
+        self._set_status("", visible=False)
+
+
+    def _refresh_spectra_from_artifacts(self, dataset_id=None, selected_id=None):
+        spectra_by_source = self._collect_spectra_from_artifacts(
+            dataset_id=dataset_id,
+            selected_id=selected_id,
+        )
+
+        def _update():
+            self._apply_spectra_models(spectra_by_source)
+
+        if self.doc is not None:
+            self.doc.add_next_tick_callback(_update)
+        else:
+            _update()
+    
+    def _spectra_updated(self, topic, payload):
+        dataset_id = self._get_active_dataset_id()
+        current_selected_id = self._get_selected_source_id()
+
+        if payload:
+            dataset_id = payload.get("dataset_id", dataset_id)
+            payload_selected_id = payload.get("selected_id")
+
+            if current_selected_id is not None and payload_selected_id is not None:
+                if str(payload_selected_id) != str(current_selected_id):
+                    return
+
+        self._refresh_spectra_from_artifacts(
+            dataset_id=dataset_id,
+            selected_id=current_selected_id,
+        )
 
     # ------------------------------------------------------------------
     # Source / plot state updates
@@ -3652,6 +4250,10 @@ class SpecAnalyser(CustomPlotClass):
         spec = self._spectra_cache[selected]
         spectrum_data = self._artifact_to_spectrum_data(spec, selected)
         self._current_spectrum_data = spectrum_data
+
+        resolved_redshift = self._resolve_redshift_for_selected(selected)
+        if self.redshift_slider.value != resolved_redshift:
+            self.redshift_slider.value = resolved_redshift
 
         raw_data = {
             "wavelength": spectrum_data.wv.tolist(),
@@ -3736,6 +4338,8 @@ class SpecAnalyser(CustomPlotClass):
             y=ys_text,
             label=labels,
         )
+
+        self._sync_emission_label_visibility()
 
     def _rebuild_locked_fit_source(self):
         if self._current_spectrum_data is None or not self._locked_fits:
