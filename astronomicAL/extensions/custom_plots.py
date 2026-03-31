@@ -74,7 +74,11 @@ def get_customplot_dict():
 
         "spec_analyser": lambda data, src, close_button, context : SpecAnalyser(
             data, src, close_button, extra_features=[], context=context, require_settings=False
-        )
+        ),
+
+        "Table Transform": lambda data, src, close_button, context: TableTransformPanel(
+            data, src, close_button, extra_features=[], context=context
+        ),
 
         #"SDSS Cutout"  : lambda data, src, close_button, context : SDSSClass(data, src, close_button,
         #                                                    extra_features=[], dataset="SDSS", context=context)                                                                                                      
@@ -4795,3 +4799,521 @@ class SpecAnalyser(CustomPlotClass):
             pass
 
         super().dispose()
+
+class TableTransformPanel(CustomPlotClass):
+    """
+    Generic panel for:
+    1) adding derived columns to the active dataset
+    2) creating subset datasets from boolean expressions
+    """
+
+    def __init__(self, data, src, close_button=None, extra_features=None, context=None, **params):
+        super().__init__(
+            data=data,
+            src=src,
+            close_button=close_button,
+            extra_features=extra_features or [],
+            panel_name="table_transform_panel",
+            ready_stage="plot",
+            context=context,
+            require_settings=False,
+            **params,
+        )
+
+        if context is not None and getattr(context, "config", None) is not None:
+            self.config = context.config
+
+        common_margin = (0, 0, 6, 0)
+
+        self.help_text = pn.pane.Markdown(
+            (
+                "Create derived columns with pandas-style expressions and create subset datasets "
+                "with boolean filters.\n\n"
+                "**Examples**\n"
+                "- `col1 + col2`\n"
+                "- `col1 ** 2`\n"
+                "- `(col1 + col2) / (col3 + col4)`\n"
+                "- `(score > 0.9) & (redshift < 1.0)`"
+            ),
+            sizing_mode="stretch_width",
+            margin=(0, 0, 8, 0),
+        )
+
+        self.dataset_info = pn.pane.Markdown(
+            "",
+            sizing_mode="stretch_width",
+            margin=(0, 0, 6, 0),
+        )
+
+        self.status = pn.pane.Markdown(
+            "",
+            sizing_mode="stretch_width",
+            margin=(0, 0, 6, 0),
+        )
+
+        self.column_filter = pn.widgets.TextInput(
+            name="Filter columns",
+            placeholder="Type to filter columns, e.g. abc",
+            sizing_mode="stretch_width",
+            margin=common_margin,
+        )
+
+        self.available_columns = pn.pane.HTML(
+            "",
+            height=160,
+            sizing_mode="stretch_width",
+            margin=common_margin,
+            styles={
+                "border": "1px solid #bfbfbf",
+                "border-radius": "4px",
+                "padding": "8px",
+                "background": "#f5f5f5",
+                "overflow-y": "auto",
+                "overflow-x": "hidden",
+                "font-family": "monospace",
+                "font-size": "13px",
+                "line-height": "1.35",
+            },
+        )
+
+        self.add_param_watch(self.column_filter, self._on_column_filter_change, "value_input")
+
+        self.new_column_name = pn.widgets.TextInput(
+            name="New column name",
+            placeholder="e.g. colour_index",
+            sizing_mode="stretch_width",
+            margin=common_margin,
+        )
+        self.new_column_expr = pn.widgets.TextAreaInput(
+            name="Column formula",
+            placeholder="e.g. mag_g - mag_r",
+            height=70,
+            sizing_mode="stretch_width",
+            margin=common_margin,
+        )
+
+        self.preview_column_button = pn.widgets.Button(
+            name="Preview Column",
+            button_type="default",
+            height=32,
+            sizing_mode="stretch_width",
+            margin=0,
+        )
+        self.add_column_button = pn.widgets.Button(
+            name="Add Column",
+            button_type="primary",
+            height=32,
+            sizing_mode="stretch_width",
+            margin=0,
+        )
+
+        self.subset_name = pn.widgets.TextInput(
+            name="Subset dataset name",
+            placeholder="e.g. high_confidence_sources",
+            sizing_mode="stretch_width",
+            margin=common_margin,
+        )
+        self.subset_expr = pn.widgets.TextAreaInput(
+            name="Subset boolean filter",
+            placeholder="e.g. (score > 0.9) & (redshift < 1.0)",
+            height=90,
+            min_height=90,
+            sizing_mode="stretch_width",
+            margin=common_margin,
+        )
+        self.set_active_checkbox = pn.widgets.Checkbox(
+            name="Set new subset as active dataset",
+            value=True,
+            margin=common_margin,
+        )
+
+        self.preview_subset_button = pn.widgets.Button(
+            name="Preview Subset",
+            button_type="default",
+            height=32,
+            sizing_mode="stretch_width",
+            margin=0,
+        )
+        self.create_subset_button = pn.widgets.Button(
+            name="Create Subset Dataset",
+            button_type="primary",
+            height=32,
+            sizing_mode="stretch_width",
+            margin=0,
+        )
+
+        self.preview = pn.pane.DataFrame(
+            pd.DataFrame(),
+            height=140,
+            min_height=140,
+            sizing_mode="stretch_width",
+            margin=(0, 0, 0, 0),
+        )
+
+        self.preview_column_button.on_click(self._preview_column)
+        self.add_column_button.on_click(self._add_column)
+        self.preview_subset_button.on_click(self._preview_subset)
+        self.create_subset_button.on_click(self._create_subset_dataset)
+
+        self._refresh_metadata_panes()
+
+    # ------------------------------------------------------------------
+    # Rendering
+    # ------------------------------------------------------------------
+
+    def _button_row(self, left_button, right_button):
+        return pn.Row(
+            left_button,
+            pn.Spacer(width=8),
+            right_button,
+            sizing_mode="stretch_width",
+            margin=(2, 0, 0, 0),
+        )
+
+    def _section(self, title, *objects, height=None):
+        return pn.Column(
+            pn.pane.HTML(
+                f"<div style='font-weight:600; margin-bottom:6px;'>{title}</div>",
+                sizing_mode="stretch_width",
+                margin=(0, 0, 0, 0),
+            ),
+            *objects,
+            sizing_mode="stretch_width",
+            height=height,
+            margin=(0, 0, 8, 0),
+            styles={
+                "border": "1px solid #d9d9d9",
+                "border-radius": "4px",
+                "padding": "8px",
+                "background": "#fafafa",
+                "overflow": "visible",
+                "flex": "0 0 auto",
+            },
+        )
+
+    def get_layout(self):
+        header = pn.pane.HTML(
+            "<div style='font-size: 28px; font-weight: 600; margin-bottom: 8px;'>Table Transform</div>",
+            sizing_mode="stretch_width",
+            margin=(0, 0, 0, 0),
+        )
+
+        active_section = self._section(
+            "Active dataset",
+            self.dataset_info,
+            self.column_filter,
+            self.available_columns,
+        )
+
+        derived_section = self._section(
+            "Add derived column",
+            self.new_column_name,
+            self.new_column_expr,
+            self._button_row(self.preview_column_button, self.add_column_button),
+            height=205,
+        )
+
+        subset_section = self._section(
+            "Create subset dataset",
+            self.subset_name,
+            self.subset_expr,
+            self.set_active_checkbox,
+            self._button_row(self.preview_subset_button, self.create_subset_button),
+            height=245,
+        )
+
+        preview_section = self._section(
+            "Preview / Output",
+            self.status,
+            self.preview,
+        )
+
+        return pn.Column(
+            header,
+            self.help_text,
+            active_section,
+            derived_section,
+            subset_section,
+            preview_section,
+            sizing_mode="stretch_width",
+            margin=(0, 0, 0, 0),
+        )
+
+    def plot_panel(self):
+        self.layout = self.get_layout()
+        toolbar = self.get_toolbar()
+
+        scroll_body = pn.Column(
+            *self.layout.objects,
+            sizing_mode="stretch_width",
+            scroll=True,
+            margin=(0, 0, 0, 0),
+            styles={
+                "overflow-y": "auto",
+                "overflow-x": "hidden",
+                "padding-right": "4px",
+            },
+        )
+
+        return pn.Column(
+            toolbar,
+            scroll_body,
+            sizing_mode="stretch_both",
+            min_height=450,
+        )
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _on_column_filter_change(self, event=None):
+        self._update_available_columns_view()
+
+    def _update_available_columns_view(self):
+        df = self._active_df()
+        all_columns = [str(c) for c in df.columns]
+
+        query = (self.column_filter.value_input or "").strip().lower()
+
+        if query:
+            shown_columns = [c for c in all_columns if query in c.lower()]
+        else:
+            shown_columns = all_columns
+
+        if shown_columns:
+            html = "<br>".join(shown_columns)
+        else:
+            html = "<i>No matching columns</i>"
+
+        summary = f"<div style='margin-bottom:6px;'><b>{len(shown_columns)}</b> / {len(all_columns)} columns shown</div>"
+
+        self.available_columns.object = summary + html
+
+    def _active_dataset_id(self):
+        if self.datasets is not None:
+            try:
+                return self.datasets.active_id()
+            except Exception:
+                pass
+        return "default"
+
+    def _active_df(self):
+        if self.datasets is not None:
+            try:
+                return self.datasets.get_df().copy()
+            except Exception:
+                pass
+
+        if hasattr(self, "config") and getattr(self.config, "main_df", None) is not None:
+            return self.config.main_df.copy()
+
+        return self.df.copy()
+
+    def _active_dataset_name(self):
+        if self.datasets is not None:
+            try:
+                return self.datasets.get().name
+            except Exception:
+                pass
+        return self._active_dataset_id()
+
+    def _active_dataset_meta(self):
+        if self.datasets is not None:
+            try:
+                return dict(self.datasets.get_meta())
+            except Exception:
+                pass
+        return {}
+
+    def _refresh_metadata_panes(self):
+        df = self._active_df()
+        dataset_id = self._active_dataset_id()
+        dataset_name = self._active_dataset_name()
+
+        self.dataset_info.object = (
+            f"**Active dataset:** `{dataset_name}` (`{dataset_id}`)  \n"
+            f"**Rows:** {len(df)}  \n"
+            f"**Columns:** {len(df.columns)}"
+        )
+
+        self._update_available_columns_view()
+
+    def _evaluate_expression(self, expr, df):
+        expr = (expr or "").strip()
+        if not expr:
+            raise ValueError("Expression is empty.")
+
+        result = df.eval(expr, parser="pandas", engine="python")
+
+        if isinstance(result, pd.DataFrame):
+            raise ValueError("Expression returned a DataFrame. Expected a single column/series.")
+
+        if isinstance(result, pd.Series):
+            return result.reindex(df.index)
+
+        return pd.Series([result] * len(df), index=df.index)
+
+    def _evaluate_boolean_expression(self, expr, df):
+        result = self._evaluate_expression(expr, df)
+
+        if not pd.api.types.is_bool_dtype(result):
+            raise ValueError(
+                "Subset expression must evaluate to boolean values. "
+                "Use comparisons like `(col > 0)` and combine them with `&`, `|`, `~`."
+            )
+
+        return result.fillna(False)
+
+    def _sync_active_dataset(self, new_df, *, extra_meta=None):
+        extra_meta = extra_meta or {}
+        self.df = new_df
+
+        if self.datasets is not None:
+            dataset_id = self._active_dataset_id()
+            dataset_name = self._active_dataset_name()
+            meta = self._active_dataset_meta()
+            meta.update(extra_meta)
+
+            self.datasets.ensure_registered(
+                dataset_id,
+                new_df,
+                name=dataset_name,
+                **meta,
+            )
+
+        if hasattr(self, "config") and self.config is not None:
+            self.config.main_df = new_df
+
+        self._refresh_metadata_panes()
+
+    def _set_preview_df(self, df):
+        self.preview.object = df
+
+    # ------------------------------------------------------------------
+    # Actions: derived columns
+    # ------------------------------------------------------------------
+
+    def _preview_column(self, _event=None):
+        try:
+            df = self._active_df()
+            result = self._evaluate_expression(self.new_column_expr.value, df)
+
+            preview_df = pd.DataFrame({
+                "__preview_result__": result.head(20).values
+            })
+
+            self._set_preview_df(preview_df)
+            self.status.object = "Preview generated successfully."
+        except Exception as e:
+            self.status.object = f"Column preview failed: `{e}`"
+
+    def _add_column(self, _event=None):
+        try:
+            new_col = (self.new_column_name.value or "").strip()
+            if not new_col:
+                raise ValueError("Please provide a new column name.")
+
+            df = self._active_df()
+            if new_col in df.columns:
+                raise ValueError(f"Column `{new_col}` already exists.")
+
+            result = self._evaluate_expression(self.new_column_expr.value, df)
+
+            new_df = df.copy()
+            new_df[new_col] = result
+
+            self._sync_active_dataset(
+                new_df,
+                extra_meta={
+                    "last_transform_type": "add_column",
+                    "last_transform_column": new_col,
+                    "last_transform_expr": self.new_column_expr.value,
+                },
+            )
+
+            self.publish(
+                "dataset.updated",
+                {
+                    "dataset_id": self._active_dataset_id(),
+                    "change": "column.added",
+                    "column": new_col,
+                },
+            )
+
+            self._set_preview_df(new_df[[new_col]].head(20))
+            self.status.object = f"Added new column `{new_col}` to the active dataset."
+        except Exception as e:
+            self.status.object = f"Add column failed: `{e}`"
+
+    # ------------------------------------------------------------------
+    # Actions: subsets
+    # ------------------------------------------------------------------
+
+    def _preview_subset(self, _event=None):
+        try:
+            df = self._active_df()
+            mask = self._evaluate_boolean_expression(self.subset_expr.value, df)
+            filtered = df.loc[mask].copy()
+
+            self._set_preview_df(filtered.head(50))
+            self.status.object = (
+                f"Subset preview generated: **{len(filtered)} / {len(df)}** rows matched."
+            )
+        except Exception as e:
+            self.status.object = f"Subset preview failed: `{e}`"
+
+    def _create_subset_dataset(self, _event=None):
+        try:
+            if self.datasets is None:
+                raise RuntimeError("DatasetManager is required to create subset datasets.")
+
+            subset_name = (self.subset_name.value or "").strip()
+            if not subset_name:
+                raise ValueError("Please provide a subset dataset name.")
+
+            base_dataset_id = self._active_dataset_id()
+            base_df = self._active_df()
+            mask = self._evaluate_boolean_expression(self.subset_expr.value, base_df)
+            filtered = base_df.loc[mask].copy()
+
+            new_dataset_id = f"{base_dataset_id}__subset__{uuid.uuid4().hex[:8]}"
+
+            self.datasets.register(
+                new_dataset_id,
+                filtered,
+                name=subset_name,
+                derived_from=base_dataset_id,
+                filter=self.subset_expr.value,
+                created_by="table_transform_panel",
+            )
+
+            self.publish(
+                "dataset.loaded",
+                {
+                    "dataset_id": new_dataset_id,
+                    "derived_from": base_dataset_id,
+                },
+            )
+
+            if self.set_active_checkbox.value:
+                previous_dataset_id = base_dataset_id
+                self.datasets.set_active(new_dataset_id)
+
+                if hasattr(self, "config") and self.config is not None:
+                    self.config.main_df = filtered
+
+                self.publish(
+                    "dataset.active.changed",
+                    {
+                        "dataset_id": new_dataset_id,
+                        "previous_dataset_id": previous_dataset_id,
+                    },
+                )
+
+            self._set_preview_df(filtered.head(50))
+            self._refresh_metadata_panes()
+            self.status.object = (
+                f"Created subset dataset `{subset_name}` with **{len(filtered)}** rows."
+            )
+        except Exception as e:
+            self.status.object = f"Create subset dataset failed: `{e}`"

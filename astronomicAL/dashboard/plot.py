@@ -117,7 +117,133 @@ class BasePlotClass(param.Parameterized):
 
 
     def update_df(self):
-        self.df = self.config.main_df
+        """
+        Refresh the plot dataframe from the active dataset if available.
+        Falls back to config.main_df for compatibility with older code.
+        """
+        if self.context is not None and getattr(self.context, "datasets", None) is not None:
+            try:
+                self.df = self.context.datasets.get_df().copy()
+                if getattr(self, "config", None) is not None:
+                    self.config.main_df = self.df
+                return
+            except Exception:
+                pass
+
+        self.df = self.config.main_df.copy()
+
+    def _get_active_dataset_id(self):
+        if self.context is not None and getattr(self.context, "datasets", None) is not None:
+            try:
+                return self.context.datasets.active_id()
+            except Exception:
+                pass
+        return "default"
+
+    def _event_targets_active_dataset(self, payload):
+        """
+        Only react when the event is about the currently active dataset.
+        """
+        if not payload:
+            return True
+
+        dataset_id = payload.get("dataset_id")
+        if dataset_id is None:
+            return True
+
+        return dataset_id == self._get_active_dataset_id()
+
+    def _get_available_columns_for_selectors(self):
+        """
+        Default selector columns for BasePlotClass-style plots.
+        Override in subclasses if needed.
+        """
+        return self.get_column_list(
+            excluded_columns=["id_col", "ra_dec", "label_col"],
+            excluded_types=["object"],
+            allowed_types=None,
+        )
+
+    def _refresh_label_selector_objects(self):
+        """
+        Refresh label selector options and keep only still-valid selections.
+        """
+        all_labels = ["All"] + list(getattr(self.config, "settings", {}).get("strings_to_labels", {}).keys())
+        self.param.label_selector.objects = all_labels
+
+        current = list(self.label_selector) if self.label_selector else ["All"]
+        current = [x for x in current if x in all_labels]
+
+        if not current:
+            current = ["All"]
+
+        self.label_selector = current
+
+    def _coerce_selector_values_after_df_change(self):
+        """
+        Base version for plots with only X_variable.
+        Subclasses with more selectors should override.
+        """
+        objects = list(getattr(self, "available_columns", []))
+        if not objects:
+            self.param.X_variable.objects = ["0"]
+            self.X_variable = "0"
+            return
+
+        self.param.X_variable.objects = objects
+
+        if self.X_variable not in objects:
+            self.X_variable = objects[0]
+
+    def _refresh_selectors_from_current_df(self):
+        """
+        Refresh dataframe-backed selector options after dataset mutation/switch.
+        """
+        self.update_df()
+        self.available_columns = self._get_available_columns_for_selectors()
+
+        if not self.available_columns:
+            self.available_columns = ["0"]
+
+        self._initialise_selector_options()
+        self._refresh_label_selector_objects()
+        self._coerce_selector_values_after_df_change()
+
+    def _rerender_after_dataset_change(self):
+        """
+        Default re-render hook.
+        If the subclass has _update_plot(), use that.
+        Otherwise try plot().
+        """
+        try:
+            if hasattr(self, "_update_plot"):
+                self._update_plot()
+                return
+        except Exception:
+            pass
+
+        try:
+            if hasattr(self, "plot"):
+                self.figure.object = self.plot()
+        except Exception:
+            pass
+
+    def _handle_dataset_change_event(self, topic, payload):
+        """
+        Generic response to dataset.updated / dataset.active.changed.
+        """
+        if not self._event_targets_active_dataset(payload):
+            return
+
+        self._refresh_selectors_from_current_df()
+        self._rerender_after_dataset_change()
+
+    def _register_dataset_event_handlers(self):
+        """
+        Call this at the end of subclass __init__ once selectors/settings exist.
+        """
+        self.subscribe_event("dataset.updated", self._handle_dataset_change_event)
+        self.subscribe_event("dataset.active.changed", self._handle_dataset_change_event)
 
     def _toggle_settings_panel(self, event):
         self.settings_panel.visible = not self.settings_panel.visible
@@ -182,7 +308,7 @@ class BasePlotClass(param.Parameterized):
         """
 
         self._initialise_selector_options()
-        self.param.label_selector.objects = ["All"] + list(self.config.settings["strings_to_labels"].keys())
+        self.param.label_selector.objects = ["All"] + list(getattr(self.config, "settings", {}).get("strings_to_labels", {}).keys())
 
         self.update_df()
 
@@ -269,7 +395,104 @@ class ScatterPlotDashboard(BasePlotClass):
             visible=False,
             margin=(10, 0, 0, 0)
         )
-    
+
+        self._register_dataset_event_handlers()
+
+
+    def _coerce_selector_values_after_df_change(self):
+        """
+        Scatter override: keep X and Y if still valid, otherwise repair them.
+        """
+        objects = list(getattr(self, "available_columns", []))
+        if not objects:
+            self.param.X_variable.objects = ["0"]
+            self.param.Y_variable.objects = ["1"]
+            self.X_variable = "0"
+            self.Y_variable = "1"
+            return
+
+        self.param.X_variable.objects = objects
+        self.param.Y_variable.objects = objects
+
+        # Keep current choices where possible
+        x_value = self.X_variable if self.X_variable in objects else objects[0]
+
+        if self.Y_variable in objects:
+            y_value = self.Y_variable
+        else:
+            y_value = objects[1] if len(objects) > 1 else objects[0]
+
+        # Avoid X and Y collapsing to the same value when there are >=2 columns
+        if len(objects) > 1 and x_value == y_value:
+            for col in objects:
+                if col != x_value:
+                    y_value = col
+                    break
+
+        self.param.update(
+            X_variable=x_value,
+            Y_variable=y_value,
+        )
+
+    def _get_selected_row_from_current_df(self):
+        """
+        Rebuild the selected row from the current dataframe when possible.
+        This is important after:
+        - switching to a subset dataset
+        - adding derived columns not present in src.data
+        """
+        if self.src is None:
+            return None
+
+        id_col = self.config.settings["id_col"]
+
+        try:
+            if id_col != "Use Index" and id_col in self.src.data and len(self.src.data[id_col]) == 1:
+                selected_id = self.src.data[id_col][0]
+                selected = self.df[self.df[id_col] == selected_id]
+                if len(selected) > 0:
+                    return selected.head(1)
+        except Exception:
+            pass
+
+        # Fallback to old behavior only if src still looks like a single-row record
+        try:
+            cols = [c for c in self.df.columns if c in self.src.data]
+            if cols and len(self.src.data[cols[0]]) == 1:
+                return pd.DataFrame(self.src.data, columns=cols, index=[0])
+        except Exception:
+            pass
+
+        return None
+
+    def _change_source_cb(self, attr, old, new):
+        selected_src_plot = self.plot_selected(self.X_variable, self.Y_variable)
+        if selected_src_plot is not None:
+            self.figure.object = hv.Overlay(self.main_plot + selected_src_plot).collate()
+        else:
+            self.figure.object = self.main_plot
+
+    def plot_selected(self, x_var, y_var):
+        selected = self._get_selected_row_from_current_df()
+        if selected is None:
+            return None
+
+        if x_var not in selected.columns or y_var not in selected.columns:
+            return None
+
+        if selected.shape[0] > 0:
+            return hv.Scatter(selected, x_var, y_var).opts(
+                marker="circle",
+                size=14,
+                fill_alpha=0.0,
+                line_color="black",
+                line_width=3,
+                active_tools=[],
+                logx=self.log_xscale,
+                logy=self.log_yscale,
+            )
+
+        return None
 
     def _get_from_settings_dictionary(self, key, default):
         value = self.config.settings["Scatter_plot_settings"].get(key, default)
@@ -406,7 +629,7 @@ class ScatterPlotDashboard(BasePlotClass):
         
         if bool(strings_to_plot) and ("All" not in strings_to_plot or len(strings_to_plot)>1):
            labels = self.df[self.config.settings["label_col"]]
-           labels_to_plot = [self.config.settings["strings_to_labels"][i] for i in strings_to_plot if i != "All"]
+           labels_to_plot = [self.config.settings.get("strings_to_labels", {}).get(i) for i in strings_to_plot if i != "All" and i in self.config.settings.get("strings_to_labels", {})]
         
         else:
             labels_to_plot = []
@@ -638,7 +861,7 @@ class HistoDashboard(BasePlotClass):
         strings_to_plot = self.label_selector
         if bool(strings_to_plot) and ("All" not in strings_to_plot or len(strings_to_plot)>1):
            labels = self.df[self.config.settings["label_col"]]
-           labels_to_plot = [self.config.settings["strings_to_labels"][i] for i in strings_to_plot if i != "All"]
+           labels_to_plot = [self.config.settings.get("strings_to_labels", {}).get(i) for i in strings_to_plot if i != "All" and i in self.config.settings.get("strings_to_labels", {})]
         
         else:
             labels_to_plot = []
@@ -887,7 +1110,7 @@ class DensityPlotDashboard(BasePlotClass):
        
         if bool(strings_to_plot) and ("All" not in strings_to_plot or len(strings_to_plot)>1):
            labels = self.df[self.config.settings["label_col"]]
-           labels_to_plot = [self.config.settings["strings_to_labels"][i] for i in strings_to_plot if i != "All"]
+           labels_to_plot = [self.config.settings.get("strings_to_labels", {}).get(i) for i in strings_to_plot if i != "All" and i in self.config.settings.get("strings_to_labels", {})]
         
         else:
             labels_to_plot = []
