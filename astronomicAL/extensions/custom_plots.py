@@ -496,10 +496,12 @@ class CustomPlotClass(param.Parameterized):
         self.plot_settings_button.name = "Close Settings" if self.plot_settings_panel.visible else "Open Settings"
 
     def get_selected_source(self):
+        print(f"CustomPlotClass get_selected_source: {self.src}")
         if self.src is None:
             return None
         cols = list(self.df.columns)
         if len(self.src.data[cols[0]]) == 1:
+            print("CustomPlotClass get_selected_source Return:\n", pd.DataFrame(self.src.data, columns=cols, index=[0]))
             return pd.DataFrame(self.src.data, columns=cols, index=[0])
         return None
     
@@ -510,6 +512,8 @@ class CustomPlotClass(param.Parameterized):
         return None
             
     def get_ra_dec(self, err_message = "No ra and dec available for this source"):
+        print(f"running get_ra_dec: {self.src}")
+
         ra_dec = self.get_value_from_df("ra_dec")
         if ra_dec is not None:
             ra = float(ra_dec[: ra_dec.index(",")])
@@ -746,43 +750,331 @@ class CustomPlotClass(param.Parameterized):
             return self.plot_panel()
         
 
-
 class EuclidPlotClass(CustomPlotClass):
     def __init__(self, data, src, close_button=None, extra_features=None, context=None, **params):
-        super().__init__(data=data,
-                         src=src,
-                         close_button=close_button,
-                         extra_features=extra_features,
-                         panel_name= "Euclid_Cutout",
-                         context=context,
-                         **params)
-        
-        self.context = context
-        if (context is not None and getattr(context, "config", None) is not None):
-            self.config = context.config
+        super().__init__(
+            data=data,
+            src=src,
+            close_button=close_button,
+            extra_features=extra_features or [],
+            panel_name="Euclid_Cutout",
+            context=context,
+            **params,
+        )
 
-        self._src_callback = self._change_source_cb
-        self.watch_bokeh(self.src, "data", self._src_callback)
-        self._initialize_settings_dictionary()
+        self._mapping_requests_sent = set()
         self.euclid_object = None
-        self._initialise_euclid_object()
-        self.euclid_pane = pn.pane.HoloViews(width=400, height=400) #euclid_pane = Euclid cutout, figure = euclid_pane+overplotted_coordinates
+        self.euclid_pane = pn.pane.HoloViews(width=400, height=400)
+
+        self._widgets_initialised = False
+        self._runtime_subscriptions_initialised = False
+
+        self._initialize_settings_dictionary()
+
         self.filter = self._get_from_settings_dictionary("filter", "Color")
         self.radius = self._get_from_settings_dictionary("radius", 5.0)
-        
 
-    def _change_source_cb(self, attr, old, new):
+    # ------------------------------------------------------------------
+    # Refresh / event handling
+    # ------------------------------------------------------------------
+
+    def _refresh_cutout(self, reason=None, verbose=False):
+        if verbose:
+            print(f"EuclidPlotClass refresh: reason={reason}")
+
         initialised = self._initialise_euclid_object()
         self.stored_spectrum_coordinates = {}
-        if initialised:
+
+        if initialised and self._widgets_initialised:
             self._run_euclid()
 
-    def get_layout(self):
-        initialised = self._initialise_euclid_object()
-        self._initialise_widgets()
-        self._manage_subscriptions()
+    def _change_source_cb(self, attr, old, new):
+        self._refresh_cutout(reason="src.data", verbose=False)
 
-        # Keep the image compact and aspect-preserving in small panels
+    def _subscribe_to_mapping_and_dataset_events(self):
+        if self._runtime_subscriptions_initialised:
+            return
+        self._runtime_subscriptions_initialised = True
+
+        if getattr(self, "context", None) is None or getattr(self.context, "events", None) is None:
+            return
+
+        def _mapping_updated(_topic, payload):
+            if not payload:
+                return
+            if payload.get("dataset_id") != self._dataset_id():
+                return
+
+            semantic_name = payload.get("semantic_name")
+            column_name = payload.get("column_name")
+            config_key = payload.get("config_key")
+
+            if semantic_name is None or column_name is None:
+                return
+
+            if config_key:
+                self.config.settings[config_key] = column_name
+
+            self._refresh_cutout(reason="dataset.mapping_updated")
+
+        def _dataset_changed(_topic, payload):
+            if payload and payload.get("dataset_id") not in (None, self._dataset_id()):
+                return
+            self._refresh_cutout(reason="dataset changed")
+
+        self.subscribe("dataset.mapping_updated", _mapping_updated)
+        self.subscribe("dataset.active.changed", _dataset_changed)
+        self.subscribe("dataset.updated", _dataset_changed)
+
+    # ------------------------------------------------------------------
+    # Dataset / mapping helpers
+    # ------------------------------------------------------------------
+
+    def _dataset_id(self) -> str:
+        if getattr(self, "context", None) is not None and getattr(self.context, "datasets", None) is not None:
+            try:
+                active = self.context.datasets.active_id()
+                if active:
+                    return active
+            except Exception:
+                pass
+        return "main"
+
+    def _guess_column(self, names):
+        lowered = {str(col).lower(): col for col in self.df.columns}
+        for name in names:
+            if name.lower() in lowered:
+                return lowered[name.lower()]
+        return None
+
+    def _euclid_mapping_specs(self):
+        columns = list(self.df.columns)
+
+        return [
+            {
+                "semantic_name": "record_id",
+                "config_key": "id_col",
+                "display_name": "ID column",
+                "description": "Needed by Euclid Cutout to resolve the currently selected source in the active dataset.",
+                "required": True,
+                "candidates": ["Use Index"] + columns,
+                "suggested": self._guess_column(["source_id", "id", "objid", "object_id"]) or "Use Index",
+            },
+            {
+                "semantic_name": "coords.ra",
+                "config_key": "ra_col_name",
+                "display_name": "RA column",
+                "description": "Needed by Euclid Cutout to locate the currently selected source.",
+                "required": True,
+                "candidates": columns,
+                "suggested": self._guess_column(["ra", "raj2000", "ra_deg", "right_ascension"]),
+            },
+            {
+                "semantic_name": "coords.dec",
+                "config_key": "dec_col_name",
+                "display_name": "DEC column",
+                "description": "Needed by Euclid Cutout to locate the currently selected source.",
+                "required": True,
+                "candidates": columns,
+                "suggested": self._guess_column(["dec", "dej2000", "dec_deg", "declination"]),
+            },
+        ]
+
+    def _sync_config_from_dataset_mappings(self) -> None:
+        if getattr(self, "context", None) is None or getattr(self.context, "datasets", None) is None:
+            return
+
+        dataset_id = self._dataset_id()
+
+        for spec in self._euclid_mapping_specs():
+            semantic_name = spec["semantic_name"]
+            config_key = spec["config_key"]
+
+            mapped = self.context.datasets.get_mapping(dataset_id, semantic_name)
+            existing = self.config.settings.get(config_key)
+
+            if mapped is None and existing in spec["candidates"]:
+                self.context.datasets.set_mapping(dataset_id, semantic_name, existing)
+                mapped = existing
+
+            if mapped is not None:
+                self.config.settings[config_key] = mapped
+
+    def _publish_mapping_request(self, spec):
+        if getattr(self, "context", None) is None or getattr(self.context, "events", None) is None:
+            return
+
+        key = (self._dataset_id(), spec["semantic_name"])
+        if key in self._mapping_requests_sent:
+            return
+
+        payload = {
+            "source": "euclid_cutout",
+            "panel_id": self.panel_id,
+            "dataset_id": self._dataset_id(),
+            "semantic_name": spec["semantic_name"],
+            "display_name": spec["display_name"],
+            "description": spec["description"],
+            "required": spec["required"],
+            "config_key": spec["config_key"],
+            "candidates": spec["candidates"],
+            "suggested": spec["suggested"],
+        }
+
+        self.context.events.publish("mapping.requested", payload)
+        self._mapping_requests_sent.add(key)
+
+    def _request_missing_mappings(self) -> bool:
+        self._sync_config_from_dataset_mappings()
+
+        if getattr(self, "context", None) is None or getattr(self.context, "datasets", None) is None:
+            return False
+
+        missing_required = False
+        dataset_id = self._dataset_id()
+
+        for spec in self._euclid_mapping_specs():
+            mapped = self.context.datasets.get_mapping(dataset_id, spec["semantic_name"])
+            if mapped is None:
+                self._publish_mapping_request(spec)
+                if spec["required"]:
+                    missing_required = True
+
+        return missing_required
+
+    def _refresh_df_from_active_dataset(self):
+        if getattr(self, "context", None) is not None and getattr(self.context, "datasets", None) is not None:
+            try:
+                self.df = self.context.datasets.get_df(self._dataset_id()).copy()
+                if getattr(self, "config", None) is not None:
+                    self.config.main_df = self.df
+                return
+            except Exception:
+                pass
+
+        self.df = self.config.main_df.copy()
+
+    def _get_selected_id_from_src(self):
+        id_col = self.config.settings.get("id_col")
+        if self.src is None or id_col is None:
+            return None
+
+        try:
+            if id_col == "Use Index":
+                first_key = next(iter(self.src.data.keys()))
+                if len(self.src.data[first_key]) == 1:
+                    return str(self.src.data[first_key][0])
+                return None
+
+            if id_col in self.src.data and len(self.src.data[id_col]) == 1:
+                return str(self.src.data[id_col][0])
+        except Exception:
+            pass
+
+        return None
+
+    def _get_selected_row_from_active_df(self):
+        selected_id = self._get_selected_id_from_src()
+        if selected_id is None:
+            return None
+
+        id_col = self.config.settings.get("id_col", "Use Index")
+
+        try:
+            if id_col == "Use Index":
+                idx = int(selected_id)
+                if idx in self.df.index:
+                    return self.df.loc[[idx]]
+                return None
+
+            matches = self.df[self.df[id_col].astype(str) == str(selected_id)]
+            if len(matches) > 0:
+                return matches.head(1)
+        except Exception:
+            pass
+
+        return None
+
+    def get_ra_dec(self, err_message="No ra and dec available for this source"):
+        if self._request_missing_mappings():
+            print(err_message)
+            return None, None
+
+        row = self._get_selected_row_from_active_df()
+        if row is None or row.empty:
+            print(err_message)
+            return None, None
+
+        ra_col = self.config.settings.get("ra_col_name")
+        dec_col = self.config.settings.get("dec_col_name")
+
+        try:
+            if ra_col in row.columns and dec_col in row.columns:
+                ra = float(row.iloc[0][ra_col])
+                dec = float(row.iloc[0][dec_col])
+                return ra, dec
+        except Exception:
+            pass
+
+        try:
+            if "ra_dec" in row.columns:
+                ra_dec = str(row.iloc[0]["ra_dec"])
+                ra = float(ra_dec[: ra_dec.index(",")])
+                dec = float(ra_dec[ra_dec.index(",") + 1 :])
+                return ra, dec
+        except Exception:
+            pass
+
+        print(err_message)
+        return None, None
+
+    def _initialise_euclid_object(self):
+        self._refresh_df_from_active_dataset()
+
+        if self._request_missing_mappings():
+            self.get_error_panel(
+                "Euclid cutout unavailable",
+                "Missing dataset mappings for RA and/or DEC",
+            )
+            return False
+
+        self.ra, self.dec = self.get_ra_dec()
+
+        if (self.ra is None) or (self.dec is None):
+            self.get_error_panel("Euclid cutout unavailable", "Missing RA or DEC value")
+            return False
+
+        try:
+            self.euclid_object.reset_data(self.ra, self.dec)
+        except AttributeError:
+            self.euclid_object = EuclidCutoutsClass(
+                self.ra,
+                self.dec,
+                euclid_filters=["VIS", "NIR_Y", "NIR_J", "NIR_H"],
+                context=self.context,
+            )
+            self.overplotted_coordinates = []
+
+        return True
+
+    # ------------------------------------------------------------------
+    # Layout
+    # ------------------------------------------------------------------
+
+    def get_layout(self):
+        if not self._widgets_initialised:
+            self._initialise_widgets()
+
+            self._src_callback = self._change_source_cb
+            self.watch_bokeh(self.src, "data", self._src_callback)
+
+            self._subscribe_to_mapping_and_dataset_events()
+            self._manage_subscriptions()
+
+            self._widgets_initialised = True
+
+        initialised = self._initialise_euclid_object()
+
         self.figure.sizing_mode = "stretch_width"
         self.figure.min_height = 120
         self.figure.max_height = 260
@@ -802,18 +1094,23 @@ class EuclidPlotClass(CustomPlotClass):
             scroll=False,
         )
 
+    # ------------------------------------------------------------------
+    # Settings persistence
+    # ------------------------------------------------------------------
+
     def _initialize_settings_dictionary(self):
         euclid_settings = self.config.settings.setdefault("Euclid_cutout_settings", {})
-        
-        default_values = { "filter" : "Color",
-                           "radius" : 5.0,
-                           "stretching" : "Linear",
-                           "clipping" : (0,1),
-                           "scale" : "minmax",
-                           "gamma" : (1,1,1),
-                           "source_coordinates" : False,
-                           "levels" : 0,
-                        }
+
+        default_values = {
+            "filter": "Color",
+            "radius": 5.0,
+            "stretching": "Linear",
+            "clipping": (0, 1),
+            "scale": "minmax",
+            "gamma": (1, 1, 1),
+            "source_coordinates": False,
+            "levels": 0,
+        }
         for key, value in default_values.items():
             if key not in euclid_settings:
                 self._update_settings_dictionary(key, value)
@@ -828,14 +1125,15 @@ class EuclidPlotClass(CustomPlotClass):
     def _update_settings_dictionary(self, key, value):
         euclid_settings = self.config.settings.setdefault("Euclid_cutout_settings", {})
         euclid_settings[key] = value
-        
+
     def _update_all_settings_dictionary(self):
         filter = self.filter_input.value
         low, high = self.contrast_scaler.value
-        gamma = (self.gamma_red_input.value,  self.gamma_green_input.value, self.gamma_blue_input.value)
+        gamma = (self.gamma_red_input.value, self.gamma_green_input.value, self.gamma_blue_input.value)
         scale = self.scale_input.value
         source_coordinates = self.overplot_source_coords_widget.value
         levels = self.contour_levels_input.value
+
         self._update_settings_dictionary("scale", scale)
         self._update_settings_dictionary("filter", filter)
         self._update_settings_dictionary("gamma", gamma)
@@ -843,35 +1141,57 @@ class EuclidPlotClass(CustomPlotClass):
         self._update_settings_dictionary("source_coordinates", source_coordinates)
         self._update_settings_dictionary("levels", levels)
 
+    # ------------------------------------------------------------------
+    # Image / save helpers
+    # ------------------------------------------------------------------
+
     def _get_scaled_image(self):
         if self.filter != "Color":
             low, high = self.contrast_scaler.value
-            return self.euclid_object.transform_image_range(self.filter, low, high,
-                                                            scale_method = self.scale_input.value)
-    
-        gamma = (self.gamma_red_input.value,  self.gamma_green_input.value, self.gamma_blue_input.value)
+            return self.euclid_object.transform_image_range(
+                self.filter,
+                low,
+                high,
+                scale_method=self.scale_input.value,
+            )
+
+        gamma = (
+            self.gamma_red_input.value,
+            self.gamma_green_input.value,
+            self.gamma_blue_input.value,
+        )
         scale_by_channel = True
         low_r, high_r = self.contrast_scaler_red.value
         low_g, high_g = self.contrast_scaler_green.value
         low_b, high_b = self.contrast_scaler_blue.value
         low = (low_r, low_g, low_b)
         high = (high_r, high_g, high_b)
-        if (low == (0,0,0)) and (high == (1,1,1)):
+
+        if (low == (0, 0, 0)) and (high == (1, 1, 1)):
             low, high = self.contrast_scaler.value
             scale_by_channel = False
-        return self.euclid_object.transform_image_range(self.filter, low, high, gamma = gamma, 
-                                                        scale_method = self.scale_input.value,
-                                                        scale_by_channel = scale_by_channel)
-         
-    def _save_figure(self, directory_path = "data/saved_sources", prefix = None):
+
+        return self.euclid_object.transform_image_range(
+            self.filter,
+            low,
+            high,
+            gamma=gamma,
+            scale_method=self.scale_input.value,
+            scale_by_channel=scale_by_channel,
+        )
+
+    def _save_figure(self, directory_path="data/saved_sources", prefix=None):
         try:
             fname = f"{prefix + '_' if prefix else ''}{self.panel_name}.png"
-            filename = os.path.join(directory_path,fname)
-            scaled_image =  self._get_scaled_image()
-            fig = self.get_euclid_figure(scaled_image, show_scale = True,
-                                        show_coordinates = self.overplot_source_coords_widget.value,
-                                        show_spectra_coordinates = self.overplot_coords_widget.value)
-            fig.savefig(filename, bbox_inches = "tight")
+            filename = os.path.join(directory_path, fname)
+            scaled_image = self._get_scaled_image()
+            fig = self.get_euclid_figure(
+                scaled_image,
+                show_scale=True,
+                show_coordinates=self.overplot_source_coords_widget.value,
+                show_spectra_coordinates=self.overplot_coords_widget.value,
+            )
+            fig.savefig(filename, bbox_inches="tight")
             plt.close(fig)
             return filename
         except FileNotFoundError:
@@ -880,36 +1200,21 @@ class EuclidPlotClass(CustomPlotClass):
             print(e)
         except KeyError as e:
             print(f"Missing filter {e} in euclid_object.plot_data")
-   
-  
 
-
-    def _save_data_to_fits(self, directory_path = "data/saved_sources"):
+    def _save_data_to_fits(self, directory_path="data/saved_sources"):
         try:
-            self.euclid_object.export_cutouts_to_fits(bands_to_export = ["VIS", "NIR_Y", "NIR_J", "NIR_H"], 
-                                                      directory_path = directory_path)
+            self.euclid_object.export_cutouts_to_fits(
+                bands_to_export=["VIS", "NIR_Y", "NIR_J", "NIR_H"],
+                directory_path=directory_path,
+            )
         except AttributeError:
             pass
         except FileNotFoundError:
             print(f"Could not find the saving directory: {directory_path}")
 
-
-    def _initialise_euclid_object(self):
-        self.ra, self.dec = self.get_ra_dec()
-        if (self.ra is None) or (self.dec is None):
-            self.get_error_panel("Euclid cutout unavailable", "Missing RA or DEC value")
-            return False
-        
-        try: 
-            self.euclid_object.reset_data(self.ra, self.dec)
-        
-        except AttributeError:
-            self.euclid_object = EuclidCutoutsClass(self.ra, self.dec, 
-                             euclid_filters= ["VIS", "NIR_Y", "NIR_J", "NIR_H"],
-                             context = self.context)
-        
-        self.overplotted_coordinates = []
-        return True
+    # ------------------------------------------------------------------
+    # UI widget helpers
+    # ------------------------------------------------------------------
 
     def _field_label(self, text, width=320):
         return pn.pane.HTML(
@@ -952,7 +1257,6 @@ class EuclidPlotClass(CustomPlotClass):
 
     def _initialise_widgets(self):
         CONTROL_HEIGHT = 34
-        SMALL_WIDTH = 72
 
         def fix_control(widget, height=CONTROL_HEIGHT):
             widget.height = height
@@ -1345,8 +1649,12 @@ class EuclidPlotClass(CustomPlotClass):
             margin=(0, 0, 8, 0),
         )
 
+    # ------------------------------------------------------------------
+    # Callbacks
+    # ------------------------------------------------------------------
+
     def _update_radius(self, event):
-        if event.new: 
+        if event.new:
             self.radius = event.new
             self._update_settings_dictionary("radius", self.radius)
             if self.context and self.context.events:
@@ -1357,35 +1665,43 @@ class EuclidPlotClass(CustomPlotClass):
             self._run_euclid()
         else:
             print("Input a valid value for radius")
-    
+
     def _general_parameter_callback(self, event):
         if hasattr(self.euclid_object, "plot_data"):
             self.filter = self.filter_input.value
             self._update_all_settings_dictionary()
             scaled_image = self._get_scaled_image()
-            self.get_euclid_figure_hv(scaled_image, show_coordinates= self.overplot_source_coords_widget.value)
+            self.get_euclid_figure_hv(
+                scaled_image,
+                show_coordinates=self.overplot_source_coords_widget.value,
+            )
             self._update_image()
-        
+
     def _update_stretching(self, event):
         stretch = self.stretching_input.value
-        #Use non default scale only if the actual scale parameter is being changed
         if not isinstance(event.new, str):
             stretch_scale = self.stretching_scale_input.value
             self._update_settings_dictionary("stretching_scale", stretch_scale)
         else:
             stretch_scale = None
-        
+
         self._update_settings_dictionary("stretching", stretch)
-        self.euclid_object.get_plot_data(stretch = stretch, stretch_scale = stretch_scale)
+        self.euclid_object.get_plot_data(stretch=stretch, stretch_scale=stretch_scale)
         scaled_image = self._get_scaled_image()
-        self.get_euclid_figure_hv(scaled_image, show_coordinates = self.overplot_source_coords_widget.value)
+        self.get_euclid_figure_hv(
+            scaled_image,
+            show_coordinates=self.overplot_source_coords_widget.value,
+        )
         self._update_image()
 
     def _color_specific_callback(self, event):
         if self.filter == "Color":
             if hasattr(self.euclid_object, "plot_data"):
                 scaled_image = self._get_scaled_image()
-                self.get_euclid_figure_hv(scaled_image, show_coordinates = self.overplot_source_coords_widget.value)
+                self.get_euclid_figure_hv(
+                    scaled_image,
+                    show_coordinates=self.overplot_source_coords_widget.value,
+                )
                 self._update_image()
 
     def _update_image(self):
@@ -1399,26 +1715,23 @@ class EuclidPlotClass(CustomPlotClass):
             self.message_pane.visible = False
         except Exception as e:
             print(f"Euclid image unavailable:\n {e}")
- 
+
     def _add_coordinates(self, coordinates, dataset):
-        """Storing Coordinates from DESI/SDSS
-           coordinates : dict : {"ra" : [...], "dec" : [...]} 
-           dataset : string, key of the dictionary storing the coordinates
-        """
         if not coordinates or "ra" not in coordinates or "dec" not in coordinates:
             print("Wrong passed coordinates")
             return
-        ra, dec  = coordinates["ra"], coordinates["dec"]
+
+        ra, dec = coordinates["ra"], coordinates["dec"]
         if not hasattr(self, "stored_spectrum_coordinates"):
             self.stored_spectrum_coordinates = {}
-        self.stored_spectrum_coordinates[dataset] = {"ra" : ra, "dec" : dec}
 
+        self.stored_spectrum_coordinates[dataset] = {"ra": ra, "dec": dec}
         self.overplot_coords_widget.name = "Spectrum Coordinates"
+
         if self.overplot_coords_widget.value:
             self._show_overplot_coordinates()
-    
-    def _show_overplot_coordinates(self):
 
+    def _show_overplot_coordinates(self):
         if hasattr(self, "stored_spectrum_coordinates"):
             self.overplot_coords_widget.name = "Spectrum Coordinates"
             if self.overplot_coords_widget.value:
@@ -1426,21 +1739,24 @@ class EuclidPlotClass(CustomPlotClass):
                 for dataset in self.stored_spectrum_coordinates:
                     print(f"overplotting coordinates for {dataset}")
                     N = len(self.stored_spectrum_coordinates[dataset]["ra"])
-                    colors = plt.get_cmap("gist_rainbow", max(N,2))
-                    marker = "+" if dataset == "DESI" else "*" #TODO improve
+                    colors = plt.get_cmap("gist_rainbow", max(N, 2))
+                    marker = "+" if dataset == "DESI" else "*"
                     label = "Euclid Spectra" if dataset == "EuclidSpec" else f"{dataset} Spectra"
-                    for i, (x, y) in enumerate(self.euclid_object.world_2_pix(ra =  self.stored_spectrum_coordinates[dataset]["ra"],
-                                                                              dec = self.stored_spectrum_coordinates[dataset]["dec"],
-                                                                              filtro = self.filter, zipped = True)):
+                    for i, (x, y) in enumerate(
+                        self.euclid_object.world_2_pix(
+                            ra=self.stored_spectrum_coordinates[dataset]["ra"],
+                            dec=self.stored_spectrum_coordinates[dataset]["dec"],
+                            filtro=self.filter,
+                            zipped=True,
+                        )
+                    ):
                         if (0 <= x < self.image_width) and (0 <= y < self.image_height):
-                            points = hv.Points([(x,y)], label = label if i == 0 else "")
-                            points = points.opts(color = colors(i),
-                                                marker = marker, 
-                                                size = 20)
+                            points = hv.Points([(x, y)], label=label if i == 0 else "")
+                            points = points.opts(color=colors(i), marker=marker, size=20)
                             self.overplotted_coordinates.append(points)
-                
+
                 self._update_image()
-    
+
     def _overplot_coordinates_callback(self, event):
         if event.new:
             if not hasattr(self, "stored_spectrum_coordinates"):
@@ -1448,24 +1764,23 @@ class EuclidPlotClass(CustomPlotClass):
                 event.obj.name = "Spectrum Coordinates [Not Currently Avaliable]"
                 self.overplotted_coordinates = []
                 return None
-            
+
             event.obj.name = "Spectrum Coordinates"
             self._show_overplot_coordinates()
 
         elif not event.new:
             self.overplotted_coordinates = []
+
         self._update_image()
 
     def _change_euclid_environment(self, event):
         self.environment = event.new
 
-        # Public release never needs login fields
         if self.environment == "PDR":
             self.login_column.visible = False
             self.euclid_object.change_environment(environment="PDR")
             return
 
-        # Private / authenticated environments
         if self.environment in ["IDR", "OTF", "REG"]:
             if os.path.isfile("euclid_credentials.login"):
                 self.login_column.visible = False
@@ -1489,96 +1804,108 @@ class EuclidPlotClass(CustomPlotClass):
                     environment=self.environment,
                     user=user,
                     password=password,
-                )      
-
+                )
 
     def _confirm_login_credentials_cb(self, event):
         self.login_column.visible = False
         self.config.settings["EuclidAccountUser"] = self.user_input.value
         self.config.settings["EuclidAccountPassword"] = self.password_input.value
-        self.euclid_object.change_environment(environment=self.environment,
-                                                user = self.config.settings["EuclidAccountUser"], 
-                                                password = self.config.settings["EuclidAccountPassword"])
+        self.euclid_object.change_environment(
+            environment=self.environment,
+            user=self.config.settings["EuclidAccountUser"],
+            password=self.config.settings["EuclidAccountPassword"],
+        )
         svc = getattr(self.context, "services", None) if self.context else None
         if svc is not None:
             svc.set("euclid.client", self.euclid_object.client)
-    
+
     def _open_color_settings_cb(self, event):
         self.color_settings_column.visible = not self.color_settings_column.visible
         self.color_settings_button.name = (
             "Color settings ▴" if self.color_settings_column.visible else "Color settings ▾"
         )
 
+    # ------------------------------------------------------------------
+    # Plot helpers
+    # ------------------------------------------------------------------
+
     def get_plot_scale(self):
         bar_length_arcsecond = self.bar_length_pixels * self.euclid_object.arcsec_per_pix[self.filter]
         return bar_length_arcsecond
 
-    
-    def get_euclid_figure_hv(self, data, 
-                             show_coordinates = False, 
-                             show_scale = True):
-        
-        self.image_height, self.image_width,  = data.shape[:2]
+    def get_euclid_figure_hv(self, data, show_coordinates=False, show_scale=True):
+        self.image_height, self.image_width = data.shape[:2]
         bounds = (0, 0, self.image_width, self.image_height)
-        
-        if len(data.shape) == 3:
-            image = hv.RGB(data[::-1,...], bounds=bounds).opts(
-                                         active_tools =[], toolbar=None,
-                                         padding = 0,
-                                         border = 0,
-                                         framewise = True,
-                                         xaxis=None, 
-                                         yaxis=None,
-                                         )
-        else:
-            image = hv.Image(data[::-1,...], bounds=bounds).opts(
-                                         active_tools =[], toolbar=None,
-                                         padding = 0,
-                                         border = 0,
-                                         framewise = True,
-                                         xaxis=None, 
-                                         yaxis=None,
-                                         cmap = "grey",
-                                         )
-        self.image_stream = hv.streams.Tap(source=image, x=np.nan, y=np.nan)
 
+        if len(data.shape) == 3:
+            image = hv.RGB(data[::-1, ...], bounds=bounds).opts(
+                active_tools=[],
+                toolbar=None,
+                padding=0,
+                border=0,
+                framewise=True,
+                xaxis=None,
+                yaxis=None,
+            )
+        else:
+            image = hv.Image(data[::-1, ...], bounds=bounds).opts(
+                active_tools=[],
+                toolbar=None,
+                padding=0,
+                border=0,
+                framewise=True,
+                xaxis=None,
+                yaxis=None,
+                cmap="grey",
+            )
+
+        self.image_stream = hv.streams.Tap(source=image, x=np.nan, y=np.nan)
         self.add_param_watch(self.image_stream, self._light_profile_callback, what=["x"])
-        
+
         self.euclid_fig = [image]
 
         if self.contour_levels_input.value > 0:
             N_contour_levels = self.contour_levels_input.value
             base, exponent = self.contour_levels_scale_input.value
             temp_data = self.euclid_object.data[self.filter]
-            temp_img = hv.RGB(temp_data[::-1,...], bounds=bounds) if len(temp_data.shape) == 3 else hv.Image(temp_data[::-1,...], bounds=bounds)
-            levels = np.nanmax(temp_data)/(base ** (np.arange(1, N_contour_levels+1)*exponent))
-            contours = hv.operation.contours(temp_img, levels = levels).opts(cmap=['red'], colorbar=False, 
-                                                                    active_tools=[], show_legend = False)
+            temp_img = hv.RGB(temp_data[::-1, ...], bounds=bounds) if len(temp_data.shape) == 3 else hv.Image(temp_data[::-1, ...], bounds=bounds)
+            levels = np.nanmax(temp_data) / (base ** (np.arange(1, N_contour_levels + 1) * exponent))
+            contours = hv.operation.contours(temp_img, levels=levels).opts(
+                cmap=["red"],
+                colorbar=False,
+                active_tools=[],
+                show_legend=False,
+            )
             self.euclid_fig.append(contours)
-        
+
         if show_scale:
-            self.bar_length_pixels = self.image_width * 0.2  #always shows a bar 1/5 of the plot 
-            x0, y0 = 0.1*self.image_width, 0.1*self.image_height
+            self.bar_length_pixels = self.image_width * 0.2
+            x0, y0 = 0.1 * self.image_width, 0.1 * self.image_height
             x1 = x0 + self.bar_length_pixels
-            scale_bar = hv.Curve(([x0, x1], [y0, y0])).opts(color='red', line_width=3)
-            scale_text = hv.Text(x=(x0 + x1)/2, y=y0 + y0/2,
-                            text=f'{self.get_plot_scale():.1f}"').opts(
-                            text_color='red', text_align='center',
-                            text_baseline='bottom', fontsize=14
-                            )
+            scale_bar = hv.Curve(([x0, x1], [y0, y0])).opts(color="red", line_width=3)
+            scale_text = hv.Text(
+                x=(x0 + x1) / 2,
+                y=y0 + y0 / 2,
+                text=f'{self.get_plot_scale():.1f}"',
+            ).opts(
+                text_color="red",
+                text_align="center",
+                text_baseline="bottom",
+                fontsize=14,
+            )
             self.euclid_fig.extend([scale_bar, scale_text])
-        
+
         if show_coordinates:
-            label = f"{np.round(self.ra,3)}, {np.round(self.dec,3)}"
-            x, y = self.euclid_object.world_2_pix(ra = self.ra, dec = self.dec, filtro=self.filter, zipped = False)
+            label = f"{np.round(self.ra, 3)}, {np.round(self.dec, 3)}"
+            x, y = self.euclid_object.world_2_pix(ra=self.ra, dec=self.dec, filtro=self.filter, zipped=False)
             if (0 <= x < self.image_width) and (0 <= y < self.image_height):
-                points = hv.Points([(x,y)], label = label)
-                points = points.opts(color = "blue",
-                                    marker = "+", 
-                                    size = 30)
+                points = hv.Points([(x, y)], label=label).opts(
+                    color="blue",
+                    marker="+",
+                    size=30,
+                )
                 self.euclid_fig.append(points)
-        
-        
+
         if self.overplot_coords_widget.value:
             self._show_overplot_coordinates()
 
@@ -1586,33 +1913,35 @@ class EuclidPlotClass(CustomPlotClass):
         col, row = self.image_stream.x, self.image_stream.y
         if (row is None) or (col is None):
             return
+
         row, col = int(round(row)), int(round(col))
         row = max(0, min(row, self.image_height - 1))
         col = max(0, min(col, self.image_width - 1))
 
-        if self.filter not in ["Color"]: #TODO compute light profile for RGB images
+        if self.filter not in ["Color"]:
             self.get_light_profile_plot(row, col)
-    
+
     def _light_profile_callback_reverse(self, event):
         self._update_image()
 
     def get_light_profile_plot(self, row, col):
-
         scaled_image = self._get_scaled_image()
-        
-        def get_curve(values, idx, xlabel, plot_psf = True, fwhm_psf = 0.16, arcsec_per_pix = 0.1):
-            curve =hv.Curve(values, kdims ="x", vdims ="value").opts(toolbar=None, padding = 0.0,
-                                                                      border = 1, framewise = True,
-                                                                      active_tools =[],
-                                                                      xlabel=xlabel, 
-                                                                      yaxis=None,  
-                                                                      ylim = (min(0,np.nanmin(values)),np.nanmax(values)*1.1), 
-                                                                      color = "black") 
-            line = hv.VLine(idx).opts(color = "red", line_width=1, line_dash='dotted')
-            
+
+        def get_curve(values, idx, xlabel, plot_psf=True, fwhm_psf=0.16, arcsec_per_pix=0.1):
+            curve = hv.Curve(values, kdims="x", vdims="value").opts(
+                toolbar=None,
+                padding=0.0,
+                border=1,
+                framewise=True,
+                active_tools=[],
+                xlabel=xlabel,
+                yaxis=None,
+                ylim=(min(0, np.nanmin(values)), np.nanmax(values) * 1.1),
+                color="black",
+            )
+            line = hv.VLine(idx).opts(color="red", line_width=1, line_dash="dotted")
+
             if plot_psf:
-                #Centering the psf around the brightest pixel in a 15 px window. if multiple maxima are found
-                #it centers to the middle one
                 window = 15
                 start = max(0, idx - window)
                 end = min(len(values), idx + window)
@@ -1620,131 +1949,162 @@ class EuclidPlotClass(CustomPlotClass):
                 peak = np.nanmax(reduced_values)
                 peak_indices = np.where(reduced_values == peak)[0]
                 peak_idx = start + peak_indices[len(peak_indices) // 2]
-                sigma_psf = fwhm_psf/2.35482004503/arcsec_per_pix
+                sigma_psf = fwhm_psf / 2.35482004503 / arcsec_per_pix
                 x = np.arange(len(values))
-                psf_profile = peak * np.exp(-0.5*((x-peak_idx)/sigma_psf)**2)
-                psf = hv.Curve(psf_profile, kdims = "x", vdims ="value").opts(color = "red", line_width=1, line_dash='solid')
-                image = hv.Overlay([curve, line, psf]).opts(responsive=True, toolbar = None)
+                psf_profile = peak * np.exp(-0.5 * ((x - peak_idx) / sigma_psf) ** 2)
+                psf = hv.Curve(psf_profile, kdims="x", vdims="value").opts(color="red", line_width=1, line_dash="solid")
+                image = hv.Overlay([curve, line, psf]).opts(responsive=True, toolbar=None)
             else:
-                image = hv.Overlay([curve, line]).opts(responsive=True, toolbar = None)
+                image = hv.Overlay([curve, line]).opts(responsive=True, toolbar=None)
 
             return image
 
         arcsec_per_pix = self.euclid_object.arcsec_per_pix[self.filter]
-        fwhm_psf = 0.16 if self.filter == "VIS" else 0.3 
+        fwhm_psf = 0.16 if self.filter == "VIS" else 0.3
         plot_psf = self._get_from_settings_dictionary("stretching", None) == "Linear"
 
-        plot_x = get_curve(scaled_image[row, :], col, "X coordinate", 
-                           plot_psf = plot_psf, fwhm_psf = fwhm_psf,
-                           arcsec_per_pix = arcsec_per_pix
-                           )   
-        plot_y = get_curve(scaled_image[:, col], row, "Y coordinate",
-                           plot_psf = plot_psf, fwhm_psf = fwhm_psf,
-                           arcsec_per_pix = arcsec_per_pix)      
-        
-        layout = hv.Layout(plot_x + plot_y).cols(1).opts(sizing_mode = "stretch_both")
+        plot_x = get_curve(
+            scaled_image[row, :],
+            col,
+            "X coordinate",
+            plot_psf=plot_psf,
+            fwhm_psf=fwhm_psf,
+            arcsec_per_pix=arcsec_per_pix,
+        )
+        plot_y = get_curve(
+            scaled_image[:, col],
+            row,
+            "Y coordinate",
+            plot_psf=plot_psf,
+            fwhm_psf=fwhm_psf,
+            arcsec_per_pix=arcsec_per_pix,
+        )
+
+        layout = hv.Layout(plot_x + plot_y).cols(1).opts(sizing_mode="stretch_both")
         row_stream = hv.streams.Tap(source=plot_x, x=np.nan, y=np.nan)
         col_stream = hv.streams.Tap(source=plot_y, x=np.nan, y=np.nan)
-        
+
         self.add_param_watch_many(
             [row_stream, col_stream],
             self._light_profile_callback_reverse,
-            what= ["x"]
+            what=["x"],
         )
 
         self.figure.object = layout
-    
 
     def _run_euclid(self):
-        """Wrapper for multithreading"""
         self.message_pane.object = "## Loading..."
         self.message_pane.visible = True
+
         if self.context and self.context.events:
             self.context.events.publish(
                 "astro.cutout.running",
                 {"source": "Euclid", "running": True, "panel_id": self.panel_id},
             )
- 
+
         def callback(future_obj=None):
             result = future_obj.result()
+
             if self.context and self.context.events:
                 self.context.events.publish(
                     "astro.cutout.running",
                     {"source": "Euclid", "running": False, "panel_id": self.panel_id},
                 )
-            
+
             if self.euclid_object.error_tracker.has_error:
-                message =  f"# Euclid cutout unavailable:\n"
+                message = "# Euclid cutout unavailable:\n"
                 message += f"## {self.euclid_object.error_tracker.error_message}"
                 self.message_pane.object = message
-                self.message_pane.visible = True #probably already visible
+                self.message_pane.visible = True
                 self.figure.object = self.get_empty_image()
                 return
+
             self.overplot_coords_widget.value = False
             scaled_image = self._get_scaled_image()
-            self.get_euclid_figure_hv(scaled_image, show_coordinates = self.overplot_source_coords_widget.value)
+            self.get_euclid_figure_hv(
+                scaled_image,
+                show_coordinates=self.overplot_source_coords_widget.value,
+            )
             self._update_image()
-     
-        self.run_multithread(self.euclid_object.get_final_cutout,
-                             func_kwargs = {"radius" : self.radius, "stretch" : self.stretching_input.value, 
-                              "filtro" : self.filter_input.value,
-                              "reference" : "VIS", "verbose" : True, "return_object" : True}, 
-                              callback = callback)
-    
 
-    def get_euclid_figure(self, data, 
-                          show_coordinates = False, 
-                          show_scale = True,
-                          show_spectra_coordinates = False):
-        """Fuction to have the plot in matplotlib in order to be saved.
-           Less general than get_euclid_figure_hv as in this case coordinates are overplotted on the same axis
-           returns the fig to be saved
-        """
+        self.run_multithread(
+            self.euclid_object.get_final_cutout,
+            func_kwargs={
+                "radius": self.radius,
+                "stretch": self.stretching_input.value,
+                "filtro": self.filter_input.value,
+                "reference": "VIS",
+                "verbose": True,
+                "return_object": True,
+            },
+            callback=callback,
+        )
+
+    def get_euclid_figure(
+        self,
+        data,
+        show_coordinates=False,
+        show_scale=True,
+        show_spectra_coordinates=False,
+    ):
         image_height, image_width = data.shape[:2]
-        fig, ax = plt.subplots(figsize = (6,6))
-        ax.imshow(data, origin = "lower", cmap = "gray")
+        fig, ax = plt.subplots(figsize=(6, 6))
+        ax.imshow(data, origin="lower", cmap="gray")
 
         if show_scale:
-            bar_length_pixels = image_width * 0.2  #always shows a bar 1/5 of the plot 
-            x0, y0 = 0.1*image_width, 0.1*image_height
-            x1 = x0 + bar_length_pixels 
-            ax.plot([x0, x1], [y0, y0], color='red', lw=3)
-            ax.text(x=(x0 + x1)/2, y = y0 + y0/2,
-                    s = f'{self.get_plot_scale():.1f}"', color = "red",
-                    ha = 'center',va = 'bottom', fontsize=14)
+            bar_length_pixels = image_width * 0.2
+            x0, y0 = 0.1 * image_width, 0.1 * image_height
+            x1 = x0 + bar_length_pixels
+            ax.plot([x0, x1], [y0, y0], color="red", lw=3)
+            ax.text(
+                x=(x0 + x1) / 2,
+                y=y0 + y0 / 2,
+                s=f'{self.get_plot_scale():.1f}"',
+                color="red",
+                ha="center",
+                va="bottom",
+                fontsize=14,
+            )
 
         if show_coordinates:
-            label = f"{np.round(self.ra,3)}, {np.round(self.dec,3)}"
-            x, y = self.euclid_object.world_2_pix(ra = self.ra, dec = self.dec, filtro=self.filter, zipped = False)
+            label = f"{np.round(self.ra, 3)}, {np.round(self.dec, 3)}"
+            x, y = self.euclid_object.world_2_pix(ra=self.ra, dec=self.dec, filtro=self.filter, zipped=False)
             if (0 <= x < image_width) and (0 <= y < image_height):
-                ax.scatter(x,y, s = 130, label = label, c = "blue", marker = "+")
-               
+                ax.scatter(x, y, s=130, label=label, c="blue", marker="+")
+
         if show_spectra_coordinates:
             if hasattr(self, "stored_spectrum_coordinates"):
                 for dataset in self.stored_spectrum_coordinates:
                     N = len(self.stored_spectrum_coordinates[dataset]["ra"])
-                    colors = plt.get_cmap("gist_rainbow", max(N,2))(np.arange(N))
-                    marker = "+" if dataset == "DESI" else "x" #TODO improve
+                    colors = plt.get_cmap("gist_rainbow", max(N, 2))(np.arange(N))
+                    marker = "+" if dataset == "DESI" else "x"
                     label = "Euclid Spectra" if dataset == "EuclidSpec" else f"{dataset} Spectra"
-                    x, y = self.euclid_object.world_2_pix(ra = self.stored_spectrum_coordinates[dataset]["ra"],
-                                                          dec = self.stored_spectrum_coordinates[dataset]["dec"],
-                                                          filtro = self.filter, zipped = False)
+                    x, y = self.euclid_object.world_2_pix(
+                        ra=self.stored_spectrum_coordinates[dataset]["ra"],
+                        dec=self.stored_spectrum_coordinates[dataset]["dec"],
+                        filtro=self.filter,
+                        zipped=False,
+                    )
                     x = np.where((0 <= x) & (x < image_width), x, np.nan)
                     y = np.where((0 <= y) & (y < image_height), y, np.nan)
-                    ax.scatter(x,y, color = colors, label = label, marker = marker, s =100)
-        
+                    ax.scatter(x, y, color=colors, label=label, marker=marker, s=100)
+
         _, labels = ax.get_legend_handles_labels()
-        if labels:  
+        if labels:
             ax.legend()
+
         ax.axis("off")
         fig.subplots_adjust(left=0.0, right=1, top=1, bottom=0)
         return fig
+
+    # ------------------------------------------------------------------
+    # Artifact subscriptions
+    # ------------------------------------------------------------------
 
     def _manage_subscriptions(self):
         if not self.context or not getattr(self.context, "events", None) or not getattr(self.context, "artifacts", None):
             return
 
-        # Avoid duplicate subscriptions if get_layout() is called more than once
         if getattr(self, "_coords_subscription_ready", False):
             return
         self._coords_subscription_ready = True
@@ -1763,7 +2123,6 @@ class EuclidPlotClass(CustomPlotClass):
             if not source or not artifact_id:
                 return
 
-            # Ignore coords for a different selected source if source scoping is present
             if current_selected_id is not None and payload_selected_id is not None:
                 if str(payload_selected_id) != str(current_selected_id):
                     return
@@ -1778,7 +2137,6 @@ class EuclidPlotClass(CustomPlotClass):
 
         self.subscribe("astro.coords.updated", _coords_updated)
 
-        # Late-join: load latest coords already in the artifact store
         active_dataset_id = self._get_active_dataset_id()
         current_selected_id = self._get_selected_source_id()
 
@@ -1806,6 +2164,7 @@ class EuclidPlotClass(CustomPlotClass):
 
                 except Exception as e:
                     print(f"Late-join coords lookup failed for {src_name} in dataset {dsid}: {e}")
+
 
 class SpectrumPlotClass(CustomPlotClass):
     
