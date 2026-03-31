@@ -42,21 +42,148 @@ class ExplorationDashboard(param.Parameterized):
 
         self._ensure_dataset_registered()
         self._subscribe_to_mapping_events()
+        self._subscribe_to_dataset_events()
         self._try_build_dashboard()
 
     def _dataset_id(self) -> str:
+        if getattr(self, "context", None) is not None and getattr(self.context, "datasets", None) is not None:
+            try:
+                active = self.context.datasets.active_id()
+                if active:
+                    return active
+            except Exception:
+                pass
         return "main"
 
     def _ensure_dataset_registered(self) -> None:
         if getattr(self, "context", None) is None or getattr(self.context, "datasets", None) is None:
             return
 
+        try:
+            active = self.context.datasets.active_id()
+        except Exception:
+            active = None
+
+        if active:
+            try:
+                self.df = self.context.datasets.get_df(active).copy()
+                if getattr(self, "config", None) is not None:
+                    self.config.main_df = self.df
+                return
+            except Exception:
+                pass
+
         self.context.datasets.ensure_registered(
-            self._dataset_id(),
+            "main",
             self.df,
             name="Main Dataset",
         )
-        self.context.datasets.set_active(self._dataset_id())
+        self.context.datasets.set_active("main")
+
+    def _subscribe_to_dataset_events(self) -> None:
+        if not getattr(self, "context", None) or not getattr(self.context, "events", None):
+            return
+
+        bus = self.context.events
+
+        def _sub(topic, fn):
+            sub = bus.subscribe(topic, fn)
+            self._event_subs.append(sub)
+
+        def _dataset_active_changed(_topic, payload):
+            dataset_id = payload.get("dataset_id") if payload else None
+            if dataset_id is not None and dataset_id != self._dataset_id():
+                return
+            self._refresh_from_active_dataset(reset_history=True)
+
+        def _dataset_updated(_topic, payload):
+            dataset_id = payload.get("dataset_id") if payload else None
+            if dataset_id is not None and dataset_id != self._dataset_id():
+                return
+            self._refresh_from_active_dataset(reset_history=False)
+
+        _sub("dataset.active.changed", _dataset_active_changed)
+        _sub("dataset.updated", _dataset_updated)
+
+    def _refresh_from_active_dataset(self, reset_history=True):
+        if getattr(self, "context", None) is not None and getattr(self.context, "datasets", None) is not None:
+            try:
+                self.df = self.context.datasets.get_df(self._dataset_id()).copy()
+                if getattr(self, "config", None) is not None:
+                    self.config.main_df = self.df
+            except Exception:
+                self.df = self.config.main_df.copy()
+        else:
+            self.df = self.config.main_df.copy()
+
+        missing_required = self._request_missing_mappings()
+        if missing_required:
+            self._root[:] = [
+                pn.Column(
+                    pn.pane.Alert(
+                        "Exploration Mode needs dataset mappings before it can open. "
+                        "Use the header alert to map the ID, RA and DEC columns.",
+                        alert_type="warning",
+                    ),
+                    sizing_mode="stretch_width",
+                    margin=(0, 0, 0, 0),
+                )
+            ]
+            return
+
+        self._sync_config_from_dataset_mappings()
+        self._preprocess_data()
+        self._create_extra_info_cols_list()
+
+        self.config.settings["extra_info_cols"] = [
+            c for c in self.config.settings["extra_info_cols"] if c in self.df.columns
+        ]
+
+        max_index = max(0, len(self.df) - 1)
+        self.param.index.bounds = (0, max_index)
+        self.index = min(self.index, max_index)
+
+        if hasattr(self, "index_input"):
+            self.index_input.start = 0
+            self.index_input.end = max_index
+            self.index_input.value = self.index
+
+        if hasattr(self, "sourceid_input"):
+            self.sourceid_input.value = ""
+
+        if hasattr(self, "column_selector"):
+            self.column_selector.value = None
+            self.column_selector.visible = False
+
+        if hasattr(self, "label_selector"):
+            label_options = ["No Labels"] + list(self.df.columns)
+            self.label_selector.options = label_options
+
+            current_label_col = self.config.settings.get("label_col", "No Labels")
+            if current_label_col not in label_options:
+                current_label_col = "No Labels"
+                self.config.settings["label_col"] = current_label_col
+
+            self.label_selector.value = current_label_col
+            self._sync_label_editor_state(current_label_col, keep_button_visible=True)
+
+        if reset_history:
+            self.visited_indices = [self.index]
+            self.current_position = 0
+
+        if not self._built:
+            self._build_dashboard_ui()
+            self._root[:] = [self.main_layout]
+            self._built = True
+            return
+
+        self._update_selected_src()
+
+        if hasattr(self, "extra_info_html"):
+            self._refresh_extra_info_view()
+
+        self._update_navigation_flags()
+        self._rerender_main_layout()
 
     def _exploration_mapping_specs(self) -> List[Dict[str, Any]]:
         columns = list(self.df.columns)
@@ -78,7 +205,7 @@ class ExplorationDashboard(param.Parameterized):
                 "description": "Needed by Exploration Mode to construct the combined RA/DEC coordinate string.",
                 "required": True,
                 "candidates": columns,
-                "suggested": self._guess_column(["ra", "raj2000", "ra_deg"]),
+                "suggested": self._guess_column(["ra", "raj2000", "ra_deg", "right_ascension"]),
             },
             {
                 "semantic_name": "coords.dec",
@@ -87,7 +214,7 @@ class ExplorationDashboard(param.Parameterized):
                 "description": "Needed by Exploration Mode to construct the combined RA/DEC coordinate string.",
                 "required": True,
                 "candidates": columns,
-                "suggested": self._guess_column(["dec", "dej2000", "dec_deg"]),
+                "suggested": self._guess_column(["dec", "dej2000", "dec_deg", "declination"]),
             },
             {
                 "semantic_name": "target_label",
@@ -256,15 +383,10 @@ class ExplorationDashboard(param.Parameterized):
             if config_key:
                 self.config.settings[config_key] = column_name
 
-            if semantic_name == "target_label" and self._built:
+            if semantic_name == "target_label":
                 self.config.settings["label_col"] = column_name
-                if hasattr(self, "label_selector"):
-                    options = ["No Labels"] + list(self.df.columns)
-                    self.label_selector.options = options
-                    if column_name in options:
-                        self.label_selector.value = column_name
 
-            self._try_build_dashboard()
+            self._refresh_from_active_dataset(reset_history=False)
 
         _sub("dataset.mapping_updated", _mapping_updated)
 
@@ -592,6 +714,9 @@ class ExplorationDashboard(param.Parameterized):
         _sub("selection.sourceid.changed", _selected_sourceid)
 
     def _update_navigation_flags(self):
+        if not hasattr(self, "prev_button") or not hasattr(self, "next_button"):
+            return
+
         self.prev_button.disabled = self.current_position == 0
         self.next_button.disabled = False
 
