@@ -87,19 +87,24 @@ def get_customplot_dict():
 
     return plot_dict
 
-
 class CustomPlotClass(param.Parameterized):
 
     available_stages = ["columns_selection", "plot"]
 
-    stage = param.ObjectSelector(default = "columns_selection", objects = available_stages)
-    
-    def __init__(self, data, src, close_button, extra_features, 
-                 panel_name = "custom_plot",
-                 ready_stage = "plot",
-                 context = None,
-                 require_settings = True,
-                 **params):
+    stage = param.ObjectSelector(default="columns_selection", objects=available_stages)
+
+    def __init__(
+        self,
+        data,
+        src,
+        close_button,
+        extra_features,
+        panel_name="custom_plot",
+        ready_stage="plot",
+        context=None,
+        require_settings=True,
+        **params
+    ):
         super().__init__(**params)
 
         self.df = data
@@ -130,16 +135,23 @@ class CustomPlotClass(param.Parameterized):
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
 
         if self.extra_features:
-            self._get_unknown_columns(columns_needed = self.extra_features)
+            self._get_unknown_columns(columns_needed=self.extra_features)
             self._change_state_if_unknown_columns(ready_stage=ready_stage)
         else:
             self.stage = ready_stage
-        self.figure = pn.pane.HoloViews(sizing_mode="stretch_both")
-        self.message_pane = pn.pane.Markdown("## Loading...", sizing_mode="stretch_width", height = 80)
 
-        self.plot_settings_button = pn.widgets.Button(name="Open Settings", button_type="primary", max_height = 40, max_width=100, sizing_mode="stretch_width" )
+        self.figure = pn.pane.HoloViews(sizing_mode="stretch_both")
+        self.message_pane = pn.pane.Markdown("## Loading...", sizing_mode="stretch_width", height=80)
+
+        self.plot_settings_button = pn.widgets.Button(
+            name="Open Settings",
+            button_type="primary",
+            max_height=40,
+            max_width=100,
+            sizing_mode="stretch_width",
+        )
         self.plot_settings_button.on_click(self._toggle_settings_panel)
-        self.plot_settings_panel = pn.Column(visible = False)
+        self.plot_settings_panel = pn.Column(visible=False)
 
         self.require_settings = require_settings
 
@@ -147,9 +159,7 @@ class CustomPlotClass(param.Parameterized):
             try:
                 self.close_button.on_click(lambda _e: self.dispose())
             except Exception as e:
-                # Some button types / contexts may not support on_click in tests
                 print("CustomPlotClass.dispose() Errored", e)
-                pass
 
     # -----------------------
     # Jobs
@@ -165,19 +175,10 @@ class CustomPlotClass(param.Parameterized):
         track: bool = True,
         **kwargs: Any,
     ) -> Any:
-        """
-        Submit a background job through context.jobs.
-
-        - If context.jobs is unavailable, runs synchronously (keeps old behavior working).
-        - Adds cooperative cancellation token via kwarg `cancel_token` when using JobManager.
-        - Tracks job handles so dispose() can cancel them.
-        """
-        # Default dedupe key scoped to this panel instance
         if key is None:
             key = f"{self.panel_id}:{title}"
 
         if self.jobs is None:
-            # Synchronous fallback
             try:
                 res = fn(cancel_token=None, **kwargs)
                 if on_done:
@@ -204,7 +205,6 @@ class CustomPlotClass(param.Parameterized):
         return handle
 
     def cancel_jobs(self) -> None:
-        """Best-effort cancellation of all jobs started by this panel."""
         for mj in list(self._jobs):
             try:
                 mj.handle.cancel()
@@ -216,12 +216,6 @@ class CustomPlotClass(param.Parameterized):
     # Events
     # -----------------------
     def subscribe(self, topic: str, callback: Callable[[str, Any], None]) -> Optional[Subscription]:
-        """
-        Subscribe to an event topic through context.events.
-        Tracks subscriptions so dispose() can unsubscribe.
-
-        Callback signature: (topic, payload).
-        """
         if self.events is None:
             return None
         sub = self.events.subscribe(topic, callback)
@@ -229,7 +223,6 @@ class CustomPlotClass(param.Parameterized):
         return sub
 
     def unsubscribe_all(self) -> None:
-        """Unsubscribe all tracked subscriptions."""
         if self.events is None:
             self._subscriptions.clear()
             return
@@ -241,7 +234,6 @@ class CustomPlotClass(param.Parameterized):
         self._subscriptions.clear()
 
     def publish(self, topic: str, payload: Any = None) -> None:
-        """Publish an event if the bus exists."""
         if self.events is None:
             return
         try:
@@ -250,7 +242,7 @@ class CustomPlotClass(param.Parameterized):
             traceback.print_exc()
 
     # -----------------------
-    # Artifact helpers (optional conveniences)
+    # Artifact helpers
     # -----------------------
     def put_artifact(
         self,
@@ -262,10 +254,6 @@ class CustomPlotClass(param.Parameterized):
         params: Optional[Dict[str, Any]] = None,
         persist: bool = False,
     ) -> Optional[str]:
-        """
-        Store an artifact in context.artifacts and return artifact_id.
-        If no artifact store exists, returns None.
-        """
         if self.artifacts is None:
             return None
         return self.artifacts.put(
@@ -277,7 +265,6 @@ class CustomPlotClass(param.Parameterized):
             persist=persist,
         )
 
-
     def _get_active_dataset_id(self):
         try:
             if self.context and getattr(self.context, "datasets", None):
@@ -287,7 +274,6 @@ class CustomPlotClass(param.Parameterized):
         except Exception:
             pass
         return "default"
-
 
     def _get_selected_source_id(self):
         try:
@@ -299,13 +285,131 @@ class CustomPlotClass(param.Parameterized):
             return None
 
     # -----------------------
+    # Column mapping / semantic requirements
+    # -----------------------
+    def _get_dataset_for_lookup(self):
+        """
+        Prefer authoritative dataset from context.datasets when available.
+        Fall back to self.df.
+        """
+        try:
+            if self.datasets is not None:
+                dataset_id = self._get_active_dataset_id()
+                df = self.datasets.get_df(dataset_id)
+                if df is not None:
+                    return df
+        except Exception:
+            pass
+        return self.df
+
+    def _get_all_known_mappings(self) -> Dict[str, str]:
+        """
+        Best-effort collection of semantic column mappings.
+
+        Supports:
+        - context.datasets.get_mappings(dataset_id)
+        - context.datasets.get_mappings()
+        - context.config.settings
+        """
+        mappings = {}
+
+        dataset_id = self._get_active_dataset_id()
+
+        # Preferred: DatasetManager mappings
+        try:
+            if self.datasets is not None and hasattr(self.datasets, "get_mappings"):
+                try:
+                    ds_mappings = self.datasets.get_mappings(dataset_id)
+                except TypeError:
+                    ds_mappings = self.datasets.get_mappings()
+                if isinstance(ds_mappings, dict):
+                    mappings.update(ds_mappings)
+        except Exception:
+            pass
+
+        # Back-compat: config.settings aliases
+        try:
+            if self.config is not None and hasattr(self.config, "settings"):
+                if isinstance(self.config.settings, dict):
+                    mappings.update(self.config.settings)
+        except Exception:
+            pass
+
+        return mappings
+
+    def resolve_column_name(
+        self,
+        requirement: str,
+        *,
+        df: Optional[pd.DataFrame] = None,
+        allow_direct: bool = True,
+    ) -> Optional[str]:
+        """
+        Resolve a semantic requirement like 'ra', 'dec', 'id_col', 'label_col'
+        to a real dataframe column.
+
+        Resolution order:
+        1. direct column name match
+        2. dataset/config mapping under exact key
+        3. common aliases for semantic requirements
+        """
+        df = df if df is not None else self._get_dataset_for_lookup()
+        if df is None:
+            return None
+
+        cols = set(getattr(df, "columns", []))
+        mappings = self._get_all_known_mappings()
+
+        if allow_direct and requirement in cols:
+            return requirement
+
+        mapped = mappings.get(requirement)
+        if isinstance(mapped, str) and mapped in cols:
+            return mapped
+
+        aliases = {
+            "id": ["id", "ids", "source_id", "object_id", "id_col"],
+            "id_col": ["id_col", "id", "ids", "source_id", "object_id"],
+            "ra": [
+                "ra",
+                "right_ascension",
+                "right_ascension_euclid",
+                "raj2000",
+                "alpha",
+                "ra_col",
+            ],
+            "dec": [
+                "dec",
+                "declination",
+                "declination_euclid",
+                "dej2000",
+                "delta",
+                "dec_col",
+            ],
+            "label": ["label", "class", "target", "label_col"],
+            "label_col": ["label_col", "label", "class", "target"],
+        }
+
+        for alias in aliases.get(requirement, []):
+            mapped = mappings.get(alias)
+            if isinstance(mapped, str) and mapped in cols:
+                return mapped
+            if alias in cols:
+                return alias
+
+        return None
+
+    def require_columns(self, *requirements: str, df: Optional[pd.DataFrame] = None) -> Dict[str, Optional[str]]:
+        """
+        Return a mapping of semantic requirement -> resolved dataframe column.
+        """
+        df = df if df is not None else self._get_dataset_for_lookup()
+        return {req: self.resolve_column_name(req, df=df) for req in requirements}
+
+    # -----------------------
     # Lifecycle
     # -----------------------
     def _dispose_impl(self) -> None:
-        """
-        Subclass-specific cleanup hook.
-        Override in subclasses if needed.
-        """
         return
 
     def dispose(self) -> None:
@@ -315,13 +419,11 @@ class CustomPlotClass(param.Parameterized):
 
         print(f"[dispose] {self.__class__.__name__} panel_id={getattr(self, 'panel_id', None)}")
 
-        # 1) subclass hook first (still has access to state)
         try:
             self._dispose_impl()
         except Exception:
             pass
 
-        # 2) Remove any tracked bokeh callbacks (including src.on_change)
         try:
             self.unwatch_all_bokeh()
         except Exception:
@@ -332,27 +434,22 @@ class CustomPlotClass(param.Parameterized):
         except Exception:
             pass
 
-        # 3) Remove column-selection callbacks / widgets if present
         if hasattr(self, "remove_column_selection"):
             try:
                 self.remove_column_selection()
             except Exception:
                 pass
 
-        # 4) Cancel outstanding jobs submitted via context.jobs
         try:
             self.cancel_jobs()
         except Exception:
             pass
 
-        # 5) Unsubscribe EventBus subscriptions
         try:
             self.unsubscribe_all()
         except Exception:
             pass
 
-        # 6) Shut down legacy per-panel executors if any remain
-        # (Eventually you should remove these entirely and rely on context.jobs)
         ex = getattr(self, "executor", None)
         if ex is not None:
             try:
@@ -371,25 +468,19 @@ class CustomPlotClass(param.Parameterized):
         title="Job",
         key=None,
     ):
-        """
-        Compatibility wrapper used by existing panels.
-
-        - Runs `fn(**func_kwargs)` in context.jobs thread pool if available.
-        - Calls `callback(future_like)` on success where future_like.result() returns result.
-        """
         func_kwargs = func_kwargs or {}
 
         class _FutureLike:
             def __init__(self, result=None, exc=None):
                 self._result = result
                 self._exc = exc
+
             def result(self):
                 if self._exc is not None:
                     raise self._exc
                 return self._result
 
         def _runner(cancel_token=None, **kwargs):
-            # Euclid code doesn't currently use cancel_token; kept for future
             return fn(**kwargs)
 
         def _on_done(res):
@@ -421,10 +512,6 @@ class CustomPlotClass(param.Parameterized):
         queued: bool = False,
         precedence: int = 0,
     ):
-        """
-        Register owner.param.watch(...) and track it for later cleanup.
-        Returns the Watcher object (or None on failure).
-        """
         if owner is None or not hasattr(owner, "param"):
             return None
         try:
@@ -441,7 +528,6 @@ class CustomPlotClass(param.Parameterized):
             return None
 
     def remove_all_param_watches(self) -> None:
-        """Idempotently unwatch everything added via add_param_watch()."""
         for owner, w in list(getattr(self, "_param_watchers", [])):
             try:
                 owner.param.unwatch(w)
@@ -454,25 +540,17 @@ class CustomPlotClass(param.Parameterized):
             self.add_param_watch(owner, callback, what, **kw)
 
     def watch_bokeh(self, model: Any, attr: str, callback: Callable) -> None:
-        """
-        Register a Bokeh on_change callback and track it for cleanup.
-        """
         if model is None:
             return
         try:
             model.on_change(attr, callback)
             self._bokeh_on_change.append((model, attr, callback))
         except Exception:
-            # If this is called in a non-bokeh context/tests, fail silently
             pass
 
     def unwatch_all_bokeh(self) -> None:
-        """
-        Remove all tracked Bokeh callbacks.
-        """
         for model, attr, callback in list(self._bokeh_on_change):
             try:
-                # ColumnDataSource and other Bokeh Models support remove_on_change
                 model.remove_on_change(attr, callback)
             except Exception:
                 pass
@@ -490,45 +568,148 @@ class CustomPlotClass(param.Parameterized):
     def _skip_button_cb(self, event):
         current_index = self.available_stages.index(self.stage)
         self.stage = self.available_stages[current_index + 1]
-    
+
     def _toggle_settings_panel(self, event):
         self.plot_settings_panel.visible = not self.plot_settings_panel.visible
         self.plot_settings_button.name = "Close Settings" if self.plot_settings_panel.visible else "Open Settings"
 
+    # -----------------------
+    # Selection helpers
+    # -----------------------
     def get_selected_source(self):
+        """
+        Return selected row as a dataframe.
+
+        Preferred behavior:
+        - resolve selected ID semantically
+        - fetch authoritative row from dataset/self.df
+        Fallback:
+        - build a 1-row dataframe from self.src.data as-is
+        """
         print(f"CustomPlotClass get_selected_source: {self.src}")
+
         if self.src is None:
             return None
-        cols = list(self.df.columns)
-        if len(self.src.data[cols[0]]) == 1:
-            print("CustomPlotClass get_selected_source Return:\n", pd.DataFrame(self.src.data, columns=cols, index=[0]))
-            return pd.DataFrame(self.src.data, columns=cols, index=[0])
-        return None
-    
-    def get_value_from_df(self, column):
-        selected_source = self.get_selected_source()
-        if (selected_source is not None) and self.check_required_column(column):
-            return selected_source[column][0]
-        return None
-            
-    def get_ra_dec(self, err_message = "No ra and dec available for this source"):
-        print(f"running get_ra_dec: {self.src}")
 
-        ra_dec = self.get_value_from_df("ra_dec")
-        if ra_dec is not None:
-            ra = float(ra_dec[: ra_dec.index(",")])
-            dec = float(ra_dec[ra_dec.index(",") + 1 :])
-        else:
+        try:
+            src_df = pd.DataFrame(self.src.data)
+        except Exception:
+            src_df = None
+
+        # Fast path: source itself already holds exactly one selected row
+        if src_df is not None and len(src_df) == 1:
+            selected_id_col = self.resolve_column_name("id_col", df=src_df) or self.resolve_column_name("id", df=src_df)
+            selected_id = None
+            if selected_id_col and selected_id_col in src_df.columns:
+                try:
+                    selected_id = src_df[selected_id_col].iloc[0]
+                except Exception:
+                    selected_id = None
+
+            if selected_id is not None:
+                base_df = self._get_dataset_for_lookup()
+                base_id_col = self.resolve_column_name("id_col", df=base_df) or self.resolve_column_name("id", df=base_df)
+
+                if (
+                    base_df is not None
+                    and base_id_col is not None
+                    and base_id_col in base_df.columns
+                ):
+                    try:
+                        match = base_df[base_df[base_id_col].astype(str) == str(selected_id)]
+                        if len(match) == 1:
+                            print("CustomPlotClass get_selected_source Return:\n", match)
+                            return match.reset_index(drop=True)
+                    except Exception:
+                        pass
+
+            print("CustomPlotClass get_selected_source Return:\n", src_df)
+            return src_df.reset_index(drop=True)
+
+        return None
+
+    def get_value_from_df(self, column_or_requirement):
+        """
+        Read a value from the selected row using either:
+        - a real dataframe column name
+        - a semantic requirement like 'ra', 'dec', 'id_col'
+        """
+        selected_source = self.get_selected_source()
+        print(f"running get_value_from_df in CustomPlotClass: {selected_source}")
+
+        if selected_source is None or len(selected_source) != 1:
+            return None
+
+        col = self.resolve_column_name(column_or_requirement, df=selected_source)
+
+        if col is None:
+            return None
+
+        try:
+            return selected_source[col].iloc[0]
+        except Exception:
+            return None
+
+    def get_ra_dec(self, err_message="No ra and dec available for this source"):
+        """
+        Preferred behavior:
+        - resolve mapped RA/Dec columns semantically
+        Legacy fallback:
+        - use precomputed 'ra_dec' if present
+        """
+        selected_source = self.get_selected_source()
+        print(f"running get_ra_dec in CustomPlotClass: {selected_source}")
+
+        if selected_source is None or len(selected_source) != 1:
             print(err_message)
-            ra, dec = None, None
-        return ra, dec
-    
+            return None, None
+
+        ra_col = self.resolve_column_name("ra", df=selected_source)
+        dec_col = self.resolve_column_name("dec", df=selected_source)
+
+        if ra_col is not None and dec_col is not None:
+            try:
+                ra = float(selected_source[ra_col].iloc[0])
+                dec = float(selected_source[dec_col].iloc[0])
+                print(f"running get_ra_dec in CustomPlotClass: ({ra}, {dec})")
+                return ra, dec
+            except Exception:
+                pass
+
+        # Legacy fallback only
+        if "ra_dec" in selected_source.columns:
+            try:
+                ra_dec = selected_source["ra_dec"].iloc[0]
+                print(f"running get_ra_dec in CustomPlotClass legacy fallback: {ra_dec}")
+                if ra_dec is not None:
+                    ra_str, dec_str = str(ra_dec).split(",", 1)
+                    return float(ra_str), float(dec_str)
+            except Exception:
+                pass
+
+        print(err_message)
+        return None, None
+
+    def get_ra_dec_string(self, err_message="No ra and dec available for this source"):
+        """
+        Convenience helper for panels like spectra panels that still need 'ra,dec'
+        for external query APIs. This value is derived locally and not assumed to
+        already exist in the dataframe.
+        """
+        ra, dec = self.get_ra_dec(err_message=err_message)
+        if ra is None or dec is None:
+            return None
+        return f"{ra},{dec}"
+
     def _get_selected_id(self):
-        return self.get_value_from_df(self.config.settings["id_col"])
+        return self.get_value_from_df("id_col")
 
     def check_required_column(self, column):
-        return column in self.df.columns
-    
+        """
+        Backward-compatible check:
+        returns True if the semantic requirement or explicit column can be resolved.
+        """
+        return self.resolve_column_name(column) is not None
 
     def get_column_list(
         self,
@@ -538,13 +719,11 @@ class CustomPlotClass(param.Parameterized):
     ):
         cols = list(getattr(self.df, "columns", []))
 
-        # remove excluded columns by name or config alias
         for excluded_col in excluded_columns:
-            col_name = self.config.settings.get(excluded_col, excluded_col)
+            col_name = self.resolve_column_name(excluded_col, df=self.df) or excluded_col
             if col_name in cols:
                 cols.remove(col_name)
 
-        # type filtering
         if allowed_types:
             cols = [c for c in cols if matches_type(self.df[c].dtype, allowed_types)]
         if excluded_types:
@@ -552,58 +731,73 @@ class CustomPlotClass(param.Parameterized):
 
         return cols
 
-
-    def _get_selection_widgets_grid(self, columns_to_select, default_values = None, 
-                                    options = None, allowed_types = None):
-        settings_grid = pn.GridBox(ncols=3, sizing_mode = "stretch_width", scroll = True)  
+    def _get_selection_widgets_grid(
+        self,
+        columns_to_select,
+        default_values=None,
+        options=None,
+        allowed_types=None
+    ):
+        settings_grid = pn.GridBox(ncols=3, sizing_mode="stretch_width", scroll=True)
         self.select_widgets = {}
         if options is None:
-            options = self.get_column_list(excluded_columns = ["ra_dec", "label_col"],
-                              excluded_types = ["object"], allowed_types = allowed_types)
+            options = self.get_column_list(
+                excluded_columns=["ra_dec", "label_col"],
+                excluded_types=["object"],
+                allowed_types=allowed_types,
+            )
         if len(columns_to_select) > 0:
             for i, col in enumerate(columns_to_select):
-                select_widget = pn.widgets.Select(name= col, options=options, max_height=120, sizing_mode = "stretch_width")
+                select_widget = pn.widgets.Select(
+                    name=col,
+                    options=options,
+                    max_height=120,
+                    sizing_mode="stretch_width",
+                )
                 if (default_values is not None) and (i < len(default_values)):
                     select_widget.value = default_values[i]
                 settings_grid.append(select_widget)
                 self.select_widgets[col] = select_widget
         return settings_grid
-        
 
-    def columns_selection_panel(self, columns_to_select, skippable = False,
-                                options = None, allowed_types = None,
-                                info_text = None):
-        settings_grid = self._get_selection_widgets_grid(columns_to_select, options = options, 
-                                                         allowed_types = allowed_types)
-        
-        submit_button = pn.widgets.Button(name='Confirm', button_type='primary', max_height=120)
+    def columns_selection_panel(
+        self,
+        columns_to_select,
+        skippable=False,
+        options=None,
+        allowed_types=None,
+        info_text=None
+    ):
+        settings_grid = self._get_selection_widgets_grid(
+            columns_to_select,
+            options=options,
+            allowed_types=allowed_types,
+        )
+
+        submit_button = pn.widgets.Button(name="Confirm", button_type="primary", max_height=120)
         submit_button.on_click(self._submit_button_cb)
-        skip_button = pn.widgets.Button(name='Skip', button_type='primary', max_height=120)
+        skip_button = pn.widgets.Button(name="Skip", button_type="primary", max_height=120)
         skip_button.on_click(self._skip_button_cb)
         if not skippable:
             skip_button.disabled = True
         if info_text is not None:
-           card_content = pn.Column(pn.pane.Markdown(info_text, sizing_mode="stretch_width", margin=(15,0,15,15)), 
-                                           settings_grid)
+            card_content = pn.Column(
+                pn.pane.Markdown(info_text, sizing_mode="stretch_width", margin=(15, 0, 15, 15)),
+                settings_grid,
+            )
         else:
-           card_content = settings_grid
+            card_content = settings_grid
 
         toolbar = self.get_layout(submit_button=submit_button, skip_button=skip_button)
-        return pn.Column(toolbar, card_content,
-                                sizing_mode="stretch_both", scroll=True, min_height = 300 )
+        return pn.Column(
+            toolbar,
+            card_content,
+            sizing_mode="stretch_both",
+            scroll=True,
+            min_height=300,
+        )
 
-    
-    def _get_unknown_columns(self, columns_needed, settings_key = None):
-        
-        """
-        Check if required columns exist in config.settings or config.main_df.
-
-        columns_needed : list
-            Columns that are required.
-        settings_key : str or None, optional
-            If provided, checks within config.settings[settings_key].keys().
-            Otherwise, checks directly against config.settings.
-        """
+    def _get_unknown_columns(self, columns_needed, settings_key=None):
         current_cols = getattr(self.config.main_df, "columns", [])
         self.unknown_columns = []
 
@@ -621,17 +815,8 @@ class CustomPlotClass(param.Parameterized):
                     self.unknown_columns.append(col)
                 else:
                     settings_dict[col] = col
-                            
-    def _change_state_if_unknown_columns(self,  unknown_stage  = "columns_selection",
-                                          ready_stage = "plot"):
-        """ Manages  the change of stage depending on the presence or not of unknown_columns.
-        
-        unknown_stage : str, optional
-            Stage to set if unknown columns are present (default: 'columns_selection').
-        ready_stage : str, optional
-            Stage to set if all columns are known (default: 'plot').
-        
-        """
+
+    def _change_state_if_unknown_columns(self, unknown_stage="columns_selection", ready_stage="plot"):
         if hasattr(self, "unknown_columns"):
             if self.unknown_columns:
                 self.stage = unknown_stage
@@ -639,43 +824,49 @@ class CustomPlotClass(param.Parameterized):
                 self.stage = ready_stage
         else:
             print("The unknown_columns attribute was not initialized, not changing Stage")
-    
-    def _save_panel(self, directory_path = "data/saved_sources", 
-                    save_fits_files = True, 
-                    prefix = None, 
-                    ): 
+
+    def _save_panel(
+        self,
+        directory_path="data/saved_sources",
+        save_fits_files=True,
+        prefix=None,
+    ):
         paths = {}
         if self.stage == "plot":
             try:
-               paths["figure"] = self._save_figure(directory_path = directory_path, prefix = prefix)
+                paths["figure"] = self._save_figure(directory_path=directory_path, prefix=prefix)
             except AttributeError:
                 print(f"{self.panel_name} has no _save_panel_method")
-            
+
             if save_fits_files:
                 try:
-                    paths["fits_file"] = self._save_data_to_fits(directory_path = directory_path)
-                    #paths["fits_file"] is currently always None
+                    paths["fits_file"] = self._save_data_to_fits(directory_path=directory_path)
                 except AttributeError:
                     pass
         return paths
-    
+
     @staticmethod
     def get_empty_image():
-        """Returns a completely white image to update the previous one if the query fails"""
-        return hv.Image(np.ones((10,10))).opts(active_tools =[], 
-                                            clim = (0,1), toolbar=None,
-                                            padding = 0,border = 0,framewise = True, xaxis=None, 
-                                            yaxis=None, cmap = "grey")
-    
+        return hv.Image(np.ones((10, 10))).opts(
+            active_tools=[],
+            clim=(0, 1),
+            toolbar=None,
+            padding=0,
+            border=0,
+            framewise=True,
+            xaxis=None,
+            yaxis=None,
+            cmap="grey",
+        )
+
     def get_error_panel(self, message_1, message_2):
-        message = f"# {message_1}:\n"  
+        message = f"# {message_1}:\n"
         message += f"## {message_2}"
         self.message_pane.object = message
-        self.message_pane.visible = True 
+        self.message_pane.visible = True
         self.figure.objects = [self.get_empty_image()]
 
     def remove_src_listener(self):
-        """Removes the callback to a change in the selected source"""
         if self.src is not None and hasattr(self, "_src_callback"):
             try:
                 self.src.remove_on_change("data", self._src_callback)
@@ -690,65 +881,69 @@ class CustomPlotClass(param.Parameterized):
                     del self.config.settings[col]
             print(f"[{self.panel_id}] unknown columns selected removed from config")
 
-    ##Example method
     def plot(self, N=20):
         self.message_pane.visible = True
         coords = [(i, np.random.random()) for i in range(N)]
-        scatter = hv.Scatter(coords).opts(color='black', marker='+')
+        scatter = hv.Scatter(coords).opts(color="black", marker="+")
         self.figure.object = scatter
         self.message_pane.visible = False
 
-    ##Example method
     def get_layout(self):
-        points_input = pn.widgets.IntInput(name="Number of points", value=20, start=1, sizing_mode = "stretch_width" )
+        points_input = pn.widgets.IntInput(name="Number of points", value=20, start=1, sizing_mode="stretch_width")
+
         def update_points(event):
             N = points_input.value
             self.plot(N)
-        self.plot_settings_panel.objects = [points_input]
 
-        self.add_param_watch(points_input, update_points, what = "value")
+        self.plot_settings_panel.objects = [points_input]
+        self.add_param_watch(points_input, update_points, what="value")
         self.plot(points_input.value)
-        return pn.Column(self.message_pane, self.figure, self.plot_settings_panel, 
-                         sizing_mode="stretch_both", min_height = 450, styles={'background': 'lightgreen'})
-    
+        return pn.Column(
+            self.message_pane,
+            self.figure,
+            self.plot_settings_panel,
+            sizing_mode="stretch_both",
+            min_height=450,
+            styles={"background": "lightgreen"},
+        )
 
     def get_toolbar(self, skip_button=None, submit_button=None):
-
         if self.stage == "columns_selection":
             toolbar = pn.Row(
-                pn.Spacer(width=25), 
-                self.close_button, 
-                skip_button, 
-                submit_button, 
-                height=40)
+                pn.Spacer(width=25),
+                self.close_button,
+                skip_button,
+                submit_button,
+                height=40,
+            )
         else:
             if self.require_settings:
                 toolbar = pn.Row(
-                    pn.Spacer(width=25,), 
-                    self.close_button, 
-                    self.plot_settings_button, 
-                    height=40)
+                    pn.Spacer(width=25),
+                    self.close_button,
+                    self.plot_settings_button,
+                    height=40,
+                )
             else:
                 toolbar = pn.Row(
-                    pn.Spacer(width=25,), 
-                    self.close_button, 
-                    height=40) 
-        
+                    pn.Spacer(width=25),
+                    self.close_button,
+                    height=40,
+                )
+
         return toolbar
 
     def plot_panel(self):
         self.layout = self.get_layout()
         toolbar = self.get_toolbar()
+        return pn.Column(toolbar, self.layout, sizing_mode="stretch_both", min_height=450)
 
-        return pn.Column(toolbar, self.layout, sizing_mode="stretch_both", min_height =450,)
-    
-    @param.depends("stage")                
+    @param.depends("stage")
     def panel(self):
         if self.stage == "columns_selection":
             return self.columns_selection_panel(self.unknown_columns)
         else:
             return self.plot_panel()
-        
 
 class EuclidPlotClass(CustomPlotClass):
     def __init__(self, data, src, close_button=None, extra_features=None, context=None, **params):
@@ -764,7 +959,6 @@ class EuclidPlotClass(CustomPlotClass):
 
         self._mapping_requests_sent = set()
         self.euclid_object = None
-        self.euclid_pane = pn.pane.HoloViews(width=400, height=400)
 
         self._widgets_initialised = False
         self._runtime_subscriptions_initialised = False
@@ -996,6 +1190,7 @@ class EuclidPlotClass(CustomPlotClass):
         return None
 
     def get_ra_dec(self, err_message="No ra and dec available for this source"):
+        print("Running get_ra_dec in EuclidPlotClass")
         if self._request_missing_mappings():
             print(err_message)
             return None, None
@@ -1006,7 +1201,9 @@ class EuclidPlotClass(CustomPlotClass):
             return None, None
 
         ra_col = self.config.settings.get("ra_col_name")
+        print(f"EuclidPlotClass ra_col: {ra_col}")
         dec_col = self.config.settings.get("dec_col_name")
+        print(f"EuclidPlotClass ra_col: {dec_col}")
 
         try:
             if ra_col in row.columns and dec_col in row.columns:
@@ -1014,6 +1211,7 @@ class EuclidPlotClass(CustomPlotClass):
                 dec = float(row.iloc[0][dec_col])
                 return ra, dec
         except Exception:
+            print("ra_col in row.columns and dec_col in row.columns != True")
             pass
 
         try:
@@ -1710,6 +1908,8 @@ class EuclidPlotClass(CustomPlotClass):
                 responsive=True,
                 aspect="equal",
                 toolbar=None,
+                shared_axes=False,
+                axiswise=True,
             )
             self.figure.object = overlay
             self.message_pane.visible = False
@@ -1844,6 +2044,7 @@ class EuclidPlotClass(CustomPlotClass):
                 padding=0,
                 border=0,
                 framewise=True,
+                shared_axes=False,
                 xaxis=None,
                 yaxis=None,
             )
@@ -1854,6 +2055,7 @@ class EuclidPlotClass(CustomPlotClass):
                 padding=0,
                 border=0,
                 framewise=True,
+                shared_axes=False,
                 xaxis=None,
                 yaxis=None,
                 cmap="grey",
@@ -1933,6 +2135,8 @@ class EuclidPlotClass(CustomPlotClass):
                 padding=0.0,
                 border=1,
                 framewise=True,
+                shared_axes=False,
+                axiswise=True,
                 active_tools=[],
                 xlabel=xlabel,
                 yaxis=None,
@@ -1955,7 +2159,11 @@ class EuclidPlotClass(CustomPlotClass):
                 psf = hv.Curve(psf_profile, kdims="x", vdims="value").opts(color="red", line_width=1, line_dash="solid")
                 image = hv.Overlay([curve, line, psf]).opts(responsive=True, toolbar=None)
             else:
-                image = hv.Overlay([curve, line]).opts(responsive=True, toolbar=None)
+                image = hv.Overlay([curve, line]).opts(
+                    responsive=True, 
+                    toolbar=None,
+                    shared_axes=False,
+                    axiswise=True,)
 
             return image
 
@@ -1980,7 +2188,11 @@ class EuclidPlotClass(CustomPlotClass):
             arcsec_per_pix=arcsec_per_pix,
         )
 
-        layout = hv.Layout(plot_x + plot_y).cols(1).opts(sizing_mode="stretch_both")
+        layout = hv.Layout(plot_x + plot_y).cols(1).opts(
+            sizing_mode="stretch_both",
+            shared_axes=False,
+            axiswise=True,
+        )
         row_stream = hv.streams.Tap(source=plot_x, x=np.nan, y=np.nan)
         col_stream = hv.streams.Tap(source=plot_y, x=np.nan, y=np.nan)
 
@@ -2165,18 +2377,19 @@ class EuclidPlotClass(CustomPlotClass):
                 except Exception as e:
                     print(f"Late-join coords lookup failed for {src_name} in dataset {dsid}: {e}")
 
-
 class SpectrumPlotClass(CustomPlotClass):
-    
 
-    def __init__(self, data, src, close_button, extra_features, dataset = "DESI", context = None):
-        super().__init__(data, src, close_button, extra_features,
-                         panel_name= f"{dataset}_spectrum", context = context)
-        
+    def __init__(self, data, src, close_button, extra_features, dataset="DESI", context=None):
+        super().__init__(
+            data,
+            src,
+            close_button,
+            extra_features,
+            panel_name=f"{dataset}_spectrum",
+            context=context,
+        )
 
-        self.context = context
-
-        if (context is not None and getattr(context, "config", None) is not None):
+        if context is not None and getattr(context, "config", None) is not None:
             self.config = context.config
 
         self.figure = pn.Column(
@@ -2186,26 +2399,39 @@ class SpectrumPlotClass(CustomPlotClass):
             scroll=False,
         )
         self.dataset = dataset
-        self._is_euclid_spec = self.dataset == "EuclidSpec" 
+        self._is_euclid_spec = self.dataset == "EuclidSpec"
 
         self._src_callback = self._change_source_cb
         self.watch_bokeh(self.src, "data", self._src_callback)
 
         self.from_sourceId = False
+        self._euclid_radius_sub = None
+
         self._initialize_settings_dictionary()
-        self.plot_settings_panel = pn.Column(visible = False, scroll = True)
+        self.plot_settings_panel = pn.Column(visible=False, scroll=True)
         self.mode_options = ["Use TargetId", "Cone Search"]
         self.chosen_mode = self.mode_options[1]
-   
+
+    def _dispose_impl(self) -> None:
+        """
+        Extra cleanup for SpectrumPlotClass only.
+        Keeps CustomPlotClass cleanup intact.
+        """
+        if getattr(self, "_euclid_radius_sub", None) is not None and self.events is not None:
+            try:
+                self.events.unsubscribe(self._euclid_radius_sub)
+            except Exception:
+                pass
+            self._euclid_radius_sub = None
+
     def _to_list(self, x):
         """Convert numpy/array-like to plain python list safely."""
         if x is None:
             return None
         try:
-            # numpy arrays, astropy columns, etc.
             return list(x)
         except Exception:
-            return x  # scalar
+            return x
 
     def _get_attr_or_key(self, obj, name, default=None):
         """Get attribute (Euclid SpectrumContainer) or dict key (DESI record)."""
@@ -2214,16 +2440,6 @@ class SpectrumPlotClass(CustomPlotClass):
         if isinstance(obj, dict):
             return obj.get(name, default)
         return getattr(obj, name, default)
-
-    def _get_active_dataset_id(self):
-        try:
-            if self.context and getattr(self.context, "datasets", None):
-                active = self.context.datasets.active_id()
-                if active:
-                    return active
-        except Exception:
-            pass
-        return "default"
 
     def _build_spectrum_artifact_payload(self) -> dict:
         """
@@ -2236,14 +2452,12 @@ class SpectrumPlotClass(CustomPlotClass):
 
         payload = {
             "source": self.dataset,
-            # target/source coords (the clicked object), if you want them:
             "ra0": getattr(self.spectrum_object, "ra", None),
             "dec0": getattr(self.spectrum_object, "dec", None),
             "spectra": [],
         }
 
         for sp in spectra:
-            # identify spectrum id consistently
             sid = (
                 self._get_attr_or_key(sp, "specid", None)
                 or self._get_attr_or_key(sp, "sourceId", None)
@@ -2256,7 +2470,6 @@ class SpectrumPlotClass(CustomPlotClass):
                 "flux": self._to_list(self._get_attr_or_key(sp, "flux", None)),
             }
 
-            # optional fields (common across your include list / SpectrumContainer)
             mask = self._get_attr_or_key(sp, "mask", None)
             if mask is not None:
                 rec["mask"] = self._to_list(mask)
@@ -2289,7 +2502,6 @@ class SpectrumPlotClass(CustomPlotClass):
                 except Exception:
                     rec["dec"] = dec
 
-            # DESI-specific useful metadata if present
             dr = self._get_attr_or_key(sp, "data_release", None)
             if dr is not None:
                 rec.setdefault("meta", {})["data_release"] = dr
@@ -2299,13 +2511,13 @@ class SpectrumPlotClass(CustomPlotClass):
         return payload
 
     def publish_spectrum_artifact(self, dataset_id: str = "default"):
-        if self.context is None:
+        if self.artifacts is None:
             return
 
         selected_id = self._get_selected_id()
         spec_payload = self._build_spectrum_artifact_payload()
 
-        artifact_id = self.context.artifacts.put(
+        artifact_id = self.artifacts.put(
             type="astro.spectrum",
             payload=spec_payload,
             dataset_id=dataset_id,
@@ -2316,7 +2528,7 @@ class SpectrumPlotClass(CustomPlotClass):
             },
         )
 
-        self.context.events.publish(
+        self.publish(
             "astro.spectrum.updated",
             {
                 "source": self.dataset,
@@ -2328,7 +2540,6 @@ class SpectrumPlotClass(CustomPlotClass):
 
     def _initialize_settings_dictionary(self):
         self.max_separation = self.config.settings.get("spectrumRadius", 5)
-
 
     def get_layout(self):
         self._initialize_settings_panel()
@@ -2344,14 +2555,14 @@ class SpectrumPlotClass(CustomPlotClass):
             min_height=0,
             scroll=False,
         )
-    
+
     def _change_source_cb(self, attr, old, new):
         if self.stage == "plot":
             initialized = self._initialize_spectrum_object()
             if initialized:
                 self._run_spectrum()
 
-    def _save_figure(self, directory_path = "data/saved_sources", prefix = None):
+    def _save_figure(self, directory_path="data/saved_sources", prefix=None):
         if self.spectrum_object.spectra is not None:
             if self.redshift_column_selector.value != "None":
                 redshift_value = self.get_value_from_df(self.redshift_column_selector.value)
@@ -2362,60 +2573,100 @@ class SpectrumPlotClass(CustomPlotClass):
             try:
                 fname = f"{prefix + '_' if prefix else ''}{self.panel_name}.png"
                 filename = os.path.join(directory_path, fname)
-                fig = self.spectrum_object.plot_all_spectra(plot_model = plot_model, plot_lines = plot_lines)
-                fig.savefig(filename, bbox_inches = "tight")
+                fig = self.spectrum_object.plot_all_spectra(
+                    plot_model=plot_model,
+                    plot_lines=plot_lines,
+                )
+                fig.savefig(filename, bbox_inches="tight")
                 plt.close(fig)
                 return filename
-            
             except FileNotFoundError:
                 print(f"Could not find the saving directory: {directory_path}")
 
-    def _save_data_to_fits(self, directory_path = "data/saved_sources"):
+    def _save_data_to_fits(self, directory_path="data/saved_sources"):
         if self.spectrum_object.spectra is not None:
             try:
-                self.spectrum_object.export_spectra_to_fits(fname = self.dataset, directory_path = directory_path)
+                self.spectrum_object.export_spectra_to_fits(
+                    fname=self.dataset,
+                    directory_path=directory_path,
+                )
             except FileNotFoundError:
                 print(f"Could not find the saving directory: {directory_path}")
 
+    def _get_required_spectrum_columns(self):
+        """
+        Declare semantic requirements instead of assuming structural columns like 'ra_dec'.
+        """
+        if self.from_sourceId:
+            return [f"{self.dataset}_TargetID"]
+        return ["ra", "dec", "id_col"]
+
+    def _validate_spectrum_requirements(self) -> bool:
+        """
+        Ensure the current mode has the required semantic columns available.
+        """
+        required = self._get_required_spectrum_columns()
+
+        if self.from_sourceId:
+            target_key = required[0]
+            if not self.check_required_column(target_key):
+                self.get_error_panel("Spectrum unavailable", "Missing column with target ID")
+                return False
+            return True
+
+        resolved = self.require_columns("ra", "dec", "id_col")
+        if resolved["ra"] is None or resolved["dec"] is None:
+            self.get_error_panel("Spectrum unavailable", "Missing mapped RA or DEC values")
+            return False
+        return True
+
     def _initialize_spectrum_object(self):
-        
+        if not self._validate_spectrum_requirements():
+            return False
+
         if self.from_sourceId:
             try:
-                self.sourceId = int(self.get_value_from_df(self.config.settings[f"{self.dataset}_TargetID"]))
+                self.sourceId = int(self.get_value_from_df(f"{self.dataset}_TargetID"))
                 self.ra, self.dec = None, None
             except KeyError:
-                self.get_error_panel("Spectrum unavailable", "Missing column with target ID" )
+                self.get_error_panel("Spectrum unavailable", "Missing column with target ID")
                 return False
-            except ValueError:
+            except (TypeError, ValueError):
                 self.get_error_panel("Spectrum unavailable", "Missing target ID")
-                return False         
+                return False
         else:
             self.sourceId = None
             self.ra, self.dec = self.get_ra_dec()
-            if (self.ra is None) or (self.dec is None):
-                self.get_error_panel("Spectrum unavailable", "Missing RA or DEC values")
+            if self.ra is None or self.dec is None:
+                self.get_error_panel("Spectrum unavailable", "Missing mapped RA or DEC values")
                 return False
 
         try:
-            self.spectrum_object.reset_data(ra = self.ra, dec = self.dec,
-                                             max_separation = self.max_separation,
-                                             sourceId = self.sourceId)
-
+            self.spectrum_object.reset_data(
+                ra=self.ra,
+                dec=self.dec,
+                max_separation=self.max_separation,
+                sourceId=self.sourceId,
+            )
         except AttributeError:
             if self._is_euclid_spec:
                 self.spectrum_object = EuclidSpectraClass(
-                    self.ra, self.dec,
+                    self.ra,
+                    self.dec,
                     max_separation=self.max_separation,
                     sourceId=self.sourceId,
                     context=self.context,
                 )
             else:
-                datasets = (["DESI-DR1"] if self.dataset == "DESI"
-                            else ["BOSS-DR17", "SDSS-DR17"] if self.dataset == "SDSS"
-                            else None)
+                datasets = (
+                    ["DESI-DR1"] if self.dataset == "DESI"
+                    else ["BOSS-DR17", "SDSS-DR17"] if self.dataset == "SDSS"
+                    else None
+                )
 
                 self.spectrum_object = DESISpectraClass(
-                    self.ra, self.dec,
+                    self.ra,
+                    self.dec,
                     datasets=datasets,
                     max_separation=self.max_separation,
                     sourceId=self.sourceId,
@@ -2434,13 +2685,13 @@ class SpectrumPlotClass(CustomPlotClass):
         return None
 
     def publish_coords(self, source: str, ra: list[float], dec: list[float], dataset_id: str = "default"):
-        if self.context is None:
+        if self.artifacts is None:
             return
 
         selected_id = self._get_selected_id()
         coords = {"ra": ra, "dec": dec}
 
-        artifact_id = self.context.artifacts.put(
+        artifact_id = self.artifacts.put(
             type="astro.coords",
             payload=coords,
             dataset_id=dataset_id,
@@ -2451,7 +2702,7 @@ class SpectrumPlotClass(CustomPlotClass):
             },
         )
 
-        self.context.events.publish(
+        self.publish(
             "astro.coords.updated",
             {
                 "source": source,
@@ -2465,22 +2716,19 @@ class SpectrumPlotClass(CustomPlotClass):
         self.message_pane.object = "## Loading..."
         self.message_pane.visible = True
 
-        # running event
-        if self.context and getattr(self.context, "events", None):
-            self.context.events.publish(
-                "astro.spectra.running",
-                {"source": self.dataset, "running": True, "panel_id": self.panel_id},
-            )
+        self.publish(
+            "astro.spectra.running",
+            {"source": self.dataset, "running": True, "panel_id": self.panel_id},
+        )
 
         if max_separation is None:
             max_separation = self.max_separation
 
         def _set_running(val: bool):
-            if self.context and getattr(self.context, "events", None):
-                self.context.events.publish(
-                    "astro.spectra.running",
-                    {"source": self.dataset, "running": val, "panel_id": self.panel_id},
-                )
+            self.publish(
+                "astro.spectra.running",
+                {"source": self.dataset, "running": val, "panel_id": self.panel_id},
+            )
 
         def callback(future_result=None):
             try:
@@ -2494,7 +2742,6 @@ class SpectrumPlotClass(CustomPlotClass):
                     self.figure.objects = [self.get_empty_image()]
                     return
 
-                # success
                 if self.redshift_column_selector.value != "None":
                     redshift_value = self.get_value_from_df(self.redshift_column_selector.value)
                     if redshift_value is not None:
@@ -2528,49 +2775,97 @@ class SpectrumPlotClass(CustomPlotClass):
             return float(default)
 
     def _initialize_settings_panel(self):
-        self.retrieve_mode_button = pn.widgets.RadioButtonGroup(name="How to retrieve spectrum", options=self.mode_options, 
-                                            value = self.chosen_mode, sizing_mode = "stretch_both", max_height = 40)
-        
+        self.retrieve_mode_button = pn.widgets.RadioButtonGroup(
+            name="How to retrieve spectrum",
+            options=self.mode_options,
+            value=self.chosen_mode,
+            sizing_mode="stretch_both",
+            max_height=40,
+        )
+
         self.max_separation_input = pn.widgets.FloatInput(
             name="Cone Radius [arcsec]",
             value=self._get_euclid_radius_arcsec(0.5),
-            step=0.5, start=1, end=100,
-            max_width=200, max_height=40,
+            step=0.5,
+            start=1,
+            end=100,
+            max_width=200,
+            max_height=40,
             sizing_mode="stretch_both",
         )
-        
-        self.link_to_cutout_checkbox = pn.widgets.Checkbox(name = "Use radius from Euclid cutout",  value = False, align = "center")
+
+        self.link_to_cutout_checkbox = pn.widgets.Checkbox(
+            name="Use radius from Euclid cutout",
+            value=False,
+            align="center",
+        )
         self.max_separation_input.disabled = (self.chosen_mode == self.mode_options[0])
         self.link_to_cutout_checkbox.disabled = (self.chosen_mode == self.mode_options[0])
 
-        self.plot_lines_checkbox = pn.widgets.Checkbox(name = "Plot Emission/Absorption Lines positions",  value = not self._is_euclid_spec, align = "center")
+        self.plot_lines_checkbox = pn.widgets.Checkbox(
+            name="Plot Emission/Absorption Lines positions",
+            value=not self._is_euclid_spec,
+            align="center",
+        )
         self.plot_lines_checkbox.disabled = self._is_euclid_spec
-        
-        self.plot_model_checkbox = pn.widgets.Checkbox(name = "Plot Model",  value = not self._is_euclid_spec, align = "center")
+
+        self.plot_model_checkbox = pn.widgets.Checkbox(
+            name="Plot Model",
+            value=not self._is_euclid_spec,
+            align="center",
+        )
         self.plot_model_checkbox.disabled = self._is_euclid_spec
 
+        self.smoothing_window_input = pn.widgets.IntInput(
+            name="Smoothing Window",
+            value=5,
+            start=1,
+            end=50,
+            step=1,
+            max_width=200,
+            max_height=40,
+            sizing_mode="stretch_both",
+        )
+        self.smoothing_function_input = pn.widgets.Select(
+            name="Smoothing Function",
+            align="center",
+            options={"Box": "Box1DKernel", "Gaussian": "Gaussian1DKernel"},
+            value="Box1DKernel",
+            max_width=200,
+            max_height=40,
+            sizing_mode="stretch_both",
+        )
 
-        self.smoothing_window_input = pn.widgets.IntInput(name = "Smoothing Window", value = 5, start = 1, end = 50, step =1,
-                                                         max_width = 200, max_height = 40, sizing_mode="stretch_both")
-        self.smoothing_function_input = pn.widgets.Select(name = "Smoothing Function", align = "center", 
-                                                          options = {"Box" : "Box1DKernel", "Gaussian" : "Gaussian1DKernel"},
-                                                          value = "Box1DKernel",
-                                                          max_width = 200, max_height = 40, sizing_mode="stretch_both")
+        self.redshift_input = pn.widgets.FloatInput(
+            name="Assign Redshift (Same for all Sources)",
+            start=0.0,
+            end=15,
+            max_width=200,
+            max_height=40,
+            sizing_mode="stretch_both",
+        )
+        self.query_redshift_button = pn.widgets.Button(
+            name="Query Redshift",
+            align="center",
+            button_type="primary",
+            max_width=200,
+            max_height=40,
+            sizing_mode="stretch_both",
+        )
+        self.redshift_column_selector = pn.widgets.Select(
+            name="Redshift Column",
+            align="center",
+            options=["None"] + self.get_column_list(allowed_types=["float"]),
+            value="None",
+            max_width=200,
+            max_height=40,
+            sizing_mode="stretch_both",
+        )
 
-        self.redshift_input = pn.widgets.FloatInput(name = "Assign Redshift (Same for all Sources)", start = 0.0, end = 15, 
-                                                    max_width = 200, max_height = 40, sizing_mode="stretch_both")
-        self.query_redshift_button  = pn.widgets.Button(name = "Query Redshift", align = "center", button_type = "primary",
-                                                       max_width = 200, max_height = 40, sizing_mode="stretch_both")
-        self.redshift_column_selector  = pn.widgets.Select(name = "Redshift Column", align = "center", 
-                                                           options = ["None"] + self.get_column_list(allowed_types=["float"]),
-                                                           value = "None",
-                                                           max_width = 200, max_height = 40, sizing_mode="stretch_both")
-        
         self.redshift_input.disabled = not self._is_euclid_spec
         self.query_redshift_button.disabled = not self._is_euclid_spec
         self.redshift_column_selector.disabled = not self._is_euclid_spec
 
-      
         self.add_param_watch(self.retrieve_mode_button, self._retrieve_mode_cb, what="value")
         self.add_param_watch(self.max_separation_input, self._max_separation_input_cb, what="value")
         self.add_param_watch(self.link_to_cutout_checkbox, self._link_to_cutout_cb, what="value")
@@ -2578,29 +2873,40 @@ class SpectrumPlotClass(CustomPlotClass):
         self.add_param_watch_many(
             [self.plot_lines_checkbox, self.plot_model_checkbox],
             self._general_parameter_cb,
-            "value"
+            "value",
         )
 
         self.add_param_watch_many(
             [self.smoothing_function_input, self.smoothing_window_input],
             self._update_smoothing_cb,
-            "value"
+            "value",
         )
 
         self.query_redshift_button.on_click(self._query_redshift_cb)
 
         self.add_param_watch(self.redshift_input, self._redshift_input_cb, what="value")
         self.add_param_watch(self.redshift_column_selector, self._redshift_column_selector_cb, what="value")
-            
-        self.plot_settings_panel = pn.Column(self.retrieve_mode_button, 
-                                             pn.Row(self.max_separation_input, pn.Column(pn.Spacer(height=23), self.link_to_cutout_checkbox), align = "center"),
-                                             pn.Row(self.plot_lines_checkbox, self.plot_model_checkbox),
-                                             pn.Row(self.smoothing_function_input, self.smoothing_window_input, align = "center"),
-                                             pn.Row(self.redshift_input,  pn.Column(pn.Spacer(height=10), self.query_redshift_button),
-                                             self.redshift_column_selector, pn.Spacer(width=350), align = "center"),
-                                             scroll = True, visible = False)
-        
-    
+
+        self.plot_settings_panel = pn.Column(
+            self.retrieve_mode_button,
+            pn.Row(
+                self.max_separation_input,
+                pn.Column(pn.Spacer(height=23), self.link_to_cutout_checkbox),
+                align="center",
+            ),
+            pn.Row(self.plot_lines_checkbox, self.plot_model_checkbox),
+            pn.Row(self.smoothing_function_input, self.smoothing_window_input, align="center"),
+            pn.Row(
+                self.redshift_input,
+                pn.Column(pn.Spacer(height=10), self.query_redshift_button),
+                self.redshift_column_selector,
+                pn.Spacer(width=350),
+                align="center",
+            ),
+            scroll=True,
+            visible=False,
+        )
+
     def _retrieve_mode_cb(self, event):
         if event.new == "Use TargetId":
             self.from_sourceId = True
@@ -2609,27 +2915,22 @@ class SpectrumPlotClass(CustomPlotClass):
             self.max_separation_input.disabled = True
             self._get_unknown_columns([f"{self.dataset}_TargetID"])
             self._change_state_if_unknown_columns()
-        
+
         elif event.new == "Cone Search":
             self.from_sourceId = False
             self.chosen_mode = event.new
             self.link_to_cutout_checkbox.disabled = False
             self.max_separation_input.disabled = False
             self.get_layout()
-    
+
     def _max_separation_input_cb(self, event):
         if event.new is not None:
             self.max_separation = event.new
             self._run_spectrum(self.max_separation)
 
     def _link_to_cutout_cb(self, event):
-        # If linking is enabled, listen to radius change events
         if event.new:
-            if not self.from_sourceId and self.context and self.context.events:
-                # subscribe once; keep handle so we can disable link without closing panel
-                if not hasattr(self, "_euclid_radius_sub"):
-                    self._euclid_radius_sub = None
-
+            if not self.from_sourceId and self.events is not None:
                 if self._euclid_radius_sub is None:
                     def _on_radius(topic, payload):
                         if not payload:
@@ -2637,38 +2938,36 @@ class SpectrumPlotClass(CustomPlotClass):
                         radius = payload.get("radius")
                         if radius is None:
                             return
-                        # update input and trigger your existing logic
                         try:
                             self.max_separation_input.value = float(radius)
                         except Exception:
                             pass
                         self._update_max_separation(float(radius))
 
-                    self._euclid_radius_sub = self.context.events.subscribe(
+                    self._euclid_radius_sub = self.events.subscribe(
                         "astro.euclid.radius.changed",
-                        _on_radius
+                        _on_radius,
                     )
         else:
-            # unlink: unsubscribe from event
-            if getattr(self, "_euclid_radius_sub", None) is not None and self.context and self.context.events:
+            if self._euclid_radius_sub is not None and self.events is not None:
                 try:
-                    self.context.events.unsubscribe(self._euclid_radius_sub)
+                    self.events.unsubscribe(self._euclid_radius_sub)
                 except Exception:
                     pass
                 self._euclid_radius_sub = None
 
     def _update_smoothing_cb(self, event):
         if self.spectrum_object.spectra is not None:
-            self.spectrum_object.get_smoothed_spectra(kernel = self.smoothing_function_input.value,
-                                                      window= self.smoothing_window_input.value)
+            self.spectrum_object.get_smoothed_spectra(
+                kernel=self.smoothing_function_input.value,
+                window=self.smoothing_window_input.value,
+            )
             self._update_plot()
 
-    
     def _general_parameter_cb(self, event):
-        """This is the Calbback to update the plot without actually querying new data"""
         if self.spectrum_object.spectra is not None:
             self._update_plot()
-    
+
     def _redshift_input_cb(self, event):
         redshift = event.new
         if redshift is not None:
@@ -2682,13 +2981,13 @@ class SpectrumPlotClass(CustomPlotClass):
     def _query_redshift_cb(self, event):
         if self.spectrum_object.spectra is not None:
             self.query_redshift_button.name = "Query Redshift [Running...]"
-            self.spectrum_object.query_specz_table(verbose = True)
+            self.spectrum_object.query_specz_table(verbose=True)
             self.spectrum_object.update_info_from_query()
             self.plot_lines_checkbox.disabled = False
             if self.plot_lines_checkbox.value:
                 self._update_plot()
         self.query_redshift_button.name = "Query Redshift"
-    
+
     def _redshift_column_selector_cb(self, event):
         column = event.new
         if column == "None":
@@ -2696,7 +2995,7 @@ class SpectrumPlotClass(CustomPlotClass):
         redshift_value = self.get_value_from_df(column)
         if redshift_value is not None:
             self.redshift_input.value = redshift_value
-    
+
     def _update_plot(self):
         plot_model = self.plot_model_checkbox.value
         plot_lines = "class" if self.plot_lines_checkbox.value else False
@@ -2717,19 +3016,19 @@ class SpectrumPlotClass(CustomPlotClass):
             )
         ]
 
-    
     def _update_max_separation(self, new_separation):
-         self.max_separation_input.value = new_separation
+        self.max_separation_input.value = new_separation
 
-    
-    @param.depends("stage")                        
+    @param.depends("stage")
     def panel(self):
         if self.stage == "columns_selection":
-            return self.columns_selection_panel(self.unknown_columns, allowed_types = ["int"],
-                                                info_text= "## Select column with TargetID")
+            return self.columns_selection_panel(
+                self.unknown_columns,
+                allowed_types=["int"],
+                info_text="## Select column with TargetID",
+            )
         else:
             return self.plot_panel()
-
 
 class SEDPlotClass(CustomPlotClass):
 
