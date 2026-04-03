@@ -9,6 +9,7 @@ import pandas as pd
 import panel as pn
 import json
 import param
+import re
 import uuid
 import time
 import matplotlib.pyplot as plt
@@ -24,6 +25,7 @@ from astronomicAL.extensions.astro_data_utility import VLASS_cutout, LoTSS_cutou
 import uuid
 import traceback
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Union, Iterable
 
 try:
@@ -79,10 +81,16 @@ def get_customplot_dict():
         "Table Transform": lambda data, src, close_button, context: TableTransformPanel(
             data, src, close_button, extra_features=[], context=context
         ),
-
+        
         #"SDSS Cutout"  : lambda data, src, close_button, context : SDSSClass(data, src, close_button,
-        #                                                    extra_features=[], dataset="SDSS", context=context)                                                                                                      
+        #                                                    extra_features=[], dataset="SDSS", context=context)
+        "SAMP Send": lambda data, src, close_button, context: SampSendPanel(
+            data, src, close_button, extra_features=[], context=context
+        ),
 
+        "SAMP Receive": lambda data, src, close_button, context: SampReceivePanel(
+            data, src, close_button, extra_features=[], context=context
+        ),
     }
 
     return plot_dict
@@ -5975,3 +5983,880 @@ class TableTransformPanel(CustomPlotClass):
             )
         except Exception as e:
             self.status.object = f"Create subset dataset failed: `{e}`"
+
+
+###
+
+from astronomicAL.extensions.samp_bridge import SAMPBridge
+
+
+_SECTION_STYLE = {
+    "padding": "12px 14px",
+    "border": "1px solid #d9d9d9",
+    "border-radius": "8px",
+    "background": "#fafafa",
+    "box-sizing": "border-box",
+    "min-width": "0",
+}
+
+_STATUS_STYLE = {
+    "padding": "10px 12px",
+    "border": "1px solid #d9d9d9",
+    "border-radius": "8px",
+    "background": "#ffffff",
+    "box-sizing": "border-box",
+    "min-width": "0",
+}
+
+def _fit_block(*objects):
+    return pn.FlexBox(
+        *objects,
+        flex_direction="column",
+        flex_wrap="nowrap",
+        justify_content="flex-start",
+        align_items="stretch",
+        sizing_mode="stretch_width",
+        styles={
+            "min-width": "0",
+            "gap": "0px",
+        },
+    )
+
+def _section(title: str, *objects):
+    return pn.FlexBox(
+        pn.pane.HTML(
+            f"<div style='font-weight:600; margin-bottom:10px;'>{title}</div>",
+            sizing_mode="stretch_width",
+        ),
+        _fit_block(*objects),
+        flex_direction="column",
+        flex_wrap="nowrap",
+        justify_content="flex-start",
+        align_items="stretch",
+        sizing_mode="stretch_width",
+        styles=dict(_SECTION_STYLE),
+        margin=(0, 0, 12, 0),
+    )
+
+def _status_block(status_pane):
+    return pn.FlexBox(
+        pn.pane.HTML(
+            "<div style='font-weight:600; margin-bottom:10px;'>Status</div>",
+            sizing_mode="stretch_width",
+        ),
+        _fit_block(status_pane),
+        flex_direction="column",
+        flex_wrap="nowrap",
+        justify_content="flex-start",
+        align_items="stretch",
+        sizing_mode="stretch_width",
+        styles=dict(_STATUS_STYLE),
+        margin=(0, 0, 12, 0),
+    )
+
+def _root_column(*objects):
+    return pn.FlexBox(
+        *objects,
+        flex_direction="column",
+        flex_wrap="nowrap",
+        justify_content="flex-start",
+        align_items="stretch",
+        sizing_mode="stretch_both",
+        styles={
+            "overflow-x": "hidden",
+            "overflow-y": "auto",
+            "min-width": "0",
+            "min-height": "0",
+            "gap": "0px",
+        },
+    )
+
+def _text_input(name: str, value: str = ""):
+    return pn.widgets.TextInput(
+        name=name,
+        value=value,
+        sizing_mode="stretch_width",
+        margin=(0, 0, 10, 0),
+    )
+
+
+def _select(name: str, options=None, value=None, size=None):
+    kwargs = dict(
+        name=name,
+        options=options or {},
+        value=value,
+        sizing_mode="stretch_width",
+        margin=(0, 0, 10, 0),
+    )
+    if size is not None:
+        kwargs["size"] = size
+    return pn.widgets.Select(**kwargs)
+
+
+def _int_input(name: str, value: int, start: int = 0, step: int = 1):
+    return pn.widgets.IntInput(
+        name=name,
+        value=value,
+        start=start,
+        step=step,
+        sizing_mode="stretch_width",
+        margin=(0, 0, 10, 0),
+    )
+
+
+def _multichoice(name: str, options=None, value=None, height: int = 120):
+    return pn.widgets.MultiChoice(
+        name=name,
+        options=options or [],
+        value=value or [],
+        sizing_mode="stretch_width",
+        height=height,
+        margin=(0, 0, 10, 0),
+    )
+
+def _multiselect(name: str, options=None, value=None, size: int = 10):
+    return pn.widgets.MultiSelect(
+        name=name,
+        options=options or [],
+        value=value or [],
+        size=size,
+        sizing_mode="stretch_width",
+        margin=(0, 0, 10, 0),
+    )
+
+class SampSendPanel(CustomPlotClass):
+    def __init__(self, data, src, close_button=None, extra_features=None, context=None, **params):
+        super().__init__(
+            data=data,
+            src=src,
+            close_button=close_button,
+            extra_features=[],
+            panel_name="samp_send_panel",
+            ready_stage="plot",
+            context=context,
+            require_settings=False,
+            **params,
+        )
+
+        self.services = getattr(context, "services", None)
+
+        self.status = pn.pane.Markdown("Ready.")
+        self.summary = pn.pane.Markdown("")
+
+        self.dataset_select = _select("Dataset", options={})
+        self.table_name = _text_input("Table name", value="AstronomicAL table")
+
+        self.target_mode = _select(
+            "Send target",
+            options={
+                "TOPCAT": "topcat",
+                "All SAMP clients": "all",
+                "Specific client": "client",
+            },
+            value="topcat",
+        )
+
+        self.client_select = _select("Specific client", options={})
+        self.refresh_clients_button = pn.widgets.Button(
+            name="Refresh clients",
+            button_type="default",
+            sizing_mode="stretch_width",
+            height=40,
+            margin=(0, 0, 10, 0),
+        )
+
+        self.all_columns = pn.widgets.Checkbox(
+            name="Send all columns",
+            value=True,
+            margin=(0, 0, 10, 0),
+        )
+
+        self.column_help = pn.pane.Markdown(
+            "To choose specific columns: hold **Ctrl** (or **Cmd** on Mac) to add/remove individual columns, "
+            "or hold **Shift** to select a continuous range.",
+            sizing_mode="stretch_width",
+            margin=(0, 0, 8, 0),
+        )
+
+        self.column_select = _multiselect("Columns", options=[], value=[], size=10)        
+        
+        self.row_limit = _int_input("Row limit (0 = all)", value=0, start=0)
+
+        self.send_button = pn.widgets.Button(
+            name="Send to SAMP",
+            button_type="primary",
+            sizing_mode="stretch_width",
+            height=44,
+            margin=(0, 0, 0, 0),
+        )
+
+        self.client_block = _fit_block(self.client_select)
+        self.columns_block = _fit_block(self.column_help, self.column_select)
+
+        self.add_param_watch(self.dataset_select, self._on_dataset_changed, "value")
+        self.add_param_watch(self.target_mode, self._on_target_changed, "value")
+        self.add_param_watch(self.all_columns, self._on_all_columns_changed, "value")
+
+        self.refresh_clients_button.on_click(self._refresh_clients_clicked)
+        self.send_button.on_click(self._send_clicked)
+
+        self.subscribe("dataset.loaded", self._on_dataset_event)
+        self.subscribe("dataset.active.changed", self._on_dataset_event)
+
+        self._refresh_dataset_options()
+        self._refresh_client_options()
+        self._on_target_changed(None)
+        self._on_all_columns_changed(None)
+
+    def _ensure_samp_service(self) -> SAMPBridge:
+        if self.services is None:
+            raise RuntimeError("No ServiceRegistry available on context.")
+
+        if not self.services.has("interop.samp"):
+            self.services.set("interop.samp", SAMPBridge(client_name="AstronomicAL"))
+
+        bridge = self.services.get("interop.samp")
+        bridge.start()
+        return bridge
+
+    def _dataset_options(self) -> dict[str, str]:
+        if self.datasets is None:
+            return {}
+
+        options = {}
+        for dataset_id in self.datasets.list_ids():
+            dataset = self.datasets.get(dataset_id)
+            dataset_name = getattr(dataset, "name", None) or dataset_id
+            options[f"{dataset_name} ({dataset_id})"] = dataset_id
+        return options
+
+    def _refresh_dataset_options(self) -> None:
+        options = self._dataset_options()
+        self.dataset_select.options = options
+
+        if not options:
+            self.dataset_select.value = None
+            self.summary.object = "No datasets available."
+            self.column_select.options = []
+            self.column_select.value = []
+            return
+
+        if self.dataset_select.value not in options.values():
+            try:
+                active_id = self.datasets.active_id()
+                self.dataset_select.value = active_id if active_id in options.values() else next(iter(options.values()))
+            except Exception:
+                self.dataset_select.value = next(iter(options.values()))
+
+        self._refresh_column_options()
+        self._refresh_summary()
+
+    def _refresh_column_options(self) -> None:
+        dataset_id = self.dataset_select.value
+        if not dataset_id:
+            self.column_select.options = []
+            self.column_select.value = []
+            return
+
+        df = self.datasets.get_df(dataset_id)
+        cols = list(df.columns)
+        self.column_select.options = cols
+
+        if self.all_columns.value:
+            self.column_select.value = cols
+        else:
+            self.column_select.value = [c for c in self.column_select.value if c in cols]
+
+    def _refresh_summary(self) -> None:
+        dataset_id = self.dataset_select.value
+        if not dataset_id:
+            self.summary.object = "No dataset selected."
+            return
+
+        df = self.datasets.get_df(dataset_id)
+        self.summary.object = (
+            f"**Rows:** {len(df):,}  \n"
+            f"**Columns:** {len(df.columns):,}  \n"
+            f"**Dataset id:** `{dataset_id}`"
+        )
+
+        if not self.table_name.value.strip():
+            self.table_name.value = dataset_id
+
+    def _refresh_client_options(self) -> None:
+        try:
+            bridge = self._ensure_samp_service()
+            clients = bridge.list_clients()
+            options = {f"{c['name']} ({c['id']})": c["id"] for c in clients}
+            self.client_select.options = options
+
+            if options and self.client_select.value not in options.values():
+                self.client_select.value = next(iter(options.values()))
+
+            self.status.object = f"Found {len(clients)} SAMP client(s)."
+        except Exception as exc:
+            self.client_select.options = {}
+            self.status.object = f"Failed to list SAMP clients: `{exc}`"
+
+    def _on_dataset_event(self, _topic, _payload) -> None:
+        self._refresh_dataset_options()
+
+    def _on_dataset_changed(self, _event) -> None:
+        self._refresh_column_options()
+        self._refresh_summary()
+
+    def _on_target_changed(self, _event) -> None:
+        self.client_block.visible = self.target_mode.value == "client"
+
+    def _on_all_columns_changed(self, _event) -> None:
+        self.columns_block.visible = not bool(self.all_columns.value)
+        if self.all_columns.value:
+            self._refresh_column_options()
+
+    def _refresh_clients_clicked(self, _event) -> None:
+        self.status.object = "Refreshing SAMP clients..."
+        self._refresh_client_options()
+
+    def _send_clicked(self, _event) -> None:
+        dataset_id = self.dataset_select.value
+        if not dataset_id:
+            self.status.object = "No dataset selected."
+            return
+
+        selected_columns = None
+        if not self.all_columns.value:
+            selected_columns = list(self.column_select.value)
+            if not selected_columns:
+                self.status.object = "Pick at least one column to send."
+                return
+
+        self.send_button.disabled = True
+        self.status.object = "Sending table..."
+
+        self.submit_job(
+            self._send_job,
+            title="Send table over SAMP",
+            key=f"{self.panel_id}:send:{uuid.uuid4().hex}",
+            on_done=self._on_send_done,
+            on_error=self._on_error,
+            dataset_id=dataset_id,
+            table_name=self.table_name.value.strip() or dataset_id,
+            target_mode=self.target_mode.value,
+            target_client_id=self.client_select.value,
+            selected_columns=selected_columns,
+            row_limit=int(self.row_limit.value or 0),
+        )
+
+    def _send_job(
+        self,
+        *,
+        cancel_token,
+        dataset_id: str,
+        table_name: str,
+        target_mode: str,
+        target_client_id: str | None,
+        selected_columns: list[str] | None,
+        row_limit: int,
+    ):
+        if cancel_token and cancel_token.cancelled():
+            return None
+
+        df = self.datasets.get_df(dataset_id)
+
+        if selected_columns is not None:
+            df = df.loc[:, selected_columns]
+
+        if row_limit > 0:
+            df = df.head(row_limit)
+
+        bridge = self._ensure_samp_service()
+        result = bridge.send_dataframe(
+            df,
+            table_name=table_name,
+            target_mode=target_mode,
+            target_client_id=target_client_id,
+        )
+        result["dataset_id"] = dataset_id
+        result["columns"] = list(df.columns)
+        return result
+
+    def _on_send_done(self, result) -> None:
+        self.send_button.disabled = False
+
+        if result is None:
+            self.status.object = "Send cancelled."
+            return
+
+        artifact_id = self.put_artifact(
+            "interop.samp.export",
+            result,
+            dataset_id=result["dataset_id"],
+            params={
+                "target_mode": self.target_mode.value,
+                "mtype": "table.load.votable",
+            },
+        )
+
+        if artifact_id:
+            self.publish(
+                "artifact.created",
+                {
+                    "artifact_id": artifact_id,
+                    "type": "interop.samp.export",
+                    "dataset_id": result["dataset_id"],
+                },
+            )
+
+        self.publish(
+            "interop.samp.table.sent",
+            {
+                "dataset_id": result["dataset_id"],
+                "artifact_id": artifact_id,
+                "table_name": result["table_name"],
+                "target_mode": self.target_mode.value,
+            },
+        )
+
+        self.status.object = (
+            f"Sent **{result['table_name']}** "
+            f"({result['row_count']:,} rows, {result['column_count']:,} columns)."
+        )
+
+    def _on_error(self, exc: BaseException) -> None:
+        self.send_button.disabled = False
+        self.status.object = f"Failed: `{exc}`"
+
+    def get_layout(self):
+        return _root_column(
+            _section("Dataset summary", self.summary),
+            _section("Table selection", self.dataset_select, self.table_name),
+            _section("Target client", self.target_mode, self.client_block, self.refresh_clients_button),
+            _section("Export options", self.all_columns, self.row_limit, self.columns_block),
+            _section("Send", self.send_button),
+            _status_block(self.status),
+        )
+
+
+class SampReceivePanel(CustomPlotClass):
+    def __init__(self, data, src, close_button=None, extra_features=None, context=None, **params):
+        super().__init__(
+            data=data,
+            src=src,
+            close_button=close_button,
+            extra_features=[],
+            panel_name="samp_receive_panel",
+            ready_stage="plot",
+            context=context,
+            require_settings=False,
+            **params,
+        )
+
+        self.services = getattr(context, "services", None)
+        self._listener_token: str | None = None
+        self._receive_count = 0
+        self._received_items: list[dict[str, Any]] = []
+
+        self.status = pn.pane.Markdown("Listening for incoming SAMP tables.")
+        self.summary = pn.pane.Markdown("No received table selected.")
+        self.inbox_info = pn.pane.Markdown("No received tables yet.")
+        self.empty_state = pn.pane.Markdown(
+            "No received tables yet. Send a table from TOPCAT or another SAMP client."
+        )
+        
+        self.inbox_select = _select("Received tables", options={}, size=8)
+
+        self.preview_rows = _int_input("Preview rows", value=20, start=1, step=5)
+        self.preview_columns = _multichoice("Preview columns", options=[], value=[], height=100)
+
+        self.dataset_name = _text_input("Dataset name", value="")
+        self.dataset_id = _text_input("Dataset id", value="")
+        self.make_active = pn.widgets.Checkbox(
+            name="Make active after import",
+            value=True,
+            margin=(0, 0, 10, 0),
+        )
+
+        self.register_button = pn.widgets.Button(
+            name="Register as dataset",
+            button_type="primary",
+            sizing_mode="stretch_width",
+            height=40,
+            margin=(0, 0, 10, 0),
+        )
+
+        self.activate_button = pn.widgets.Button(
+            name="Make selected dataset active",
+            button_type="default",
+            sizing_mode="stretch_width",
+            height=40,
+            margin=(0, 0, 10, 0),
+        )
+
+        self.discard_button = pn.widgets.Button(
+            name="Discard selected",
+            button_type="warning",
+            sizing_mode="stretch_width",
+            height=40,
+            margin=(0, 0, 10, 0),
+        )
+
+        self.clear_button = pn.widgets.Button(
+            name="Clear inbox",
+            button_type="default",
+            sizing_mode="stretch_width",
+            height=40,
+            margin=(0, 0, 0, 0),
+        )
+
+        self.preview = pn.pane.DataFrame(
+            pd.DataFrame(),
+            index=False,
+            sizing_mode="stretch_width",
+            height=180,
+            max_height=180,
+        )
+
+        self.inbox_body = _fit_block()
+
+        self.add_param_watch(self.inbox_select, self._on_inbox_changed, "value")
+        self.add_param_watch(self.preview_rows, self._on_preview_control_changed, "value")
+        self.add_param_watch(self.preview_columns, self._on_preview_control_changed, "value")
+
+        self.register_button.on_click(self._register_clicked)
+        self.activate_button.on_click(self._activate_clicked)
+        self.discard_button.on_click(self._discard_clicked)
+        self.clear_button.on_click(self._clear_clicked)
+
+        self._attach_listener()
+        self._refresh_inbox_body()
+        self._update_selection_view()
+
+    def _ensure_samp_service(self) -> SAMPBridge:
+        if self.services is None:
+            raise RuntimeError("No ServiceRegistry available on context.")
+
+        if not self.services.has("interop.samp"):
+            self.services.set("interop.samp", SAMPBridge(client_name="AstronomicAL"))
+
+        bridge = self.services.get("interop.samp")
+        bridge.start()
+        return bridge
+
+    def _attach_listener(self) -> None:
+        bridge = self._ensure_samp_service()
+        if self._listener_token is None:
+            self._listener_token = bridge.add_table_listener(self._on_table_received)
+
+    def _detach_listener(self) -> None:
+        if self._listener_token is None:
+            return
+
+        try:
+            bridge = self._ensure_samp_service()
+            bridge.remove_table_listener(self._listener_token)
+        finally:
+            self._listener_token = None
+
+    def _run_on_ui_thread(self, fn) -> None:
+        doc = getattr(pn.state, "curdoc", None)
+        if doc is not None:
+            doc.add_next_tick_callback(fn)
+        else:
+            fn()
+
+    def _on_table_received(self, payload: dict[str, Any]) -> None:
+        self._run_on_ui_thread(lambda: self._handle_received_table(payload))
+
+    def _handle_received_table(self, payload: dict[str, Any]) -> None:
+        self._receive_count += 1
+
+        artifact_id = self.put_artifact(
+            "interop.samp.import",
+            payload,
+            dataset_id=None,
+            params={
+                "mtype": payload.get("mtype"),
+                "sender_id": payload.get("sender_id"),
+                "url": payload.get("url"),
+            },
+        )
+
+        item_id = f"samp-recv-{uuid.uuid4().hex[:10]}"
+        item = {
+            "id": item_id,
+            "name": payload.get("name") or f"Incoming SAMP table {self._receive_count}",
+            "sender_id": payload.get("sender_id") or "unknown",
+            "artifact_id": artifact_id,
+            "dataset_id": None,
+            "payload": payload,
+            "dataframe": payload["dataframe"],
+            "row_count": payload.get("row_count", 0),
+            "column_count": payload.get("column_count", 0),
+            "columns": list(payload.get("columns", [])),
+            "url": payload.get("url"),
+            "received_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+
+        self._received_items.insert(0, item)
+
+        if artifact_id:
+            self.publish(
+                "artifact.created",
+                {
+                    "artifact_id": artifact_id,
+                    "type": "interop.samp.import",
+                    "dataset_id": None,
+                },
+            )
+
+        self.publish(
+            "interop.samp.table.received",
+            {
+                "artifact_id": artifact_id,
+                "dataset_id": None,
+                "table_name": item["name"],
+                "sender_id": item["sender_id"],
+                "row_count": item["row_count"],
+                "column_count": item["column_count"],
+            },
+        )
+
+        self._refresh_inbox_options(select_item_id=item_id)
+        self.status.object = (
+            f"Received **{item['name']}** from `{item['sender_id']}` "
+            f"({item['row_count']:,} rows, {item['column_count']:,} columns)."
+        )
+
+    def _refresh_inbox_body(self) -> None:
+        self.inbox_body.objects = [self.empty_state] if not self._received_items else [self.inbox_select]
+
+    def _refresh_inbox_options(self, select_item_id: str | None = None) -> None:
+        options = {}
+
+        for item in self._received_items:
+            dataset_part = f" → dataset `{item['dataset_id']}`" if item["dataset_id"] else ""
+            label = (
+                f"{item['name']} | {item['row_count']:,}x{item['column_count']:,} | "
+                f"{item['sender_id']} | {item['received_at']}{dataset_part}"
+            )
+            options[label] = item["id"]
+
+        self.inbox_select.options = options
+        self.inbox_info.object = (
+            f"**Received tables:** {len(self._received_items)}"
+            if options
+            else "No received tables yet."
+        )
+
+        if not options:
+            self.inbox_select.value = None
+        elif select_item_id is not None:
+            self.inbox_select.value = select_item_id
+        elif self.inbox_select.value not in options.values():
+            self.inbox_select.value = next(iter(options.values()))
+
+        self._refresh_inbox_body()
+        self._update_selection_view()
+
+    def _get_selected_item(self) -> dict[str, Any] | None:
+        item_id = self.inbox_select.value
+        if not item_id:
+            return None
+
+        for item in self._received_items:
+            if item["id"] == item_id:
+                return item
+
+        return None
+
+    def _build_default_dataset_name(self, item: dict[str, Any]) -> str:
+        return item["name"] or f"SAMP import {self._receive_count}"
+
+    def _build_default_dataset_id(self, item: dict[str, Any]) -> str:
+        base = re.sub(r"[^A-Za-z0-9._-]+", "-", self._build_default_dataset_name(item).strip()).strip("-").lower()
+        base = base or "samp-import"
+        return f"{base}-{item['id'][-4:]}"
+
+    def _update_selection_view(self) -> None:
+        item = self._get_selected_item()
+
+        if item is None:
+            self.summary.object = "No received table selected."
+            self.preview.object = pd.DataFrame()
+            self.preview_columns.options = []
+            self.preview_columns.value = []
+            self.dataset_name.value = ""
+            self.dataset_id.value = ""
+            self.register_button.disabled = True
+            self.activate_button.disabled = True
+            self.discard_button.disabled = True
+            self.clear_button.disabled = len(self._received_items) == 0
+            return
+
+        self.register_button.disabled = item["dataset_id"] is not None
+        self.activate_button.disabled = item["dataset_id"] is None
+        self.discard_button.disabled = False
+        self.clear_button.disabled = False
+
+        if not self.dataset_name.value:
+            self.dataset_name.value = self._build_default_dataset_name(item)
+
+        if not self.dataset_id.value:
+            self.dataset_id.value = self._build_default_dataset_id(item)
+
+        cols = list(item["columns"])
+        self.preview_columns.options = cols
+        self.preview_columns.value = [c for c in self.preview_columns.value if c in cols]
+
+        dataset_line = (
+            f"**Registered dataset:** `{item['dataset_id']}`"
+            if item["dataset_id"] is not None
+            else "**Registered dataset:** not yet imported"
+        )
+
+        self.summary.object = (
+            f"**Table:** {item['name']}  \n"
+            f"**Sender:** `{item['sender_id']}`  \n"
+            f"**Received:** {item['received_at']}  \n"
+            f"**Rows:** {item['row_count']:,}  \n"
+            f"**Columns:** {item['column_count']:,}  \n"
+            f"**Artifact id:** `{item['artifact_id']}`  \n"
+            f"{dataset_line}  \n"
+            f"**Source URL:** `{item['url']}`"
+        )
+
+        self._update_preview()
+
+    def _update_preview(self) -> None:
+        item = self._get_selected_item()
+        if item is None:
+            self.preview.object = pd.DataFrame()
+            return
+
+        df = item["dataframe"]
+
+        cols = list(self.preview_columns.value)
+        if cols:
+            df = df.loc[:, cols]
+
+        self.preview.object = df.head(max(1, int(self.preview_rows.value or 20)))
+
+    def _on_inbox_changed(self, _event) -> None:
+        self.dataset_name.value = ""
+        self.dataset_id.value = ""
+        self._update_selection_view()
+
+    def _on_preview_control_changed(self, _event) -> None:
+        self._update_preview()
+
+    def _register_clicked(self, _event) -> None:
+        item = self._get_selected_item()
+        if item is None:
+            self.status.object = "No received table selected."
+            return
+
+        if item["dataset_id"] is not None:
+            self.status.object = f"Selected table is already registered as `{item['dataset_id']}`."
+            return
+
+        dataset_name = self.dataset_name.value.strip() or self._build_default_dataset_name(item)
+        dataset_id = self.dataset_id.value.strip() or self._build_default_dataset_id(item)
+
+        existing_ids = set(self.datasets.list_ids())
+        if dataset_id in existing_ids:
+            self.status.object = f"Dataset id `{dataset_id}` already exists. Choose a different id."
+            return
+
+        self.datasets.register(
+            dataset_id,
+            item["dataframe"],
+            name=dataset_name,
+            source=item["url"],
+            domain="interop.samp",
+        )
+
+        item["dataset_id"] = dataset_id
+
+        self.publish(
+            "dataset.loaded",
+            {
+                "dataset_id": dataset_id,
+                "source": "interop.samp",
+            },
+        )
+
+        if self.make_active.value:
+            self.datasets.set_active(dataset_id)
+            self.publish(
+                "dataset.active.changed",
+                {
+                    "dataset_id": dataset_id,
+                    "source": "interop.samp",
+                },
+            )
+
+        self.publish(
+            "interop.samp.table.imported",
+            {
+                "artifact_id": item["artifact_id"],
+                "dataset_id": dataset_id,
+                "table_name": item["name"],
+                "sender_id": item["sender_id"],
+            },
+        )
+
+        self.status.object = (
+            f"Imported **{item['name']}** as dataset `{dataset_id}`."
+            + (" It is now active." if self.make_active.value else "")
+        )
+
+        self._refresh_inbox_options(select_item_id=item["id"])
+
+    def _activate_clicked(self, _event) -> None:
+        item = self._get_selected_item()
+        if item is None or item["dataset_id"] is None:
+            self.status.object = "Selected table has not been registered as a dataset yet."
+            return
+
+        self.datasets.set_active(item["dataset_id"])
+        self.publish(
+            "dataset.active.changed",
+            {
+                "dataset_id": item["dataset_id"],
+                "source": "interop.samp",
+            },
+        )
+
+        self.status.object = f"Set dataset `{item['dataset_id']}` as active."
+
+    def _discard_clicked(self, _event) -> None:
+        item = self._get_selected_item()
+        if item is None:
+            self.status.object = "No received table selected."
+            return
+
+        self._received_items = [x for x in self._received_items if x["id"] != item["id"]]
+        self.status.object = f"Discarded received table **{item['name']}**."
+        self._refresh_inbox_options()
+
+    def _clear_clicked(self, _event) -> None:
+        self._received_items = []
+        self.status.object = "Cleared received-table inbox."
+        self._refresh_inbox_options()
+
+    def get_layout(self):
+        return _root_column(
+            _section("Received tables", self.inbox_info, self.inbox_body),
+            _section("Inbox actions", self.discard_button, self.clear_button),
+            _section("Selected table", self.summary),
+            _section("Preview", self.preview_rows, self.preview_columns, self.preview),
+            _section("Import actions", self.dataset_name, self.dataset_id, self.make_active, self.register_button, self.activate_button),
+            _status_block(self.status),
+        )
+
+    def dispose(self):
+        self._detach_listener()
+        try:
+            super().dispose()
+        except AttributeError:
+            pass
