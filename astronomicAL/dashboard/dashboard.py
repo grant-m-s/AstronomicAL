@@ -21,8 +21,6 @@ class Dashboard(param.Parameterized):
 
     Parameters
     ----------
-    src : ColumnDataSource
-        The shared data source which holds the current selected source.
     contents : param.String, default = "Menu"
         The identifier for which of the dashboard views should be initialised
         and rendered.
@@ -37,34 +35,33 @@ class Dashboard(param.Parameterized):
 
     """
 
-    src = ColumnDataSource(data={"0": [], "1": []})
-
     contents = param.String()
 
-    def __init__(self, src, contents= "Menu", context=None):
+    def __init__(self, src, contents="Menu", context=None):
         super(Dashboard, self).__init__()
 
-        self.src = src
+        self._bokeh_on_change = []
+        self.src = ColumnDataSource(data={"0": [], "1": []})
         self.watch_bokeh(self.src, "data", self._update_extension_plots_cb)
-        self.row = pn.Row(pn.pane.Str("loading"))
 
+        self.row = pn.Row(pn.pane.Str("loading"))
         self.context = context
 
-        if (context is not None and getattr(context, "config", None) is not None):
-            self.config = context.config 
+        if context is not None and getattr(context, "config", None) is not None:
+            self.config = context.config
+
         self.df = self.config.main_df
         self.current_extension_plot = None
 
-        self._child_controllers = []  # controllers that should be disposed with this dashboard
-
+        self._child_controllers = []
         self._disposed = False
-        
+
         self._close_button = pn.widgets.Button(name="Close", max_width=100, max_height=40)
         self._close_button.on_click(self._close_button_cb)
-        
+
         self._submit_button = pn.widgets.Button(name="Submit Column Names")
         self._submit_button.on_click(self._submit_button_cb)
-        
+
         self.plot_dict = extension_plots.get_plot_dict()
         self.cust_plot_dict = custom_plots.get_customplot_dict()
         self.contents = contents
@@ -123,16 +120,13 @@ class Dashboard(param.Parameterized):
 
         print(f"[dispose] Dashboard {getattr(self, 'contents', '')}")
 
-        # stop dashboard-owned src callback
         try:
-            self.src.remove_on_change("data", self._update_extension_plots_cb)
+            self.unwatch_all_bokeh()
         except Exception:
             pass
 
-        # dispose active contents (custom plots or extension plots)
         self._dispose_current_contents_only()
 
-        # dispose any child controllers if you are using them elsewhere
         for ctrl in list(getattr(self, "_child_controllers", [])):
             try:
                 if hasattr(ctrl, "dispose"):
@@ -238,7 +232,9 @@ class Dashboard(param.Parameterized):
             if not self._require_loaded_dataset():
                 return
             self.panel_contents = self.cust_plot_dict[self.contents](
-                self.config.main_df, self.src, self._close_button, context=self.context
+                self.config.main_df,
+                self._close_button,
+                context=self.context,
             )
 
         else:

@@ -43,53 +43,53 @@ def get_customplot_dict():
 
     plot_dict = {
         
-        "Euclid Cutout" : lambda data, src, close_button, context : EuclidPlotClass(data, src, close_button,
+        "Euclid Cutout" : lambda data, close_button, context : EuclidPlotClass(data, close_button,
                                                            extra_features=[], context=context),
 
-        "DESI Spectra"  : lambda data, src, close_button, context : SpectrumPlotClass(data, src, close_button,
+        "DESI Spectra"  : lambda data, close_button, context : SpectrumPlotClass(data, close_button,
                                                             extra_features=[], dataset="DESI", context=context), 
 
-        "Euclid Spectra"  : lambda data, src, close_button, context : SpectrumPlotClass(data, src, close_button,
+        "Euclid Spectra"  : lambda data, close_button, context : SpectrumPlotClass(data, close_button,
                                                             extra_features=[], dataset="EuclidSpec", context=context), 
 
-        "SDSS Spectra"  : lambda data, src, close_button, context : SpectrumPlotClass(data, src, close_button,
+        "SDSS Spectra"  : lambda data, close_button, context : SpectrumPlotClass(data, close_button,
                                                             extra_features=[], dataset="SDSS", context=context),
 
-        "BroadBand SED"  : lambda data, src, close_button, context : SEDPlotClass(data, src, close_button,
+        "BroadBand SED"  : lambda data, close_button, context : SEDPlotClass(data, close_button,
                                                             extra_features=[], context=context),
 
-        "Notes Panel"  : lambda data, src, close_button, context : LogBookClass(data, src, close_button,
+        "Notes Panel"  : lambda data, close_button, context : LogBookClass(data, close_button,
                                                             extra_features=[], context=context),
         
-        "Aladin Lite"  : lambda data, src, close_button, context : AladinClass(data, src, close_button,
+        "Aladin Lite"  : lambda data, close_button, context : AladinClass(data, close_button,
                                                             extra_features=[], context=context),                                                  
         
-        "VLASS Cutout"  : lambda data, src, close_button, context : RadioClass(data, src, close_button,
+        "VLASS Cutout"  : lambda data, close_button, context : RadioClass(data, close_button,
                                                             extra_features=[], dataset="VLASS", context=context),
         
-        "LoTSS Cutout"  : lambda data, src, close_button, context : RadioClass(data, src, close_button,
+        "LoTSS Cutout"  : lambda data, close_button, context : RadioClass(data, close_button,
                                                             extra_features=[], dataset="LoTSS", context=context),
 
-        "Event Monitor": lambda data, src, close_button, context : EventMonitorClass(
-            data, src, close_button, extra_features=[], context=context
+        "Event Monitor": lambda data, close_button, context : EventMonitorClass(
+            data, close_button, extra_features=[], context=context
         ),
 
-        "spec_analyser": lambda data, src, close_button, context : SpecAnalyser(
-            data, src, close_button, extra_features=[], context=context, require_settings=False
+        "spec_analyser": lambda data, close_button, context : SpecAnalyser(
+            data, close_button, extra_features=[], context=context, require_settings=False
         ),
 
-        "Table Transform": lambda data, src, close_button, context: TableTransformPanel(
-            data, src, close_button, extra_features=[], context=context
+        "Table Transform": lambda data, close_button, context: TableTransformPanel(
+            data, close_button, extra_features=[], context=context
         ),
         
-        #"SDSS Cutout"  : lambda data, src, close_button, context : SDSSClass(data, src, close_button,
+        #"SDSS Cutout"  : lambda data, close_button, context : SDSSClass(data, close_button,
         #                                                    extra_features=[], dataset="SDSS", context=context)
-        "SAMP Send": lambda data, src, close_button, context: SampSendPanel(
-            data, src, close_button, extra_features=[], context=context
+        "SAMP Send": lambda data, close_button, context: SampSendPanel(
+            data, close_button, extra_features=[], context=context
         ),
 
-        "SAMP Receive": lambda data, src, close_button, context: SampReceivePanel(
-            data, src, close_button, extra_features=[], context=context
+        "SAMP Receive": lambda data, close_button, context: SampReceivePanel(
+            data, close_button, extra_features=[], context=context
         ),
     }
 
@@ -104,7 +104,6 @@ class CustomPlotClass(param.Parameterized):
     def __init__(
         self,
         data,
-        src,
         close_button,
         extra_features,
         panel_name="custom_plot",
@@ -116,7 +115,6 @@ class CustomPlotClass(param.Parameterized):
         super().__init__(**params)
 
         self.df = data
-        self.src = src
         self.extra_features = extra_features
         self.close_button = close_button
         self.context = context
@@ -142,7 +140,7 @@ class CustomPlotClass(param.Parameterized):
 
         # Standard runtime subscription / refresh orchestration
         self._dataset_runtime_subscriptions_initialised = False
-        self._src_runtime_subscription_initialised = False
+        self._selection_runtime_subscriptions_initialised = False
 
         self._refresh_pending = False
         self._refresh_pending_payload = None
@@ -377,6 +375,45 @@ class CustomPlotClass(param.Parameterized):
         self._request_refresh(reason=str(topic or "dataset.mapping_updated"), payload=payload)
 
 
+    def _get_focus_state(self):
+        if self.context is not None and getattr(self.context, "selection", None) is not None:
+            try:
+                return self.context.selection.get_focus()
+            except Exception:
+                pass
+        return None
+
+
+    def _bind_selection_runtime_subscriptions(self):
+        """
+        Standard selection watcher for new plugins.
+
+        Focus changes request a coalesced refresh rather than launching work
+        immediately.
+        """
+        if self._selection_runtime_subscriptions_initialised:
+            return
+
+        self._selection_runtime_subscriptions_initialised = True
+        self.subscribe("selection.focus.changed", self._selection_focus_changed_cb)
+        self.subscribe("selection.focus.cleared", self._selection_focus_cleared_cb)
+
+
+    def _selection_focus_changed_cb(self, topic, payload):
+        self._request_refresh(
+            reason=str(topic or "selection.focus.changed"),
+            payload=payload,
+        )
+
+
+    def _selection_focus_cleared_cb(self, topic, payload):
+        self._request_refresh(
+            reason=str(topic or "selection.focus.cleared"),
+            payload=payload,
+        )
+
+
+
     def _rebuild_layout_from_current_state(self):
         """
         Conservative fallback for panels that do not expose a dedicated refresh API.
@@ -429,29 +466,6 @@ class CustomPlotClass(param.Parameterized):
             self._rebuild_layout_from_current_state()
         finally:
             self._finish_refresh(refresh_signature)
-
-    def _bind_src_runtime_subscription(self, model=None, attr="data", callback=None):
-        """
-        Standard source watcher for new plugins.
-
-        By default, src.data changes request a coalesced refresh rather than
-        launching work immediately.
-        """
-        if self._src_runtime_subscription_initialised:
-            return
-
-        model = model if model is not None else self.src
-        callback = callback if callback is not None else self._src_data_changed_cb
-
-        if model is None:
-            return
-
-        self._src_callback = callback
-        self.watch_bokeh(model, attr, callback)
-        self._src_runtime_subscription_initialised = True
-
-    def _src_data_changed_cb(self, attr, old, new):
-        self._request_refresh(reason=f"src.{attr or 'data'}", payload=None)
 
     def _request_refresh(self, reason="unknown", payload=None, verbose=False):
         """
@@ -517,12 +531,6 @@ class CustomPlotClass(param.Parameterized):
 
 
     def _build_refresh_signature(self, reason=None, payload=None):
-        """
-        Default refresh signature.
-
-        Subclasses can extend this when refreshes depend on more than just
-        active dataset + selected source.
-        """
         return (
             self._get_active_dataset_id(),
             self._get_selected_source_id(),
@@ -873,55 +881,34 @@ class CustomPlotClass(param.Parameterized):
     # -----------------------
     def get_selected_source(self):
         """
-        Return selected row as a dataframe.
+        Return the currently focused row as a one-row dataframe.
 
-        Preferred behavior:
-        - resolve selected ID semantically
-        - fetch authoritative row from dataset/self.df
-        Fallback:
-        - build a 1-row dataframe from self.src.data as-is
+        Selection is now driven by context.selection rather than src.data.
         """
-        print(f"CustomPlotClass get_selected_source: {self.src}")
-
-        if self.src is None:
+        selected_id = self._get_selected_id()
+        if selected_id is None:
             return None
 
+        base_df = self._get_dataset_for_lookup()
+        if base_df is None or len(base_df) == 0:
+            return None
+
+        id_col = self.resolve_column_name("id_col", df=base_df) or self.resolve_column_name("id", df=base_df)
+
         try:
-            src_df = pd.DataFrame(self.src.data)
+            if id_col is None or id_col == "Use Index":
+                selected = base_df.loc[base_df.index.astype(str) == str(selected_id)]
+            else:
+                if id_col not in base_df.columns:
+                    return None
+                selected = base_df[base_df[id_col].astype(str) == str(selected_id)]
+
+            if len(selected) == 0:
+                return None
+
+            return selected.head(1).reset_index(drop=True)
         except Exception:
-            src_df = None
-
-        # Fast path: source itself already holds exactly one selected row
-        if src_df is not None and len(src_df) == 1:
-            selected_id_col = self.resolve_column_name("id_col", df=src_df) or self.resolve_column_name("id", df=src_df)
-            selected_id = None
-            if selected_id_col and selected_id_col in src_df.columns:
-                try:
-                    selected_id = src_df[selected_id_col].iloc[0]
-                except Exception:
-                    selected_id = None
-
-            if selected_id is not None:
-                base_df = self._get_dataset_for_lookup()
-                base_id_col = self.resolve_column_name("id_col", df=base_df) or self.resolve_column_name("id", df=base_df)
-
-                if (
-                    base_df is not None
-                    and base_id_col is not None
-                    and base_id_col in base_df.columns
-                ):
-                    try:
-                        match = base_df[base_df[base_id_col].astype(str) == str(selected_id)]
-                        if len(match) == 1:
-                            print("CustomPlotClass get_selected_source Return:\n", match)
-                            return match.reset_index(drop=True)
-                    except Exception:
-                        pass
-
-            print("CustomPlotClass get_selected_source Return:\n", src_df)
-            return src_df.reset_index(drop=True)
-
-        return None
+            return None
 
     def get_value_from_df(self, column_or_requirement):
         """
@@ -997,7 +984,21 @@ class CustomPlotClass(param.Parameterized):
         return f"{ra},{dec}"
 
     def _get_selected_id(self):
-        return self.get_value_from_df("id_col")
+        focus = self._get_focus_state()
+        if focus is None:
+            return None
+
+        focus_dataset_id = getattr(focus, "dataset_id", None)
+        focus_row_id = getattr(focus, "row_id", None)
+
+        if focus_row_id is None:
+            return None
+
+        active_dataset_id = self._get_active_dataset_id()
+        if focus_dataset_id not in (None, "", active_dataset_id):
+            return None
+
+        return str(focus_row_id)
 
     def check_required_column(self, column):
         """
@@ -1161,14 +1162,6 @@ class CustomPlotClass(param.Parameterized):
         self.message_pane.visible = True
         self.figure.objects = [self.get_empty_image()]
 
-    def remove_src_listener(self):
-        if self.src is not None and hasattr(self, "_src_callback"):
-            try:
-                self.src.remove_on_change("data", self._src_callback)
-                print(f"[{self.panel_id}] Listener removed")
-            except Exception as e:
-                print(f"[{self.panel_id}] Error removing src listener: {e}")
-
     def remove_column_selection(self):
         if hasattr(self, "unknown_columns"):
             for col in self.unknown_columns:
@@ -1241,10 +1234,9 @@ class CustomPlotClass(param.Parameterized):
             return self.plot_panel()
 
 class EuclidPlotClass(CustomPlotClass):
-    def __init__(self, data, src, close_button=None, extra_features=None, context=None, **params):
+    def __init__(self, data, close_button=None, extra_features=None, context=None, **params):
         super().__init__(
             data=data,
-            src=src,
             close_button=close_button,
             extra_features=extra_features or [],
             panel_name="Euclid_Cutout",
@@ -1276,16 +1268,6 @@ class EuclidPlotClass(CustomPlotClass):
         """
         self._request_refresh(reason=reason or "euclid.refresh", verbose=verbose)
 
-    def _change_source_cb(self, attr, old, new):
-        """
-        Compatibility wrapper.
-
-        New code should prefer _bind_src_runtime_subscription(), which will call the
-        standard base-class src callback. Keep this method so any existing direct
-        references still work.
-        """
-        self._src_data_changed_cb(attr, old, new)
-
     def _dataset_mapping_updated_cb(self, topic, payload):
         if not self._event_matches_active_dataset(payload):
             return
@@ -1314,7 +1296,7 @@ class EuclidPlotClass(CustomPlotClass):
         do not launch duplicate jobs, while real changes still trigger a new fetch.
         """
         dataset_id = self._dataset_id()
-        selected_id = self._get_selected_id_from_src()
+        selected_id = self._get_selected_id()
 
         filter_value = self.filter
         radius_value = self.radius
@@ -1509,27 +1491,8 @@ class EuclidPlotClass(CustomPlotClass):
 
         self.df = self.config.main_df.copy()
 
-    def _get_selected_id_from_src(self):
-        id_col = self.config.settings.get("id_col")
-        if self.src is None or id_col is None:
-            return None
-
-        try:
-            if id_col == "Use Index":
-                first_key = next(iter(self.src.data.keys()))
-                if len(self.src.data[first_key]) == 1:
-                    return str(self.src.data[first_key][0])
-                return None
-
-            if id_col in self.src.data and len(self.src.data[id_col]) == 1:
-                return str(self.src.data[id_col][0])
-        except Exception:
-            pass
-
-        return None
-
     def _get_selected_row_from_active_df(self):
-        selected_id = self._get_selected_id_from_src()
+        selected_id = self._get_selected_id()
         if selected_id is None:
             return None
 
@@ -1624,7 +1587,7 @@ class EuclidPlotClass(CustomPlotClass):
         if not self._widgets_initialised:
             self._initialise_widgets()
 
-            self._bind_src_runtime_subscription()
+            self._bind_selection_runtime_subscriptions()
             self._subscribe_to_mapping_and_dataset_events()
             self._manage_subscriptions()
 
@@ -2581,7 +2544,7 @@ class EuclidPlotClass(CustomPlotClass):
                     "panel_id": self.panel_id,
                     "reason": reason,
                     "dataset_id": self._dataset_id(),
-                    "selected_id": self._get_selected_id_from_src(),
+                    "selected_id": self._get_selected_id(),
                 },
             )
 
@@ -2621,7 +2584,7 @@ class EuclidPlotClass(CustomPlotClass):
                             "panel_id": self.panel_id,
                             "reason": reason,
                             "dataset_id": self._dataset_id(),
-                            "selected_id": self._get_selected_id_from_src(),
+                            "selected_id": self._get_selected_id(),
                         },
                     )
 
@@ -2767,10 +2730,9 @@ class EuclidPlotClass(CustomPlotClass):
 
 class SpectrumPlotClass(CustomPlotClass):
 
-    def __init__(self, data, src, close_button, extra_features, dataset="DESI", context=None):
+    def __init__(self, data, close_button, extra_features, dataset="DESI", context=None):
         super().__init__(
             data,
-            src,
             close_button,
             extra_features,
             panel_name=f"{dataset}_spectrum",
@@ -2991,7 +2953,7 @@ class SpectrumPlotClass(CustomPlotClass):
     def get_layout(self):
         if not self._widgets_initialised:
             self._initialize_settings_panel()
-            self._bind_src_runtime_subscription()
+            self._bind_selection_runtime_subscriptions()
             self._widgets_initialised = True
 
         self._request_initial_refresh_once(reason="initial.layout")
@@ -3004,9 +2966,6 @@ class SpectrumPlotClass(CustomPlotClass):
             min_height=0,
             scroll=False,
         )
-
-    def _change_source_cb(self, attr, old, new):
-        self._src_data_changed_cb(attr, old, new)
 
     def _save_figure(self, directory_path="data/saved_sources", prefix=None):
         if self.spectrum_object.spectra is not None:
@@ -3535,8 +3494,8 @@ class SEDPlotClass(CustomPlotClass):
 
     stage = param.ObjectSelector(default = available_stages[0], objects=available_stages)
 
-    def __init__(self, data, src, close_button, extra_features, context = None):
-        super().__init__(data, src, close_button, extra_features, panel_name= "SED",
+    def __init__(self, data, close_button, extra_features, context = None):
+        super().__init__(data, close_button, extra_features, panel_name= "SED",
                          ready_stage = "filters_selection", context = context)
 
 
@@ -3546,8 +3505,7 @@ class SEDPlotClass(CustomPlotClass):
             self.config = context.config
 
 
-        self._src_callback = self._change_source_cb
-        self.watch_bokeh(self.src, "data", self._src_callback)
+        self._bind_selection_runtime_subscriptions()
 
         ##Any changes here requires an update in load_config (verify_SED)
         self.conversion_dictionary = {"AB magnitudes" : lambda f, e : self.mag_to_flux(f,e),
@@ -3562,9 +3520,14 @@ class SEDPlotClass(CustomPlotClass):
             include_mapping=True,
         )
 
-    def _change_source_cb(self, attr, old, new):
+    def _selection_focus_changed_cb(self, topic, payload):
         if self.stage == "plot":
-            self._update_plot(new)
+            self._update_plot(None)
+
+    def _selection_focus_cleared_cb(self, topic, payload):
+        if self.stage == "plot":
+            self.message_pane.visible = True
+            self.figure.object = self.get_empty_image()
     
     
     def filters_selection_panel(self):
@@ -4077,22 +4040,20 @@ class SEDPlotClass(CustomPlotClass):
 
 class RadioClass(CustomPlotClass):
     
-    def __init__(self, data, src, close_button, extra_features, dataset, context = None):
-        super().__init__(data, src, close_button, extra_features, context = context)
+    def __init__(self, data, close_button, extra_features, dataset, context = None):
+        super().__init__(data, close_button, extra_features, context = context)
 
         self.context = context
 
         if (context is not None and getattr(context, "config", None) is not None):
             self.config = context.config
 
-
-        self._src_callback = self._change_source_cb
-        self.watch_bokeh(self.src, "data", self._src_callback)
-
-
+        
         self.dataset = dataset
         self._initialize_source()
         self.radius = 20
+
+        self._bind_selection_runtime_subscriptions()
 
         self._bind_dataset_runtime_subscriptions(
             include_loaded=False,
@@ -4105,9 +4066,14 @@ class RadioClass(CustomPlotClass):
             self.message_pane.visible = True
             self.message_pane.object = ["## Missing Ra and Dec"]   
 
-    def _change_source_cb(self, attr, old, new):
+    def _selection_focus_changed_cb(self, topic, payload):
         self._initialize_source()
-        self._run_radio(radius = self.radius)
+        self._run_radio(radius=self.radius)
+
+    def _selection_focus_cleared_cb(self, topic, payload):
+        self.message_pane.visible = True
+        self.message_pane.object = "## Missing RA and Dec"
+        self.figure.object = self.get_empty_image()
 
     def get_layout(self):
         self._initialise_widgets()
@@ -4184,17 +4150,15 @@ class RadioClass(CustomPlotClass):
     
 class SDSSClass(CustomPlotClass):
     
-    def __init__(self, data, src, close_button, extra_features, dataset, context = None):
-        super().__init__(data, src, close_button, extra_features, context = context)
+    def __init__(self, data, close_button, extra_features, dataset, context = None):
+        super().__init__(data, close_button, extra_features, context = context)
 
         self.context = context
 
         if (context is not None and getattr(context, "config", None) is not None):
             self.config = context.config
 
-
-        self._src_callback = self._change_source_cb
-        self.watch_bokeh(self.src, "data", self._src_callback)
+        self._bind_selection_runtime_subscriptions()
 
         self.dataset = dataset
         self._initialize_source()
@@ -4206,9 +4170,14 @@ class SDSSClass(CustomPlotClass):
             self.message_pane.visible = True
             self.message_pane.object = ["## Missing Ra and Dec"]   
 
-    def _change_source_cb(self, attr, old, new):
+    def _selection_focus_changed_cb(self, topic, payload):
         self._initialize_source()
-        self._run_sdss(radius = self.radius)
+        self._run_sdss(radius=self.radius)
+
+    def _selection_focus_cleared_cb(self, topic, payload):
+        self.message_pane.visible = True
+        self.message_pane.object = "## Missing RA and Dec"
+        self.figure.object = self.get_empty_image()
 
     def get_layout(self):
         self._initialise_widgets()
@@ -4282,19 +4251,18 @@ class SDSSClass(CustomPlotClass):
 class AladinClass(CustomPlotClass):
     # Available surveys here: https://aladin.cds.unistra.fr/hips/list
     
-    def __init__(self, data, src, close_button, extra_features, context = None):
-        super().__init__(data, src, close_button, extra_features, panel_name = "Aladin Panel", context = context)
+    def __init__(self, data, close_button, extra_features, context = None):
+        super().__init__(data, close_button, extra_features, panel_name = "Aladin Panel", context = context)
 
         self.context = context
 
         if (context is not None and getattr(context, "config", None) is not None):
             self.config = context.config
 
-        self._src_callback = self._change_source_cb
-        self.watch_bokeh(self.src, "data", self._src_callback)
-
 
         self.figure = pn.pane.HTML("", sizing_mode="stretch_both")
+
+        self._bind_selection_runtime_subscriptions()
 
         self._bind_dataset_runtime_subscriptions(
             include_loaded=False,
@@ -4302,12 +4270,15 @@ class AladinClass(CustomPlotClass):
         )
     
 
-    def _change_source_cb(self, attr, old, new):
+    def _selection_focus_changed_cb(self, topic, payload):
         self.ra, self.dec = self.get_ra_dec()
         if (self.ra is None) or (self.dec is None):
             self.get_error_panel("Aladin panel unavailable", "Missing RA or DEC value")
+            return
         self._update_image(None)
 
+    def _selection_focus_cleared_cb(self, topic, payload):
+        self.get_error_panel("Aladin panel unavailable", "No selected source")
 
     @staticmethod
     def make_iframe_html(survey_id, ra, dec):
@@ -4382,23 +4353,25 @@ class AladinClass(CustomPlotClass):
     
 class LogBookClass(CustomPlotClass):
     
-    def __init__(self, data, src, close_button, extra_features, context = None):
-        super().__init__(data, src, close_button, extra_features, panel_name = "Notes Panel", context = context)
+    def __init__(self, data, close_button, extra_features, context = None):
+        super().__init__(data, close_button, extra_features, panel_name = "Notes Panel", context = context)
 
         self.context = context
 
         if (context is not None and getattr(context, "config", None) is not None):
             self.config = context.config
 
-        self._src_callback = self._change_source_cb
-        self.watch_bokeh(self.src, "data", self._src_callback)
-
+        self._bind_selection_runtime_subscriptions()
+        
         self._bind_dataset_runtime_subscriptions(
             include_loaded=False,
             include_mapping=False,
         )
 
-    def _change_source_cb(self, attr, old, new):
+    def _selection_focus_changed_cb(self, topic, payload):
+        self.logbook_panel.value = ""
+
+    def _selection_focus_cleared_cb(self, topic, payload):
         self.logbook_panel.value = ""
 
     def get_layout(self):
@@ -4450,10 +4423,9 @@ class EventMonitorClass(CustomPlotClass):
         "workflow.",
     ]
 
-    def __init__(self, data, src, close_button=None, extra_features=None, context=None, **params):
+    def __init__(self, data, close_button=None, extra_features=None, context=None, **params):
         super().__init__(
             data=data,
-            src=src,
             close_button=close_button,
             extra_features=extra_features,
             context=context,
@@ -5681,10 +5653,9 @@ class SpecAnalyser(CustomPlotClass):
         "Halpha": 6563.0,
     }
 
-    def __init__(self, data, src, close_button=None, extra_features=None, context=None, **params):
+    def __init__(self, data, close_button=None, extra_features=None, context=None, **params):
         super().__init__(
             data=data,
-            src=src,
             close_button=close_button,
             extra_features=extra_features,
             context=context,
@@ -6220,9 +6191,6 @@ class SpecAnalyser(CustomPlotClass):
 
         self.residuals_plot.on_event(Tap, self._on_plot_tap)
 
-        self._src_callback = self._change_source_cb
-        self.watch_bokeh(self.src, "data", self._src_callback)
-
         self._on_plot_settings_changed(None)
         self._update_region_overlays()
         self._update_results_table(None)
@@ -6230,6 +6198,7 @@ class SpecAnalyser(CustomPlotClass):
 
         self._refresh_spectra_from_artifacts()
 
+        self._bind_selection_runtime_subscriptions()
         self._bind_dataset_runtime_subscriptions(
             include_loaded=True,
             include_mapping=True,
@@ -6346,10 +6315,16 @@ class SpecAnalyser(CustomPlotClass):
     # External event handling
     # ------------------------------------------------------------------
 
-    def _change_source_cb(self, attr, old, new):
+    def _selection_focus_changed_cb(self, topic, payload):
         self._refresh_spectra_from_artifacts(
             dataset_id=self._get_active_dataset_id(),
             selected_id=self._get_selected_source_id(),
+        )
+
+    def _selection_focus_cleared_cb(self, topic, payload):
+        self._refresh_spectra_from_artifacts(
+            dataset_id=self._get_active_dataset_id(),
+            selected_id=None,
         )
 
     def _get_active_dataset_id(self):
@@ -7041,10 +7016,9 @@ class TableTransformPanel(CustomPlotClass):
     2) creating subset datasets from boolean expressions
     """
 
-    def __init__(self, data, src, close_button=None, extra_features=None, context=None, **params):
+    def __init__(self, data, close_button=None, extra_features=None, context=None, **params):
         super().__init__(
             data=data,
-            src=src,
             close_button=close_button,
             extra_features=extra_features or [],
             panel_name="table_transform_panel",
@@ -7693,10 +7667,9 @@ def _multiselect(name: str, options=None, value=None, size: int = 10):
     )
 
 class SampSendPanel(CustomPlotClass):
-    def __init__(self, data, src, close_button=None, extra_features=None, context=None, **params):
+    def __init__(self, data, close_button=None, extra_features=None, context=None, **params):
         super().__init__(
             data=data,
-            src=src,
             close_button=close_button,
             extra_features=[],
             panel_name="samp_send_panel",
@@ -8006,10 +7979,9 @@ class SampSendPanel(CustomPlotClass):
 
 
 class SampReceivePanel(CustomPlotClass):
-    def __init__(self, data, src, close_button=None, extra_features=None, context=None, **params):
+    def __init__(self, data, close_button=None, extra_features=None, context=None, **params):
         super().__init__(
             data=data,
-            src=src,
             close_button=close_button,
             extra_features=[],
             panel_name="samp_receive_panel",
