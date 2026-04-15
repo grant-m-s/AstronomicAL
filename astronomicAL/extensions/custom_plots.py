@@ -226,7 +226,14 @@ class CustomPlotClass(param.Parameterized):
     def subscribe(self, topic: str, callback: Callable[[str, Any], None]) -> Optional[Subscription]:
         if self.events is None:
             return None
-        sub = self.events.subscribe(topic, callback)
+
+        sub = self.events.subscribe(
+            topic,
+            callback,
+            owner_id=self.panel_id,
+            owner_label=self.panel_name,
+            owner_kind="panel",
+        )
         self._subscriptions.append(sub)
         return sub
 
@@ -3913,11 +3920,33 @@ class LogBookClass(CustomPlotClass):
 
 ######
 
+
 class EventMonitorClass(CustomPlotClass):
     """
-    A lightweight UI panel to inspect EventBus publishes and subscriptions.
-    Appears as a selectable panel in the menu.
+    Debug/observability panel for platform subscriptions.
+
+    Main goals:
+    - show a graph of owner -> topic subscriptions
+    - show which owners are missing dataset.* subscriptions
+    - show recent published events to help debug dataset switching
     """
+
+    DATASET_TOPICS = [
+        "dataset.loaded",
+        "dataset.active.changed",
+        "dataset.updated",
+        "dataset.mapping_updated",
+    ]
+
+    TOPIC_FILTER_OPTIONS = [
+        "*",
+        "dataset.",
+        "selection.",
+        "artifact.",
+        "labels.",
+        "review.",
+        "workflow.",
+    ]
 
     def __init__(self, data, src, close_button=None, extra_features=None, context=None, **params):
         super().__init__(
@@ -3926,51 +3955,949 @@ class EventMonitorClass(CustomPlotClass):
             close_button=close_button,
             extra_features=extra_features,
             context=context,
-            panel_name="Event Monitor",
+            panel_name="Subscription Graph",
             **params,
         )
 
-        # Enable tracing if supported (safe no-op if not)
         if self.context and getattr(self.context, "events", None):
             try:
                 self.context.events.enable_trace(True)
             except Exception:
                 pass
 
-        # UI
-        self.refresh_btn = pn.widgets.Button(name="Refresh", button_type="primary", width=100)
-        self.trace_toggle = pn.widgets.Checkbox(name="Trace enabled", value=True)
-        self.limit_input = pn.widgets.IntInput(name="Rows", value=200, start=10, end=5000, step=10, width=120)
+        self.refresh_btn = pn.widgets.Button(
+            name="Refresh",
+            button_type="primary",
+            width=100,
+            height=32,
+        )
 
-        self.events_table = pn.widgets.Tabulator(
-            pd.DataFrame(columns=["time", "topic", "payload"]),
-            height=120,
-            max_height=250,
-            sizing_mode="stretch_both",
+        self.auto_refresh_toggle = pn.widgets.Checkbox(
+            name="Auto refresh",
+            value=True,
+            width=120,
+        )
+
+        self.trace_toggle = pn.widgets.Checkbox(
+            name="Trace enabled",
+            value=True,
+            width=120,
+        )
+
+        self.follow_toggle = pn.widgets.Checkbox(
+            name="Follow newest",
+            value=False,
+            width=130,
+        )
+
+        self.limit_input = pn.widgets.Select(
+            name="Rows",
+            options=[100, 250, 500, 1000, 2000, 5000],
+            value=250,
+            width=110,
+        )
+
+        self.topic_filter = pn.widgets.Select(
+            name="Graph topic filter",
+            options=self.TOPIC_FILTER_OPTIONS,
+            value="dataset.",
+            width=150,
+        )
+
+        self.show_wildcards_toggle = pn.widgets.Checkbox(
+            name="Include wildcard (*)",
+            value=True,
+            width=150,
+        )
+
+        self.show_orphans_toggle = pn.widgets.Checkbox(
+            name="Show owners with no edges",
+            value=True,
+            width=190,
+        )
+
+        self.status = pn.pane.Markdown(
+            "",
+            sizing_mode="stretch_width",
+            margin=(0, 0, 4, 0),
+        )
+
+        self._tab_content_height = 560
+        self._table_height = 500
+
+        self.graph_pane = pn.pane.Bokeh(
+            sizing_mode="stretch_width",
+            min_height=self._table_height,
+            margin=(0, 0, 0, 0),
+        )
+
+        self.coverage_table = pn.widgets.Tabulator(
+            pd.DataFrame(
+                columns=[
+                    "owner_label",
+                    "owner_kind",
+                    "wildcard",
+                    "dataset.loaded",
+                    "dataset.active.changed",
+                    "dataset.updated",
+                    "dataset.mapping_updated",
+                    "status",
+                    "topics",
+                ]
+            ),
+            height=self._table_height,
+            sizing_mode="stretch_width",
+            disabled=True,
+            margin=(0, 0, 0, 0),
         )
 
         self.subs_table = pn.widgets.Tabulator(
-            pd.DataFrame(columns=["topic", "subscribers"]),
-            height=110,
-            max_height=220,
-            sizing_mode="stretch_both",
+            pd.DataFrame(
+                columns=[
+                    "owner_label",
+                    "owner_kind",
+                    "topic",
+                    "callback_name",
+                    "module",
+                    "owner_id",
+                ]
+            ),
+            height=self._table_height,
+            sizing_mode="stretch_width",
+            disabled=True,
+            margin=(0, 0, 0, 0),
         )
 
-        self.follow_toggle = pn.widgets.Checkbox(name="Follow newest", value=False)
-
-        self._events_df = pd.DataFrame(columns=["time", "topic", "payload"])
-        self._last_key = None
-
-        self.status = pn.pane.Markdown("", sizing_mode="stretch_width")
+        self.events_table = pn.widgets.Tabulator(
+            pd.DataFrame(columns=["time", "topic", "payload"]),
+            height=self._table_height,
+            sizing_mode="stretch_width",
+            disabled=True,
+            margin=(0, 0, 0, 0),
+        )
 
         self.refresh_btn.on_click(lambda _e: self.refresh())
 
-        # periodic refresh
-        self._period_ms = 1000
-        self._cb = pn.state.add_periodic_callback(self.refresh, period=self._period_ms, start=True)
+        self.add_param_watch_many(
+            [
+                self.auto_refresh_toggle,
+                self.trace_toggle,
+                self.follow_toggle,
+                self.limit_input,
+                self.topic_filter,
+                self.show_wildcards_toggle,
+                self.show_orphans_toggle,
+            ],
+            self._controls_changed,
+            what="value",
+        )
 
-        # initial fill
+        self._period_ms = 2000
+        self._cb = pn.state.add_periodic_callback(
+            self._periodic_refresh,
+            period=self._period_ms,
+            start=True,
+        )
+
         self.refresh()
+
+    # -----------------------
+    # Reactive helpers
+    # -----------------------
+    def _controls_changed(self, event=None):
+        self.refresh()
+
+    def _periodic_refresh(self):
+        if bool(self.auto_refresh_toggle.value):
+            self.refresh()
+
+    # -----------------------
+    # Formatting helpers
+    # -----------------------
+    def _short_text(self, text, max_len=28):
+        text = "" if text is None else str(text)
+        if len(text) <= max_len:
+            return text
+        return text[: max_len - 1] + "…"
+
+    def _pretty_owner_label(self, text):
+        text = "" if text is None else str(text)
+
+        if ".<locals>." in text:
+            text = text.replace(".<locals>.", "::")
+            left, right = text.split("::", 1)
+            left = left.split(".")[0]
+            right = right.split(".")[-1]
+            text = f"{left}::{right}"
+
+        return text or "<unknown>"
+
+    def _pretty_topic_label(self, text):
+        text = "" if text is None else str(text)
+        return text or "<topic>"
+
+    def _wrap_graph_label(self, text, max_line_len=16, max_lines=4):
+        """
+        Wrap labels more compactly.
+        """
+        import re
+
+        text = "" if text is None else str(text).strip()
+        if not text:
+            return "<unknown>"
+
+        text = text.replace(".<locals>.", "::")
+
+        # Split on meaningful separators, but keep the separator attached to the
+        # chunk on its left so labels still read naturally.
+        raw_parts = re.split(r"(::|\.|_|-)", text)
+        chunks = []
+
+        for part in raw_parts:
+            if not part:
+                continue
+
+            if part in {"::", ".", "_", "-"}:
+                if chunks:
+                    chunks[-1] = chunks[-1] + part
+                else:
+                    chunks.append(part)
+                continue
+
+            # Split CamelCase only enough to help wrapping long owner names.
+            camel_parts = re.findall(
+                r"[A-Z]+(?=[A-Z][a-z]|[0-9]|$)|[A-Z]?[a-z]+|[0-9]+",
+                part,
+            )
+
+            if camel_parts:
+                for piece in camel_parts:
+                    chunks.append(piece)
+            else:
+                chunks.append(part)
+
+        def _pack_chunks(effective_len):
+            lines = []
+            current = ""
+
+            pending = list(chunks)
+            while pending:
+                chunk = pending.pop(0)
+
+                if not current:
+                    if len(chunk) <= effective_len:
+                        current = chunk
+                    else:
+                        # Hard split only when an individual chunk is still too long.
+                        while len(chunk) > effective_len:
+                            lines.append(chunk[:effective_len])
+                            chunk = chunk[effective_len:]
+                        current = chunk
+                    continue
+
+                if len(current) + len(chunk) <= effective_len:
+                    current += chunk
+                else:
+                    lines.append(current.rstrip())
+                    current = ""
+                    pending.insert(0, chunk)
+
+            if current:
+                lines.append(current.rstrip())
+
+            return [line for line in lines if line]
+
+        effective_len = max(10, int(max_line_len or 16))
+        lines = _pack_chunks(effective_len)
+
+        # If wrapping is too tall, relax line length a little instead of creating
+        # excessive vertical whitespace.
+        while len(lines) > max_lines and effective_len < 30:
+            effective_len += 2
+            lines = _pack_chunks(effective_len)
+
+        return "\n".join(lines) if lines else "<unknown>"
+
+    def _estimate_label_lines(self, text, max_line_len=22, max_lines=3):
+        wrapped = self._wrap_graph_label(text, max_line_len=max_line_len, max_lines=max_lines)
+        return max(1, wrapped.count("\n") + 1)
+
+    def _label_box_metrics(self, text, max_line_len=16, max_lines=4):
+
+        wrapped = self._wrap_graph_label(text, max_line_len=max_line_len, max_lines=max_lines)
+        lines = [line for line in wrapped.split("\n") if line]
+
+        line_count = max(1, len(lines))
+        max_chars = max((len(line) for line in lines), default=1)
+
+        # Tighter width/height estimates than before.
+        box_w = max(0.34, 0.14 + 0.038 * max_chars)
+        box_h = 0.24 + 0.14 * (line_count - 1)
+
+        if max_chars >= 20 or line_count >= 4:
+            font_size = "8pt"
+        elif max_chars >= 15 or line_count >= 3:
+            font_size = "9pt"
+        elif max_chars <= 8 and line_count == 1:
+            font_size = "11pt"
+        else:
+            font_size = "10pt"
+
+        return wrapped, line_count, max_chars, box_w, box_h, font_size
+
+
+    def _payload_to_str(self, payload, max_len=280):
+        try:
+            if isinstance(payload, (dict, list, tuple)):
+                text = json.dumps(payload, default=str)
+            else:
+                text = str(payload)
+        except Exception:
+            text = repr(payload)
+
+        text = text.replace("\n", " ").replace("\r", " ")
+        if len(text) > max_len:
+            text = text[: max_len - 3] + "..."
+        return text
+
+    def _rows_to_cds_data(self, rows, columns=None):
+
+        if not rows:
+            columns = columns or []
+            return {col: [] for col in columns}
+
+        if columns is None:
+            columns = []
+            seen = set()
+            for row in rows:
+                for key in row.keys():
+                    if key not in seen:
+                        seen.add(key)
+                        columns.append(key)
+
+        data = {col: [] for col in columns}
+        for row in rows:
+            for col in columns:
+                data[col].append(row.get(col))
+        return data
+
+    def _normalise_df_for_compare(self, df):
+        if df is None:
+            return pd.DataFrame()
+
+        if not isinstance(df, pd.DataFrame):
+            try:
+                df = pd.DataFrame(df)
+            except Exception:
+                return pd.DataFrame()
+
+        out = df.copy()
+        out = out.reset_index(drop=True)
+
+        # Make comparison stable across refreshes.
+        out.columns = [str(c) for c in out.columns]
+        for col in out.columns:
+            out[col] = out[col].map(lambda x: "" if x is None else str(x))
+
+        return out
+
+    def _df_changed(self, old_df, new_df):
+        old_norm = self._normalise_df_for_compare(old_df)
+        new_norm = self._normalise_df_for_compare(new_df)
+
+        if list(old_norm.columns) != list(new_norm.columns):
+            return True
+
+        if old_norm.shape != new_norm.shape:
+            return True
+
+        return not old_norm.equals(new_norm)
+
+    def _set_tabulator_df_if_changed(self, widget, df):
+        """
+        Only update Tabulator when the dataframe content actually changed.
+        This avoids the visible flicker/reset on every periodic refresh.
+        """
+        current = getattr(widget, "value", None)
+        if self._df_changed(current, df):
+            widget.value = df
+
+    # -----------------------
+    # Data gathering
+    # -----------------------
+    def _get_subscription_infos(self):
+        if not (self.context and getattr(self.context, "events", None)):
+            return []
+
+        if hasattr(self.context.events, "list_subscriptions"):
+            try:
+                return self.context.events.list_subscriptions()
+            except Exception:
+                traceback.print_exc()
+                return []
+
+        return []
+
+    def _topic_matches_filter(self, topic: str, prefix: str) -> bool:
+        if topic == "*":
+            return bool(self.show_wildcards_toggle.value)
+
+        if prefix in ("", "*", None):
+            return True
+
+        return str(topic).startswith(prefix)
+
+    def _owner_key(self, info) -> str:
+        owner_id = getattr(info, "owner_id", None)
+        owner_label = getattr(info, "owner_label", None)
+        callback_name = getattr(info, "callback_name", None)
+        sub_id = getattr(info, "id", None)
+
+        if owner_id:
+            return str(owner_id)
+
+        parts = [
+            str(owner_label or "unknown"),
+            str(callback_name or "callback"),
+            str(sub_id or ""),
+        ]
+        return "::".join(parts)
+
+    def _owner_label(self, info) -> str:
+        raw = (
+            getattr(info, "owner_label", None)
+            or getattr(info, "owner_id", None)
+            or getattr(info, "callback_name", None)
+            or "<unknown>"
+        )
+        return self._pretty_owner_label(raw)
+
+    def _build_owner_groups(self, sub_infos):
+        owners = {}
+
+        for info in sub_infos:
+            key = self._owner_key(info)
+            rec = owners.setdefault(
+                key,
+                {
+                    "owner_id": getattr(info, "owner_id", None),
+                    "owner_label": self._owner_label(info),
+                    "owner_kind": getattr(info, "owner_kind", None) or "subscriber",
+                    "subscriptions": [],
+                    "topics": set(),
+                },
+            )
+            rec["subscriptions"].append(info)
+            rec["topics"].add(getattr(info, "topic", ""))
+
+        return owners
+
+    def _build_diagnostics_df(self, owners):
+        rows = []
+
+        for owner in owners.values():
+            topics = set(owner["topics"])
+            wildcard = "*" in topics
+
+            row = {
+                "owner_label": owner["owner_label"],
+                "owner_kind": owner["owner_kind"],
+                "wildcard": "yes" if wildcard else "no",
+                "dataset.loaded": "yes" if wildcard or "dataset.loaded" in topics else "no",
+                "dataset.active.changed": "yes" if wildcard or "dataset.active.changed" in topics else "no",
+                "dataset.updated": "yes" if wildcard or "dataset.updated" in topics else "no",
+                "dataset.mapping_updated": "yes" if wildcard or "dataset.mapping_updated" in topics else "no",
+                "topics": ", ".join(sorted(topics))[:240],
+            }
+
+            dataset_any = wildcard or any(t.startswith("dataset.") for t in topics)
+
+            if wildcard or all(
+                row[col] == "yes"
+                for col in [
+                    "dataset.loaded",
+                    "dataset.active.changed",
+                    "dataset.updated",
+                    "dataset.mapping_updated",
+                ]
+            ):
+                row["status"] = "good"
+            elif dataset_any:
+                row["status"] = "partial"
+            else:
+                row["status"] = "missing dataset subscriptions"
+
+            rows.append(row)
+
+        if not rows:
+            return pd.DataFrame(
+                columns=[
+                    "owner_label",
+                    "owner_kind",
+                    "wildcard",
+                    "dataset.loaded",
+                    "dataset.active.changed",
+                    "dataset.updated",
+                    "dataset.mapping_updated",
+                    "status",
+                    "topics",
+                ]
+            )
+
+        status_order = {
+            "missing dataset subscriptions": 0,
+            "partial": 1,
+            "good": 2,
+        }
+
+        df = pd.DataFrame(rows)
+        df["_status_order"] = df["status"].map(status_order).fillna(99)
+        df = df.sort_values(
+            by=["_status_order", "owner_kind", "owner_label"],
+            ascending=[True, True, True],
+        ).drop(columns=["_status_order"])
+
+        return df.reset_index(drop=True)
+
+    def _build_subscription_df(self, sub_infos):
+        rows = []
+        for info in sub_infos:
+            rows.append(
+                {
+                    "owner_label": self._owner_label(info),
+                    "owner_kind": getattr(info, "owner_kind", None) or "subscriber",
+                    "topic": getattr(info, "topic", None),
+                    "callback_name": getattr(info, "callback_name", None),
+                    "module": getattr(info, "module", None),
+                    "owner_id": getattr(info, "owner_id", None),
+                }
+            )
+
+        if not rows:
+            return pd.DataFrame(
+                columns=[
+                    "owner_label",
+                    "owner_kind",
+                    "topic",
+                    "callback_name",
+                    "module",
+                    "owner_id",
+                ]
+            )
+
+        return pd.DataFrame(rows).sort_values(
+            by=["owner_kind", "owner_label", "topic", "callback_name"],
+            ascending=[True, True, True, True],
+        ).reset_index(drop=True)
+
+    def _build_events_df(self, prefix: str, n: int):
+        if not (self.context and getattr(self.context, "events", None)):
+            return pd.DataFrame(columns=["time", "topic", "payload"])
+
+        try:
+            events = self.context.events.recent_events(n)
+        except Exception:
+            return pd.DataFrame(columns=["time", "topic", "payload"])
+
+        rows = []
+        for t, topic, payload in events:
+            if prefix not in ("", "*", None) and not str(topic).startswith(prefix):
+                continue
+
+            rows.append(
+                {
+                    "time": time.strftime("%H:%M:%S", time.localtime(t)),
+                    "topic": topic,
+                    "payload": self._payload_to_str(payload),
+                }
+            )
+
+        df = pd.DataFrame(rows)
+        if df.empty:
+            return pd.DataFrame(columns=["time", "topic", "payload"])
+        return df.reset_index(drop=True)
+
+    # -----------------------
+    # Graph building
+    # -----------------------
+
+    def _build_graph_figure(self, owners, matching_subs, prefix):
+        from bokeh.models import ColumnDataSource, HoverTool, LabelSet
+        from bokeh.plotting import figure as bokeh_figure
+
+        owner_keys_with_edges = {self._owner_key(info) for info in matching_subs}
+
+        owner_items = []
+        for key, owner in owners.items():
+            if not self.show_orphans_toggle.value and key not in owner_keys_with_edges:
+                continue
+            owner_items.append((key, owner))
+
+        owner_items = sorted(owner_items, key=lambda kv: str(kv[1]["owner_label"]).lower())
+        topics = sorted({getattr(info, "topic", "") for info in matching_subs})
+
+        owner_metrics = {
+            key: self._label_box_metrics(owner["owner_label"], max_line_len=16, max_lines=4)
+            for key, owner in owner_items
+        }
+        topic_metrics = {
+            topic: self._label_box_metrics(str(topic), max_line_len=16, max_lines=4)
+            for topic in topics
+        }
+
+        max_owner_box_w = max((m[3] for m in owner_metrics.values()), default=0.8)
+        max_topic_box_w = max((m[3] for m in topic_metrics.values()), default=0.8)
+
+        max_owner_box_h = max((m[4] for m in owner_metrics.values()), default=0.3)
+        max_topic_box_h = max((m[4] for m in topic_metrics.values()), default=0.3)
+
+        # Use actual estimated box heights rather than a coarse line-count multiplier.
+        slot_gap = 0.16
+        slot_step = max(max_owner_box_h, max_topic_box_h) + slot_gap
+
+        def spread_positions(items):
+            if not items:
+                return {}
+            if len(items) == 1:
+                return {items[0]: 0.0}
+
+            half_span = ((len(items) - 1) * slot_step) / 2.0
+            return {item: half_span - i * slot_step for i, item in enumerate(items)}
+
+        owner_positions = spread_positions([key for key, _owner in owner_items])
+        topic_positions = spread_positions(topics)
+
+        topic_counts = {}
+        for info in matching_subs:
+            topic = getattr(info, "topic", "")
+            topic_counts[topic] = topic_counts.get(topic, 0) + 1
+
+        # Compact horizontal layout.
+        left_margin = 0.18
+        label_to_node_gap = 0.16
+        node_to_node_gap = 0.70
+        right_margin = 0.18
+
+        owner_label_x = left_margin + max_owner_box_w / 2.0
+        owner_node_x = owner_label_x + max_owner_box_w / 2.0 + label_to_node_gap
+        topic_node_x = owner_node_x + node_to_node_gap
+        topic_label_x = topic_node_x + label_to_node_gap + max_topic_box_w / 2.0
+        total_width = topic_label_x + max_topic_box_w / 2.0 + right_margin
+
+        owner_label_rows = []
+        owner_node_rows = []
+        orphan_node_rows = []
+
+        for key, owner in owner_items:
+            wrapped, line_count, max_chars, box_w, box_h, font_size = owner_metrics[key]
+            y = owner_positions[key]
+
+            owner_label_rows.append(
+                {
+                    "x": owner_label_x,
+                    "y": y,
+                    "label": wrapped,
+                    "font_size": font_size,
+                    "full_label": owner["owner_label"],
+                }
+            )
+
+            node_row = {
+                "x": owner_node_x,
+                "y": y,
+                "full_label": owner["owner_label"],
+                "owner_id": owner["owner_id"],
+                "owner_kind": owner["owner_kind"],
+                "subscription_count": len(owner["subscriptions"]),
+                "dataset_topic_count": len(
+                    [t for t in owner["topics"] if str(t).startswith("dataset.")]
+                ),
+            }
+
+            if key in owner_keys_with_edges:
+                owner_node_rows.append(node_row)
+            else:
+                orphan_node_rows.append(node_row)
+
+        topic_label_rows = []
+        topic_node_rows = []
+
+        for topic in topics:
+            wrapped, line_count, max_chars, box_w, box_h, font_size = topic_metrics[topic]
+            y = topic_positions[topic]
+
+            topic_label_rows.append(
+                {
+                    "x": topic_label_x,
+                    "y": y,
+                    "label": wrapped,
+                    "font_size": font_size,
+                    "topic": topic,
+                }
+            )
+
+            topic_node_rows.append(
+                {
+                    "x": topic_node_x,
+                    "y": y,
+                    "topic": topic,
+                    "subscriber_count": topic_counts.get(topic, 0),
+                }
+            )
+
+        edge_rows = []
+        for info in matching_subs:
+            key = self._owner_key(info)
+            topic = getattr(info, "topic", "")
+
+            if key not in owner_positions or topic not in topic_positions:
+                continue
+
+            edge_rows.append(
+                {
+                    "x0": owner_node_x,
+                    "y0": owner_positions[key],
+                    "x1": topic_node_x,
+                    "y1": topic_positions[topic],
+                    "owner_label": self._owner_label(info),
+                    "owner_id": getattr(info, "owner_id", None),
+                    "owner_kind": getattr(info, "owner_kind", None),
+                    "topic": topic,
+                    "callback_name": getattr(info, "callback_name", None),
+                    "module": getattr(info, "module", None),
+                }
+            )
+
+        all_y = list(owner_positions.values()) + list(topic_positions.values())
+        if not all_y:
+            all_y = [0.0]
+
+        y_pad = max(max_owner_box_h, max_topic_box_h) * 0.9
+        y_min = min(all_y) - y_pad
+        y_max = max(all_y) + y_pad
+        y_span = max(1.0, y_max - y_min)
+
+        # Let the graph height scale with actual content instead of pinning it to the table height.
+        height = int(max(240, min(900, 90 + y_span * 85)))
+
+        p = bokeh_figure(
+            title=f"Subscription Graph ({prefix if prefix not in ('', None) else '*'})",
+            height=height,
+            x_range=(0.0, total_width),
+            y_range=(y_min, y_max),
+            tools="pan,wheel_zoom,box_zoom,reset,save",
+            toolbar_location="right",
+            sizing_mode="stretch_width",
+            min_border_left=6,
+            min_border_right=6,
+            min_border_top=6,
+            min_border_bottom=6,
+        )
+
+        p.grid.visible = False
+        p.axis.visible = False
+        p.outline_line_color = None
+        p.toolbar.logo = None
+
+        if edge_rows:
+            edge_src = ColumnDataSource(
+                self._rows_to_cds_data(
+                    edge_rows,
+                    columns=[
+                        "x0",
+                        "y0",
+                        "x1",
+                        "y1",
+                        "owner_label",
+                        "owner_id",
+                        "owner_kind",
+                        "topic",
+                        "callback_name",
+                        "module",
+                    ],
+                )
+            )
+            edge_renderer = p.segment(
+                x0="x0",
+                y0="y0",
+                x1="x1",
+                y1="y1",
+                source=edge_src,
+                line_width=1.7,
+                line_alpha=0.35,
+            )
+            p.add_tools(
+                HoverTool(
+                    renderers=[edge_renderer],
+                    tooltips=[
+                        ("owner", "@owner_label"),
+                        ("kind", "@owner_kind"),
+                        ("topic", "@topic"),
+                        ("callback", "@callback_name"),
+                        ("module", "@module"),
+                    ],
+                )
+            )
+
+        if owner_label_rows:
+            owner_label_src = ColumnDataSource(
+                self._rows_to_cds_data(
+                    owner_label_rows,
+                    columns=["x", "y", "label", "font_size", "full_label"],
+                )
+            )
+            p.add_layout(
+                LabelSet(
+                    x="x",
+                    y="y",
+                    text="label",
+                    source=owner_label_src,
+                    text_align="center",
+                    text_baseline="middle",
+                    text_font_size={"field": "font_size"},
+                    text_font_style="bold",
+                    text_color="white",
+                    background_fill_color="#1e88e5",
+                    background_fill_alpha=0.98,
+                    border_line_color="#1565c0",
+                )
+            )
+
+        if topic_label_rows:
+            topic_label_src = ColumnDataSource(
+                self._rows_to_cds_data(
+                    topic_label_rows,
+                    columns=["x", "y", "label", "font_size", "topic"],
+                )
+            )
+            p.add_layout(
+                LabelSet(
+                    x="x",
+                    y="y",
+                    text="label",
+                    source=topic_label_src,
+                    text_align="center",
+                    text_baseline="middle",
+                    text_font_size={"field": "font_size"},
+                    text_font_style="bold",
+                    text_color="white",
+                    background_fill_color="#43a047",
+                    background_fill_alpha=0.98,
+                    border_line_color="#2e7d32",
+                )
+            )
+
+        if owner_node_rows:
+            owner_src = ColumnDataSource(
+                self._rows_to_cds_data(
+                    owner_node_rows,
+                    columns=[
+                        "x",
+                        "y",
+                        "full_label",
+                        "owner_id",
+                        "owner_kind",
+                        "subscription_count",
+                        "dataset_topic_count",
+                    ],
+                )
+            )
+            owner_renderer = p.scatter(
+                x="x",
+                y="y",
+                size=9,
+                marker="circle",
+                source=owner_src,
+                alpha=0.95,
+            )
+            p.add_tools(
+                HoverTool(
+                    renderers=[owner_renderer],
+                    tooltips=[
+                        ("owner", "@full_label"),
+                        ("kind", "@owner_kind"),
+                        ("owner_id", "@owner_id"),
+                        ("subscriptions", "@subscription_count"),
+                        ("dataset topics", "@dataset_topic_count"),
+                    ],
+                )
+            )
+
+        if orphan_node_rows:
+            orphan_src = ColumnDataSource(
+                self._rows_to_cds_data(
+                    orphan_node_rows,
+                    columns=[
+                        "x",
+                        "y",
+                        "full_label",
+                        "owner_id",
+                        "owner_kind",
+                        "subscription_count",
+                        "dataset_topic_count",
+                    ],
+                )
+            )
+            orphan_renderer = p.scatter(
+                x="x",
+                y="y",
+                size=8,
+                marker="circle",
+                source=orphan_src,
+                alpha=0.22,
+            )
+            p.add_tools(
+                HoverTool(
+                    renderers=[orphan_renderer],
+                    tooltips=[
+                        ("owner", "@full_label"),
+                        ("kind", "@owner_kind"),
+                        ("owner_id", "@owner_id"),
+                        ("subscriptions", "@subscription_count"),
+                        ("dataset topics", "@dataset_topic_count"),
+                    ],
+                )
+            )
+
+        if topic_node_rows:
+            topic_src = ColumnDataSource(
+                self._rows_to_cds_data(
+                    topic_node_rows,
+                    columns=["x", "y", "topic", "subscriber_count"],
+                )
+            )
+            topic_renderer = p.scatter(
+                x="x",
+                y="y",
+                size=9,
+                marker="square",
+                source=topic_src,
+                alpha=0.95,
+            )
+            p.add_tools(
+                HoverTool(
+                    renderers=[topic_renderer],
+                    tooltips=[
+                        ("topic", "@topic"),
+                        ("subscribers", "@subscriber_count"),
+                    ],
+                )
+            )
+
+        if not edge_rows and not owner_node_rows and not orphan_node_rows and not topic_node_rows:
+            p.text(
+                x=[total_width / 2.0],
+                y=[0.0],
+                text=["No subscriptions found for the current filter."],
+                text_align="center",
+                text_baseline="middle",
+            )
+
+        return p
+
+    # -----------------------
+    # Public refresh
+    # -----------------------
 
     def refresh(self):
         if not (self.context and getattr(self.context, "events", None)):
@@ -3982,99 +4909,233 @@ class EventMonitorClass(CustomPlotClass):
         except Exception:
             pass
 
-        n = int(self.limit_input.value or 200)
+        prefix = self.topic_filter.value or "*"
+        n = int(self.limit_input.value or 250)
 
         try:
-            events = self.context.events.recent_events(n)
-        except Exception:
-            self.status.object = "### Event tracing not implemented on EventBus. Add recent_events()/enable_trace()."
-            return
+            sub_infos = self._get_subscription_infos()
+            owners = self._build_owner_groups(sub_infos)
 
-        # Build rows in a stable way
-        rows = []
-        for (t, topic, payload) in events:
-            payload_str = (str(payload)[:240] if payload is not None else "")
-            rows.append({
-                "t": t,
-                "time": time.strftime("%H:%M:%S", time.localtime(t)),
-                "topic": topic,
-                "payload": payload_str,
-            })
+            matching_subs = [
+                info
+                for info in sub_infos
+                if self._topic_matches_filter(getattr(info, "topic", ""), prefix)
+            ]
 
-        # Find only the new rows since last refresh
-        new_rows = []
-        if rows:
-            if self._last_key is None:
-                # first fill: set once (this will scroll to top once, at startup)
-                self._events_df = pd.DataFrame([{k: r[k] for k in ["time","topic","payload"]} for r in rows])
-                self.events_table.value = self._events_df
-                last = rows[-1]
-                self._last_key = (last["t"], last["topic"], last["payload"])
-            else:
-                # scan from the end to find last_key
-                last_t, last_topic, last_payload = self._last_key
-                idx = -1
-                for i in range(len(rows) - 1, -1, -1):
-                    r = rows[i]
-                    if (r["t"], r["topic"], r["payload"]) == (last_t, last_topic, last_payload):
-                        idx = i
-                        break
+            self.graph_pane.object = self._build_graph_figure(owners, matching_subs, prefix)
 
-                if idx == -1:
-                    # buffer mismatch (rollover changed / tracing restarted) -> reset table once
-                    self._events_df = pd.DataFrame([{k: r[k] for k in ["time","topic","payload"]} for r in rows])
-                    self.events_table.value = self._events_df
+            coverage_df = self._build_diagnostics_df(owners)
+            subs_df = self._build_subscription_df(matching_subs)
+            events_df = self._build_events_df(prefix, n)
+
+            self._set_tabulator_df_if_changed(self.coverage_table, coverage_df)
+            self._set_tabulator_df_if_changed(self.subs_table, subs_df)
+            self._set_tabulator_df_if_changed(self.events_table, events_df)
+
+            total_owners = len(owners)
+            total_matching_subs = len(matching_subs)
+            visible_topics = len({getattr(info, "topic", "") for info in matching_subs})
+
+            missing_dataset = 0
+            partial_dataset = 0
+            for owner in owners.values():
+                topics = set(owner["topics"])
+                wildcard = "*" in topics
+                dataset_any = wildcard or any(str(t).startswith("dataset.") for t in topics)
+                if wildcard or all(t in topics for t in self.DATASET_TOPICS):
+                    continue
+                if dataset_any:
+                    partial_dataset += 1
                 else:
-                    # append only truly new rows
-                    new_rows = rows[idx + 1 :]
+                    missing_dataset += 1
 
-                    if new_rows:
-                        append_df = pd.DataFrame([{k: r[k] for k in ["time","topic","payload"]} for r in new_rows])
+            workspace_count = ""
+            try:
+                if self.context and getattr(self.context, "workspace", None):
+                    workspace_count = f" • workspace panels: {len(self.context.workspace.list_panels())}"
+            except Exception:
+                workspace_count = ""
 
-                        # keep our buffer and enforce max size n
-                        self._events_df = pd.concat([self._events_df, append_df], ignore_index=True)
-                        if len(self._events_df) > n:
-                            self._events_df = self._events_df.iloc[-n:].reset_index(drop=True)
+            self.status.object = (
+                f"### Owners: {total_owners} • matching subscriptions: {total_matching_subs} "
+                f"• visible topics: {visible_topics} • missing dataset.* owners: {missing_dataset} "
+                f"• partial dataset.* owners: {partial_dataset}{workspace_count}"
+            )
 
-                        # stream to Tabulator without resetting scroll
-                        # rollover keeps Tabulator in sync too
-                        self.events_table.stream(append_df, rollover=n, follow=bool(self.follow_toggle.value))
+        except Exception as exc:
+            traceback.print_exc()
+            self.status.object = f"### Subscription Graph render error: `{exc}`"
+            try:
+                self.graph_pane.object = None
+            except Exception:
+                pass
 
-                        last = new_rows[-1]
-                        self._last_key = (last["t"], last["topic"], last["payload"])
-
-        try:
-            subs = self.context.events.subscribers()
-            df2 = pd.DataFrame([{"topic": k, "subscribers": v} for k, v in sorted(subs.items())])
-            self.subs_table.value = df2
-        except Exception:
-            pass
-
-        self.status.object = f"### Showing last {len(self._events_df)} events • {time.strftime('%H:%M:%S')}"
 
     def get_layout(self):
-        return pn.Column(
-            pn.Row(self.refresh_btn, self.trace_toggle, self.follow_toggle, self.limit_input),
+
+        outer_height = 780
+        top_row_height = 42
+        controls_block_height = 88
+        status_height = 56
+        tabs_header_height = 36
+        tabs_height = self._tab_content_height + tabs_header_height
+
+        # Top controls row
+        row_1 = pn.Row(
+            self.refresh_btn,
+            pn.Spacer(width=10),
+            self.auto_refresh_toggle,
+            pn.Spacer(width=18),
+            self.trace_toggle,
+            sizing_mode="stretch_width",
+            height=top_row_height,
+            min_height=top_row_height,
+            max_height=top_row_height,
+            margin=(0, 0, 8, 0),
+            align="center",
+        )
+
+        # Group 1: topic filter + wildcard checkbox
+        filter_group = pn.Column(
+            self.topic_filter,
+            pn.Spacer(height=15),
+            self.show_wildcards_toggle,
+            width=165,
+            min_width=165,
+            max_width=165,
+            height=controls_block_height,
+            min_height=controls_block_height,
+            max_height=controls_block_height,
+            margin=(0, 12, 0, 0),
+        )
+
+        # Group 2: rows select + show orphans checkbox
+        rows_group = pn.Column(
+            self.limit_input,
+            pn.Spacer(height=15),
+            self.show_orphans_toggle,
+            width=170,
+            min_width=170,
+            max_width=170,
+            height=controls_block_height,
+            min_height=controls_block_height,
+            max_height=controls_block_height,
+            margin=(0, 12, 0, 0),
+        )
+
+        # Group 3: follow checkbox aligned with the checkbox row, not the select label row
+        follow_group = pn.Column(
+            pn.Spacer(height=31),
+            self.follow_toggle,
+            width=140,
+            min_width=140,
+            max_width=140,
+            height=controls_block_height,
+            min_height=controls_block_height,
+            max_height=controls_block_height,
+            margin=(0, 0, 0, 0),
+        )
+
+        row_2 = pn.Row(
+            filter_group,
+            rows_group,
+            follow_group,
+            pn.Spacer(sizing_mode="stretch_width"),
+            sizing_mode="stretch_width",
+            height=controls_block_height,
+            min_height=controls_block_height,
+            max_height=controls_block_height,
+            margin=(0, 0, 10, 0),
+            align="start",
+        )
+
+        status_row = pn.Column(
             self.status,
-            pn.pane.Markdown("#### Recent published events"),
-            self.events_table,
-            pn.pane.Markdown("#### Current subscriptions"),
+            sizing_mode="stretch_width",
+            height=status_height,
+            min_height=status_height,
+            max_height=status_height,
+            margin=(0, 0, 6, 0),
+        )
+
+        graph_tab = pn.Column(
+            self.graph_pane,
+            sizing_mode="stretch_width",
+            height=self._tab_content_height,
+            min_height=self._tab_content_height,
+            max_height=self._tab_content_height,
+            scroll=False,
+            margin=(0, 0, 0, 0),
+        )
+
+        coverage_tab = pn.Column(
+            self.coverage_table,
+            sizing_mode="stretch_width",
+            height=self._tab_content_height,
+            min_height=self._tab_content_height,
+            max_height=self._tab_content_height,
+            scroll=False,
+            margin=(0, 0, 0, 0),
+        )
+
+        subscriptions_tab = pn.Column(
             self.subs_table,
-            sizing_mode="stretch_both",
+            sizing_mode="stretch_width",
+            height=self._tab_content_height,
+            min_height=self._tab_content_height,
+            max_height=self._tab_content_height,
+            scroll=False,
+            margin=(0, 0, 0, 0),
+        )
+
+        events_tab = pn.Column(
+            self.events_table,
+            sizing_mode="stretch_width",
+            height=self._tab_content_height,
+            min_height=self._tab_content_height,
+            max_height=self._tab_content_height,
+            scroll=False,
+            margin=(0, 0, 0, 0),
+        )
+
+        tabs = pn.Tabs(
+            ("Graph", graph_tab),
+            ("Coverage", coverage_tab),
+            ("Subscriptions", subscriptions_tab),
+            ("Events", events_tab),
+            dynamic=True,
+            sizing_mode="stretch_width",
+            height=tabs_height,
+            min_height=tabs_height,
+            max_height=tabs_height,
+            margin=(0, 0, 0, 0),
+        )
+
+        return pn.Column(
+            row_1,
+            row_2,
+            status_row,
+            tabs,
+            sizing_mode="stretch_width",
+            height=outer_height,
+            min_height=outer_height,
+            max_height=outer_height,
             scroll=True,
+            margin=(0, 0, 0, 0),
         )
 
     def dispose(self) -> None:
-        # stop periodic callback
         try:
-            if self._cb:
+            if getattr(self, "_cb", None):
                 self._cb.stop()
         except Exception:
             pass
 
-        # call base disposal (jobs/events/bokeh watchers)
         super().dispose()
 
+
+
+######
 
 # Constants and Configuration
 EMISSION_LINES = {
