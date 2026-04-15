@@ -390,6 +390,23 @@ class ExplorationDashboard(param.Parameterized):
 
         _sub("dataset.mapping_updated", _mapping_updated)
 
+    def _publish_label_settings(self):
+        if not getattr(self, "context", None) or not getattr(self.context, "events", None):
+            return
+
+        payload = {
+            "dataset_id": self._dataset_id(),
+            "label_col": self.config.settings.get("label_col", "No Labels"),
+            "labels": list(getattr(self, "labels", [])),
+            "labels_to_strings": dict(self.config.settings.get("labels_to_strings", {})),
+            "strings_to_labels": dict(self.config.settings.get("strings_to_labels", {})),
+            "label_colours": dict(self.config.settings.get("label_colours", {})),
+            "source": "ExplorationDashboard",
+            "panel_id": self.panel_id,
+        }
+
+        self.context.events.publish("labels.settings.updated", payload)
+
     def _try_build_dashboard(self) -> None:
         missing_required = self._request_missing_mappings()
 
@@ -895,9 +912,15 @@ class ExplorationDashboard(param.Parameterized):
     def _confirm_labels_change_cb(self, event):
         self.config.settings["label_col"] = self.label_selector.value
         self.config.settings["labels"] = self.labels
-        self.config.settings["labels_to_strings"], self.config.settings["strings_to_labels"] = self.get_label_strings()
+        (
+            self.config.settings["labels_to_strings"],
+            self.config.settings["strings_to_labels"],
+        ) = self.get_label_strings()
         self.config.settings["label_colours"] = self.get_label_colours()
+
         self.confirm_label_button.visible = bool(self.labels)
+
+        self._publish_label_settings()
         self._rerender_main_layout()
 
     def _label_editor_height(self):
@@ -943,6 +966,7 @@ class ExplorationDashboard(param.Parameterized):
         self._build_label_editor_rows()
         self.confirm_label_button.visible = keep_button_visible
 
+
     def _build_label_editor_rows(self):
         self.label_to_strings_param = {}
         self.colours_param = {}
@@ -952,10 +976,10 @@ class ExplorationDashboard(param.Parameterized):
             "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf",
         ]
 
-        raw_w = 70
-        colour_w = 40
+        raw_w = 64
+        colour_w = 88
 
-        def header_cell(text):
+        def header_cell(text, align="left"):
             return pn.pane.HTML(
                 f"""
                 <div style="
@@ -965,22 +989,44 @@ class ExplorationDashboard(param.Parameterized):
                     white-space:nowrap;
                     overflow:hidden;
                     text-overflow:ellipsis;
+                    text-align:{align};
+                    line-height:12px;
+                    padding:0;
+                    margin:0;
                 ">
                     {text}
                 </div>
                 """,
                 margin=(0, 0, 0, 0),
                 sizing_mode="stretch_width",
+                height=12,
             )
 
         rows = [
             pn.Row(
-                pn.Column(header_cell("Raw label"), width=raw_w, min_width=raw_w, max_width=raw_w, margin=(0, 0, 0, 0)),
-                pn.Column(header_cell("Display name"), sizing_mode="stretch_width", min_width=0, margin=(0, 0, 0, 0)),
-                pn.Column(header_cell("Colour"), width=colour_w, min_width=colour_w, max_width=colour_w, margin=(0, 0, 0, 0)),
+                pn.Column(
+                    header_cell("Raw label"),
+                    width=raw_w,
+                    min_width=raw_w,
+                    max_width=raw_w,
+                    margin=(0, 0, 0, 0),
+                ),
+                pn.Column(
+                    header_cell("Display name"),
+                    sizing_mode="stretch_width",
+                    min_width=0,
+                    margin=(0, 0, 0, 0),
+                ),
+                pn.Column(
+                    header_cell("Colour", align="center"),
+                    width=colour_w,
+                    min_width=colour_w,
+                    max_width=colour_w,
+                    margin=(0, 0, 0, 0),
+                ),
                 sizing_mode="stretch_width",
                 min_width=0,
-                margin=(0, 0, 3, 0),
+                margin=(0, 0, 6, 0),
             )
         ]
 
@@ -991,15 +1037,17 @@ class ExplorationDashboard(param.Parameterized):
                 placeholder="Display name",
                 sizing_mode="stretch_width",
                 min_width=0,
-                height=24,
+                height=26,
                 margin=(0, 0, 0, 0),
             )
 
             picker = pn.widgets.ColorPicker(
                 name="",
                 value=colour_list[i % len(colour_list)],
-                width=30,
-                height=24,
+                width=58,
+                min_width=58,
+                max_width=58,
+                height=26,
                 margin=(0, 0, 0, 0),
             )
 
@@ -1010,8 +1058,8 @@ class ExplorationDashboard(param.Parameterized):
                 f"""
                 <div style="
                     display:inline-block;
-                    max-width:54px;
-                    padding:1px 7px;
+                    max-width:52px;
+                    padding:4px 8px;
                     border:1px solid #d8d8d8;
                     border-radius:999px;
                     background:#f7f7f7;
@@ -1028,22 +1076,51 @@ class ExplorationDashboard(param.Parameterized):
                 </div>
                 """,
                 width=raw_w,
+                height=24,
                 margin=(0, 0, 0, 0),
             )
 
+            colour_cell = pn.Row(
+                pn.Spacer(sizing_mode="stretch_width"),
+                picker,
+                pn.Spacer(sizing_mode="stretch_width"),
+                width=colour_w,
+                min_width=colour_w,
+                max_width=colour_w,
+                margin=(0, 0, 0, 0),
+                align="center",
+            )
+
             row = pn.Row(
-                pn.Column(raw_chip, width=raw_w, min_width=raw_w, max_width=raw_w, margin=(0, 0, 0, 0)),
-                pn.Column(text_input, sizing_mode="stretch_width", min_width=0, margin=(0, 0, 0, 0)),
-                pn.Column(picker, width=colour_w, min_width=colour_w, max_width=colour_w, margin=(0, 0, 0, 0)),
+                pn.Column(
+                    raw_chip,
+                    width=raw_w,
+                    min_width=raw_w,
+                    max_width=raw_w,
+                    margin=(0, 0, 0, 0),
+                ),
+                pn.Column(
+                    text_input,
+                    sizing_mode="stretch_width",
+                    min_width=0,
+                    margin=(0, 0, 0, 0),
+                ),
+                pn.Column(
+                    colour_cell,
+                    width=colour_w,
+                    min_width=colour_w,
+                    max_width=colour_w,
+                    margin=(0, 0, 0, 0),
+                ),
                 sizing_mode="stretch_width",
                 min_width=0,
-                margin=(0, 0, 3, 0),
+                margin=(0, 0, 4, 0),
                 styles={
                     "width": "100%",
                     "max-width": "100%",
                     "border": "1px solid #e8e8e8",
                     "border-radius": "7px",
-                    "padding": "2px 5px",
+                    "padding": "6px 6px",
                     "background": "#ffffff",
                     "box-sizing": "border-box",
                     "align-items": "center",
