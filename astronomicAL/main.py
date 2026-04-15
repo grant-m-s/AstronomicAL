@@ -70,6 +70,7 @@ from astronomicAL.platform.jobs import JobManager
 from astronomicAL.platform.artifacts import ArtifactStore
 from astronomicAL.platform.datasets import DatasetManager
 from astronomicAL.platform.workspace import WorkspaceManager
+from astronomicAL.platform.selection import SelectionManager
 from astronomicAL.platform.services import ServiceRegistry
 
 import holoviews as hv
@@ -89,6 +90,7 @@ jobs = JobManager(max_workers=16)
 artifacts = ArtifactStore(cache_dir="data/cache_artifacts")
 datasets = DatasetManager()
 workspace = WorkspaceManager(react_template=react, grid=grid)
+selection = SelectionManager(events=events, artifacts=artifacts)
 services = ServiceRegistry()
 
 context = AppContext(
@@ -97,6 +99,7 @@ context = AppContext(
     artifacts=artifacts,
     datasets=datasets,
     workspace=workspace,
+    selection=selection,
     services=services,
     config=config,
 )
@@ -112,8 +115,10 @@ if missing:
 
 # Now finalize layout using context (header + dashboards + restore layouts)
 if os.path.isfile(config.layout_file):
+    print("Has layout File")
     load_config.create_layout_from_file(react, context)
 else:
+    print("Create Default")
     load_config.create_default_layout(react, context)
 
 workspace.register_existing()
