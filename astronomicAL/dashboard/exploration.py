@@ -6,26 +6,34 @@ import pandas as pd
 import numpy as np
 
 from typing import Any, Dict, List
-from functools import partial
 
 from astronomicAL.extensions import feature_generation
-from astronomicAL.utils.optimise import matches_type, get_series_type
+from astronomicAL.utils.optimise import get_series_type
 
 
 class ExplorationDashboard(param.Parameterized):
 
     index = param.Integer(default=0, bounds=(0, 0))
 
-    def __init__(self, src, df, context=None, **params):
+    def __init__(self, df, context=None, **params):
         super().__init__(**params)
 
-        self.src = src
         self.context = context
 
-        if (context is not None and getattr(context, "config", None) is not None):
+        if context is not None and getattr(context, "config", None) is not None:
             self.config = context.config
 
-        self.df = self.config.main_df
+        if isinstance(df, pd.DataFrame):
+            self.df = df.copy()
+        else:
+            try:
+                self.df = self.config.main_df.copy()
+            except Exception:
+                self.df = pd.DataFrame()
+
+        if getattr(self, "config", None) is not None:
+            self.config.main_df = self.df
+
         self.panel_id = str(uuid.uuid4())
 
         self._running_panels = set()
@@ -34,6 +42,7 @@ class ExplorationDashboard(param.Parameterized):
         self._built = False
         self.main_layout = None
         self.labels_expanded = False
+        self._preserve_sourceid_input_once = False
 
         self.visited_indices = [self.index]
         self.current_position = 0
@@ -43,6 +52,7 @@ class ExplorationDashboard(param.Parameterized):
         self._ensure_dataset_registered()
         self._subscribe_to_mapping_events()
         self._subscribe_to_dataset_events()
+        self._subscribe_to_selection_events()
         self._try_build_dashboard()
 
     def _dataset_id(self) -> str:
@@ -141,7 +151,9 @@ class ExplorationDashboard(param.Parameterized):
 
         max_index = max(0, len(self.df) - 1)
         self.param.index.bounds = (0, max_index)
-        self.index = min(self.index, max_index)
+        self.index = min(max(self.index, 0), max_index)
+
+        self._sync_index_from_current_focus()
 
         if hasattr(self, "index_input"):
             self.index_input.start = 0
@@ -175,15 +187,19 @@ class ExplorationDashboard(param.Parameterized):
             self._build_dashboard_ui()
             self._root[:] = [self.main_layout]
             self._built = True
-            return
 
-        self._update_selected_src()
+            if not self._sync_index_from_current_focus():
+                self._publish_focus_for_current_index()
+            return
 
         if hasattr(self, "extra_info_html"):
             self._refresh_extra_info_view()
 
         self._update_navigation_flags()
         self._rerender_main_layout()
+
+        if not self._sync_index_from_current_focus():
+            self._publish_focus_for_current_index()
 
     def _exploration_mapping_specs(self) -> List[Dict[str, Any]]:
         columns = list(self.df.columns)
@@ -553,17 +569,19 @@ class ExplorationDashboard(param.Parameterized):
             self.index_input.value = event.new
 
     def _build_dashboard_ui(self) -> None:
-        self.param.index.bounds = (0, len(self.df) - 1)
+        max_index = max(0, len(self.df) - 1)
+        self.param.index.bounds = (0, max_index)
+        self.index = min(max(self.index, 0), max_index)
 
         self._preprocess_data()
         self._create_extra_info_cols_list()
-        self._update_selected_src()
+        self._sync_index_from_current_focus()
 
         self.index_input = pn.widgets.IntInput(
             name="",
             value=self.index,
             start=0,
-            end=len(self.df) - 1,
+            end=max_index,
             width=88,
             height=28,
             sizing_mode="fixed",
@@ -619,9 +637,10 @@ class ExplorationDashboard(param.Parameterized):
         self._initialise_add_remove_columns_widgets()
         self._initialise_label_selector()
         self._update_navigation_flags()
-        self._subscribe_to_shared()
 
         self.main_layout = self._build_main_layout()
+
+        self._publish_focus_for_current_index()
 
     @param.depends('index', watch=True)
     def _update_history(self):
@@ -632,7 +651,11 @@ class ExplorationDashboard(param.Parameterized):
 
         self.current_position = len(self.visited_indices) - 1
         self._update_navigation_flags()
-        self.sourceid_input.value = ""
+
+        if getattr(self, "_preserve_sourceid_input_once", False):
+            self._preserve_sourceid_input_once = False
+        else:
+            self.sourceid_input.value = ""
 
     def _go_previous(self, event):
         if self.current_position > 0:
@@ -669,32 +692,131 @@ class ExplorationDashboard(param.Parameterized):
         else:
             return self.df[id_col]
 
-    def _get_selected_id(self):
-        id_col = self.config.settings["id_col"]
-        if len(self.src.data[id_col]) > 0:
-            return str(self.src.data[id_col][0])
-        
-        
-    
+    def _get_current_row_df(self):
+        if self.df is None or len(self.df) == 0:
+            return pd.DataFrame(columns=getattr(self.df, "columns", []))
 
-    
+        if self.index < 0 or self.index >= len(self.df):
+            return pd.DataFrame(columns=self.df.columns)
+
+        return self.df.iloc[[self.index]].copy()
+
+    def _get_selected_id(self):
+        selected = self._get_current_row_df()
+        if selected.empty:
+            return None
+
+        id_col = self.config.settings["id_col"]
+
+        if id_col == "Use Index":
+            return str(selected.index[0])
+
+        if id_col in selected.columns:
+            return str(selected[id_col].iloc[0])
+
+        return None
+
+    def _find_index_for_row_id(self, row_id):
+        if row_id is None or self.df is None or len(self.df) == 0:
+            return None
+
+        try:
+            id_series = self._get_id().astype(str)
+            matches = id_series == str(row_id)
+            positions = np.flatnonzero(matches.to_numpy())
+            if len(positions) > 0:
+                return int(positions[0])
+        except Exception:
+            pass
+
+        return None
+
+    def _get_focus_state(self):
+        if getattr(self, "context", None) is not None and getattr(self.context, "selection", None) is not None:
+            try:
+                return self.context.selection.get_focus()
+            except Exception:
+                pass
+        return None
+
+    def _sync_index_from_current_focus(self):
+        focus = self._get_focus_state()
+        if focus is None:
+            return False
+
+        if getattr(focus, "dataset_id", None) != self._dataset_id():
+            return False
+
+        row_id = getattr(focus, "row_id", None)
+        if row_id is None:
+            return False
+
+        new_index = self._find_index_for_row_id(row_id)
+        if new_index is None:
+            return False
+
+        if new_index != self.index:
+            self.index = new_index
+
+        return True
+
+    def _publish_focus_for_current_index(self):
+        if getattr(self, "context", None) is None or getattr(self.context, "selection", None) is None:
+            return
+
+        row_id = self._get_selected_id()
+        if row_id is None:
+            return
+
+        dataset_id = self._dataset_id()
+        focus = self._get_focus_state()
+
+        if focus is not None:
+            current_dataset_id = getattr(focus, "dataset_id", None)
+            current_row_id = getattr(focus, "row_id", None)
+
+            if current_dataset_id == dataset_id and str(current_row_id) == str(row_id):
+                return
+
+        self.context.selection.set_focus(
+            dataset_id=dataset_id,
+            row_id=str(row_id),
+            origin="exploration.index",
+            panel_id=self.panel_id,
+        )
+
+    def _focus_row_from_selection(self, row_id):
+        new_index = self._find_index_for_row_id(row_id)
+        if new_index is None:
+            return
+
+        if hasattr(self, "sourceid_input") and self.sourceid_input.value != str(row_id):
+            self.sourceid_input.value = str(row_id)
+
+        if new_index != self.index:
+            self._preserve_sourceid_input_once = True
+            self.index = new_index
+        else:
+            if hasattr(self, "extra_info_html"):
+                self._refresh_extra_info_view()
+            
     def _find_from_id(self, sourceid):
         sourceid = sourceid.strip()
-        try:
-            matches = self._get_id().str.contains(sourceid, case=True)
-        except AttributeError:
-            matches = self._get_id().astype(str).str.contains(sourceid, case=True)
+        id_series = self._get_id().astype(str)
 
-        N_matches = matches.sum()
+        matches = id_series.str.contains(sourceid, case=True, na=False)
+        N_matches = int(matches.sum())
+
         if N_matches == 1:
-            self.index = self.df[matches].index[0]
+            self.index = int(np.flatnonzero(matches.to_numpy())[0])
         elif N_matches == 0:
             print("No matches found")
         else:
-            exact_matches = self._get_id().astype(str) == sourceid
-            N_exact = exact_matches.sum()
+            exact_matches = id_series == sourceid
+            N_exact = int(exact_matches.sum())
+
             if N_exact == 1:
-                self.index = self.df[exact_matches].index[0]
+                self.index = int(np.flatnonzero(exact_matches.to_numpy())[0])
             elif N_exact > 1:
                 print(f"There are {N_exact} sources which exactly match the provided sourceId")
             else:
@@ -709,26 +831,34 @@ class ExplorationDashboard(param.Parameterized):
         self.prev_button.disabled = any_running or self.current_position == 0
         self.next_button.disabled = any_running
 
-    def _subscribe_to_shared(self):
+    def _subscribe_to_selection_events(self) -> None:
         if not getattr(self, "context", None) or not getattr(self.context, "events", None):
             return
 
         bus = self.context.events
-        self._event_subs = getattr(self, "_event_subs", [])
 
         def _sub(topic, fn):
             sub = bus.subscribe(topic, fn)
             self._event_subs.append(sub)
 
-        def _selected_sourceid(_topic, payload):
+        def _focus_changed(_topic, payload):
             if not payload:
                 return
-            source_id = payload.get("sourceId", None)
-            if source_id is None:
-                return
-            self._selected_src_from_plot_cb(source_id)
 
-        _sub("selection.sourceid.changed", _selected_sourceid)
+            if payload.get("panel_id") == self.panel_id:
+                return
+
+            dataset_id = payload.get("dataset_id")
+            if dataset_id is not None and dataset_id != self._dataset_id():
+                return
+
+            row_id = payload.get("row_id")
+            if row_id is None:
+                return
+
+            self._focus_row_from_selection(str(row_id))
+
+        _sub("selection.focus.changed", _focus_changed)
 
     def _update_navigation_flags(self):
         if not hasattr(self, "prev_button") or not hasattr(self, "next_button"):
@@ -738,22 +868,28 @@ class ExplorationDashboard(param.Parameterized):
         self.next_button.disabled = False
 
     def _get_extra_info_df(self):
-        id_col = self.config.settings["id_col"]
-        if len(self.src.data[id_col]) > 0:
-            source_id = str(self.src.data[id_col][0])
-            extra_data_list = [["SourceId", source_id]]
-            for col in self.config.settings["extra_info_cols"]:
-                try:
-                    value = self.src.data[f"{col}"][0]
-                    if isinstance(value, float) and value < 1e4:
-                        value = float(f"{value:.6g}")
-                    extra_data_list.append([col, value])
-                except KeyError:
-                    continue
-            return pd.DataFrame(extra_data_list, columns=["Column", "Value"])
-        else:
+        selected = self._get_current_row_df()
+
+        if selected.empty:
             cols = ["SourceId"] + self.config.settings["extra_info_cols"]
             return pd.DataFrame(cols, columns=["Column"])
+
+        row = selected.iloc[0]
+        source_id = self._get_selected_id()
+
+        extra_data_list = [["SourceId", source_id]]
+
+        for col in self.config.settings["extra_info_cols"]:
+            if col not in selected.columns:
+                continue
+
+            value = row[col]
+            if isinstance(value, (float, np.floating)) and np.isfinite(value) and value < 1e4:
+                value = float(f"{value:.6g}")
+
+            extra_data_list.append([col, value])
+
+        return pd.DataFrame(extra_data_list, columns=["Column", "Value"])
 
     def _save_extra_info_df(self):
         return self._get_extra_info_df()
@@ -825,19 +961,12 @@ class ExplorationDashboard(param.Parameterized):
             self.column_selector.visible = False
             self._rerender_main_layout()
 
-    def _selected_src_from_plot_cb(self, sourceid):
-        self.sourceid_input.value = str(sourceid)
-
     @param.depends("index", watch=True)
-    def _update_src_cb(self):
-        self._update_selected_src()
-        self._refresh_extra_info_view()
+    def _update_focus_cb(self):
+        self._publish_focus_for_current_index()
 
-    def _update_selected_src(self):
-        selected_dict = self.df.iloc[[self.index]].to_dict("list")
-        if self.config.settings["id_col"] not in selected_dict:
-            selected_dict[self.config.settings["id_col"]] = [self.index]
-        self.src.data = selected_dict
+        if hasattr(self, "extra_info_html"):
+            self._refresh_extra_info_view()
 
     def _generate_features(self, df):
         bands = self.config.settings["features_for_training"]

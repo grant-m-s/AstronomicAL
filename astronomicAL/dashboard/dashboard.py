@@ -227,7 +227,7 @@ class Dashboard(param.Parameterized):
             if not self._require_loaded_dataset():
                 return
             self.df = self.config.main_df
-            self.panel_contents = ExplorationDashboard(self.src, self.df, context=self.context)
+            self.panel_contents = ExplorationDashboard(self.df, context=self.context)
 
         elif self.contents == "Selected Source Info":
             if not self._require_loaded_dataset():
