@@ -205,17 +205,17 @@ class Dashboard(param.Parameterized):
         elif self.contents == "Histogram Plot":
             if not self._require_loaded_dataset():
                 return
-            self.panel_contents = HistoDashboard(self.src, self._close_button, context=self.context)
+            self.panel_contents = HistoDashboard(self._close_button, context=self.context)
 
         elif self.contents == "Basic Plot":
             if not self._require_loaded_dataset():
                 return
-            self.panel_contents = ScatterPlotDashboard(self.src, self._close_button, context=self.context)
+            self.panel_contents = ScatterPlotDashboard(self._close_button, context=self.context)
 
         elif self.contents == "Density Plot":
             if not self._require_loaded_dataset():
                 return
-            self.panel_contents = DensityPlotDashboard(self.src, self._close_button, context=self.context)
+            self.panel_contents = DensityPlotDashboard(self._close_button, context=self.context)
 
         elif self.contents == "Labelling":
             if not self._require_loaded_dataset():

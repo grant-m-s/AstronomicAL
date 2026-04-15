@@ -26,7 +26,7 @@ class BasePlotClass(param.Parameterized):
     
     selector_params = ("X_variable",)
 
-    def __init__(self, src, close_button, context=None):
+    def __init__(self, close_button, context=None):
         super().__init__()
 
         self.context = context
@@ -40,8 +40,8 @@ class BasePlotClass(param.Parameterized):
         self._event_subs = []
         self._periodic_cbs = []
         self._bokeh_on_change = []
+        self._param_watchers = []
 
-        self._src_runtime_subscription_initialised = False
         self._refresh_pending = False
         self._refresh_pending_payload = None
         self._refresh_reasons = set()
@@ -50,7 +50,7 @@ class BasePlotClass(param.Parameterized):
         self._initial_refresh_requested = False
 
         self.panel_id = str(uuid.uuid4())
-        self.src = src
+
         self.close_button = close_button
 
         self.figure = pn.pane.HoloViews(
@@ -88,6 +88,33 @@ class BasePlotClass(param.Parameterized):
                     pass
             # continue regardless
         self._bokeh_on_change = []
+
+    def watch_param(self, parameterized, param_name: str, callback):
+        """
+        Register and track param.watch callbacks for unified disposal.
+        """
+        if parameterized is None:
+            return None
+
+        try:
+            watcher = parameterized.param.watch(callback, param_name)
+            self._param_watchers.append((parameterized, watcher))
+            return watcher
+        except Exception:
+            return None
+
+
+    def unwatch_all_params(self):
+        """
+        Remove all tracked param watchers (idempotent).
+        """
+        for parameterized, watcher in list(getattr(self, "_param_watchers", [])):
+            try:
+                parameterized.param.unwatch(watcher)
+            except Exception:
+                pass
+
+        self._param_watchers = []
 
     def subscribe_event(self, topic: str, callback):
         """
@@ -131,6 +158,11 @@ class BasePlotClass(param.Parameterized):
         except Exception:
             pass
 
+        try:
+            self.unwatch_all_params()
+        except Exception:
+            pass
+
         # 3) Unsubscribe EventBus
         if self.context and getattr(self.context, "events", None):
             for sub in list(getattr(self, "_event_subs", [])):
@@ -168,6 +200,43 @@ class BasePlotClass(param.Parameterized):
             self.df = self.config.main_df.copy()
         except Exception:
             self.df = pd.DataFrame()
+
+    def set_focus_selection(self, row_id, *, origin=None, selection_set_id=None):
+        if not self.context or not getattr(self.context, "selection", None):
+            return
+
+        self.context.selection.set_focus(
+            dataset_id=self._get_active_dataset_id(),
+            row_id=str(row_id),
+            origin=origin or self.__class__.__name__,
+            panel_id=self.panel_id,
+            selection_set_id=selection_set_id,
+        )
+
+
+    def set_selection_set(
+        self,
+        row_ids,
+        *,
+        origin=None,
+        mode="replace",
+        metadata=None,
+        create_artifact=True,
+        update_focus_policy="preserve_or_first",
+    ):
+        if not self.context or not getattr(self.context, "selection", None):
+            return None
+
+        return self.context.selection.set_selection_set(
+            dataset_id=self._get_active_dataset_id(),
+            row_ids=[str(r) for r in row_ids],
+            origin=origin or self.__class__.__name__,
+            panel_id=self.panel_id,
+            mode=mode,
+            metadata=metadata or {},
+            create_artifact=create_artifact,
+            update_focus_policy=update_focus_policy,
+        )
 
     def _get_active_dataset_id(self):
         if self.context is not None and getattr(self.context, "datasets", None) is not None:
@@ -255,29 +324,6 @@ class BasePlotClass(param.Parameterized):
             return True
 
         return dataset_id == self._get_active_dataset_id()
-    
-    def _bind_src_runtime_subscription(self, model=None, attr="data", callback=None):
-        """
-        Standard source watcher for plots.
-
-        By default, src.data changes request a coalesced refresh rather than
-        launching work immediately.
-        """
-        if self._src_runtime_subscription_initialised:
-            return
-
-        model = model if model is not None else self.src
-        callback = callback if callback is not None else self._src_data_changed_cb
-
-        if model is None:
-            return
-
-        self._src_callback = callback
-        self.watch_bokeh(model, attr, callback)
-        self._src_runtime_subscription_initialised = True
-
-    def _src_data_changed_cb(self, attr, old, new):
-        self._request_refresh(reason=f"src.{attr or 'data'}", payload=None)
 
     def _request_refresh(self, reason="unknown", payload=None, verbose=False):
         """
@@ -335,14 +381,41 @@ class BasePlotClass(param.Parameterized):
             traceback.print_exc()
             self._finish_refresh(refresh_signature)
 
+    def _get_focus_state(self):
+        if self.context is not None and getattr(self.context, "selection", None) is not None:
+            try:
+                return self.context.selection.get_focus()
+            except Exception:
+                pass
+        return None
+
+    def _get_focus_signature(self):
+        focus = self._get_focus_state()
+        if focus is None:
+            return (None, None)
+
+        return (
+            getattr(focus, "dataset_id", None),
+            str(getattr(focus, "row_id", None)) if getattr(focus, "row_id", None) is not None else None,
+        )
+
     def _build_refresh_signature(self, reason=None, payload=None):
         """
         Default refresh signature for plot dashboards.
+        Includes focus state so selection changes coalesce correctly.
         """
+        selector_values = tuple(
+            getattr(self, name, None)
+            for name in getattr(self, "selector_params", ())
+        )
+
+        label_values = tuple(self.label_selector) if hasattr(self, "label_selector") and self.label_selector else tuple()
+
         return (
             self._get_active_dataset_id(),
-            self.X_variable if hasattr(self, "X_variable") else None,
-            tuple(self.label_selector) if hasattr(self, "label_selector") and self.label_selector else tuple(),
+            selector_values,
+            label_values,
+            self._get_focus_signature(),
         )
     
     def _begin_refresh(self, reason=None, payload=None, verbose=False):
@@ -392,38 +465,55 @@ class BasePlotClass(param.Parameterized):
 
     def _get_selected_row_from_current_df(self):
         """
-        Rebuild the selected row from the current dataframe when possible.
+        Resolve the currently focused row from the active dataset.
+
+        Selection is now driven by context.selection rather than src.data.
         """
-        if self.src is None:
+        focus = self._get_focus_state()
+        if focus is None:
             return None
 
-        try:
-            src_df = pd.DataFrame(self.src.data)
-        except Exception:
-            src_df = None
+        focus_dataset_id = getattr(focus, "dataset_id", None)
+        focus_row_id = getattr(focus, "row_id", None)
 
-        if src_df is None or len(src_df) != 1:
+        if focus_row_id is None:
+            return None
+
+        if focus_dataset_id != self._get_active_dataset_id():
+            return None
+
+        if self.df is None or len(self.df) == 0:
             return None
 
         id_col = self.config.settings.get("id_col")
 
         try:
-            if id_col and id_col != "Use Index" and id_col in src_df.columns and id_col in self.df.columns:
-                selected_id = src_df[id_col].iloc[0]
-                selected = self.df[self.df[id_col].astype(str) == str(selected_id)]
-                if len(selected) > 0:
-                    return selected.head(1).reset_index(drop=True)
-        except Exception:
-            pass
+            if id_col == "Use Index":
+                mask = self.df.index.astype(str) == str(focus_row_id)
+                selected = self.df.loc[mask]
+            elif id_col and id_col in self.df.columns:
+                selected = self.df[self.df[id_col].astype(str) == str(focus_row_id)]
+            else:
+                return None
 
-        try:
-            cols = [c for c in self.df.columns if c in src_df.columns]
-            if cols:
-                return src_df[cols].reset_index(drop=True)
+            if len(selected) > 0:
+                return selected.head(1).reset_index(drop=True)
         except Exception:
             pass
 
         return None
+
+    def _handle_focus_change_event(self, topic, payload):
+        """
+        Rerender on any focus change.
+
+        We do not filter by active dataset here, because a focus change to a
+        different dataset should clear the selected overlay in the current plot.
+        """
+        self._request_refresh(reason=str(topic or "selection.focus.changed"), payload=payload)
+
+    def _handle_focus_cleared_event(self, topic, payload):
+        self._request_refresh(reason=str(topic or "selection.focus.cleared"), payload=payload)
 
     def _get_available_columns_for_selectors(self):
         """
@@ -530,6 +620,9 @@ class BasePlotClass(param.Parameterized):
         self.subscribe_event("dataset.updated", self._handle_dataset_change_event)
         self.subscribe_event("dataset.active.changed", self._handle_dataset_change_event)
         self.subscribe_event("labels.settings.updated", self._handle_label_settings_event)
+
+        self.subscribe_event("selection.focus.changed", self._handle_focus_change_event)
+        self.subscribe_event("selection.focus.cleared", self._handle_focus_cleared_event)
 
     def _toggle_settings_panel(self, event):
         self.settings_panel.visible = not self.settings_panel.visible
@@ -849,8 +942,6 @@ class ScatterPlotDashboard(BasePlotClass):
     """A Dashboard used for rendering dynamic scatter plots of the data.
     Parameters
     ----------
-    src : ColumnDataSource
-        The shared data source which holds the current selected source.
 
     Attributes
     ----------
@@ -868,12 +959,11 @@ class ScatterPlotDashboard(BasePlotClass):
     selector_params = ("X_variable", "Y_variable")
 
 
-    def __init__(self, src, close_button, context=None):
-        super().__init__(src, close_button, context=context)
+    def __init__(self, close_button, context=None):
+        super().__init__( close_button, context=context)
 
         self.context = context
 
-        self._bind_src_runtime_subscription()
         self.available_columns = self.get_column_list(
             excluded_columns=["id_col", "label_col", "ra_dec"]
         )
@@ -967,40 +1057,6 @@ class ScatterPlotDashboard(BasePlotClass):
             Y_variable=y_value,
         )
 
-    def _get_selected_row_from_current_df(self):
-        """
-        Rebuild the selected row from the current dataframe when possible.
-        This is important after:
-        - switching to a subset dataset
-        - adding derived columns not present in src.data
-        """
-        if self.src is None:
-            return None
-
-        id_col = self.config.settings["id_col"]
-
-        try:
-            if id_col != "Use Index" and id_col in self.src.data and len(self.src.data[id_col]) == 1:
-                selected_id = self.src.data[id_col][0]
-                selected = self.df[self.df[id_col] == selected_id]
-                if len(selected) > 0:
-                    return selected.head(1)
-        except Exception:
-            pass
-
-        # Fallback to old behavior only if src still looks like a single-row record
-        try:
-            cols = [c for c in self.df.columns if c in self.src.data]
-            if cols and len(self.src.data[cols[0]]) == 1:
-                return pd.DataFrame(self.src.data, columns=cols, index=[0])
-        except Exception:
-            pass
-
-        return None
-
-    def _change_source_cb(self, attr, old, new):
-        self._src_data_changed_cb(attr, old, new)
-
     def plot_selected(self, x_var, y_var):
         selected = self._get_selected_row_from_current_df()
         if selected is None:
@@ -1091,6 +1147,43 @@ class ScatterPlotDashboard(BasePlotClass):
                 **overlay_opts,
             )
 
+    def _handle_scatter_selection_indices(self, indices, sourceid):
+        if not indices:
+            return
+
+        row_ids = []
+        for i in indices:
+            try:
+                row_ids.append(str(sourceid[i]))
+            except Exception:
+                continue
+
+        if not row_ids:
+            return
+
+        # Single-point selection -> focus only
+        if len(row_ids) == 1:
+            self.set_focus_selection(
+                row_ids[0],
+                origin="scatter.tap",
+            )
+            return
+
+        # Multi-point selection -> selection set
+        self.set_selection_set(
+            row_ids,
+            origin="scatter.box_select",
+            mode="replace",
+            metadata={
+                "x_variable": self.X_variable,
+                "y_variable": self.Y_variable,
+                "plot_mode": self.plot_mode,
+                "panel_type": "scatter",
+            },
+            create_artifact=True,
+            update_focus_policy="preserve_or_first",
+        )
+
     def get_scatter_hv(self, x, y, sourceid=None, plot_mode="tap", color="blue", label=""):
         x = np.asarray(x)
         y = np.asarray(y)
@@ -1149,23 +1242,14 @@ class ScatterPlotDashboard(BasePlotClass):
 
             sel_stream = streams.Selection1D(source=points)
 
-            def tap_callback(event):
-                if not event.new:
+            def selection_callback(event):
+                indices = list(event.new or [])
+                if not indices:
                     return
 
-                src_id = str(sourceid[event.new[0]])
+                self._handle_scatter_selection_indices(indices, sourceid)
 
-                if getattr(self, "context", None) and getattr(self.context, "events", None):
-                    self.context.events.publish(
-                        "selection.sourceid.changed",
-                        {
-                            "sourceId": src_id,
-                            "origin": "ScatterPlotDashboard",
-                            "panel_id": self.panel_id,
-                        },
-                    )
-
-            sel_stream.param.watch(tap_callback, "index")
+            self.watch_param(sel_stream, "index", selection_callback)
             return points
 
         points = hv.Points((x, y), kdims=["x", "y"], label=label).opts(
@@ -1348,12 +1432,11 @@ class HistoDashboard(BasePlotClass):
     range_min = param.Number(default= None, bounds=(-np.inf, np.inf), allow_None= True,  doc= "Range min")
     range_max = param.Number(default= None, bounds=(-np.inf, np.inf), allow_None= True, doc= "Range max")
 
-    def __init__(self, src, close_button, context=None):
-        super().__init__(src, close_button, context=context)
+    def __init__(self, close_button, context=None):
+        super().__init__(close_button, context=context)
 
         self.context = context
 
-        self._bind_src_runtime_subscription()
         self.available_columns = self.get_column_list(excluded_columns=["id_col", "ra_dec"])
 
         if not self.available_columns:
@@ -1402,11 +1485,6 @@ class HistoDashboard(BasePlotClass):
         )
 
         self._register_dataset_event_handlers()
-        
-    def _change_source_cb(self, attr, old, new):
-        selected_src_plot = self.plot_selected(self.X_variable)
-        if selected_src_plot is not None:
-            self.figure.object = hv.Overlay(self.main_plot + selected_src_plot).collate()
 
     def _get_from_settings_dictionary(self, key, default):
         value = self.config.settings["Histogram_plot_settings"].get(key, default)
@@ -1685,12 +1763,11 @@ class DensityPlotDashboard(BasePlotClass):
 
     clim = param.Integer(default=10, bounds=(2, 1000), doc = "Number of bins per axis")
 
-    def __init__(self, src, close_button, context=None):
-        super().__init__(src, close_button, context=context)
+    def __init__(self, close_button, context=None):
+        super().__init__(close_button, context=context)
 
         self.context = context
 
-        self._bind_src_runtime_subscription()
         self.available_columns = self.get_column_list(
             excluded_columns=["id_col", "label_col", "ra_dec"]
         )
@@ -1779,11 +1856,6 @@ class DensityPlotDashboard(BasePlotClass):
                        "y_range" : (self.y_range_min, self.y_range_max)
         }
         self.config.settings["Density_plot_settings"].update(new_values)
-
-
-    def _change_source_cb(self, attr, old, new):
-        self._src_data_changed_cb(attr, old, new)
-
 
     @param.depends(
         "X_variable", "Y_variable", "label_selector", "log_xscale",
