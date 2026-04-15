@@ -140,6 +140,18 @@ class CustomPlotClass(param.Parameterized):
 
         self._disposed = False
 
+        # Standard runtime subscription / refresh orchestration
+        self._dataset_runtime_subscriptions_initialised = False
+        self._src_runtime_subscription_initialised = False
+
+        self._refresh_pending = False
+        self._refresh_pending_payload = None
+        self._refresh_reasons: set[str] = set()
+
+        self._refresh_inflight_signature = None
+        self._last_completed_signature = None
+        self._initial_refresh_requested = False
+
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
 
         if self.extra_features:
@@ -168,7 +180,6 @@ class CustomPlotClass(param.Parameterized):
                 self.close_button.on_click(lambda _e: self.dispose())
             except Exception as e:
                 print("CustomPlotClass.dispose() Errored", e)
-
     # -----------------------
     # Jobs
     # -----------------------
@@ -298,6 +309,275 @@ class CustomPlotClass(param.Parameterized):
             return str(selected_id)
         except Exception:
             return None
+
+    def _event_matches_active_dataset(self, payload=None):
+        """
+        Return True when a dataset event should affect this panel.
+
+        We accept:
+        - no payload at all
+        - payloads without dataset_id
+        - payloads targeting the current active dataset
+        """
+        if not isinstance(payload, dict):
+            return True
+
+        active_id = self._get_active_dataset_id()
+        payload_dataset_id = (
+            payload.get("dataset_id")
+            or payload.get("active_dataset_id")
+            or payload.get("id")
+        )
+
+        return payload_dataset_id in (None, "", active_id)
+
+
+    def _bind_dataset_runtime_subscriptions(self, *, include_loaded=False, include_mapping=False):
+        """
+        Opt a panel into dataset lifecycle responsiveness.
+
+        New plugins should generally use:
+            include_loaded=False
+            include_mapping=True only if semantic mappings matter
+        """
+        if self._dataset_runtime_subscriptions_initialised:
+            return
+
+        self._dataset_runtime_subscriptions_initialised = True
+
+        self.subscribe("dataset.active.changed", self._dataset_active_changed_cb)
+        self.subscribe("dataset.updated", self._dataset_updated_cb)
+
+        if include_loaded:
+            self.subscribe("dataset.loaded", self._dataset_loaded_cb)
+
+        if include_mapping:
+            self.subscribe("dataset.mapping_updated", self._dataset_mapping_updated_cb)
+
+
+    def _dataset_active_changed_cb(self, topic, payload):
+        if not self._event_matches_active_dataset(payload):
+            return
+        self._request_refresh(reason=str(topic or "dataset.active.changed"), payload=payload)
+
+    def _dataset_updated_cb(self, topic, payload):
+        if not self._event_matches_active_dataset(payload):
+            return
+        self._request_refresh(reason=str(topic or "dataset.updated"), payload=payload)
+
+
+    def _dataset_loaded_cb(self, topic, payload):
+        if not self._event_matches_active_dataset(payload):
+            return
+        self._request_refresh(reason=str(topic or "dataset.loaded"), payload=payload)
+
+    def _dataset_mapping_updated_cb(self, topic, payload):
+        if not self._event_matches_active_dataset(payload):
+            return
+        self._request_refresh(reason=str(topic or "dataset.mapping_updated"), payload=payload)
+
+
+    def _rebuild_layout_from_current_state(self):
+        """
+        Conservative fallback for panels that do not expose a dedicated refresh API.
+
+        Rebuild the layout in place when possible so existing panel containers
+        keep working.
+        """
+        if not hasattr(self, "get_layout"):
+            return
+
+        new_layout = self.get_layout()
+
+        current_layout = getattr(self, "layout", None)
+        if current_layout is None:
+            self.layout = new_layout
+            return
+
+        try:
+            if hasattr(current_layout, "objects") and hasattr(new_layout, "objects"):
+                current_layout.objects = list(new_layout.objects)
+            else:
+                self.layout = new_layout
+        except Exception:
+            self.layout = new_layout
+
+
+    def _refresh_for_dataset_change(self, reason=None, payload=None):
+        """
+        Backward-compatible entrypoint.
+
+        Older code may still call this directly. Route it through the coalescing
+        scheduler so it behaves the same way as dataset/src runtime triggers.
+        """
+        self._request_refresh(reason=reason or "dataset.change", payload=payload)
+
+    def _perform_refresh(self, reason=None, payload=None, refresh_signature=None):
+        """
+        Default synchronous refresh hook for simple panels.
+
+        New plugins should override this if they need custom refresh logic.
+        Async plugins should call self._finish_refresh(refresh_signature) in their
+        completion callback.
+        """
+        try:
+            self.df = self._get_dataset_for_lookup()
+        except Exception:
+            traceback.print_exc()
+
+        try:
+            self._rebuild_layout_from_current_state()
+        finally:
+            self._finish_refresh(refresh_signature)
+
+    def _bind_src_runtime_subscription(self, model=None, attr="data", callback=None):
+        """
+        Standard source watcher for new plugins.
+
+        By default, src.data changes request a coalesced refresh rather than
+        launching work immediately.
+        """
+        if self._src_runtime_subscription_initialised:
+            return
+
+        model = model if model is not None else self.src
+        callback = callback if callback is not None else self._src_data_changed_cb
+
+        if model is None:
+            return
+
+        self._src_callback = callback
+        self.watch_bokeh(model, attr, callback)
+        self._src_runtime_subscription_initialised = True
+
+    def _src_data_changed_cb(self, attr, old, new):
+        self._request_refresh(reason=f"src.{attr or 'data'}", payload=None)
+
+    def _request_refresh(self, reason="unknown", payload=None, verbose=False):
+        """
+        Coalesce repeated triggers onto the next tick.
+
+        Dataset events, src.data changes, and initial layout should all funnel
+        through this method.
+        """
+        if getattr(self, "_disposed", False):
+            return
+
+        if reason:
+            self._refresh_reasons.add(str(reason))
+
+        if payload is not None:
+            self._refresh_pending_payload = payload
+
+        if self._refresh_pending:
+            return
+
+        self._refresh_pending = True
+
+        def _runner():
+            self._refresh_pending = False
+            merged_reason = " + ".join(sorted(self._refresh_reasons)) if self._refresh_reasons else "unknown"
+            merged_payload = self._refresh_pending_payload
+
+            self._refresh_reasons.clear()
+            self._refresh_pending_payload = None
+
+            self._run_scheduled_refresh(
+                reason=merged_reason,
+                payload=merged_payload,
+                verbose=verbose,
+            )
+
+        try:
+            doc = pn.state.curdoc
+            if doc is not None:
+                doc.add_next_tick_callback(_runner)
+            else:
+                _runner()
+        except Exception:
+            _runner()
+
+    def _run_scheduled_refresh(self, reason=None, payload=None, verbose=False):
+        """
+        Start one refresh cycle unless an identical request is already in flight.
+        """
+        refresh_signature = self._begin_refresh(reason=reason, payload=payload, verbose=verbose)
+        if refresh_signature is None:
+            return
+
+        try:
+            self._perform_refresh(
+                reason=reason,
+                payload=payload,
+                refresh_signature=refresh_signature,
+            )
+        except Exception:
+            traceback.print_exc()
+            self._finish_refresh(refresh_signature)
+
+
+    def _build_refresh_signature(self, reason=None, payload=None):
+        """
+        Default refresh signature.
+
+        Subclasses can extend this when refreshes depend on more than just
+        active dataset + selected source.
+        """
+        return (
+            self._get_active_dataset_id(),
+            self._get_selected_source_id(),
+        )
+
+    def _begin_refresh(self, reason=None, payload=None, verbose=False):
+        """
+        Mark a refresh as in-flight unless the same request is already running.
+        """
+        try:
+            refresh_signature = self._build_refresh_signature(reason=reason, payload=payload)
+        except Exception:
+            traceback.print_exc()
+            refresh_signature = (
+                self._get_active_dataset_id(),
+                self._get_selected_source_id(),
+            )
+
+        if refresh_signature == self._refresh_inflight_signature:
+            if verbose:
+                print(
+                    f"[{self.panel_name}] refresh skipped; identical request already in flight: "
+                    f"{refresh_signature} (reason={reason})"
+                )
+            return None
+
+        self._refresh_inflight_signature = refresh_signature
+        return refresh_signature
+
+    def _finish_refresh(self, refresh_signature=None):
+        """
+        Mark the current refresh as complete.
+
+        Async subclasses should call this in their completion callback.
+        """
+        if refresh_signature is None:
+            refresh_signature = self._refresh_inflight_signature
+
+        if refresh_signature is not None:
+            self._last_completed_signature = refresh_signature
+
+        if self._refresh_inflight_signature == refresh_signature:
+            self._refresh_inflight_signature = None
+
+
+    def _request_initial_refresh_once(self, reason="initial.layout"):
+        """
+        Call from get_layout() in new plugins instead of launching expensive work
+        directly in get_layout().
+        """
+        if self._initial_refresh_requested:
+            return
+
+        self._initial_refresh_requested = True
+        self._request_refresh(reason=reason)
 
     # -----------------------
     # Column mapping / semantic requirements
@@ -976,7 +1256,6 @@ class EuclidPlotClass(CustomPlotClass):
         self.euclid_object = None
 
         self._widgets_initialised = False
-        self._runtime_subscriptions_initialised = False
 
         self._initialize_settings_dictionary()
 
@@ -988,52 +1267,119 @@ class EuclidPlotClass(CustomPlotClass):
     # ------------------------------------------------------------------
 
     def _refresh_cutout(self, reason=None, verbose=False):
-        if verbose:
-            print(f"EuclidPlotClass refresh: reason={reason}")
+        """
+        Backward-compatible helper.
 
-        initialised = self._initialise_euclid_object()
-        self.stored_spectrum_coordinates = {}
-
-        if initialised and self._widgets_initialised:
-            self._run_euclid()
+        Older Euclid code may still call this directly. Route everything through the
+        base-class refresh scheduler so dataset events, src.data changes, and manual
+        refreshes all coalesce cleanly.
+        """
+        self._request_refresh(reason=reason or "euclid.refresh", verbose=verbose)
 
     def _change_source_cb(self, attr, old, new):
-        self._refresh_cutout(reason="src.data", verbose=False)
+        """
+        Compatibility wrapper.
 
-    def _subscribe_to_mapping_and_dataset_events(self):
-        if self._runtime_subscriptions_initialised:
+        New code should prefer _bind_src_runtime_subscription(), which will call the
+        standard base-class src callback. Keep this method so any existing direct
+        references still work.
+        """
+        self._src_data_changed_cb(attr, old, new)
+
+    def _dataset_mapping_updated_cb(self, topic, payload):
+        if not self._event_matches_active_dataset(payload):
             return
-        self._runtime_subscriptions_initialised = True
 
-        if getattr(self, "context", None) is None or getattr(self.context, "events", None) is None:
-            return
-
-        def _mapping_updated(_topic, payload):
-            if not payload:
-                return
-            if payload.get("dataset_id") != self._dataset_id():
-                return
-
+        if isinstance(payload, dict):
             semantic_name = payload.get("semantic_name")
             column_name = payload.get("column_name")
             config_key = payload.get("config_key")
 
-            if semantic_name is None or column_name is None:
+            if semantic_name is not None and column_name is not None and config_key:
+                try:
+                    self.config.settings[config_key] = column_name
+                except Exception:
+                    pass
+
+        self._request_refresh(
+            reason=str(topic or "dataset.mapping_updated"),
+            payload=payload,
+        )
+
+    def _build_refresh_signature(self, reason=None, payload=None):
+        """
+        Euclid refreshes depend on more than dataset + selected source.
+
+        Include filter/radius/stretching so repeated UI actions with the same state
+        do not launch duplicate jobs, while real changes still trigger a new fetch.
+        """
+        dataset_id = self._dataset_id()
+        selected_id = self._get_selected_id_from_src()
+
+        filter_value = self.filter
+        radius_value = self.radius
+        stretching_value = self._get_from_settings_dictionary("stretching", "Linear")
+
+        if getattr(self, "_widgets_initialised", False):
+            try:
+                filter_value = self.filter_input.value
+            except Exception:
+                pass
+
+            try:
+                radius_value = self.radius_input.value
+            except Exception:
+                pass
+
+            try:
+                stretching_value = self.stretching_input.value
+            except Exception:
+                pass
+
+        return (
+            str(dataset_id),
+            None if selected_id is None else str(selected_id),
+            str(filter_value),
+            float(radius_value) if radius_value is not None else None,
+            str(stretching_value),
+        )
+
+    def _perform_refresh(self, reason=None, payload=None, refresh_signature=None):
+        """
+        Euclid-specific refresh entrypoint used by the base-class scheduler.
+        """
+        try:
+            initialised = self._initialise_euclid_object()
+            self.stored_spectrum_coordinates = {}
+
+            if not initialised:
+                self._finish_refresh(refresh_signature)
                 return
 
-            if config_key:
-                self.config.settings[config_key] = column_name
-
-            self._refresh_cutout(reason="dataset.mapping_updated")
-
-        def _dataset_changed(_topic, payload):
-            if payload and payload.get("dataset_id") not in (None, self._dataset_id()):
+            if not self._widgets_initialised:
+                self._finish_refresh(refresh_signature)
                 return
-            self._refresh_cutout(reason="dataset changed")
 
-        self.subscribe("dataset.mapping_updated", _mapping_updated)
-        self.subscribe("dataset.active.changed", _dataset_changed)
-        self.subscribe("dataset.updated", _dataset_changed)
+            self._run_euclid(
+                reason=reason,
+                refresh_signature=refresh_signature,
+            )
+
+        except Exception:
+            traceback.print_exc()
+            self._finish_refresh(refresh_signature)
+
+    def _subscribe_to_mapping_and_dataset_events(self):
+        """
+        Euclid uses dataset activation/update events plus mapping updates.
+
+        We intentionally do not subscribe to dataset.loaded here because viewer-style
+        panels should react to the active dataset, not to every load event.
+        """
+        self._bind_dataset_runtime_subscriptions(
+            include_loaded=False,
+            include_mapping=True,
+        )
 
     # ------------------------------------------------------------------
     # Dataset / mapping helpers
@@ -1278,25 +1624,21 @@ class EuclidPlotClass(CustomPlotClass):
         if not self._widgets_initialised:
             self._initialise_widgets()
 
-            self._src_callback = self._change_source_cb
-            self.watch_bokeh(self.src, "data", self._src_callback)
-
+            self._bind_src_runtime_subscription()
             self._subscribe_to_mapping_and_dataset_events()
             self._manage_subscriptions()
 
             self._widgets_initialised = True
-
-        initialised = self._initialise_euclid_object()
 
         self.figure.sizing_mode = "stretch_width"
         self.figure.min_height = 120
         self.figure.max_height = 260
         self.figure.margin = (0, 0, 10, 0)
 
-        if initialised:
-            self._run_euclid()
-
         self.message_pane.visible = False
+
+        # Important: do not launch expensive work directly from get_layout().
+        self._request_initial_refresh_once(reason="initial.layout")
 
         return pn.Column(
             self.message_pane,
@@ -1870,12 +2212,14 @@ class EuclidPlotClass(CustomPlotClass):
         if event.new:
             self.radius = event.new
             self._update_settings_dictionary("radius", self.radius)
+
             if self.context and self.context.events:
                 self.context.events.publish(
                     "astro.euclid.radius.changed",
                     {"radius": self.radius, "panel_id": self.panel_id},
                 )
-            self._run_euclid()
+
+            self._request_refresh(reason="euclid.radius.changed")
         else:
             print("Input a valid value for radius")
 
@@ -2219,40 +2563,69 @@ class EuclidPlotClass(CustomPlotClass):
 
         self.figure.object = layout
 
-    def _run_euclid(self):
+    def _run_euclid(self, reason=None, refresh_signature=None):
+        refresh_signature = refresh_signature or self._build_refresh_signature(
+            reason=reason,
+            payload=None,
+        )
+
         self.message_pane.object = "## Loading..."
         self.message_pane.visible = True
 
         if self.context and self.context.events:
             self.context.events.publish(
                 "astro.cutout.running",
-                {"source": "Euclid", "running": True, "panel_id": self.panel_id},
+                {
+                    "source": "Euclid",
+                    "running": True,
+                    "panel_id": self.panel_id,
+                    "reason": reason,
+                    "dataset_id": self._dataset_id(),
+                    "selected_id": self._get_selected_id_from_src(),
+                },
             )
 
         def callback(future_obj=None):
-            result = future_obj.result()
+            try:
+                if future_obj is not None:
+                    future_obj.result()
 
-            if self.context and self.context.events:
-                self.context.events.publish(
-                    "astro.cutout.running",
-                    {"source": "Euclid", "running": False, "panel_id": self.panel_id},
+                if self.euclid_object.error_tracker.has_error:
+                    message = "# Euclid cutout unavailable:\n"
+                    message += f"## {self.euclid_object.error_tracker.error_message}"
+                    self.message_pane.object = message
+                    self.message_pane.visible = True
+                    self.figure.object = self.get_empty_image()
+                    return
+
+                self.overplot_coords_widget.value = False
+                scaled_image = self._get_scaled_image()
+                self.get_euclid_figure_hv(
+                    scaled_image,
+                    show_coordinates=self.overplot_source_coords_widget.value,
                 )
+                self._update_image()
 
-            if self.euclid_object.error_tracker.has_error:
-                message = "# Euclid cutout unavailable:\n"
-                message += f"## {self.euclid_object.error_tracker.error_message}"
-                self.message_pane.object = message
+            except Exception as e:
+                self.message_pane.object = f"# Euclid cutout unavailable:\n## {e}"
                 self.message_pane.visible = True
                 self.figure.object = self.get_empty_image()
-                return
 
-            self.overplot_coords_widget.value = False
-            scaled_image = self._get_scaled_image()
-            self.get_euclid_figure_hv(
-                scaled_image,
-                show_coordinates=self.overplot_source_coords_widget.value,
-            )
-            self._update_image()
+            finally:
+                if self.context and self.context.events:
+                    self.context.events.publish(
+                        "astro.cutout.running",
+                        {
+                            "source": "Euclid",
+                            "running": False,
+                            "panel_id": self.panel_id,
+                            "reason": reason,
+                            "dataset_id": self._dataset_id(),
+                            "selected_id": self._get_selected_id_from_src(),
+                        },
+                    )
+
+                self._finish_refresh(refresh_signature)
 
         self.run_multithread(
             self.euclid_object.get_final_cutout,
@@ -2416,16 +2789,19 @@ class SpectrumPlotClass(CustomPlotClass):
         self.dataset = dataset
         self._is_euclid_spec = self.dataset == "EuclidSpec"
 
-        self._src_callback = self._change_source_cb
-        self.watch_bokeh(self.src, "data", self._src_callback)
-
         self.from_sourceId = False
         self._euclid_radius_sub = None
+        self._widgets_initialised = False
 
         self._initialize_settings_dictionary()
         self.plot_settings_panel = pn.Column(visible=False, scroll=True)
         self.mode_options = ["Use TargetId", "Cone Search"]
         self.chosen_mode = self.mode_options[1]
+
+        self._bind_dataset_runtime_subscriptions(
+            include_loaded=False,
+            include_mapping=True,
+        )
 
     def _dispose_impl(self) -> None:
         """
@@ -2455,6 +2831,60 @@ class SpectrumPlotClass(CustomPlotClass):
         if isinstance(obj, dict):
             return obj.get(name, default)
         return getattr(obj, name, default)
+
+    def _build_refresh_signature(self, reason=None, payload=None):
+        mode_value = self.chosen_mode
+        max_sep_value = self.max_separation
+
+        if getattr(self, "_widgets_initialised", False):
+            try:
+                mode_value = self.retrieve_mode_button.value
+            except Exception:
+                pass
+
+            try:
+                max_sep_value = self.max_separation_input.value
+            except Exception:
+                pass
+
+        return (
+            self._get_active_dataset_id(),
+            self._get_selected_source_id(),
+            str(self.dataset),
+            bool(self.from_sourceId),
+            str(mode_value),
+            float(max_sep_value) if max_sep_value is not None else None,
+        )
+    
+    def _perform_refresh(self, reason=None, payload=None, refresh_signature=None):
+        try:
+            self.df = self._get_dataset_for_lookup()
+
+            if getattr(self, "_widgets_initialised", False):
+                try:
+                    current_value = getattr(self.redshift_column_selector, "value", "None")
+                    options = ["None"] + self.get_column_list(allowed_types=["float"])
+                    self.redshift_column_selector.options = options
+                    if current_value in options:
+                        self.redshift_column_selector.value = current_value
+                    else:
+                        self.redshift_column_selector.value = "None"
+                except Exception:
+                    pass
+
+            initialized = self._initialize_spectrum_object()
+            if not initialized:
+                self._finish_refresh(refresh_signature)
+                return
+
+            self._run_spectrum(
+                reason=reason,
+                refresh_signature=refresh_signature,
+            )
+
+        except Exception:
+            traceback.print_exc()
+            self._finish_refresh(refresh_signature)
 
     def _build_spectrum_artifact_payload(self) -> dict:
         """
@@ -2531,6 +2961,7 @@ class SpectrumPlotClass(CustomPlotClass):
 
         selected_id = self._get_selected_id()
         spec_payload = self._build_spectrum_artifact_payload()
+        spectrum_count = len(spec_payload.get("spectra", []))
 
         artifact_id = self.artifacts.put(
             type="astro.spectrum",
@@ -2550,6 +2981,7 @@ class SpectrumPlotClass(CustomPlotClass):
                 "artifact_id": artifact_id,
                 "dataset_id": dataset_id,
                 "selected_id": str(selected_id) if selected_id is not None else None,
+                "spectrum_count": spectrum_count,
             },
         )
 
@@ -2557,10 +2989,12 @@ class SpectrumPlotClass(CustomPlotClass):
         self.max_separation = self.config.settings.get("spectrumRadius", 5)
 
     def get_layout(self):
-        self._initialize_settings_panel()
-        initialized = self._initialize_spectrum_object()
-        if initialized:
-            self._run_spectrum()
+        if not self._widgets_initialised:
+            self._initialize_settings_panel()
+            self._bind_src_runtime_subscription()
+            self._widgets_initialised = True
+
+        self._request_initial_refresh_once(reason="initial.layout")
 
         return pn.Column(
             self.message_pane,
@@ -2572,10 +3006,7 @@ class SpectrumPlotClass(CustomPlotClass):
         )
 
     def _change_source_cb(self, attr, old, new):
-        if self.stage == "plot":
-            initialized = self._initialize_spectrum_object()
-            if initialized:
-                self._run_spectrum()
+        self._src_data_changed_cb(attr, old, new)
 
     def _save_figure(self, directory_path="data/saved_sources", prefix=None):
         if self.spectrum_object.spectra is not None:
@@ -2705,6 +3136,7 @@ class SpectrumPlotClass(CustomPlotClass):
 
         selected_id = self._get_selected_id()
         coords = {"ra": ra, "dec": dec}
+        coordinate_count = min(len(ra or []), len(dec or []))
 
         artifact_id = self.artifacts.put(
             type="astro.coords",
@@ -2724,30 +3156,33 @@ class SpectrumPlotClass(CustomPlotClass):
                 "artifact_id": artifact_id,
                 "dataset_id": dataset_id,
                 "selected_id": str(selected_id) if selected_id is not None else None,
+                "coordinate_count": coordinate_count,
             },
         )
 
-    def _run_spectrum(self, max_separation=None):
+    def _run_spectrum(self, max_separation=None, reason=None, refresh_signature=None):
         self.message_pane.object = "## Loading..."
         self.message_pane.visible = True
-
-        self.publish(
-            "astro.spectra.running",
-            {"source": self.dataset, "running": True, "panel_id": self.panel_id},
-        )
 
         if max_separation is None:
             max_separation = self.max_separation
 
-        def _set_running(val: bool):
-            self.publish(
-                "astro.spectra.running",
-                {"source": self.dataset, "running": val, "panel_id": self.panel_id},
-            )
+        self.publish(
+            "astro.spectra.running",
+            {
+                "source": self.dataset,
+                "running": True,
+                "panel_id": self.panel_id,
+                "reason": reason,
+                "dataset_id": self._get_active_dataset_id(),
+                "selected_id": self._get_selected_source_id(),
+            },
+        )
 
         def callback(future_result=None):
             try:
-                _set_running(False)
+                if future_result is not None:
+                    future_result.result()
 
                 if self.spectrum_object.error_tracker.has_error:
                     message = "# Spectrum unavailable:\n"
@@ -2773,13 +3208,46 @@ class SpectrumPlotClass(CustomPlotClass):
             except Exception as e:
                 self.message_pane.object = f"# Error updating spectrum panel\n## {e}"
                 self.message_pane.visible = True
-                _set_running(False)
+                self.figure.objects = [self.get_empty_image()]
+
+            finally:
+                self.publish(
+                    "astro.spectra.running",
+                    {
+                        "source": self.dataset,
+                        "running": False,
+                        "panel_id": self.panel_id,
+                        "reason": reason,
+                        "dataset_id": self._get_active_dataset_id(),
+                        "selected_id": self._get_selected_source_id(),
+                    },
+                )
+                self._finish_refresh(refresh_signature)
 
         self.run_multithread(
             self.spectrum_object.get_spectra,
             func_kwargs={"max_separation": max_separation, "return_object": True},
             callback=callback,
         )
+
+    def _ensure_available_spectra_attr(self):
+        """
+        Compatibility shim for EuclidSpectraClass paths that expect
+        `available_spectra` to exist.
+        """
+        spectrum_object = getattr(self, "spectrum_object", None)
+        if spectrum_object is None:
+            return
+
+        spectra = getattr(spectrum_object, "spectra", None)
+        if spectra is None:
+            return
+
+        if not hasattr(spectrum_object, "available_spectra") or getattr(spectrum_object, "available_spectra", None) is None:
+            try:
+                spectrum_object.available_spectra = spectra
+            except Exception:
+                pass
 
     def _get_euclid_radius_arcsec(self, default: float = 0.5) -> float:
         try:
@@ -2936,12 +3404,12 @@ class SpectrumPlotClass(CustomPlotClass):
             self.chosen_mode = event.new
             self.link_to_cutout_checkbox.disabled = False
             self.max_separation_input.disabled = False
-            self.get_layout()
+            self._request_refresh(reason="spectrum.retrieve_mode.changed")
 
     def _max_separation_input_cb(self, event):
         if event.new is not None:
             self.max_separation = event.new
-            self._run_spectrum(self.max_separation)
+            self._request_refresh(reason="spectrum.max_separation.changed")
 
     def _link_to_cutout_cb(self, event):
         if event.new:
@@ -2950,14 +3418,18 @@ class SpectrumPlotClass(CustomPlotClass):
                     def _on_radius(topic, payload):
                         if not payload:
                             return
+
                         radius = payload.get("radius")
                         if radius is None:
                             return
+
                         try:
-                            self.max_separation_input.value = float(radius)
+                            radius = float(radius)
                         except Exception:
-                            pass
-                        self._update_max_separation(float(radius))
+                            return
+
+                        if self.max_separation_input.value != radius:
+                            self.max_separation_input.value = radius
 
                     self._euclid_radius_sub = self.events.subscribe(
                         "astro.euclid.radius.changed",
@@ -2972,7 +3444,7 @@ class SpectrumPlotClass(CustomPlotClass):
                 self._euclid_radius_sub = None
 
     def _update_smoothing_cb(self, event):
-        if self.spectrum_object.spectra is not None:
+        if getattr(self.spectrum_object, "spectra", None) is not None:
             self.spectrum_object.get_smoothed_spectra(
                 kernel=self.smoothing_function_input.value,
                 window=self.smoothing_window_input.value,
@@ -2980,12 +3452,12 @@ class SpectrumPlotClass(CustomPlotClass):
             self._update_plot()
 
     def _general_parameter_cb(self, event):
-        if self.spectrum_object.spectra is not None:
+        if getattr(self.spectrum_object, "spectra", None) is not None:
             self._update_plot()
 
     def _redshift_input_cb(self, event):
         redshift = event.new
-        if redshift is not None:
+        if redshift is not None and getattr(self.spectrum_object, "spectra", None) is not None:
             spectype = "galaxy" if redshift > 0 else "star"
             self.spectrum_object._update_info_spectra("spectype", spectype)
             self.spectrum_object._update_info_spectra("redshift", redshift)
@@ -3012,6 +3484,15 @@ class SpectrumPlotClass(CustomPlotClass):
             self.redshift_input.value = redshift_value
 
     def _update_plot(self):
+        spectrum_object = getattr(self, "spectrum_object", None)
+        if spectrum_object is None:
+            return
+
+        if getattr(spectrum_object, "spectra", None) is None:
+            return
+
+        self._ensure_available_spectra_attr()
+
         plot_model = self.plot_model_checkbox.value
         plot_lines = "class" if self.plot_lines_checkbox.value else False
 
@@ -3032,7 +3513,8 @@ class SpectrumPlotClass(CustomPlotClass):
         ]
 
     def _update_max_separation(self, new_separation):
-        self.max_separation_input.value = new_separation
+        if self.max_separation_input.value != new_separation:
+            self.max_separation_input.value = new_separation
 
     @param.depends("stage")
     def panel(self):
@@ -3074,6 +3556,11 @@ class SEDPlotClass(CustomPlotClass):
                                        "nanoJy"  : lambda f, e : (f / 1000, e / 1000),
                                        "cgs (erg/s/Hz/cm2)" : lambda f, e : (f * 1e23, e * 1e23)
                                      }
+
+        self._bind_dataset_runtime_subscriptions(
+            include_loaded=False,
+            include_mapping=True,
+        )
 
     def _change_source_cb(self, attr, old, new):
         if self.stage == "plot":
@@ -3607,6 +4094,11 @@ class RadioClass(CustomPlotClass):
         self._initialize_source()
         self.radius = 20
 
+        self._bind_dataset_runtime_subscriptions(
+            include_loaded=False,
+            include_mapping=True,
+        )
+
     def _initialize_source(self):
         self.ra, self.dec = self.get_ra_dec()
         if (self.ra is None) or (self.dec is None):
@@ -3803,6 +4295,11 @@ class AladinClass(CustomPlotClass):
 
 
         self.figure = pn.pane.HTML("", sizing_mode="stretch_both")
+
+        self._bind_dataset_runtime_subscriptions(
+            include_loaded=False,
+            include_mapping=True,
+        )
     
 
     def _change_source_cb(self, attr, old, new):
@@ -3895,6 +4392,11 @@ class LogBookClass(CustomPlotClass):
 
         self._src_callback = self._change_source_cb
         self.watch_bokeh(self.src, "data", self._src_callback)
+
+        self._bind_dataset_runtime_subscriptions(
+            include_loaded=False,
+            include_mapping=False,
+        )
 
     def _change_source_cb(self, attr, old, new):
         self.logbook_panel.value = ""
@@ -5727,6 +6229,11 @@ class SpecAnalyser(CustomPlotClass):
         self._set_status("", visible=False)
 
         self._refresh_spectra_from_artifacts()
+
+        self._bind_dataset_runtime_subscriptions(
+            include_loaded=True,
+            include_mapping=True,
+        )
 
     def _sync_emission_label_visibility(self):
         data = self.emission_line_source.data or {}
