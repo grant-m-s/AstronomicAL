@@ -91,6 +91,10 @@ def get_customplot_dict():
         "SAMP Receive": lambda data, close_button, context: SampReceivePanel(
             data, close_button, extra_features=[], context=context
         ),
+
+        "Selection Set": lambda data, close_button, context: SelectionSetPanel(
+            data, close_button, extra_features=[], context=context
+        ),
     }
 
     return plot_dict
@@ -1249,6 +1253,9 @@ class EuclidPlotClass(CustomPlotClass):
 
         self._widgets_initialised = False
 
+        self._image_stream_watchers = []
+        self._profile_stream_watchers = []
+
         self._initialize_settings_dictionary()
 
         self.filter = self._get_from_settings_dictionary("filter", "Color")
@@ -1257,6 +1264,34 @@ class EuclidPlotClass(CustomPlotClass):
     # ------------------------------------------------------------------
     # Refresh / event handling
     # ------------------------------------------------------------------
+
+    def _clear_image_stream_watchers(self):
+        for stream, watcher in list(getattr(self, "_image_stream_watchers", [])):
+            try:
+                stream.param.unwatch(watcher)
+            except Exception:
+                pass
+        self._image_stream_watchers = []
+
+
+    def _watch_image_stream(self, stream, callback, what="x"):
+        watcher = stream.param.watch(callback, what)
+        self._image_stream_watchers.append((stream, watcher))
+        return watcher
+
+    def _clear_profile_stream_watchers(self):
+        for stream, watcher in list(getattr(self, "_profile_stream_watchers", [])):
+            try:
+                stream.param.unwatch(watcher)
+            except Exception:
+                pass
+        self._profile_stream_watchers = []
+
+
+    def _watch_profile_stream(self, stream, callback, what="x"):
+        watcher = stream.param.watch(callback, what)
+        self._profile_stream_watchers.append((stream, watcher))
+        return watcher
 
     def _refresh_cutout(self, reason=None, verbose=False):
         """
@@ -1525,9 +1560,7 @@ class EuclidPlotClass(CustomPlotClass):
             return None, None
 
         ra_col = self.config.settings.get("ra_col_name")
-        print(f"EuclidPlotClass ra_col: {ra_col}")
         dec_col = self.config.settings.get("dec_col_name")
-        print(f"EuclidPlotClass ra_col: {dec_col}")
 
         try:
             if ra_col in row.columns and dec_col in row.columns:
@@ -8400,3 +8433,383 @@ class SampReceivePanel(CustomPlotClass):
             super().dispose()
         except AttributeError:
             pass
+
+
+class SelectionSetPanel(CustomPlotClass):
+    def __init__(self, data, close_button=None, extra_features=None, context=None, **params):
+        super().__init__(
+            data=data,
+            close_button=close_button,
+            extra_features=extra_features or [],
+            panel_name="Selection_Set",
+            context=context,
+            require_settings=False,
+            **params,
+        )
+
+        self._widgets_initialised = False
+
+    # ------------------------------------------------------------------
+    # Selection helpers
+    # ------------------------------------------------------------------
+
+    def _get_active_selection_set_state(self):
+        if getattr(self, "context", None) is not None and getattr(self.context, "selection", None) is not None:
+            try:
+                return self.context.selection.get_active_set()
+            except Exception:
+                pass
+        return None
+
+    def _get_focus_state(self):
+        if getattr(self, "context", None) is not None and getattr(self.context, "selection", None) is not None:
+            try:
+                return self.context.selection.get_focus()
+            except Exception:
+                pass
+        return None
+
+    def _get_focus_row_id(self):
+        focus = self._get_focus_state()
+        if focus is None:
+            return None
+        row_id = getattr(focus, "row_id", None)
+        return None if row_id is None else str(row_id)
+
+    # ------------------------------------------------------------------
+    # Refresh handling
+    # ------------------------------------------------------------------
+
+    def _build_refresh_signature(self, reason=None, payload=None):
+        state = self._get_active_selection_set_state()
+        focus = self._get_focus_state()
+
+        return (
+            self._get_active_dataset_id(),
+            getattr(state, "selection_set_id", None),
+            getattr(state, "dataset_id", None),
+            len(getattr(state, "row_ids", []) or []) if state is not None else 0,
+            getattr(focus, "dataset_id", None) if focus is not None else None,
+            getattr(focus, "row_id", None) if focus is not None else None,
+        )
+
+    def _selection_event_cb(self, topic, payload):
+        self._request_refresh(reason=str(topic or "selection.changed"), payload=payload)
+
+    def _dataset_event_cb(self, topic, payload):
+        self._request_refresh(reason=str(topic or "dataset.changed"), payload=payload)
+
+    def _perform_refresh(self, reason=None, payload=None, refresh_signature=None):
+        try:
+            if not self._widgets_initialised:
+                self._finish_refresh(refresh_signature)
+                return
+
+            self._refresh_panel_state()
+        finally:
+            self._finish_refresh(refresh_signature)
+
+    # ------------------------------------------------------------------
+    # Data helpers
+    # ------------------------------------------------------------------
+
+    def _get_preview_df(self):
+        state = self._get_active_selection_set_state()
+        if state is None:
+            return pd.DataFrame(columns=["focus", "row_id"])
+
+        dataset_id = getattr(state, "dataset_id", None)
+        row_ids = [str(r) for r in list(getattr(state, "row_ids", []) or [])]
+        focus_row_id = self._get_focus_row_id()
+
+        if not row_ids:
+            return pd.DataFrame(columns=["focus", "row_id"])
+
+        if getattr(self, "datasets", None) is None:
+            preview = pd.DataFrame({"row_id": row_ids})
+            preview.insert(0, "focus", ["◀" if r == focus_row_id else "" for r in row_ids])
+            return preview.head(50)
+
+        try:
+            df = self.datasets.get_df(dataset_id).copy()
+        except Exception:
+            preview = pd.DataFrame({"row_id": row_ids})
+            preview.insert(0, "focus", ["◀" if r == focus_row_id else "" for r in row_ids])
+            return preview.head(50)
+
+        id_col = None
+        try:
+            id_col = self.resolve_column_name("id_col", df=df)
+        except Exception:
+            id_col = self.config.settings.get("id_col", "Use Index")
+
+        label_col = self.config.settings.get("label_col", "No Labels")
+
+        try:
+            if id_col in (None, "Use Index"):
+                subset = df.loc[df.index.astype(str).isin(row_ids)].copy()
+                subset.insert(0, "row_id", subset.index.astype(str))
+            else:
+                if id_col not in df.columns:
+                    preview = pd.DataFrame({"row_id": row_ids})
+                    preview.insert(0, "focus", ["◀" if r == focus_row_id else "" for r in row_ids])
+                    return preview.head(50)
+
+                subset = df.loc[df[id_col].astype(str).isin(row_ids)].copy()
+                subset.insert(0, "row_id", subset[id_col].astype(str))
+
+            subset.insert(0, "focus", ["◀" if str(r) == focus_row_id else "" for r in subset["row_id"]])
+
+            cols = ["focus", "row_id"]
+            if label_col not in (None, "No Labels") and label_col in subset.columns and label_col not in cols:
+                cols.append(label_col)
+
+            return subset[cols].head(50).reset_index(drop=True)
+
+        except Exception:
+            preview = pd.DataFrame({"row_id": row_ids})
+            preview.insert(0, "focus", ["◀" if r == focus_row_id else "" for r in row_ids])
+            return preview.head(50)
+
+    def _get_geometry_text(self):
+        state = self._get_active_selection_set_state()
+        if state is None:
+            return "—"
+
+        metadata = getattr(state, "metadata", {}) or {}
+        geometry = metadata.get("geometry", {}) or {}
+
+        if geometry.get("kind") != "box":
+            return "—"
+
+        bounds = geometry.get("bounds")
+        x_var = geometry.get("x_variable")
+        y_var = geometry.get("y_variable")
+
+        if not bounds or len(bounds) != 4:
+            return "—"
+
+        try:
+            x0, x1, y0, y1 = bounds
+            return (
+                f"{x_var}: [{x0:.4g}, {x1:.4g}]<br>"
+                f"{y_var}: [{y0:.4g}, {y1:.4g}]"
+            )
+        except Exception:
+            return f"{x_var}/{y_var}"
+
+    # ------------------------------------------------------------------
+    # Button actions
+    # ------------------------------------------------------------------
+
+    def _clear_selection_cb(self, event=None):
+        if getattr(self, "context", None) is None or getattr(self.context, "selection", None) is None:
+            return
+
+        self.context.selection.clear_selection_set(
+            origin="selection.set.panel.clear",
+            panel_id=self.panel_id,
+        )
+
+    def _focus_relative(self, delta):
+        state = self._get_active_selection_set_state()
+        if state is None:
+            return
+
+        row_ids = [str(r) for r in list(getattr(state, "row_ids", []) or [])]
+        if not row_ids:
+            return
+
+        focus_row_id = self._get_focus_row_id()
+
+        if focus_row_id in row_ids:
+            idx = row_ids.index(focus_row_id)
+            idx = (idx + delta) % len(row_ids)
+        else:
+            idx = 0 if delta >= 0 else len(row_ids) - 1
+
+        if getattr(self, "context", None) is None or getattr(self.context, "selection", None) is None:
+            return
+
+        self.context.selection.set_focus(
+            dataset_id=getattr(state, "dataset_id", self._get_active_dataset_id()),
+            row_id=row_ids[idx],
+            origin="selection.set.panel.focus",
+            panel_id=self.panel_id,
+            selection_set_id=getattr(state, "selection_set_id", None),
+        )
+
+    def _focus_prev_cb(self, event=None):
+        self._focus_relative(-1)
+
+    def _focus_next_cb(self, event=None):
+        self._focus_relative(1)
+
+    # ------------------------------------------------------------------
+    # UI
+    # ------------------------------------------------------------------
+
+    def _initialise_widgets(self):
+        self.summary_pane = pn.pane.HTML(
+            "",
+            sizing_mode="stretch_width",
+            margin=(0, 0, 8, 0),
+        )
+
+        self.geometry_pane = pn.pane.HTML(
+            "",
+            sizing_mode="stretch_width",
+            margin=(0, 0, 8, 0),
+        )
+
+        self.preview_table = pn.pane.HTML(
+            "",
+            sizing_mode="stretch_width",
+            margin=(0, 0, 0, 0),
+            height=260,
+            styles={
+                "overflow-y": "auto",
+                "overflow-x": "auto",
+                "border": "1px solid #ddd",
+                "border-radius": "6px",
+                "background": "white",
+                "padding": "0",
+            },
+        )
+
+        self.clear_button = pn.widgets.Button(
+            name="Clear set",
+            button_type="danger",
+            width=100,
+            height=32,
+            margin=(0, 0, 0, 0),
+        )
+        self.clear_button.on_click(self._clear_selection_cb)
+
+        self.prev_button = pn.widgets.Button(
+            name="Focus prev",
+            button_type="default",
+            width=100,
+            height=32,
+            margin=(0, 0, 0, 0),
+        )
+        self.prev_button.on_click(self._focus_prev_cb)
+
+        self.next_button = pn.widgets.Button(
+            name="Focus next",
+            button_type="primary",
+            width=100,
+            height=32,
+            margin=(0, 0, 0, 0),
+        )
+        self.next_button.on_click(self._focus_next_cb)
+
+        self.layout = pn.Column(
+            pn.pane.Markdown("### Selection Set", margin=(0, 0, 6, 0)),
+            self.summary_pane,
+            self.geometry_pane,
+            pn.Row(
+                self.prev_button,
+                self.next_button,
+                self.clear_button,
+                sizing_mode="stretch_width",
+                margin=(0, 0, 8, 0),
+            ),
+            self.preview_table,
+            sizing_mode="stretch_both",
+            min_height=0,
+            scroll=False,
+            margin=(0, 0, 0, 0),
+        )
+
+        self._widgets_initialised = True
+
+    def _preview_df_to_html(self, df: pd.DataFrame) -> str:
+        if df is None or df.empty:
+            return """
+            <div style="padding:10px; color:#666; font-size:13px;">
+                No rows in active selection set.
+            </div>
+            """
+
+        # Escape values lightly by converting to string only.
+        header_cells = "".join(
+            f'<th style="position:sticky; top:0; background:#f7f7f7; border-bottom:1px solid #ddd; padding:6px 8px; text-align:left; font-weight:600; font-size:12px;">{col}</th>'
+            for col in df.columns
+        )
+
+        body_rows = []
+        for _, row in df.iterrows():
+            cells = "".join(
+                f'<td style="border-bottom:1px solid #eee; padding:6px 8px; font-size:12px; white-space:nowrap;">{"" if pd.isna(val) else str(val)}</td>'
+                for val in row.values
+            )
+            body_rows.append(f"<tr>{cells}</tr>")
+
+        return f"""
+        <table style="width:100%; border-collapse:collapse;">
+            <thead>
+                <tr>{header_cells}</tr>
+            </thead>
+            <tbody>
+                {''.join(body_rows)}
+            </tbody>
+        </table>
+        """
+
+    def _refresh_panel_state(self):
+        state = self._get_active_selection_set_state()
+        focus = self._get_focus_state()
+
+        if state is None:
+            self.summary_pane.object = """
+            <div style="padding:8px 10px; border:1px solid #ddd; border-radius:6px; background:#fafafa;">
+                No active selection set.
+            </div>
+            """
+            self.geometry_pane.object = ""
+            self.preview_table.object = self._preview_df_to_html(pd.DataFrame(columns=["focus", "row_id"]))
+            self.prev_button.disabled = True
+            self.next_button.disabled = True
+            self.clear_button.disabled = True
+            return
+
+        row_ids = [str(r) for r in list(getattr(state, "row_ids", []) or [])]
+        dataset_id = getattr(state, "dataset_id", "—")
+        selection_set_id = getattr(state, "selection_set_id", "—")
+        focus_row_id = getattr(focus, "row_id", None) if focus is not None else None
+
+        self.summary_pane.object = f"""
+        <div style="border:1px solid #ddd; border-radius:6px; background:white; padding:10px;">
+            <div><b>Dataset:</b> {dataset_id}</div>
+            <div><b>Selection set:</b> {selection_set_id}</div>
+            <div><b>Selected sources:</b> {len(row_ids)}</div>
+            <div><b>Focused source:</b> {focus_row_id if focus_row_id is not None else "—"}</div>
+        </div>
+        """
+
+        self.geometry_pane.object = f"""
+        <div style="border:1px solid #eee; border-radius:6px; background:#fcfcfc; padding:8px 10px;">
+            <b>Selection geometry:</b><br>{self._get_geometry_text()}
+        </div>
+        """
+
+        self.preview_table.object = self._preview_df_to_html(self._get_preview_df())
+
+        has_rows = len(row_ids) > 0
+        self.prev_button.disabled = not has_rows
+        self.next_button.disabled = not has_rows
+        self.clear_button.disabled = not has_rows
+
+    def get_layout(self):
+        if not self._widgets_initialised:
+            self._initialise_widgets()
+
+            self._bind_selection_runtime_subscriptions()
+            self.subscribe("selection.set.changed", self._selection_event_cb)
+            self.subscribe("selection.set.cleared", self._selection_event_cb)
+            self.subscribe("dataset.active.changed", self._dataset_event_cb)
+            self.subscribe("dataset.updated", self._dataset_event_cb)
+
+        self._request_initial_refresh_once(reason="initial.layout")
+        return self.layout

@@ -238,6 +238,28 @@ class BasePlotClass(param.Parameterized):
             update_focus_policy=update_focus_policy,
         )
 
+    def _get_active_selection_set_state(self):
+        if self.context is not None and getattr(self.context, "selection", None) is not None:
+            try:
+                return self.context.selection.get_active_set()
+            except Exception:
+                pass
+        return None
+
+
+    def _handle_selection_set_change_event(self, topic, payload):
+        """
+        Rerender on selection-set changes.
+
+        We do not filter aggressively here because a changed/cleared selection set
+        should remove stale overlays even if the new set belongs to another dataset.
+        """
+        self._request_refresh(reason=str(topic or "selection.set.changed"), payload=payload)
+
+
+    def _handle_selection_set_cleared_event(self, topic, payload):
+        self._request_refresh(reason=str(topic or "selection.set.cleared"), payload=payload)
+
     def _get_active_dataset_id(self):
         if self.context is not None and getattr(self.context, "datasets", None) is not None:
             try:
@@ -623,6 +645,9 @@ class BasePlotClass(param.Parameterized):
 
         self.subscribe_event("selection.focus.changed", self._handle_focus_change_event)
         self.subscribe_event("selection.focus.cleared", self._handle_focus_cleared_event)
+
+        self.subscribe_event("selection.set.changed", self._handle_selection_set_change_event)
+        self.subscribe_event("selection.set.cleared", self._handle_selection_set_cleared_event)
 
     def _toggle_settings_panel(self, event):
         self.settings_panel.visible = not self.settings_panel.visible
@@ -1083,6 +1108,109 @@ class ScatterPlotDashboard(BasePlotClass):
         value = self.config.settings["Scatter_plot_settings"].get(key, default)
         return value
     
+    def _get_active_selection_set_row_ids(self):
+        state = self._get_active_selection_set_state()
+        if state is None:
+            return []
+
+        dataset_id = getattr(state, "dataset_id", None)
+        if dataset_id != self._get_active_dataset_id():
+            return []
+
+        row_ids = list(getattr(state, "row_ids", []) or [])
+        return [str(r) for r in row_ids]
+
+
+    def _get_active_selection_box_bounds(self):
+        state = self._get_active_selection_set_state()
+        if state is None:
+            return None
+
+        dataset_id = getattr(state, "dataset_id", None)
+        if dataset_id != self._get_active_dataset_id():
+            return None
+
+        metadata = getattr(state, "metadata", {}) or {}
+        geometry = metadata.get("geometry", {}) or {}
+
+        if geometry.get("kind") != "box":
+            return None
+
+        if geometry.get("x_variable") != self.X_variable:
+            return None
+
+        if geometry.get("y_variable") != self.Y_variable:
+            return None
+
+        bounds = geometry.get("bounds")
+        if not bounds or len(bounds) != 4:
+            return None
+
+        try:
+            x0, x1, y0, y1 = bounds
+            return (float(x0), float(x1), float(y0), float(y1))
+        except Exception:
+            return None
+
+
+    def _get_selection_set_overlay(self):
+        row_ids = self._get_active_selection_set_row_ids()
+        if not row_ids:
+            return None
+
+        id_col = self.config.settings.get("id_col", "Use Index")
+
+        try:
+            if id_col == "Use Index":
+                mask = self.df.index.astype(str).isin(row_ids)
+                selected = self.df.loc[mask]
+            else:
+                if id_col not in self.df.columns:
+                    return None
+                mask = self.df[id_col].astype(str).isin(row_ids)
+                selected = self.df.loc[mask]
+
+            if selected.empty:
+                return None
+
+            if self.X_variable not in selected.columns or self.Y_variable not in selected.columns:
+                return None
+
+            return hv.Points(
+                selected,
+                kdims=[self.X_variable, self.Y_variable],
+            ).opts(
+                marker="circle",
+                size=8,
+                fill_alpha=0.0,
+                line_color="orange",
+                line_width=2,
+                active_tools=[],
+                logx=self.log_xscale,
+                logy=self.log_yscale,
+            )
+        except Exception:
+            return None
+
+
+    def _get_selection_box_overlay(self):
+        bounds = self._get_active_selection_box_bounds()
+        if bounds is None:
+            return None
+
+        x0, x1, y0, y1 = bounds
+        left, right = sorted((x0, x1))
+        bottom, top = sorted((y0, y1))
+
+        return hv.Rectangles([(left, bottom, right, top)]).opts(
+            fill_alpha=0.08,
+            fill_color="orange",
+            line_color="orange",
+            line_width=2,
+            active_tools=[],
+            show_legend=False,
+        )
+    
     
     def _update_all_settings_dictionary(self):
         new_values =  {"X_variable" : self.X_variable,
@@ -1114,8 +1242,17 @@ class ScatterPlotDashboard(BasePlotClass):
         watch=True
     )
     def _update_plot(self):
+        # Important: clear old stream watchers before rebuilding the interactive plot
+        try:
+            self.unwatch_all_params()
+        except Exception:
+            pass
+
         self._update_all_settings_dictionary()
         self.main_plot = self.plot()
+
+        selection_box_plot = self._get_selection_box_overlay()
+        selection_set_plot = self._get_selection_set_overlay()
         selected_src_plot = self.plot_selected(self.X_variable, self.Y_variable)
 
         overlay_opts = dict(
@@ -1130,24 +1267,15 @@ class ScatterPlotDashboard(BasePlotClass):
             toolbar="right",
             show_grid=True,
             legend_position="right",
+            legend_opts={"click_policy": "mute" if self.plot_mode == "tap" else "hide"},
         )
 
-        overlay_opts["legend_opts"] = {
-            "click_policy": "mute" if self.plot_mode == "tap" else "hide"
-        }
+        self.figure.object = self._compose_overlay(
+            [self.main_plot, selection_box_plot, selection_set_plot, selected_src_plot],
+            **overlay_opts,
+        )
 
-        if selected_src_plot is not None:
-            self.figure.object = self._compose_overlay(
-                [self.main_plot, selected_src_plot],
-                **overlay_opts,
-            )
-        else:
-            self.figure.object = self._compose_overlay(
-                [self.main_plot],
-                **overlay_opts,
-            )
-
-    def _handle_scatter_selection_indices(self, indices, sourceid):
+    def _handle_scatter_selection_indices(self, indices, sourceid, bounds=None):
         if not indices:
             return
 
@@ -1169,17 +1297,27 @@ class ScatterPlotDashboard(BasePlotClass):
             )
             return
 
-        # Multi-point selection -> selection set
+        metadata = {
+            "x_variable": self.X_variable,
+            "y_variable": self.Y_variable,
+            "plot_mode": self.plot_mode,
+            "panel_type": "scatter",
+        }
+
+        if bounds is not None and len(bounds) == 4:
+            left, bottom, right, top = bounds
+            metadata["geometry"] = {
+                "kind": "box",
+                "x_variable": self.X_variable,
+                "y_variable": self.Y_variable,
+                "bounds": [left, right, bottom, top],
+            }
+
         self.set_selection_set(
             row_ids,
             origin="scatter.box_select",
             mode="replace",
-            metadata={
-                "x_variable": self.X_variable,
-                "y_variable": self.Y_variable,
-                "plot_mode": self.plot_mode,
-                "panel_type": "scatter",
-            },
+            metadata=metadata,
             create_artifact=True,
             update_focus_policy="preserve_or_first",
         )
@@ -1241,14 +1379,28 @@ class ScatterPlotDashboard(BasePlotClass):
             )
 
             sel_stream = streams.Selection1D(source=points)
+            bounds_stream = streams.BoundsXY(source=points)
+
+            _last_bounds = {"value": None}
+
+            def bounds_callback(event):
+                _last_bounds["value"] = event.new
 
             def selection_callback(event):
                 indices = list(event.new or [])
                 if not indices:
                     return
 
-                self._handle_scatter_selection_indices(indices, sourceid)
+                bounds = _last_bounds["value"]
+                if bounds is None:
+                    try:
+                        bounds = bounds_stream.bounds
+                    except Exception:
+                        bounds = None
 
+                self._handle_scatter_selection_indices(indices, sourceid, bounds=bounds)
+
+            self.watch_param(bounds_stream, "bounds", bounds_callback)
             self.watch_param(sel_stream, "index", selection_callback)
             return points
 
