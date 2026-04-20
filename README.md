@@ -1,89 +1,228 @@
-[![Build Status](https://travis-ci.com/grant-m-s/astronomicAL.svg?token=upRGxrMseZqj7kT3bSGx&branch=master)](https://travis-ci.com/grant-m-s/astronomicAL) [![codecov](https://codecov.io/gh/grant-m-s/astronomicAL/branch/master/graph/badge.svg?token=TCO9J2AD1Z)](https://codecov.io/gh/grant-m-s/astronomicAL) [![Documentation Status](https://readthedocs.org/projects/astronomical/badge/?version=latest)](https://astronomical.readthedocs.io/en/latest/?badge=latest)
+# AstronomicAL (`context-core-api`)
 
-[![DOI](https://joss.theoj.org/papers/10.21105/joss.03635/status.svg)](https://doi.org/10.21105/joss.03635)
+> [!WARNING]
+> This branch is under active development and the codebase is changing frequently. Some parts of the platform are still incomplete, unstable, or not yet fully functional.
+>
+> For now, if you are testing panels or exploring the current architecture, use **Exploration Mode**. Other modes are still undergoing significant work and should not yet be considered reliable.
 
-[![python](https://img.shields.io/badge/Python-3.8-blue?style=flat&logo=python&logoColor=white)](https://www.python.org)
+AstronomicAL is evolving from a domain-flexible but astronomy-heavy application into a smaller, generic platform for building interactive, panel-based analysis workspaces.
 
-# AstronomicAL
+The `context-core-api` branch introduces a platform layer built around shared runtime services such as datasets, selection state, events, artifacts, jobs, workspace management, and runtime services. The aim is to keep the core small and generic while allowing astronomy-specific and other domain-specific functionality to be built as composable panels and plugins.
 
-## An interactive dashboard for visualisation, integration and classification of data using Active Learning.
+This branch is intended for contributors and early adopters exploring the new architecture. Migration from older config-driven patterns is still in progress, and `context.config` remains as a temporary bridge for legacy code. New code should prefer the newer platform services. 
 
-https://github.com/grant-m-s/AstronomicAL/assets/12834844/4724c341-2a96-446b-8cd0-fcb6ac9efef8
+## Why this branch exists
 
----
+AstronomicAL originally aimed to support interactive analysis of tabular scientific data in a domain-agnostic way. Over time, more astronomy-specific capabilities and workflow assumptions accumulated in the main application, making the project heavier and less clearly generic.
 
-AstronomicAL is a human-in-the-loop interactive labelling and training dashboard that allows users to create reliable datasets and robust classifiers using active learning. The system enables users to visualise and integrate data from different sources and deal with incorrect or missing labels and imbalanced class sizes by using active learning to help the user focus on correcting the labels of a few key examples. Combining the use of the [Panel](https://panel.holoviz.org/), [Bokeh](https://docs.bokeh.org/en/latest/index.html), [modAL](https://github.com/modAL-python/modAL) and [SciKit Learn](https://scikit-learn.org/stable/) packages, AstronomicAL enables researchers to take full advantage of the benefits of active learning: high accuracy models using just a fraction of the total data, without the requirement of being well versed in underlying libraries.
+This branch addresses that by moving shared runtime behavior into a small platform core and pushing domain-specific and workflow-specific logic outward into composable modules. The long-term goal is for astronomy to be one plugin/workflow bundle among many, rather than the built-in identity of the whole application. 
 
-![Load Configuration](docs/source/images/AstronomicAL_demo.gif)
+## What this branch is
 
-### Statement of Need
+This branch is:
 
-Active learning [(Settles, 2012)](https://www.morganclaypool.com/doi/abs/10.2200/S00429ED1V01Y201207AIM018) removes the requirement for large amounts of labelled training data whilst still producing high accuracy models. This is extremely important as with ever-growing datasets; it is becoming impossible to manually inspect and verify ground truth used to train machine learning systems. The reliability of the training data limits the performance of any supervised learning model, so consistent classifications become more problematic as data sizes increase. The problem is exacerbated when a dataset does not contain any labelled data, preventing supervised learning techniques entirely. AstronomicAL has been developed to tackle these issues head-on and provide a solution for any large scientific dataset.
+- a platform refactor in progress
+- a host for building analysis workspaces out of panels and services
+- useful for contributors building new panels or migrating old ones
 
-It is common for active learning to query areas of high uncertainty; these are often in the boundaries between classes where the expert's knowledge is required. To facilitate this human-in-the-loop process, AstronomicAL provides users with the functionality to fully explore each data point chosen. This allows them to inject their domain expertise directly into the training process, ensuring that asigned labels are both accurate and reliable.
+This branch is not:
 
-AstronomicAL has been extensively validated on astronomy datasets. These are highly representative of the issues that we anticipate will be found in other domains for which the tool is designed to be easily customisable. Such issues include the volume of data (millions of sources per survey), vastly imbalanced classes and ambiguous class definitions leading to inconsistent labelling. AstronomicAL has been developed to be sufficiently general for any tabular data and can be customised for any domain. For example, we provide the functionality for data fusion of catalogued data and online cutout services for astronomical datasets.
+- a finished replacement for the original application
+- only an astronomy dashboard
+- only an active-learning tool
 
-Using its modular and extensible design, researchers can quickly adapt AstronomicAL for their research to allow for domain-specific plots, novel query strategies, and improved models. Furthermore, there is no requirement to be well-versed in the underlying libraries that the software uses. This is due to large parts of the complexity being abstracted whilst allowing more experienced users to access full customisability.
+Active learning remains an important use case, but the new architecture is intended to support many kinds of workflows, including non-ML workflows. 
 
-As the software runs entirely locally on the user's system, AstronomicAL provides a private space to experiment whilst providing a public mechanism to share results. By sharing only the configuration file, users remain in charge of distributing their potentially sensitive data, enabling collaboration whilst respecting privacy.
+## Core concepts
 
-### Documentation
+The platform is organized around a small set of services exposed through `AppContext`:
 
-The documentation for AstronomicAL can be found [here](https://astronomical.readthedocs.io).
+- `context` — host dependency access
+- `datasets` — canonical source data
+- `selection` — current focus and active multi-row selection sets
+- `events` — decoupled notifications
+- `artifacts` — derived outputs and reusable intermediate results
+- `jobs` — slow or cancellable background work
+- `workspace` — panel lifecycle and layout management
+- `services` — shared live runtime capabilities
+- `config` — temporary migration bridge for older code 
 
-## Installation
+A good rule of thumb is:
 
-To install AstronomicAL and its dependencies, the user can clone the repository and from within the repo folder run `pip install -r requirements.txt`. . It is recommended that the user creates a virtual environment using tools such as [Virtualenv](https://packaging.python.org/guides/installing-using-pip-and-virtual-environments/#installing-virtualenv) or [Conda](https://docs.conda.io/projects/conda/en/latest/user-guide/tasks/manage-environments.html), to prevent any conflicting package versions.
+- source data goes in `datasets`
+- current user focus goes in `selection`
+- computed results go in `artifacts`
+- notifications go through `events`
+- slow work goes through `jobs`
+- visible panels are managed by `workspace`
+- API clients and similar live objects go in `services` 
 
-```
+## Install
+
     git clone https://github.com/grant-m-s/AstronomicAL.git
     cd AstronomicAL
-    conda config --add channels conda-forge
-    conda create --name astronomical --file requirements.txt python=3.8
-    conda activate astronomical
-```
+    git checkout context-core-api
+    python -m venv venv
+    source venv/bin/activate
+    pip install -r requirements.txt
 
-### Quickstart Instructions
+## Run
 
-To begin using the software, run `bokeh serve astronomicAL --show` and your browser should automatically open to [localhost:5006/astronomicAL](localhost:5006/astronomicAL>`)
+    panel serve astronomicAL --show
 
-AstronomicAL provides both an example dataset and an example configuration file to allow you to jump right into the software and give it a test run.
+This branch is transitional, so some older config-driven paths may still exist alongside the newer platform services. The recommended direction for new work is the `context`-based model described below. 
 
-![Load Configuration](docs/source/images/Load_config_AL.gif)
+## Build your own panel
 
-To begin training you simply have to select **Load Custom Configuration** checkbox and select your config file. Here we have chosen to use the `example_config.json` file.
+New panels should treat `context` as the host API.
 
-The **Load Config Select** option allows use to choose the extent to which to reload the configuration.
+Minimal example:
 
-## Contributing to AstronomicAL
+    class DetailPanel:
+        def __init__(self, context):
+            self.context = context
+            self.events = context.events
+            self.datasets = context.datasets
+            self.selection = context.selection
 
-### Reporting Bugs
+            self.sub = self.events.subscribe(
+                "selection.focus.changed",
+                self.on_selection_focus_changed
+            )
 
-If you encounter a bug, you can directly report it in the [issues section](https://github.com/grant-m-s/AstronomicAL/issues).
+            current_focus = self.selection.get_focus()
+            if current_focus:
+                self.on_selection_focus_changed("selection.focus.changed", current_focus)
 
-Please describe how to reproduce the bug and include as much information as possible that can be helpful for fixing it.
+        def on_selection_focus_changed(self, topic, payload):
+            dataset_id = payload["dataset_id"]
+            row_id = payload["row_id"]
 
-**Are you able to fix a bug?**
+            df = self.datasets.get_df(dataset_id)
+            row = df[df["id"] == row_id]
+            self.render(row)
 
-You can open a new pull request or include your suggested fix in the issue.
+        def render(self, row):
+            print("Render row:", row)
 
-### Submission of extensions
+        def dispose(self):
+            self.events.unsubscribe(self.sub)
 
-**Have you created an extension that you want to share with the community?**
+This is the recommended pattern:
 
-Create a pull request describing your extension and how it can improve research for others.
+- read source data from `datasets`
+- read and publish selection through `selection`
+- react through `events`
+- use `jobs` for slow work
+- store reusable outputs in `artifacts`
+- open and close panels through `workspace`
+- clean up subscriptions and jobs in `dispose()` 
 
-### Support and Feedback
+### Publish focus from a table
 
-We would love to hear your thoughts on AstronomicAL.
+    class CatalogTable:
+        def __init__(self, context):
+            self.context = context
 
-Are there any features that would improve the effectiveness and usability of AstronomicAL? Let us know!
+        def on_row_clicked(self, row_id):
+            self.context.selection.set_focus(
+                dataset_id=self.context.datasets.active_id(),
+                row_id=row_id,
+                origin="catalog_table"
+            )
 
-Any feedback can be submitted as an [issue](https://github.com/grant-m-s/AstronomicAL/issues).
+### Run slow work through `jobs`
 
-## Referencing the Package
+    class SpectrumPanel:
+        def __init__(self, context):
+            self.context = context
+            self.sub = context.events.subscribe(
+                "selection.focus.changed",
+                self.on_selection_focus_changed
+            )
 
-Please remember to cite our software and user guide whenever relevant.
+        def on_selection_focus_changed(self, topic, payload):
+            dataset_id = payload["dataset_id"]
+            row_id = payload["row_id"]
 
-See the [Citing page](https://astronomical.readthedocs.io/en/latest/content/other/citing.html) in the documentation for instructions about referencing and citing the astronomicAL software.
+            self.context.jobs.submit(
+                self.fetch_spectrum,
+                title="Fetch spectrum",
+                key=f"spectrum:{dataset_id}:{row_id}",
+                on_done=lambda result: self.on_loaded(dataset_id, row_id, result),
+                row_id=row_id,
+            )
+
+        def fetch_spectrum(self, *, cancel_token, row_id):
+            if cancel_token and cancel_token.cancelled():
+                return None
+            client = self.context.services.get("desi_client")
+            return client.fetch_spectrum(row_id)
+
+        def on_loaded(self, dataset_id, row_id, result):
+            if result is None:
+                return
+
+            artifact_id = self.context.artifacts.put(
+                "spectra.desi",
+                result,
+                dataset_id=dataset_id,
+                row_ids=[row_id]
+            )
+
+            self.context.events.publish(
+                "artifact.created",
+                {
+                    "artifact_id": artifact_id,
+                    "type": "spectra.desi"
+                }
+            )
+
+The common pattern is:
+
+1. react to selection or another event
+2. run slow work through `jobs`
+3. store the result in `artifacts`
+4. publish a lightweight event announcing it 
+
+## Migration notes
+
+Older AstronomicAL code often relied on global config, shared mutable state, direct panel coupling, and ad hoc threads.
+
+The migration direction for this branch is:
+
+| Older pattern | New direction |
+|---|---|
+| Global dataframe in config/shared module | `context.datasets` |
+| Current focused row or selected subset | `context.selection` |
+| Shared computed state | `context.artifacts` |
+| Panel calling another panel directly | `context.events` |
+| Ad hoc background thread | `context.jobs` |
+| Direct layout mutation | `context.workspace` |
+| Global client or connector | `context.services` |
+| Temporary compatibility | `context.config` | :contentReference[oaicite:9]{index=9}
+
+For new contributions, prefer the platform model over extending older global/config-based patterns. 
+
+## Contributor guidance
+
+When building new features:
+
+- keep the core small and generic
+- keep domain-specific logic out of the core where possible
+- prefer events over direct panel references
+- use artifacts for derived outputs instead of shared mutable fields
+- use jobs for slow work
+- always clean up subscriptions, watchers, and jobs 
+
+## Further reading
+
+The branch direction is explained in more detail in the platform documents:
+
+- plugin and panel examples
+- platform overview
+- migration guide 
+
+## Background
+
+The original AstronomicAL project was introduced as an interactive environment for visualization, integration, and classification of scientific data with active learning. That remains an important part of the project history and a major use case, but the `context-core-api` branch is focused on a broader platform architecture.
