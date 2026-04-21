@@ -1256,7 +1256,7 @@ def VLASS_cutout(ra, dec, radius = 10, verbose = False, check_coverage = True):
     print("VLA-VLASS does not cover these coordinates")
     return None
 
-def make_srcdoc_aladin_lite(survey_id, ra, dec, fov = 0.015):
+def make_srcdoc_aladin_lite(survey_id, ra, dec, fov = 0.08):
     tpl = Template("""<!doctype html>
             <html><head>
             <meta charset="utf-8"/>
@@ -1268,7 +1268,7 @@ def make_srcdoc_aladin_lite(survey_id, ra, dec, fov = 0.015):
             <script>
             A.init.then(function () {
                 A.aladin("#aladin", {
-                cooFrame: "ICRS",
+                cooFrame: "ICRSd",
                 survey: "$survey",
                 target: "$ra $dec",
                 fov: $fov,

@@ -4293,7 +4293,17 @@ class AladinClass(CustomPlotClass):
             self.config = context.config
 
 
-        self.figure = pn.pane.HTML("", sizing_mode="stretch_both")
+        self.figure = pn.pane.HTML(
+            "",
+            sizing_mode="stretch_both",
+            margin=0,
+            styles={
+                "width": "100%",
+                "height": "100%",
+                "overflow": "hidden",
+                "flex": "1 1 auto",
+            },
+        )
 
         self._bind_selection_runtime_subscriptions()
 
@@ -4315,10 +4325,16 @@ class AladinClass(CustomPlotClass):
 
     @staticmethod
     def make_iframe_html(survey_id, ra, dec):
-        srcdoc = make_srcdoc_aladin_lite(survey_id = survey_id, ra = ra, dec =dec)
-        # Escape for inclusion inside the srcdoc='' attribute
+        srcdoc = make_srcdoc_aladin_lite(survey_id=survey_id, ra=ra, dec=dec)
         srcdoc_escaped = html.escape(srcdoc, quote=True)
-        return "<iframe width='800' height='500' style='border:none' srcdoc='{0}'></iframe>".format(srcdoc_escaped)
+        return f"""
+        <div style="width:100%; height:100%; margin:0; padding:0; overflow:hidden;">
+            <iframe
+                srcdoc="{srcdoc_escaped}"
+                style="display:block; width:100%; height:100%; border:none;"
+            ></iframe>
+        </div>
+        """
     
     def _initialise_widgets(self):
 
@@ -4351,26 +4367,40 @@ class AladinClass(CustomPlotClass):
             "Euclid Q1 (color)" : "CDS/P/Euclid/Q1/color",
         }
     
-        self.survey_selector = pn.widgets.Select(name = "Survey",
-                                                 value = "P/DSS2/color",
-                                                 groups = {"X-rays" : xray_surveys,
-                                                           "Optical/UV" : optical_surveys,
-                                                           "IR" : ir_surveys})
+
+        self.survey_selector = pn.widgets.Select(
+            name="Survey",
+            value="P/DSS2/color",
+            groups={
+                "X-rays": xray_surveys,
+                "Optical/UV": optical_surveys,
+                "IR": ir_surveys,
+            },
+            sizing_mode="stretch_width",
+            height=38,
+            max_height=38,
+            margin=0,
+        )
         
         self.add_param_watch(self.survey_selector, self._update_image, what="value")
 
 
-        self.plot_settings_panel = pn.Column(self.survey_selector, 
-                                             scroll = True, visible = False, min_height=50,max_height=80)
+        self.plot_settings_panel = pn.Row(
+            self.survey_selector,
+            visible=False,
+            sizing_mode="stretch_width",
+            height=50,
+            max_height=50,
+            margin=0,
+            styles={"flex": "0 0 auto"},
+        )
 
 
     def _update_image(self, event):
         self.message_pane.visible = False
         self.figure.object = self.make_iframe_html(self.survey_selector.value, 
                                           self.ra, self.dec)
-        
 
-    
     def get_layout(self):
         self._initialise_widgets()
         self.ra, self.dec = self.get_ra_dec()
@@ -4378,11 +4408,14 @@ class AladinClass(CustomPlotClass):
             self.get_error_panel("Aladin panel unavailable", "Missing RA or DEC value")
 
         self._update_image(None)
-        return  pn.Column(self.message_pane,self.plot_settings_panel, self.figure, 
-                          scroll = True, sizing_mode = "stretch_both")
 
-
-
+        return pn.Column(
+            self.message_pane,
+            self.plot_settings_panel,
+            self.figure,
+            sizing_mode="stretch_both",
+            margin=0,
+        )
     
 class LogBookClass(CustomPlotClass):
     
