@@ -708,6 +708,9 @@ class PluginManager:
                 raise PluginLoadError(f"Failed to reload plugin {plugin_id}: {exc}") from exc
         self.enable(plugin_id, context, validate=False)
 
+        if hasattr(context, "events"):
+            context.events.publish("plugin.reloaded", {"plugin_id": plugin_id})
+
     def _register_panel(self, registration: PanelRegistration) -> None:
         self._ensure_unique(self._panels, registration.id, "panel")
         self._panels[registration.id] = registration

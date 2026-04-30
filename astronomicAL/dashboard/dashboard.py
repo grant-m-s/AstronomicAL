@@ -11,6 +11,25 @@ from bokeh.models import ColumnDataSource
 import panel as pn
 import param
 
+NATIVE_CONTENTS = {
+    "Menu",
+    "Basic Plot",
+    "Histogram Plot",
+    "Density Plot",
+    "Selected Source Info",
+
+    # Built-in workflow/dashboard modes.
+    # These are not custom plots and should not be validated against
+    # get_customplot_dict() or get_plot_dict().
+    "Exploring",
+    "Explorer",
+    "Exploration",
+    "Active Learning",
+    "Labelling",
+    "Labelling Test Set",
+    "Settings",
+}
+
 
 class Dashboard(param.Parameterized):
     """Top-level Dashboard which holds an instance of any other Dashboard.
@@ -39,6 +58,8 @@ class Dashboard(param.Parameterized):
 
     def __init__(self, src, contents="Menu", context=None):
         super(Dashboard, self).__init__()
+
+        self.NATIVE_CONTENTS = NATIVE_CONTENTS
 
         self._bokeh_on_change = []
         self.src = ColumnDataSource(data={"0": [], "1": []})
@@ -73,6 +94,92 @@ class Dashboard(param.Parameterized):
         self.plot_dict = extension_plots.get_plot_dict()
         self.cust_plot_dict = custom_plots.get_customplot_dict(context=context)
         self.contents = contents
+
+    def _refresh_plot_registries(self):
+        self.plot_dict = extension_plots.get_plot_dict()
+        self.cust_plot_dict = custom_plots.get_customplot_dict(context=self.context)
+
+    def _available_content_names(self) -> set[str]:
+        """Return currently selectable content names.
+
+        Built-in dashboard/workflow modes must always be included here. They are not
+        plugin panels and are not present in custom_plots or extension_plots.
+
+        Plugin/custom/extension entries are dynamic and may disappear when a plugin
+        is disabled.
+        """
+
+        return (
+            set(self.NATIVE_CONTENTS)
+            | set(self.plot_dict.keys())
+            | set(self.cust_plot_dict.keys())
+        )
+
+    def _fixed_toolbar(self):
+        show_close = getattr(self, "contents", None) is not None
+
+        if not show_close:
+            return pn.Spacer(
+                height=1,
+                min_height=1,
+                max_height=1,
+                sizing_mode="stretch_width",
+            )
+
+        return pn.Row(
+            self._close_button,
+            pn.Spacer(sizing_mode="stretch_width"),
+            height=52,
+            min_height=52,
+            max_height=52,
+            sizing_mode="stretch_width",
+            align="center",
+            margin=(0, 0, 0, 0),
+            styles={
+                "flex": "0 0 52px",
+                "min-height": "52px",
+                "max-height": "52px",
+                "overflow": "visible",
+            },
+        )
+
+    def show_message(self, title: str, message: str, *, level: str = "warning") -> None:
+        """Replace panel contents with a simple non-crashing message panel."""
+
+        icon = {
+            "info": "ℹ️",
+            "warning": "⚠️",
+            "error": "❌",
+        }.get(level, "⚠️")
+
+        back_button = pn.widgets.Button(
+            name="Back to Menu",
+            button_type="primary",
+            width=140,
+            height=34,
+        )
+
+        message_panel = pn.Column(
+            pn.Spacer(height=12),
+            pn.pane.Markdown(
+                f"## {icon} {title}\n\n{message}",
+                sizing_mode="stretch_width",
+            ),
+            back_button,
+            sizing_mode="stretch_both",
+            margin=(8, 12, 8, 12),
+        )
+
+        back_button.on_click(lambda _event: self.set_contents("Menu"))
+
+        self.panel_contents = message_panel
+        self.row[0] = pn.Column(
+            self._fixed_toolbar(),
+            message_panel,
+            sizing_mode="stretch_both",
+            margin=(0, 0, 0, 0),
+            styles={"overflow": "hidden"},
+        )
 
     def _dataset_is_loaded(self) -> bool:
         return getattr(self.config, "main_df", None) is not None and not self.config.main_df.empty
@@ -259,18 +366,28 @@ class Dashboard(param.Parameterized):
         self.panel()
 
     def set_contents(self, updated):
-        """Update the current dashboard by setting a new `contents`.
+        """Update the current dashboard by setting a new `contents`."""
 
-        Parameters
-        ----------
-        updated : str
-            The new contents view required.
+        self._refresh_plot_registries()
 
-        Returns
-        -------
-        None
+        # Built-in dashboard modes must be allowed through so they can perform their
+        # own setup, such as Exploration requesting missing column mappings.
+        if updated in self.NATIVE_CONTENTS:
+            self.contents = updated
+            return
 
-        """
+        # Dynamic entries need validation because plugin-backed menu items can go
+        # stale after a plugin is disabled.
+        if updated not in self._available_content_names():
+            self.show_message(
+                title="Plot unavailable",
+                message=(
+                    f"`{updated}` is no longer available. "
+                    "It may belong to a plugin that has been disabled."
+                ),
+                level="warning",
+            )
+            return
 
         self.contents = updated
     
@@ -299,9 +416,14 @@ class Dashboard(param.Parameterized):
 
         # Decide toolbar: EITHER provided OR default, never both
         if provided_toolbar is None:
-            show_close = getattr(self, "contents", None) is not None
-            toolbar = pn.Row(self._close_button, max_height=50) if show_close else pn.Spacer(height=1)
-            self.row[0] = pn.Column(toolbar, body, sizing_mode="stretch_both")
+            toolbar = self._fixed_toolbar()
+            self.row[0] = pn.Column(
+                toolbar,
+                body,
+                sizing_mode="stretch_both",
+                margin=(0, 0, 0, 0),
+                styles={"overflow": "hidden"},
+            )
         else:
             self.row[0] = body
         

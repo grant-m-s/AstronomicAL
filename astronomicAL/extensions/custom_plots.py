@@ -98,13 +98,36 @@ def _plugin_panel_factory(panel_id):
                 )
             )
 
-        # Do not pass close_button into plugin panels.
-        # The legacy shell already renders it.
-        view, controller = context.plugins.create_panel(
-            panel_id,
-            context,
-            data=data,
-        )
+        try:
+            view, controller = context.plugins.create_panel(
+                panel_id,
+                context,
+                data=data,
+            )
+        except KeyError:
+            return _PluginPanelAdapter(
+                pn.Column(
+                    pn.pane.Markdown(
+                        "## ⚠️ Plugin panel unavailable\n\n"
+                        f"The plugin panel `{panel_id}` is no longer registered. "
+                        "It may belong to a plugin that has been disabled."
+                    ),
+                    sizing_mode="stretch_both",
+                    margin=(8, 12, 8, 12),
+                )
+            )
+        except Exception as exc:
+            return _PluginPanelAdapter(
+                pn.Column(
+                    pn.pane.Markdown(
+                        "## ❌ Plugin panel failed to load\n\n"
+                        f"Panel id: `{panel_id}`\n\n"
+                        f"Error: `{exc}`"
+                    ),
+                    sizing_mode="stretch_both",
+                    margin=(8, 12, 8, 12),
+                )
+            )
 
         return _PluginPanelAdapter(view, controller)
 

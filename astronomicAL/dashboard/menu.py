@@ -10,13 +10,16 @@ from astronomicAL.extensions import extension_plots
 from astronomicAL.extensions import custom_plots
 from astronomicAL.utils.debug import boot_print
 
+
 class MenuDashboard:
     """Dashboard used to dynamically choose which view to display."""
 
     def __init__(self, main, context=None):
-        
+        self.main = main
         self.context = context if context is not None else getattr(main, "context", None)
         self.row = pn.Row(pn.pane.Str("loading"))
+        self._subscriptions = []
+        self._disposed = False
 
         boot_print("MenuDashboard.__init__: start")
         boot_print(f"MenuDashboard.__init__: context_present={self.context is not None}")
@@ -25,11 +28,12 @@ class MenuDashboard:
             f"{getattr(self.context, 'plugins', None) is not None if self.context is not None else False}"
         )
 
-        plot_options = self._build_plot_options()
+        self._dropdown = Dropdown(
+            label="Choose Plot Type:",
+            menu=self._build_plot_options(),
+        )
 
-        dd = Dropdown(label="Choose Plot Type:", menu=plot_options)
-
-        dd.stylesheets = [
+        self._dropdown.stylesheets = [
             InlineStyleSheet(
                 css="""
                 /* Button */
@@ -81,14 +85,20 @@ class MenuDashboard:
             )
         ]
 
-        dd.on_click(
+        self._dropdown.on_click(
             partial(
                 self._update_main_contents,
                 main=main,
             )
         )
 
-        self._plot_selection = pn.pane.Bokeh(dd)
+        self._plot_selection = pn.pane.Bokeh(self._dropdown)
+
+        self._subscribe_to_plugin_events()
+
+    # ------------------------------------------------------------------
+    # Menu construction / refresh
+    # ------------------------------------------------------------------
 
     def _build_plot_options(self):
         """Build menu options from static plots, legacy custom plots, and plugins."""
@@ -106,9 +116,9 @@ class MenuDashboard:
 
         extension_options = list(extension_plots.get_plot_dict().keys())
 
-        # Preserve order while removing duplicates.
         seen = set()
         options = []
+
         for item in base_options + custom_options + extension_options:
             if item not in seen:
                 seen.add(item)
@@ -121,12 +131,94 @@ class MenuDashboard:
 
         return options
 
+    def refresh_plot_options(self) -> None:
+        """Refresh an already-created Bokeh Dropdown menu."""
+
+        if self._disposed:
+            return
+
+        options = self._build_plot_options()
+
+        try:
+            self._dropdown.menu = options
+        except Exception:
+            # Defensive fallback. If Bokeh rejects a live menu update, recreate
+            # the pane object. This should be rare.
+            self._dropdown = Dropdown(label="Choose Plot Type:", menu=options)
+            self._dropdown.on_click(
+                partial(
+                    self._update_main_contents,
+                    main=self.main,
+                )
+            )
+            self._plot_selection.object = self._dropdown
+
+    def _subscribe_to_plugin_events(self) -> None:
+        events = getattr(self.context, "events", None)
+        if events is None:
+            return
+
+        for topic in ("plugin.enabled", "plugin.disabled", "plugin.reloaded"):
+            try:
+                sub = events.subscribe(
+                    topic,
+                    self._on_plugin_registry_changed,
+                    owner_id="menu.dashboard",
+                    owner_label="Menu Dashboard",
+                    owner_kind="dashboard",
+                )
+            except TypeError:
+                sub = events.subscribe(topic, self._on_plugin_registry_changed)
+
+            self._subscriptions.append(sub)
+
+    def _on_plugin_registry_changed(self, topic, payload) -> None:
+        if self._disposed:
+            return
+
+        def _refresh():
+            if not self._disposed:
+                self.refresh_plot_options()
+
+        try:
+            doc = pn.state.curdoc
+            if doc is not None:
+                doc.add_next_tick_callback(_refresh)
+            else:
+                _refresh()
+        except Exception:
+            _refresh()
+
+    # ------------------------------------------------------------------
+    # Toolbar/content
+    # ------------------------------------------------------------------
+
     def get_toolbar(self):
         return pn.Spacer(height=1)
 
     def _update_main_contents(self, event, main):
-        self._plot_selection.label = "Loading..."
-        main.set_contents(event.item)
+        selected = event.item
+
+        # Critical stale-menu guard:
+        # The menu may have been constructed before a plugin was disabled.
+        # Rebuild the options at click-time and refuse invalid selections.
+        current_options = set(self._build_plot_options())
+
+        if selected not in current_options:
+            self.refresh_plot_options()
+            self._dropdown.label = "Choose Plot Type:"
+            main.show_message(
+                title="Plot unavailable",
+                message=(
+                    f"`{selected}` is no longer available. "
+                    "It may belong to a plugin that has been disabled."
+                ),
+            )
+            return
+
+        self._dropdown.label = "Loading..."
+        main.set_contents(selected)
+        self._dropdown.label = "Choose Plot Type:"
 
     def panel(self):
         """Render the current view."""
@@ -143,3 +235,19 @@ class MenuDashboard:
         )
 
         return self.row
+
+    def dispose(self) -> None:
+        if self._disposed:
+            return
+
+        self._disposed = True
+
+        events = getattr(self.context, "events", None)
+        if events is not None:
+            for sub in list(self._subscriptions):
+                try:
+                    events.unsubscribe(sub)
+                except Exception:
+                    pass
+
+        self._subscriptions.clear()
