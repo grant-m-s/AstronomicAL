@@ -15,6 +15,8 @@ import re
 import sys
 import traceback
 
+from astronomicAL.utils.debug import boot_print
+
 from .api import PluginAPI
 from .errors import (
     PluginDiscoveryError,
@@ -50,7 +52,6 @@ except Exception:
     Requirement = None  # type: ignore[assignment]
     SpecifierSet = None  # type: ignore[assignment]
     Version = None  # type: ignore[assignment]
-
 
 logger = logging.getLogger(__name__)
 
@@ -159,23 +160,38 @@ class PluginManager:
         development and backwards compatibility.
         """
 
+        boot_print("PluginManager.discover: start")
+        boot_print(f"PluginManager.discover: local_plugin_dirs={self.local_plugin_dirs}")
+
         candidates: List[PluginCandidate] = []
         candidates.extend(self._discover_entry_points())
         candidates.extend(self._discover_static_manifest_entry_points())
         candidates.extend(self._discover_local_dirs())
 
+        boot_print(f"PluginManager.discover: candidates count={len(candidates)}")
         for candidate in candidates:
+            boot_print(
+                "PluginManager.discover: candidate "
+                f"source={candidate.source} "
+                f"module={candidate.module_name} "
+                f"path={candidate.path} "
+                f"manifest_path={candidate.manifest_path}"
+            )
             try:
                 if candidate.manifest_path is not None:
                     module = None
                     manifest = self._read_static_manifest(candidate.manifest_path)
+                    
                 else:
                     module = self._load_module(candidate)
                     candidate.module = module
                     manifest = self._read_manifest(module, candidate=candidate)
 
                 candidate.manifest = manifest
-
+                boot_print(
+                    "PluginManager.discover: manifest read "
+                    f"id={manifest.id} name={manifest.name} version={manifest.version}"
+                )
                 if manifest.id in self._records:
                     existing = self._records[manifest.id]
                     if self._same_candidate(existing.candidate, candidate):
@@ -195,12 +211,19 @@ class PluginManager:
                     module=module,
                     status=PluginStatus.DISABLED,
                 )
+                boot_print(
+                    "PluginManager.discover: registered record "
+                    f"id={manifest.id} status={self._records[manifest.id].status}"
+                )
                 if candidate.module_name:
                     self._candidates_by_module[candidate.module_name] = candidate
             except Exception as exc:
                 candidate.error = self._format_exception(exc)
                 self._record_discovery_error(candidate, candidate.error)
 
+        boot_print(
+            f"PluginManager.discover: complete records={list(self._records.keys())}"
+        )
         return self.list_plugins()
 
     def _discover_entry_points(self) -> List[PluginCandidate]:
@@ -569,42 +592,64 @@ class PluginManager:
         astronomical_version: Optional[str] = None,
         validate: bool = True,
     ) -> None:
+        boot_print(f"PluginManager.enable: start plugin_id={plugin_id}")
         record = self._require_record(plugin_id)
         if record.status == PluginStatus.ENABLED:
             return
 
         if validate:
+            boot_print(f"PluginManager.enable: validate plugin_id={plugin_id}")
             result = self.validate(plugin_id, astronomical_version=astronomical_version)
             if not result.ok:
                 record.status = PluginStatus.ERROR
                 record.error = "; ".join(result.errors)
                 raise PluginValidationError(record.error)
+            
+            boot_print(f"PluginManager.enable: validation ok plugin_id={plugin_id}")
 
         installed_before_error = self._installed_service_keys_by_plugin.setdefault(plugin_id, set())
 
         try:
+            boot_print(f"PluginManager.enable: loading module plugin_id={plugin_id}")
             module = record.module or self._load_module(record.candidate)
+            boot_print(
+                "PluginManager.enable: module loaded "
+                f"plugin_id={plugin_id} module={module.__name__}"
+            )
             record.module = module
             api = PluginAPI(self, plugin_id)
 
             register = getattr(module, "register", None)
             if not callable(register):
                 raise PluginLoadError(f"Plugin {plugin_id!r} does not define register(api).")
-
+            
+            boot_print(f"PluginManager.enable: calling register(api) plugin_id={plugin_id}")
             register(api)
+            boot_print(
+                "PluginManager.enable: register(api) complete "
+                f"plugin_id={plugin_id} "
+                f"panels={[r.id for r in self._panels.values() if r.plugin_id == plugin_id]} "
+                f"actions={[r.id for r in self._actions.values() if r.plugin_id == plugin_id]} "
+                f"services={[r.key for r in self._services.values() if r.plugin_id == plugin_id]}"
+            )
             installed_before_error = self._install_services_for_plugin(plugin_id, context)
-
+            boot_print(
+                "PluginManager.enable: services installed "
+                f"plugin_id={plugin_id} keys={sorted(installed_before_error)}"
+            )
             on_enable = getattr(module, "on_enable", None)
             if callable(on_enable):
                 self._call_with_supported_args(on_enable, context=context, manager=self)
 
             record.status = PluginStatus.ENABLED
             record.error = None
+            boot_print(f"PluginManager.enable: publishing plugin.enabled plugin_id={plugin_id}")
             if hasattr(context, "events"):
                 context.events.publish(
                     "plugin.enabled",
                     {"plugin_id": plugin_id, "name": record.manifest.name},
                 )
+            boot_print(f"PluginManager.enable: complete plugin_id={plugin_id}")
         except Exception as exc:
             self._remove_registrations_for_plugin(
                 plugin_id,

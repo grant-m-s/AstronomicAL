@@ -92,6 +92,7 @@ sys.path.insert(1, os.path.join(sys.path[0], "../"))
 
 import astronomicAL.config as config
 from astronomicAL.utils import load_config
+from astronomicAL.utils.debug import boot_print, plugin_debug_print
 
 from astronomicAL.platform.context import AppContext
 from astronomicAL.platform.events import EventBus
@@ -102,7 +103,6 @@ from astronomicAL.platform.workspace import WorkspaceManager
 from astronomicAL.platform.selection import SelectionManager
 from astronomicAL.platform.services import ServiceRegistry
 from astronomicAL.platform.plugins import PluginManager
-
 
 def _plugin_dirs() -> list[Path]:
     """Return plugin roots scanned by PluginManager.
@@ -143,28 +143,33 @@ def _plugin_dirs() -> list[Path]:
     return unique
 
 def _discover_and_enable_plugins(context: AppContext) -> None:
+    boot_print("main.py: plugin discovery start")
     manager = context.plugins
     if manager is None:
         print("[plugins] no PluginManager on context")
         return
 
-    print("[plugins] Discovering and enabling plugins...")
-    print("[plugins] local_plugin_dirs:")
+    plugin_debug_print("local_plugin_dirs:")
     for path in manager.local_plugin_dirs:
-        print(f"  - {path} exists={path.exists()}")
+        plugin_debug_print(f"  - {path} exists={path.exists()}")
 
     try:
         discovered = manager.discover()
+        boot_print(f"main.py: plugin discovery complete count={len(discovered)}")
+        for info in discovered:
+            boot_print(
+                "main.py: discovered plugin "
+                f"id={info.id} status={info.status} source={info.source} path={info.path}"
+            )
     except Exception as exc:
         print("[plugins] discovery failed:", exc)
         traceback.print_exc()
         return
 
-    print("[plugins] discovered plugin infos:")
+    plugin_debug_print("discovered plugin infos:")
     for info in discovered:
-        print(
-            f"  - {info.id} status={info.status} "
-            f"source={info.source} path={info.path}"
+        plugin_debug_print(
+            f"  - {info.id} status={info.status} source={info.source} path={info.path}"
         )
 
     errors = manager.list_discovery_errors()
@@ -175,8 +180,16 @@ def _discover_and_enable_plugins(context: AppContext) -> None:
 
     for info in discovered:
         try:
+            boot_print(f"main.py: enabling plugin id={info.id}")
             manager.enable(info.id, context=context)
-            print(f"[plugins] enabled: {info.id}")
+            enabled_info = manager.plugin_info(info.id)
+            boot_print(
+                f"main.py: enabled plugin id={enabled_info.id} "
+                f"panels={enabled_info.panels} "
+                f"actions={enabled_info.actions} "
+                f"services={enabled_info.services} "
+                f"workflows={enabled_info.workflows}"
+            )
         except Exception as exc:
             print(f"[plugins] failed to enable {info.id}: {exc}")
             traceback.print_exc()
@@ -203,10 +216,24 @@ workspace = WorkspaceManager(react_template=react, grid=grid)
 selection = SelectionManager(events=events, artifacts=artifacts)
 services = ServiceRegistry()
 
+boot_print("main.py: platform services created")
+boot_print(f"main.py: events={type(events).__name__}")
+boot_print(f"main.py: jobs={type(jobs).__name__}")
+boot_print(f"main.py: artifacts={type(artifacts).__name__}")
+boot_print(f"main.py: datasets={type(datasets).__name__}")
+boot_print(f"main.py: workspace={type(workspace).__name__}")
+boot_print(f"main.py: selection={type(selection).__name__}")
+boot_print(f"main.py: services={type(services).__name__}")
+
 plugins = PluginManager(
     local_plugin_dirs=_plugin_dirs(),
     auto_discover=False,
 )
+
+boot_print("main.py: plugin manager created")
+boot_print("main.py: plugin local dirs:")
+for path in plugins.local_plugin_dirs:
+    boot_print(f"  - {path} exists={path.exists()}")
 
 context = AppContext(
     events=events,
@@ -219,6 +246,10 @@ context = AppContext(
     config=config,
     plugins=plugins,
 )
+
+boot_print("main.py: AppContext created")
+boot_print(f"main.py: context.plugins={type(context.plugins).__name__}")
+boot_print(f"main.py: context.config={type(context.config).__name__}")
 
 context.config.layout_file = getattr(
     context.config,
@@ -257,13 +288,26 @@ _discover_and_enable_plugins(context)
 # Layout creation
 # ---------------------------------------------------------------------
 
+boot_print("main.py: layout creation start")
+boot_print(f"main.py: layout_file={config.layout_file}")
+boot_print(f"main.py: layout_file_exists={os.path.isfile(config.layout_file)}")
+boot_print(
+    "main.py: plugin panels before layout="
+    f"{[p.id for p in plugins.list_panels()]}"
+)
+
 if os.path.isfile(config.layout_file):
-    print("Has layout File")
+    boot_print("main.py: calling create_layout_from_file")
     load_config.create_layout_from_file(react, context)
+    boot_print("main.py: returned from create_layout_from_file")
 else:
-    print("Create Default")
+    boot_print("main.py: calling create_default_layout")
     load_config.create_default_layout(react, context)
+    boot_print("main.py: returned from create_default_layout")
 
+boot_print("main.py: workspace.register_existing start")
 workspace.register_existing()
+boot_print("main.py: workspace.register_existing complete")
 
+boot_print("main.py: react.servable")
 react.servable()

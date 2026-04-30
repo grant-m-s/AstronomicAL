@@ -8,14 +8,22 @@ from bokeh.models import InlineStyleSheet
 
 from astronomicAL.extensions import extension_plots
 from astronomicAL.extensions import custom_plots
-
+from astronomicAL.utils.debug import boot_print
 
 class MenuDashboard:
     """Dashboard used to dynamically choose which view to display."""
 
     def __init__(self, main, context=None):
+        
         self.context = context if context is not None else getattr(main, "context", None)
         self.row = pn.Row(pn.pane.Str("loading"))
+
+        boot_print("MenuDashboard.__init__: start")
+        boot_print(f"MenuDashboard.__init__: context_present={self.context is not None}")
+        boot_print(
+            "MenuDashboard.__init__: plugins_present="
+            f"{getattr(self.context, 'plugins', None) is not None if self.context is not None else False}"
+        )
 
         plot_options = self._build_plot_options()
 
@@ -105,6 +113,11 @@ class MenuDashboard:
             if item not in seen:
                 seen.add(item)
                 options.append(item)
+
+        boot_print(f"MenuDashboard._build_plot_options: base_options={base_options}")
+        boot_print(f"MenuDashboard._build_plot_options: custom_options={custom_options}")
+        boot_print(f"MenuDashboard._build_plot_options: extension_options={extension_options}")
+        boot_print(f"MenuDashboard._build_plot_options: final_options={options}")
 
         return options
 

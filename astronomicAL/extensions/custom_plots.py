@@ -18,6 +18,7 @@ import concurrent.futures
 from panel.io import save
 from bokeh.models import Legend, LinearAxis, NormalHead, Range1d
 from astronomicAL.utils.optimise import matches_type
+from astronomicAL.utils.debug import boot_print
 from astronomicAL.extensions.astro_data_utility import DESISpectraClass, EuclidCutoutsClass, EuclidSpectraClass
 from astronomicAL.extensions.astro_data_utility import VLASS_cutout, LoTSS_cutout, make_srcdoc_aladin_lite, SDSS_cutout
 
@@ -32,7 +33,6 @@ try:
     from astronomicAL.platform.events import Subscription
 except Exception:  # pragma: no cover
     Subscription = Any  # type: ignore
-
 
 @dataclass
 class _ManagedJob:
@@ -112,7 +112,12 @@ def _plugin_panel_factory(panel_id):
 
 
 def get_customplot_dict(context=None):
-
+    boot_print("custom_plots.get_customplot_dict: start")
+    boot_print(f"custom_plots.get_customplot_dict: context_present={context is not None}")
+    boot_print(
+        "custom_plots.get_customplot_dict: plugins_present="
+        f"{getattr(context, 'plugins', None) is not None if context is not None else False}"
+    )
     plot_dict = {
         "Euclid Cutout": lambda data, close_button, context: EuclidPlotClass(
             data,
@@ -200,15 +205,27 @@ def get_customplot_dict(context=None):
         ),
     }
 
+    boot_print(
+        "custom_plots.get_customplot_dict: legacy keys="
+        f"{list(plot_dict.keys())}"
+    )
+
     manager = getattr(context, "plugins", None)
-    if manager is not None:
-        for registration in manager.list_panels():
-            # Use title as the old menu-facing key.
-            # If a legacy panel still uses the same title, keep the legacy entry.
-            plot_dict.setdefault(
-                registration.title,
-                _plugin_panel_factory(registration.id),
-            )
+    boot_print("custom_plots.get_customplot_dict: plugin panels found:")
+    for registration in manager.list_panels():
+        boot_print(
+            f"  plugin panel title={registration.title!r} "
+            f"id={registration.id!r} plugin_id={registration.plugin_id!r}"
+        )
+        plot_dict.setdefault(
+            registration.title,
+            _plugin_panel_factory(registration.id),
+        )
+
+    boot_print(
+        "custom_plots.get_customplot_dict: final keys="
+        f"{list(plot_dict.keys())}"
+    )
 
     return plot_dict
 
