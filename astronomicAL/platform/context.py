@@ -1,4 +1,3 @@
-# astronomicAL/platform/context.py
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -15,12 +14,13 @@ from astronomicAL.platform.services import ServiceRegistry
 
 @dataclass
 class AppContext:
-    """
-    Single object containing platform services.
+    """Single object containing platform services.
 
-    NOTE: `config` is included temporarily to avoid massive refactors in Phase 1.
-    Long term you should replace most config/global uses with datasets/events/artifacts.
+    ``config`` is included temporarily to avoid a large Phase 1 refactor.
+    Long term, most config/global uses should move into datasets, selection,
+    events, artifacts, jobs, workspace, services, or plugins.
     """
+
     events: EventBus
     jobs: JobManager
     artifacts: ArtifactStore
@@ -29,3 +29,4 @@ class AppContext:
     selection: SelectionManager
     services: ServiceRegistry
     config: Optional[Any] = None
+    plugins: Optional[Any] = None

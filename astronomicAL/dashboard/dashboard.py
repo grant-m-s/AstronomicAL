@@ -56,14 +56,22 @@ class Dashboard(param.Parameterized):
         self._child_controllers = []
         self._disposed = False
 
-        self._close_button = pn.widgets.Button(name="Close", max_width=100, max_height=40)
+        self._close_button = pn.widgets.Button(
+            name="Close",
+            width=100,
+            height=28,
+            min_height=28,
+            max_height=28,
+            sizing_mode="fixed",
+            margin=(8, 0, 8, 4),
+        )
         self._close_button.on_click(self._close_button_cb)
 
         self._submit_button = pn.widgets.Button(name="Submit Column Names")
         self._submit_button.on_click(self._submit_button_cb)
 
         self.plot_dict = extension_plots.get_plot_dict()
-        self.cust_plot_dict = custom_plots.get_customplot_dict()
+        self.cust_plot_dict = custom_plots.get_customplot_dict(context=context)
         self.contents = contents
 
     def _dataset_is_loaded(self) -> bool:

@@ -428,7 +428,7 @@ def verify_import_config(curr_config_file, context):
                 error_message += f"AstronomicAL is missing the following operations in `extensions/feature_generation.py`:\n\n{missing_opers}\n\n **[If they have not been uploaded to the astronomicAL repo you may need to contact the researcher who uploaded the config for the correct code]**\n\n\n"
                 error_message += "\n\n-------------------------------\n\n"
         if "layout" in curr_config_file:
-            plots = list(get_plot_dict().keys()) + list(get_customplot_dict().keys())
+            plots = list(get_plot_dict().keys()) + list(get_customplot_dict(context=context).keys())
             contents = [
                 "Settings",
                 "Menu",

@@ -1,7 +1,7 @@
 # astronomicAL/platform/jobs.py
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Callable, Optional, Dict
 from concurrent.futures import Future, ThreadPoolExecutor
 import threading
@@ -11,6 +11,29 @@ import traceback
 
 DoneCallback = Callable[[Any], None]
 ErrorCallback = Callable[[BaseException], None]
+
+
+def _call_on_ui_thread(fn: Callable[[], None]) -> None:
+    """
+    Best-effort UI thread marshalling for Panel/Bokeh.
+
+    If Panel is available and we have a current document, schedule on next tick.
+    Otherwise, run immediately in the current thread.
+    """
+    try:
+        import panel as pn  # local import to avoid hard dependency during non-UI tests
+        doc = pn.state.curdoc
+    except Exception:
+        doc = None
+
+    if doc is None:
+        fn()
+    else:
+        try:
+            doc.add_next_tick_callback(fn)
+        except Exception:
+            # As a last resort, just run it (better than dropping callbacks)
+            fn()
 
 
 class CancellationToken:
@@ -46,8 +69,9 @@ class JobManager:
     """
     Central job runner.
 
-    - Uses a shared ThreadPoolExecutor by default (good for I/O).
+    - Uses a shared ThreadPoolExecutor by default.
     - Supports dedupe via `key`: if key already in-flight, returns same job handle.
+    - Ensures on_done/on_error callbacks are invoked on the Panel/Bokeh UI thread when available.
     """
 
     def __init__(self, max_workers: int = 16) -> None:
@@ -67,12 +91,33 @@ class JobManager:
     ) -> JobHandle:
         """
         Submit work to threadpool.
+
         If `key` is provided and a job with that key is running, re-use it.
+        In that case, any provided on_done/on_error will be *added* as extra callbacks
+        to the existing job's future (so late-joiners still get notified).
+
         kwargs are passed into fn, plus a reserved kwarg `cancel_token`.
         """
         with self._lock:
             if key and key in self._inflight:
-                return self._inflight[key]
+                handle = self._inflight[key]
+
+                # Late join: attach additional callbacks for this submitter (if any)
+                if on_done or on_error:
+                    def _late_join_callback(_f: Future) -> None:
+                        try:
+                            res = _f.result()
+                            if on_done:
+                                _call_on_ui_thread(lambda res=res: on_done(res))
+                        except BaseException as e:
+                            if on_error:
+                                _call_on_ui_thread(lambda e=e: on_error(e))
+                            else:
+                                traceback.print_exc()
+
+                    handle.future.add_done_callback(_late_join_callback)
+
+                return handle
 
             job_id = uuid.uuid4().hex
             token = CancellationToken()
@@ -86,6 +131,7 @@ class JobManager:
             if key:
                 self._inflight[key] = handle
 
+            # One canonical completion callback handles cleanup + the first submitter's callbacks.
             def _cleanup_callback(_f: Future) -> None:
                 # Remove inflight on completion
                 if key:
@@ -95,10 +141,10 @@ class JobManager:
                 try:
                     res = _f.result()
                     if on_done:
-                        on_done(res)
+                        _call_on_ui_thread(lambda res=res: on_done(res))
                 except BaseException as e:
                     if on_error:
-                        on_error(e)
+                        _call_on_ui_thread(lambda e=e: on_error(e))
                     else:
                         traceback.print_exc()
 
