@@ -13,12 +13,13 @@ from astronomicAL.platform.plugins import PluginManifest
 manifest = PluginManifest(
     id="core.plugin_manager",
     name="Plugin Manager",
-    version="0.1.0",
+    version="0.2.0",
     description=(
-        "Read and manage discovered AstronomicAL plugins, including their panels, "
-        "actions, services, workflows, artifact viewers, and discovery errors."
+        "Inspect and manage discovered AstronomicAL plugins, including panels, "
+        "actions, services, workflows, artifact viewers, open panel instances, "
+        "and discovery errors."
     ),
-    capabilities=["panel", "diagnostics", "plugins"],
+    capabilities=["panel", "diagnostics", "plugins", "management"],
     tags=["core", "debug", "plugins", "management"],
 )
 
@@ -32,7 +33,7 @@ def register(api) -> None:
         category="Diagnostics",
         icon="plug",
         tags=["plugins", "debug", "management"],
-        default_layout={"x": 0, "y": 0, "w": 8, "h": 6},
+        default_layout={"x": 0, "y": 0, "w": 5, "h": 7},
     )
 
 
@@ -42,23 +43,7 @@ def create_plugin_manager_panel(context, **kwargs):
 
 
 class PluginManagerPanel:
-    """Plugin diagnostics and management panel.
-
-    This panel intentionally uses the platform plugin manager as its data source.
-    It does not own plugin state itself.
-
-    It can:
-
-    - list discovered plugins
-    - show plugin status/errors
-    - show registered panels/actions/workflows/services/artifact viewers
-    - show discovery errors
-    - run discovery again
-    - enable, disable, or reload a selected plugin
-
-    It guards against disabling itself, because doing so would remove the current
-    panel registration while the panel is still open.
-    """
+    """Narrow-layout plugin diagnostics and management panel."""
 
     SELF_PLUGIN_ID = manifest.id
 
@@ -69,7 +54,22 @@ class PluginManagerPanel:
         self._subscriptions: list[Any] = []
         self._watchers: list[tuple[Any, Any]] = []
 
+        self.title = pn.pane.HTML(
+            "<h2 style='margin: 0; padding: 0; line-height: 1.2;'>Plugin Manager</h2>",
+            height=32,
+            min_height=32,
+            max_height=32,
+            sizing_mode="stretch_width",
+            margin=(0, 0, 6, 0),
+        )
+
         self.status = pn.pane.Markdown(
+            "",
+            sizing_mode="stretch_width",
+            margin=(0, 0, 6, 0),
+        )
+
+        self.warning = pn.pane.Markdown(
             "",
             sizing_mode="stretch_width",
             margin=(0, 0, 6, 0),
@@ -83,117 +83,80 @@ class PluginManagerPanel:
             margin=(0, 0, 6, 0),
         )
 
+        self.force_disable = pn.widgets.Checkbox(
+            name="Allow disable/reload with open panel instances",
+            value=False,
+            sizing_mode="stretch_width",
+            margin=(0, 0, 6, 0),
+        )
+
         self.refresh_button = pn.widgets.Button(
             name="Refresh",
             button_type="default",
-            width=110,
             height=32,
+            sizing_mode="stretch_width",
         )
 
         self.discover_button = pn.widgets.Button(
-            name="Discover again",
+            name="Discover",
             button_type="default",
-            width=140,
             height=32,
+            sizing_mode="stretch_width",
+        )
+
+        self.broadcast_button = pn.widgets.Button(
+            name="Refresh Menus",
+            button_type="default",
+            height=32,
+            sizing_mode="stretch_width",
         )
 
         self.enable_button = pn.widgets.Button(
             name="Enable",
             button_type="primary",
-            width=100,
             height=32,
+            sizing_mode="stretch_width",
         )
 
         self.disable_button = pn.widgets.Button(
             name="Disable",
             button_type="warning",
-            width=100,
             height=32,
+            sizing_mode="stretch_width",
         )
 
         self.reload_button = pn.widgets.Button(
             name="Reload",
             button_type="success",
-            width=100,
             height=32,
+            sizing_mode="stretch_width",
         )
 
-        self.plugins_table = pn.widgets.Tabulator(
-            pd.DataFrame(),
-            show_index=False,
-            disabled=True,
-            pagination="local",
-            page_size=20,
-            sizing_mode="stretch_both",
-        )
-
-        self.panels_table = pn.widgets.Tabulator(
-            pd.DataFrame(),
-            show_index=False,
-            disabled=True,
-            pagination="local",
-            page_size=20,
-            sizing_mode="stretch_both",
-        )
-
-        self.actions_table = pn.widgets.Tabulator(
-            pd.DataFrame(),
-            show_index=False,
-            disabled=True,
-            pagination="local",
-            page_size=20,
-            sizing_mode="stretch_both",
-        )
-
-        self.workflows_table = pn.widgets.Tabulator(
-            pd.DataFrame(),
-            show_index=False,
-            disabled=True,
-            pagination="local",
-            page_size=20,
-            sizing_mode="stretch_both",
-        )
-
-        self.services_table = pn.widgets.Tabulator(
-            pd.DataFrame(),
-            show_index=False,
-            disabled=True,
-            pagination="local",
-            page_size=20,
-            sizing_mode="stretch_both",
-        )
-
-        self.artifact_viewers_table = pn.widgets.Tabulator(
-            pd.DataFrame(),
-            show_index=False,
-            disabled=True,
-            pagination="local",
-            page_size=20,
-            sizing_mode="stretch_both",
-        )
-
-        self.discovery_errors_table = pn.widgets.Tabulator(
-            pd.DataFrame(columns=["candidate", "error"]),
-            show_index=False,
-            disabled=True,
-            pagination="local",
-            page_size=20,
-            sizing_mode="stretch_both",
-        )
+        self.plugins_table = self._make_table(page_size=8)
+        self.instances_table = self._make_table(page_size=8)
+        self.panels_table = self._make_table(page_size=8)
+        self.actions_table = self._make_table(page_size=8)
+        self.workflows_table = self._make_table(page_size=8)
+        self.services_table = self._make_table(page_size=8)
+        self.artifact_viewers_table = self._make_table(page_size=8)
+        self.discovery_errors_table = self._make_table(page_size=8)
 
         self.details_pane = pn.pane.Markdown(
             "Select a plugin to inspect details.",
-            sizing_mode="stretch_both",
+            sizing_mode="stretch_width",
             margin=(0, 0, 0, 0),
         )
 
         self.refresh_button.on_click(self._refresh_clicked)
         self.discover_button.on_click(self._discover_clicked)
+        self.broadcast_button.on_click(self._broadcast_clicked)
         self.enable_button.on_click(self._enable_clicked)
         self.disable_button.on_click(self._disable_clicked)
         self.reload_button.on_click(self._reload_clicked)
 
         self._watch(self.selected_plugin, self._selected_plugin_changed, "value")
+        self._watch(self.force_disable, self._selected_plugin_changed, "value")
+
         self._subscribe_to_plugin_events()
 
         self.view = self._build_view()
@@ -203,70 +166,85 @@ class PluginManagerPanel:
     # Layout
     # ------------------------------------------------------------------
 
+    def _make_table(self, *, page_size: int = 8):
+        return pn.widgets.Tabulator(
+            pd.DataFrame(),
+            show_index=False,
+            disabled=True,
+            pagination="local",
+            page_size=page_size,
+            sizing_mode="stretch_width",
+            height=260,
+            min_height=220,
+            margin=(0, 0, 0, 0),
+            configuration={
+                "layout": "fitDataStretch",
+                "responsiveLayout": "collapse",
+            },
+        )
+
     def _build_view(self):
-        title = pn.pane.HTML(
-            "<h2 style='margin: 0; padding: 0; line-height: 1.2;'>Plugin Manager</h2>",
-            height=34,
-            min_height=34,
-            max_height=34,
+        action_grid = pn.GridBox(
+            self.refresh_button,
+            self.discover_button,
+            self.broadcast_button,
+            self.enable_button,
+            self.disable_button,
+            self.reload_button,
+            ncols=2,
             sizing_mode="stretch_width",
             margin=(0, 0, 6, 0),
         )
 
-        controls = pn.Column(
-            self.selected_plugin,
-            pn.Row(
-                self.refresh_button,
-                self.discover_button,
-                self.enable_button,
-                self.disable_button,
-                self.reload_button,
-                sizing_mode="stretch_width",
-                align="center",
-            ),
-            sizing_mode="stretch_width",
-            margin=(0, 0, 8, 0),
-        )
-
-        contributions_tabs = pn.Tabs(
-            ("Panels", self._table_section(self.panels_table)),
-            ("Actions", self._table_section(self.actions_table)),
-            ("Workflows", self._table_section(self.workflows_table)),
-            ("Services", self._table_section(self.services_table)),
-            ("Artifact Viewers", self._table_section(self.artifact_viewers_table)),
+        contribution_tabs = pn.Tabs(
+            ("Panels", self._section(self.panels_table)),
+            ("Actions", self._section(self.actions_table)),
+            ("Workflows", self._section(self.workflows_table)),
+            ("Services", self._section(self.services_table)),
+            ("Viewers", self._section(self.artifact_viewers_table)),
             dynamic=True,
-            sizing_mode="stretch_both",
+            sizing_mode="stretch_width",
+            margin=(0, 0, 0, 0),
         )
 
         tabs = pn.Tabs(
-            ("Plugins", self._table_section(self.plugins_table)),
-            ("Contributions", contributions_tabs),
-            ("Discovery Errors", self._table_section(self.discovery_errors_table)),
-            ("Details", pn.Column(self.details_pane, sizing_mode="stretch_both", scroll=True)),
+            ("Plugins", self._section(self.plugins_table)),
+            ("Open", self._section(self.instances_table)),
+            ("Contrib", contribution_tabs),
+            ("Errors", self._section(self.discovery_errors_table)),
+            ("Details", pn.Column(self.details_pane, sizing_mode="stretch_width", scroll=True)),
             dynamic=True,
-            sizing_mode="stretch_both",
+            sizing_mode="stretch_width",
+            margin=(0, 0, 0, 0),
         )
 
         return pn.Column(
-            title,
-            controls,
+            self.title,
+            self.selected_plugin,
+            self.force_disable,
+            action_grid,
             self.status,
+            self.warning,
             tabs,
             sizing_mode="stretch_both",
             margin=(0, 0, 0, 0),
             styles={
-                "overflow": "hidden",
+                "overflow-y": "auto",
+                "overflow-x": "hidden",
                 "padding": "0 8px 8px 8px",
             },
         )
 
     @staticmethod
-    def _table_section(table):
+    def _section(obj):
         return pn.Column(
-            table,
-            sizing_mode="stretch_both",
+            obj,
+            sizing_mode="stretch_width",
             margin=(0, 0, 0, 0),
-            styles={"overflow": "hidden"},
+            styles={
+                "overflow-x": "auto",
+                "overflow-y": "hidden",
+            },
         )
 
     # ------------------------------------------------------------------
@@ -285,7 +263,12 @@ class PluginManagerPanel:
         if events is None:
             return
 
-        for topic in ("plugin.enabled", "plugin.disabled"):
+        for topic in (
+            "plugin.enabled",
+            "plugin.disabled",
+            "plugin.reloaded",
+            "plugin.registry.changed",
+        ):
             try:
                 sub = events.subscribe(
                     topic,
@@ -302,7 +285,6 @@ class PluginManagerPanel:
     def _on_plugin_event(self, topic: str, payload: Any) -> None:
         if self._disposed:
             return
-
         self._schedule_refresh()
 
     def _schedule_refresh(self) -> None:
@@ -333,11 +315,17 @@ class PluginManagerPanel:
 
         try:
             self.manager.discover()
+            self._publish_registry_changed(operation="discovered")
             self.status.object = "Discovery completed."
         except Exception as exc:
             self.status.object = f"Discovery failed: `{exc}`"
             traceback.print_exc()
 
+        self.refresh()
+
+    def _broadcast_clicked(self, _event=None) -> None:
+        self._publish_registry_changed(operation="manual_refresh")
+        self.status.object = "Published `plugin.registry.changed` for menu refresh."
         self.refresh()
 
     def _enable_clicked(self, _event=None) -> None:
@@ -352,6 +340,7 @@ class PluginManagerPanel:
 
         try:
             self.manager.enable(plugin_id, self.context)
+            self._publish_registry_changed(plugin_id=plugin_id, operation="enabled")
             self.status.object = f"Enabled `{plugin_id}`."
         except Exception as exc:
             self.status.object = f"Enable failed for `{plugin_id}`: `{exc}`"
@@ -365,11 +354,8 @@ class PluginManagerPanel:
             self.status.object = "Select a plugin first."
             return
 
-        if plugin_id == self.SELF_PLUGIN_ID:
-            self.status.object = (
-                "Refusing to disable Plugin Manager from inside its own panel. "
-                "Use a different management surface or restart with the plugin disabled."
-            )
+        if not self._can_disable_or_reload(plugin_id, action="disable"):
+            self.refresh()
             return
 
         if self.manager is None:
@@ -378,6 +364,7 @@ class PluginManagerPanel:
 
         try:
             self.manager.disable(plugin_id, context=self.context)
+            self._publish_registry_changed(plugin_id=plugin_id, operation="disabled")
             self.status.object = f"Disabled `{plugin_id}`."
         except Exception as exc:
             self.status.object = f"Disable failed for `{plugin_id}`: `{exc}`"
@@ -391,11 +378,8 @@ class PluginManagerPanel:
             self.status.object = "Select a plugin first."
             return
 
-        if plugin_id == self.SELF_PLUGIN_ID:
-            self.status.object = (
-                "Refusing to reload Plugin Manager from inside its own panel. "
-                "Reload another plugin or restart the server."
-            )
+        if not self._can_disable_or_reload(plugin_id, action="reload"):
+            self.refresh()
             return
 
         if self.manager is None:
@@ -404,6 +388,7 @@ class PluginManagerPanel:
 
         try:
             self.manager.reload(plugin_id, self.context)
+            self._publish_registry_changed(plugin_id=plugin_id, operation="reloaded")
             self.status.object = f"Reloaded `{plugin_id}`."
         except Exception as exc:
             self.status.object = f"Reload failed for `{plugin_id}`: `{exc}`"
@@ -411,9 +396,58 @@ class PluginManagerPanel:
 
         self.refresh()
 
+    def _can_disable_or_reload(self, plugin_id: str, *, action: str) -> bool:
+        if plugin_id == self.SELF_PLUGIN_ID:
+            self.status.object = (
+                f"Refusing to {action} Plugin Manager from inside its own panel. "
+                "Use a different management surface or restart the server."
+            )
+            return False
+
+        open_count = self._open_instance_count(plugin_id)
+
+        if open_count and not bool(self.force_disable.value):
+            self.status.object = (
+                f"Refusing to {action} `{plugin_id}` while it has "
+                f"{open_count} open panel instance(s). Close them first or enable "
+                "the force checkbox."
+            )
+            return False
+
+        return True
+
     def _selected_plugin_changed(self, _event=None) -> None:
         self._render_details()
         self._update_button_state()
+
+    def _publish_registry_changed(
+        self,
+        *,
+        plugin_id: Optional[str] = None,
+        operation: str,
+    ) -> None:
+        if self.manager is not None:
+            method = getattr(self.manager, "publish_registry_changed", None)
+            if callable(method):
+                try:
+                    method(
+                        self.context,
+                        plugin_id=plugin_id,
+                        operation=operation,
+                    )
+                    return
+                except Exception:
+                    traceback.print_exc()
+
+        events = getattr(self.context, "events", None)
+        if events is not None:
+            events.publish(
+                "plugin.registry.changed",
+                {
+                    "plugin_id": plugin_id,
+                    "operation": operation,
+                },
+            )
 
     # ------------------------------------------------------------------
     # Refresh/render
@@ -431,7 +465,9 @@ class PluginManagerPanel:
         plugin_infos = self._safe_list_plugins()
 
         self._refresh_selected_plugin_options(plugin_infos)
+
         self.plugins_table.value = self._plugins_dataframe(plugin_infos)
+        self.instances_table.value = self._instances_dataframe()
         self.panels_table.value = self._panels_dataframe()
         self.actions_table.value = self._actions_dataframe()
         self.workflows_table.value = self._workflows_dataframe()
@@ -441,21 +477,40 @@ class PluginManagerPanel:
 
         self._render_details()
         self._update_button_state()
+        self._render_summary(plugin_infos)
 
-        enabled_count = len([info for info in plugin_infos if str(info.status).endswith("ENABLED") or str(info.status) == "enabled"])
-        error_count = len([info for info in plugin_infos if str(info.status).endswith("ERROR") or str(info.status) == "error"])
+    def _render_summary(self, plugin_infos: Iterable[Any]) -> None:
+        plugin_infos = list(plugin_infos)
+
+        enabled_count = len(
+            [
+                info
+                for info in plugin_infos
+                if self._status_text(getattr(info, "status", "")) == "enabled"
+            ]
+        )
+        error_count = len(
+            [
+                info
+                for info in plugin_infos
+                if self._status_text(getattr(info, "status", "")) == "error"
+            ]
+        )
+        open_count = len(self._safe_list_panel_instances())
+        discovery_errors = len(self._safe_discovery_errors())
 
         self.status.object = (
-            f"Plugins: **{len(plugin_infos)}** • "
-            f"Enabled: **{enabled_count}** • "
-            f"Errors: **{error_count}** • "
-            f"Panels: **{len(self._safe_list_panels())}** • "
-            f"Actions: **{len(self._safe_list_actions())}**"
+            f"Plugins: **{len(plugin_infos)}** · "
+            f"Enabled: **{enabled_count}** · "
+            f"Errors: **{error_count}** · "
+            f"Open panels: **{open_count}** · "
+            f"Discovery errors: **{discovery_errors}**"
         )
 
     def _clear_all_tables(self) -> None:
         empty = pd.DataFrame()
         self.plugins_table.value = empty
+        self.instances_table.value = empty
         self.panels_table.value = empty
         self.actions_table.value = empty
         self.workflows_table.value = empty
@@ -480,10 +535,38 @@ class PluginManagerPanel:
     def _update_button_state(self) -> None:
         plugin_id = self.selected_plugin.value
         has_plugin = bool(plugin_id)
+        open_count = self._open_instance_count(plugin_id) if plugin_id else 0
+        force = bool(self.force_disable.value)
 
         self.enable_button.disabled = not has_plugin
-        self.disable_button.disabled = not has_plugin or plugin_id == self.SELF_PLUGIN_ID
-        self.reload_button.disabled = not has_plugin or plugin_id == self.SELF_PLUGIN_ID
+        self.disable_button.disabled = (
+            not has_plugin
+            or plugin_id == self.SELF_PLUGIN_ID
+            or (open_count > 0 and not force)
+        )
+        self.reload_button.disabled = (
+            not has_plugin
+            or plugin_id == self.SELF_PLUGIN_ID
+            or (open_count > 0 and not force)
+        )
+
+        if not has_plugin:
+            self.warning.object = ""
+        elif plugin_id == self.SELF_PLUGIN_ID:
+            self.warning.object = (
+                "⚠️ Plugin Manager cannot disable or reload itself from this panel."
+            )
+        elif open_count > 0 and not force:
+            self.warning.object = (
+                f"⚠️ `{plugin_id}` has **{open_count}** open panel instance(s). "
+                "Close them before disabling/reloading, or enable the force checkbox."
+            )
+        elif open_count > 0 and force:
+            self.warning.object = (
+                f"⚠️ Force mode enabled. `{plugin_id}` has **{open_count}** open panel instance(s)."
+            )
+        else:
+            self.warning.object = ""
 
     def _render_details(self) -> None:
         plugin_id = self.selected_plugin.value
@@ -504,6 +587,8 @@ class PluginManagerPanel:
         except Exception:
             settings = {}
 
+        open_instances = self._safe_list_panel_instances(plugin_id=plugin_id)
+
         lines = [
             f"## {getattr(info, 'name', plugin_id)}",
             "",
@@ -512,6 +597,7 @@ class PluginManagerPanel:
             f"**Status:** `{self._status_text(getattr(info, 'status', ''))}`",
             f"**Source:** `{getattr(info, 'source', '')}`",
             f"**Path:** `{getattr(info, 'path', '')}`",
+            f"**Open panel instances:** `{len(open_instances)}`",
             "",
             "### Description",
             "",
@@ -544,9 +630,7 @@ class PluginManagerPanel:
                 [
                     "### Error",
                     "",
-                    "```text",
                     str(error),
-                    "```",
                     "",
                 ]
             )
@@ -556,9 +640,8 @@ class PluginManagerPanel:
                 [
                     "### Settings",
                     "",
-                    "```json",
                     json.dumps(settings, indent=2, default=str),
-                    "```",
+                    "",
                 ]
             )
 
@@ -572,19 +655,16 @@ class PluginManagerPanel:
         rows = []
 
         for info in plugin_infos:
+            plugin_id = getattr(info, "id", "")
+
             rows.append(
                 {
-                    "id": getattr(info, "id", ""),
-                    "name": getattr(info, "name", ""),
-                    "version": getattr(info, "version", ""),
+                    "id": plugin_id,
                     "status": self._status_text(getattr(info, "status", "")),
-                    "source": getattr(info, "source", ""),
-                    "path": getattr(info, "path", ""),
+                    "open": self._open_instance_count(plugin_id),
                     "panels": len(getattr(info, "panels", []) or []),
                     "actions": len(getattr(info, "actions", []) or []),
-                    "workflows": len(getattr(info, "workflows", []) or []),
                     "services": len(getattr(info, "services", []) or []),
-                    "artifact_viewers": len(getattr(info, "artifact_viewers", []) or []),
                     "error": self._short(getattr(info, "error", "")),
                 }
             )
@@ -593,18 +673,32 @@ class PluginManagerPanel:
             rows,
             columns=[
                 "id",
-                "name",
-                "version",
                 "status",
-                "source",
-                "path",
+                "open",
                 "panels",
                 "actions",
-                "workflows",
                 "services",
-                "artifact_viewers",
                 "error",
             ],
+        )
+
+    def _instances_dataframe(self) -> pd.DataFrame:
+        rows = []
+
+        for instance in self._safe_list_panel_instances():
+            rows.append(
+                {
+                    "plugin": instance.get("plugin_id", ""),
+                    "title": instance.get("title", ""),
+                    "source": instance.get("source", ""),
+                    "instance": instance.get("instance_id", ""),
+                    "panel": instance.get("panel_id", ""),
+                }
+            )
+
+        return pd.DataFrame(
+            rows,
+            columns=["plugin", "title", "source", "instance", "panel"],
         )
 
     def _panels_dataframe(self) -> pd.DataFrame:
@@ -613,32 +707,14 @@ class PluginManagerPanel:
         for reg in self._safe_list_panels():
             rows.append(
                 {
-                    "id": getattr(reg, "id", ""),
                     "title": getattr(reg, "title", ""),
-                    "plugin_id": getattr(reg, "plugin_id", ""),
+                    "plugin": getattr(reg, "plugin_id", ""),
                     "category": getattr(reg, "category", ""),
-                    "required_mappings": self._join(getattr(reg, "required_mappings", [])),
-                    "uses_services": self._join(getattr(reg, "uses_services", [])),
-                    "produces": self._join(getattr(reg, "produces", [])),
-                    "requires": self._join(getattr(reg, "requires", [])),
-                    "description": getattr(reg, "description", ""),
+                    "id": getattr(reg, "id", ""),
                 }
             )
 
-        return pd.DataFrame(
-            rows,
-            columns=[
-                "id",
-                "title",
-                "plugin_id",
-                "category",
-                "required_mappings",
-                "uses_services",
-                "produces",
-                "requires",
-                "description",
-            ],
-        )
+        return pd.DataFrame(rows, columns=["title", "plugin", "category", "id"])
 
     def _actions_dataframe(self) -> pd.DataFrame:
         rows = []
@@ -649,35 +725,18 @@ class PluginManagerPanel:
 
             rows.append(
                 {
-                    "id": getattr(reg, "id", ""),
                     "title": getattr(reg, "title", ""),
-                    "plugin_id": getattr(reg, "plugin_id", ""),
-                    "category": getattr(reg, "category", ""),
-                    "run_in_job": getattr(reg, "run_in_job", ""),
+                    "plugin": getattr(reg, "plugin_id", ""),
+                    "job": getattr(reg, "run_in_job", ""),
                     "selection": getattr(inputs, "selection", "") if inputs else "",
-                    "columns": getattr(inputs, "columns", "") if inputs else "",
-                    "numeric_columns": getattr(inputs, "numeric_columns", "") if inputs else "",
                     "outputs": self._join([getattr(o, "type", str(o)) for o in outputs]),
-                    "requires": self._join(getattr(reg, "requires", [])),
-                    "description": getattr(reg, "description", ""),
+                    "id": getattr(reg, "id", ""),
                 }
             )
 
         return pd.DataFrame(
             rows,
-            columns=[
-                "id",
-                "title",
-                "plugin_id",
-                "category",
-                "run_in_job",
-                "selection",
-                "columns",
-                "numeric_columns",
-                "outputs",
-                "requires",
-                "description",
-            ],
+            columns=["title", "plugin", "job", "selection", "outputs", "id"],
         )
 
     def _workflows_dataframe(self) -> pd.DataFrame:
@@ -686,19 +745,14 @@ class PluginManagerPanel:
         for reg in self._safe_list_workflows():
             rows.append(
                 {
-                    "id": getattr(reg, "id", ""),
                     "title": getattr(reg, "title", ""),
-                    "plugin_id": getattr(reg, "plugin_id", ""),
+                    "plugin": getattr(reg, "plugin_id", ""),
                     "category": getattr(reg, "category", ""),
-                    "requires": self._join(getattr(reg, "requires", [])),
-                    "description": getattr(reg, "description", ""),
+                    "id": getattr(reg, "id", ""),
                 }
             )
 
-        return pd.DataFrame(
-            rows,
-            columns=["id", "title", "plugin_id", "category", "requires", "description"],
-        )
+        return pd.DataFrame(rows, columns=["title", "plugin", "category", "id"])
 
     def _services_dataframe(self) -> pd.DataFrame:
         rows = []
@@ -717,27 +771,13 @@ class PluginManagerPanel:
             rows.append(
                 {
                     "key": key,
-                    "plugin_id": getattr(reg, "plugin_id", ""),
+                    "plugin": getattr(reg, "plugin_id", ""),
                     "lazy": getattr(reg, "lazy", ""),
-                    "replace": getattr(reg, "replace", ""),
-                    "initialized": initialized,
-                    "requires": self._join(getattr(reg, "requires", [])),
-                    "description": getattr(reg, "description", ""),
+                    "init": initialized,
                 }
             )
 
-        return pd.DataFrame(
-            rows,
-            columns=[
-                "key",
-                "plugin_id",
-                "lazy",
-                "replace",
-                "initialized",
-                "requires",
-                "description",
-            ],
-        )
+        return pd.DataFrame(rows, columns=["key", "plugin", "lazy", "init"])
 
     def _artifact_viewers_dataframe(self) -> pd.DataFrame:
         rows = []
@@ -745,39 +785,20 @@ class PluginManagerPanel:
         for reg in self._safe_list_artifact_viewers():
             rows.append(
                 {
-                    "artifact_type": getattr(reg, "artifact_type", ""),
-                    "id": getattr(reg, "id", ""),
+                    "artifact": getattr(reg, "artifact_type", ""),
                     "title": getattr(reg, "title", ""),
-                    "plugin_id": getattr(reg, "plugin_id", ""),
-                    "priority": getattr(reg, "priority", ""),
+                    "plugin": getattr(reg, "plugin_id", ""),
                     "default": getattr(reg, "default", ""),
-                    "requires": self._join(getattr(reg, "requires", [])),
-                    "description": getattr(reg, "description", ""),
                 }
             )
 
         return pd.DataFrame(
             rows,
-            columns=[
-                "artifact_type",
-                "id",
-                "title",
-                "plugin_id",
-                "priority",
-                "default",
-                "requires",
-                "description",
-            ],
+            columns=["artifact", "title", "plugin", "default"],
         )
 
     def _discovery_errors_dataframe(self) -> pd.DataFrame:
-        if self.manager is None:
-            return pd.DataFrame(columns=["candidate", "error"])
-
-        try:
-            errors = self.manager.list_discovery_errors()
-        except Exception:
-            errors = {}
+        errors = self._safe_discovery_errors()
 
         rows = [
             {
@@ -847,6 +868,38 @@ class PluginManagerPanel:
             traceback.print_exc()
             return []
 
+    def _safe_list_panel_instances(
+        self,
+        plugin_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        if self.manager is None:
+            return []
+
+        method = getattr(self.manager, "list_panel_instances", None)
+        if not callable(method):
+            return []
+
+        try:
+            return list(method(plugin_id=plugin_id))
+        except Exception:
+            traceback.print_exc()
+            return []
+
+    def _safe_discovery_errors(self) -> Dict[str, str]:
+        if self.manager is None:
+            return {}
+
+        try:
+            return dict(self.manager.list_discovery_errors())
+        except Exception:
+            traceback.print_exc()
+            return {}
+
+    def _open_instance_count(self, plugin_id: Optional[str]) -> int:
+        if not plugin_id:
+            return 0
+        return len(self._safe_list_panel_instances(plugin_id=plugin_id))
+
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
@@ -868,7 +921,7 @@ class PluginManagerPanel:
             return str(values)
 
     @staticmethod
-    def _short(value: Any, limit: int = 240) -> str:
+    def _short(value: Any, limit: int = 180) -> str:
         if value is None:
             return ""
         text = str(value)
