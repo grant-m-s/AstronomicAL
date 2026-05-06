@@ -303,7 +303,7 @@ class Dashboard(param.Parameterized):
             self.panel_contents = SettingsDashboard(self, self.src, context=self.context)
 
         elif self.contents == "Menu":
-            self.panel_contents = MenuDashboard(self)
+            self.panel_contents = MenuDashboard(self, context=self.context)
 
         elif self.contents == "Active Learning":
             if not self._require_loaded_dataset():

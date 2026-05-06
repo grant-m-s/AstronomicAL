@@ -1,240 +1,152 @@
 from __future__ import annotations
 
-from functools import partial
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Tuple
+import html
+import json
+import traceback
+import uuid
 
 import panel as pn
-from bokeh.models.widgets import Dropdown
-from bokeh.models import InlineStyleSheet
+from bokeh.models import TextInput
 
-from astronomicAL.extensions import extension_plots
-from astronomicAL.extensions import custom_plots
-from astronomicAL.utils.debug import boot_print
+from astronomicAL.extensions import custom_plots, extension_plots
+
+
+@dataclass(frozen=True)
+class MenuEntry:
+    """Small normalized entry for the hierarchical Add Panel menu."""
+
+    title: str
+    value: str
+    source: str
+    domain: str
+    category: str
+    plugin_id: Optional[str] = None
+    plugin_name: Optional[str] = None
 
 
 class MenuDashboard:
-    """Dashboard used to dynamically choose which view to display."""
+    """Dashboard used to dynamically choose which view to display.
+
+    Compact HTML/CSS hierarchical menu.
+
+    Behaviour:
+
+    - top-level Panel menu opens on click, not hover
+    - visible menu is appended to document.body to avoid ReactGrid clipping
+    - top-level menu stays open until outside click, Escape, refresh, or selection
+    - submenus open on hover
+    - selected panels open through Dashboard.set_contents(...)
+    - plugin panels continue to open through the current plugin/custom-plot bridge
+    """
+
+    NATIVE_ENTRIES: Tuple[MenuEntry, ...] = (
+        MenuEntry(
+            title="Basic Plot",
+            value="Basic Plot",
+            source="Built-in",
+            domain="Core",
+            category="Visualisation",
+        ),
+        MenuEntry(
+            title="Histogram Plot",
+            value="Histogram Plot",
+            source="Built-in",
+            domain="Core",
+            category="Visualisation",
+        ),
+        MenuEntry(
+            title="Density Plot",
+            value="Density Plot",
+            source="Built-in",
+            domain="Core",
+            category="Visualisation",
+        ),
+        MenuEntry(
+            title="Selected Source Info",
+            value="Selected Source Info",
+            source="Built-in",
+            domain="Core",
+            category="Details",
+        ),
+    )
+
+    # Transitional grouping while these panels still live in legacy custom_plots.
+    LEGACY_HINTS: Dict[str, Tuple[str, str]] = {
+        "Notes Panel": ("Core", "Annotation"),
+        "Selection Set": ("Core", "Selection"),
+
+        "Euclid Cutout": ("Astro", "Images / Cutouts"),
+        "VLASS Cutout": ("Astro", "Images / Cutouts"),
+        "LoTSS Cutout": ("Astro", "Images / Cutouts"),
+
+        "DESI Spectra": ("Astro", "Spectra"),
+        "Euclid Spectra": ("Astro", "Spectra"),
+        "SDSS Spectra": ("Astro", "Spectra"),
+        "spec_analyser": ("Astro", "Spectra"),
+
+        "BroadBand SED": ("Astro", "SED / Photometry"),
+        "Aladin Lite": ("Astro", "Sky Viewers"),
+
+        "SAMP Send": ("Astro", "Interop"),
+        "SAMP Receive": ("Astro", "Interop"),
+    }
+
+    DOMAIN_ORDER: Dict[str, int] = {
+        "Core": 0,
+        "Active Learning": 1,
+        "ML": 2,
+        "Astro": 3,
+        "Extensions": 8,
+        "Legacy": 9,
+        "Plugins": 10,
+        "User Plugins": 11,
+        "Other": 99,
+    }
 
     def __init__(self, main, context=None):
         self.main = main
         self.context = context if context is not None else getattr(main, "context", None)
-        self.row = pn.Row(pn.pane.Str("loading"))
-        self._subscriptions = []
+
         self._disposed = False
+        self._subscriptions: List[Any] = []
 
-        boot_print("MenuDashboard.__init__: start")
-        boot_print(f"MenuDashboard.__init__: context_present={self.context is not None}")
-        boot_print(
-            "MenuDashboard.__init__: plugins_present="
-            f"{getattr(self.context, 'plugins', None) is not None if self.context is not None else False}"
+        self._token = uuid.uuid4().hex[:10]
+        self._root_class = f"al-hmenu-root-{self._token}"
+
+        # Real Bokeh model name. JS finds this through Bokeh.documents and
+        # updates its value. Python receives the change through on_change.
+        self._target_name = f"al_hmenu_target_{self._token}"
+
+        self._target = TextInput(
+            name=self._target_name,
+            value="",
+            visible=False,
+            width=1,
+            height=1,
         )
+        self._target.on_change("value", self._on_target_changed)
 
-        self._dropdown = Dropdown(
-            label="Choose Plot Type:",
-            menu=self._build_plot_options(),
-        )
-
-        self._dropdown.stylesheets = [
-            InlineStyleSheet(
-                css="""
-                /* Button */
-                .bk-btn {
-                    font-size: 14px;
-                    padding: 10px 14px;
-                    border-radius: 12px;
-                    border: 1px solid rgba(0,0,0,.18);
-                    background: rgba(255,255,255,.95);
-                    box-shadow: 0 1px 2px rgba(0,0,0,.06);
-                    min-height: 40px;
-                }
-
-                .bk-btn:hover {
-                    border-color: rgba(0,0,0,.28);
-                    box-shadow: 0 2px 6px rgba(0,0,0,.10);
-                }
-
-                .bk-btn:active {
-                    transform: translateY(1px);
-                }
-
-                .bk-caret {
-                    margin-left: 10px;
-                    opacity: .75;
-                }
-
-                /* Menu */
-                .bk-menu {
-                    border-radius: 12px;
-                    border: 1px solid rgba(0,0,0,.18);
-                    box-shadow: 0 10px 24px rgba(0,0,0,.14);
-                    padding: 6px;
-                    min-width: 50px;
-                    max-height: 150px;
-                    overflow-y: auto;
-                }
-
-                .bk-menu a {
-                    font-size: 14px;
-                    padding: 10px 10px;
-                    border-radius: 10px;
-                }
-
-                .bk-menu a:hover {
-                    background: rgba(0,0,0,.06);
-                }
-                """
-            )
-        ]
-
-        self._dropdown.on_click(
-            partial(
-                self._update_main_contents,
-                main=main,
-            )
-        )
-
-        self._plot_selection = pn.pane.Bokeh(self._dropdown)
+        self._html = self._make_html_pane()
 
         self._subscribe_to_plugin_events()
+        self._refresh_menu()
 
     # ------------------------------------------------------------------
-    # Menu construction / refresh
-    # ------------------------------------------------------------------
-
-    def _build_plot_options(self):
-        """Build menu options from static plots, legacy custom plots, and plugins."""
-
-        base_options = [
-            "Basic Plot",
-            "Histogram Plot",
-            "Density Plot",
-            "Selected Source Info",
-        ]
-
-        custom_options = list(
-            custom_plots.get_customplot_dict(context=self.context).keys()
-        )
-
-        extension_options = list(extension_plots.get_plot_dict().keys())
-
-        seen = set()
-        options = []
-
-        for item in base_options + custom_options + extension_options:
-            if item not in seen:
-                seen.add(item)
-                options.append(item)
-
-        boot_print(f"MenuDashboard._build_plot_options: base_options={base_options}")
-        boot_print(f"MenuDashboard._build_plot_options: custom_options={custom_options}")
-        boot_print(f"MenuDashboard._build_plot_options: extension_options={extension_options}")
-        boot_print(f"MenuDashboard._build_plot_options: final_options={options}")
-
-        return options
-
-    def refresh_plot_options(self) -> None:
-        """Refresh an already-created Bokeh Dropdown menu."""
-
-        if self._disposed:
-            return
-
-        options = self._build_plot_options()
-
-        try:
-            self._dropdown.menu = options
-        except Exception:
-            # Defensive fallback. If Bokeh rejects a live menu update, recreate
-            # the pane object. This should be rare.
-            self._dropdown = Dropdown(label="Choose Plot Type:", menu=options)
-            self._dropdown.on_click(
-                partial(
-                    self._update_main_contents,
-                    main=self.main,
-                )
-            )
-            self._plot_selection.object = self._dropdown
-
-    def _subscribe_to_plugin_events(self) -> None:
-        events = getattr(self.context, "events", None)
-        if events is None:
-            return
-
-        for topic in ("plugin.enabled", "plugin.disabled", "plugin.reloaded"):
-            try:
-                sub = events.subscribe(
-                    topic,
-                    self._on_plugin_registry_changed,
-                    owner_id="menu.dashboard",
-                    owner_label="Menu Dashboard",
-                    owner_kind="dashboard",
-                )
-            except TypeError:
-                sub = events.subscribe(topic, self._on_plugin_registry_changed)
-
-            self._subscriptions.append(sub)
-
-    def _on_plugin_registry_changed(self, topic, payload) -> None:
-        if self._disposed:
-            return
-
-        def _refresh():
-            if not self._disposed:
-                self.refresh_plot_options()
-
-        try:
-            doc = pn.state.curdoc
-            if doc is not None:
-                doc.add_next_tick_callback(_refresh)
-            else:
-                _refresh()
-        except Exception:
-            _refresh()
-
-    # ------------------------------------------------------------------
-    # Toolbar/content
+    # Dashboard API
     # ------------------------------------------------------------------
 
     def get_toolbar(self):
-        return pn.Spacer(height=1)
-
-    def _update_main_contents(self, event, main):
-        selected = event.item
-
-        # Critical stale-menu guard:
-        # The menu may have been constructed before a plugin was disabled.
-        # Rebuild the options at click-time and refuse invalid selections.
-        current_options = set(self._build_plot_options())
-
-        if selected not in current_options:
-            self.refresh_plot_options()
-            self._dropdown.label = "Choose Plot Type:"
-            main.show_message(
-                title="Plot unavailable",
-                message=(
-                    f"`{selected}` is no longer available. "
-                    "It may belong to a plugin that has been disabled."
-                ),
-            )
-            return
-
-        self._dropdown.label = "Loading..."
-        main.set_contents(selected)
-        self._dropdown.label = "Choose Plot Type:"
+        return pn.Spacer(height=1, min_height=1, max_height=1)
 
     def panel(self):
-        """Render the current view."""
-
-        self.row[0] = pn.Column(
-            pn.layout.VSpacer(min_height=20, max_height=20),
-            pn.Row(
-                pn.Spacer(min_width=20, max_width=500),
-                self._plot_selection,
-                pn.Spacer(min_width=20, max_width=500),
-            ),
-            pn.layout.VSpacer(min_height=20, max_height=60),
-            sizing_mode="stretch_height",
+        return pn.Column(
+            self._target,
+            self._html,
+            sizing_mode="stretch_width",
+            margin=(0, 0, 0, 0),
         )
-
-        return self.row
 
     def dispose(self) -> None:
         if self._disposed:
@@ -251,3 +163,827 @@ class MenuDashboard:
                     pass
 
         self._subscriptions.clear()
+
+    # ------------------------------------------------------------------
+    # Event handling
+    # ------------------------------------------------------------------
+
+    def _subscribe_to_plugin_events(self) -> None:
+        events = getattr(self.context, "events", None)
+        if events is None:
+            return
+
+        for topic in ("plugin.enabled", "plugin.disabled", "plugin.reloaded"):
+            try:
+                sub = events.subscribe(
+                    topic,
+                    self._on_plugin_registry_changed,
+                    owner_id=f"menu.dashboard.{self._token}",
+                    owner_label="Hierarchical Panel Menu",
+                    owner_kind="dashboard",
+                )
+            except TypeError:
+                sub = events.subscribe(topic, self._on_plugin_registry_changed)
+
+            self._subscriptions.append(sub)
+
+    def _on_plugin_registry_changed(self, topic: str, payload: Any) -> None:
+        if self._disposed:
+            return
+
+        def _refresh() -> None:
+            if not self._disposed:
+                self._refresh_menu()
+
+        try:
+            doc = pn.state.curdoc
+            if doc is not None:
+                doc.add_next_tick_callback(_refresh)
+            else:
+                _refresh()
+        except Exception:
+            _refresh()
+
+    def _on_target_changed(self, attr: str, old: str, new: str) -> None:
+        if not new:
+            return
+
+        try:
+            payload = json.loads(new)
+            value = payload.get("value", "")
+        except Exception:
+            value = new
+
+        # Reset immediately so choosing the same item again still fires later.
+        try:
+            self._target.value = ""
+        except Exception:
+            pass
+
+        if not value:
+            return
+
+        if value == "__refresh__":
+            self._refresh_menu()
+            return
+
+        try:
+            self.main.set_contents(value)
+        except Exception:
+            traceback.print_exc()
+
+    # ------------------------------------------------------------------
+    # Rendering
+    # ------------------------------------------------------------------
+
+    def _make_html_pane(self) -> pn.pane.HTML:
+        try:
+            return pn.pane.HTML(
+                "",
+                sanitize_html=False,
+                sizing_mode="stretch_width",
+                margin=(6, 8, 6, 8),
+            )
+        except TypeError:
+            return pn.pane.HTML(
+                "",
+                sizing_mode="stretch_width",
+                margin=(6, 8, 6, 8),
+            )
+
+    def _refresh_menu(self) -> None:
+        entries = self._build_entries()
+        self._html.object = self._render_html(entries)
+
+    def _build_entries(self) -> List[MenuEntry]:
+        entries: List[MenuEntry] = list(self.NATIVE_ENTRIES)
+
+        plugin_entries = self._plugin_entries()
+        plugin_titles = {entry.title for entry in plugin_entries}
+
+        try:
+            legacy_dict = custom_plots.get_customplot_dict(context=self.context)
+        except Exception:
+            traceback.print_exc()
+            legacy_dict = {}
+
+        for title in legacy_dict.keys():
+            if title in plugin_titles:
+                continue
+
+            domain, category = self.LEGACY_HINTS.get(
+                title,
+                ("Legacy", "Custom Panels"),
+            )
+
+            entries.append(
+                MenuEntry(
+                    title=title,
+                    value=title,
+                    source="Legacy",
+                    domain=domain,
+                    category=category,
+                )
+            )
+
+        try:
+            extension_dict = extension_plots.get_plot_dict()
+        except Exception:
+            traceback.print_exc()
+            extension_dict = {}
+
+        for title in extension_dict.keys():
+            entries.append(
+                MenuEntry(
+                    title=title,
+                    value=title,
+                    source="Extension",
+                    domain="Extensions",
+                    category="Extension Plots",
+                )
+            )
+
+        entries.extend(plugin_entries)
+
+        seen = set()
+        deduped: List[MenuEntry] = []
+
+        for entry in entries:
+            key = (entry.value, entry.source)
+            if key in seen:
+                continue
+
+            seen.add(key)
+            deduped.append(entry)
+
+        return sorted(
+            deduped,
+            key=lambda entry: (
+                self.DOMAIN_ORDER.get(entry.domain, 50),
+                entry.domain.casefold(),
+                entry.category.casefold(),
+                entry.title.casefold(),
+            ),
+        )
+
+    def _plugin_entries(self) -> List[MenuEntry]:
+        manager = getattr(self.context, "plugins", None)
+        if manager is None:
+            return []
+
+        plugin_info_by_id: Dict[str, Any] = {}
+
+        try:
+            for info in manager.list_plugins():
+                plugin_info_by_id[getattr(info, "id", "")] = info
+        except Exception:
+            plugin_info_by_id = {}
+
+        try:
+            panel_regs = list(manager.list_panels())
+        except Exception:
+            traceback.print_exc()
+            panel_regs = []
+
+        entries: List[MenuEntry] = []
+
+        for reg in panel_regs:
+            plugin_id = getattr(reg, "plugin_id", "") or ""
+            info = plugin_info_by_id.get(plugin_id)
+
+            title = getattr(reg, "title", None) or getattr(reg, "id", "Plugin Panel")
+            category = getattr(reg, "category", None) or "Panels"
+
+            entries.append(
+                MenuEntry(
+                    title=title,
+                    value=title,
+                    source="Plugin",
+                    domain=self._domain_for_plugin(reg, info),
+                    category=category,
+                    plugin_id=plugin_id,
+                    plugin_name=getattr(info, "name", None) if info is not None else plugin_id,
+                )
+            )
+
+        return entries
+
+    def _domain_for_plugin(self, reg: Any, info: Any) -> str:
+        plugin_id = (getattr(reg, "plugin_id", "") or "").lower()
+        tags = {str(t).lower() for t in (getattr(reg, "tags", None) or [])}
+        capabilities = {
+            str(c).lower()
+            for c in (getattr(info, "capabilities", None) or [])
+        }
+        required_mappings = {
+            str(m).lower()
+            for m in (getattr(reg, "required_mappings", None) or [])
+        }
+
+        prefix = plugin_id.split(".", 1)[0] if plugin_id else ""
+
+        if prefix == "core":
+            return "Core"
+        if prefix in {"astro", "astronomy"}:
+            return "Astro"
+        if prefix in {"ml", "model", "models"}:
+            return "ML"
+        if prefix in {"active", "active_learning", "al"}:
+            return "Active Learning"
+        if prefix in {"user", "local"}:
+            return "User Plugins"
+
+        if {"astro", "astronomy"} & tags:
+            return "Astro"
+        if {"ra", "dec"} <= required_mappings:
+            return "Astro"
+        if {"active-learning", "active_learning", "labelling", "labeling"} & tags:
+            return "Active Learning"
+        if {"ml", "model", "classifier"} & tags:
+            return "ML"
+        if {"diagnostics", "debug"} & tags or "diagnostics" in capabilities:
+            return "Core"
+
+        if prefix:
+            return prefix.replace("_", " ").replace("-", " ").title()
+
+        return "Plugins"
+
+    def _render_html(self, entries: List[MenuEntry]) -> str:
+        grouped: Dict[str, Dict[str, List[MenuEntry]]] = {}
+
+        for entry in entries:
+            grouped.setdefault(entry.domain, {}).setdefault(entry.category, []).append(entry)
+
+        domain_names = sorted(
+            grouped.keys(),
+            key=lambda d: (
+                self.DOMAIN_ORDER.get(d, 50),
+                d.casefold(),
+            ),
+        )
+
+        menu_items = []
+
+        for domain in domain_names:
+            category_html = []
+
+            for category in sorted(grouped[domain].keys(), key=str.casefold):
+                panel_html = []
+
+                for entry in grouped[domain][category]:
+                    panel_html.append(self._render_leaf(entry))
+
+                category_html.append(
+                    f"""
+                    <li class="al-hmenu-item al-hmenu-has-submenu">
+                        <div class="al-hmenu-row">
+                            <span>{self._esc(category)}</span>
+                            <span class="al-hmenu-arrow">›</span>
+                        </div>
+                        <ul class="al-hmenu-menu al-hmenu-submenu">
+                            {''.join(panel_html)}
+                        </ul>
+                    </li>
+                    """
+                )
+
+            menu_items.append(
+                f"""
+                <li class="al-hmenu-item al-hmenu-has-submenu">
+                    <div class="al-hmenu-row">
+                        <span>{self._esc(domain)}</span>
+                        <span class="al-hmenu-arrow">›</span>
+                    </div>
+                    <ul class="al-hmenu-menu al-hmenu-submenu">
+                        {''.join(category_html)}
+                    </ul>
+                </li>
+                """
+            )
+
+        total = len(entries)
+
+        menu_markup = f"""
+        <ul class="al-hmenu-menu al-hmenu-body-popover" data-menu-token="{self._token}">
+            {''.join(menu_items) if menu_items else '<li class="al-hmenu-empty">No panels available</li>'}
+        </ul>
+        """
+
+        return f"""
+        <style>
+            .{self._root_class},
+            .{self._root_class} * {{
+                box-sizing: border-box;
+            }}
+
+            .{self._root_class} {{
+                position: relative;
+                display: inline-block;
+                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+                font-size: 13px;
+                line-height: 1.25;
+                color: #222;
+                overflow: visible;
+            }}
+
+            .{self._root_class} .al-hmenu-title {{
+                font-size: 14px;
+                font-weight: 600;
+                margin: 0 0 6px 0;
+            }}
+
+            .{self._root_class} .al-hmenu-bar {{
+                display: flex;
+                align-items: center;
+                gap: 6px;
+                overflow: visible;
+            }}
+
+            .{self._root_class} .al-hmenu-button,
+            .{self._root_class} .al-hmenu-refresh {{
+                border: 1px solid #b8b8b8;
+                background: #f7f7f7;
+                border-radius: 4px;
+                min-height: 28px;
+                padding: 4px 10px;
+                color: #222;
+                cursor: default;
+                user-select: none;
+                font-size: 13px;
+            }}
+
+            .{self._root_class} .al-hmenu-button:hover,
+            .{self._root_class}.al-hmenu-open .al-hmenu-button,
+            .{self._root_class} .al-hmenu-refresh:hover {{
+                background: #ececec;
+                border-color: #999;
+            }}
+
+            .{self._root_class} .al-hmenu-count {{
+                color: #666;
+                font-size: 12px;
+                margin-left: 2px;
+                white-space: nowrap;
+            }}
+        </style>
+
+        <div
+            class="al-hmenu-root {self._root_class}"
+            data-menu-token="{self._token}"
+            data-menu-html="{self._attr(menu_markup)}"
+        >
+            <div class="al-hmenu-title">Add Panel</div>
+
+            <div class="al-hmenu-bar">
+                <button
+                    type="button"
+                    class="al-hmenu-button"
+                    onclick="{self._toggle_js()}"
+                >
+                    Panel ▾
+                </button>
+
+                <button
+                    type="button"
+                    class="al-hmenu-refresh"
+                    title="Refresh panel list"
+                    data-value="__refresh__"
+                    onclick="{self._click_js()}"
+                >
+                    ↻
+                </button>
+
+                <span class="al-hmenu-count">{total} available</span>
+            </div>
+        </div>
+        """
+
+    def _render_leaf(self, entry: MenuEntry) -> str:
+        value = self._attr(entry.value)
+        title = self._esc(entry.title)
+        source = self._esc(entry.source)
+
+        plugin_title = ""
+        if entry.source == "Plugin":
+            plugin_label = entry.plugin_name or entry.plugin_id or "Plugin"
+            plugin_title = f' title="{self._attr(plugin_label)}"'
+
+        return f"""
+        <li class="al-hmenu-item">
+            <button
+                type="button"
+                class="al-hmenu-leaf-button"
+                data-value="{value}"
+                {plugin_title}
+                onclick="{self._click_js()}"
+            >
+                <span>{title}</span>
+                <span class="al-hmenu-source">{source}</span>
+            </button>
+        </li>
+        """
+
+    def _toggle_js(self) -> str:
+        token = self._js_string(self._token)
+        body_css = self._js_string(self._body_menu_css())
+
+        js = f"""
+        event.preventDefault();
+        event.stopPropagation();
+
+        const token = {token};
+        const css = {body_css};
+        const root = this.closest('.al-hmenu-root');
+
+        if (!root) {{
+            return;
+        }}
+
+        function ensureBodyMenuCss() {{
+            const styleId = 'astronomical-hmenu-body-css';
+            let style = document.getElementById(styleId);
+
+            if (!style) {{
+                style = document.createElement('style');
+                style.id = styleId;
+                document.head.appendChild(style);
+            }}
+
+            style.textContent = css;
+        }}
+
+        function closeAllMenus() {{
+            document.querySelectorAll('.al-hmenu-body-popover').forEach((menu) => {{
+                menu.remove();
+            }});
+
+            document.querySelectorAll('.al-hmenu-root.al-hmenu-open').forEach((menuRoot) => {{
+                menuRoot.classList.remove('al-hmenu-open');
+            }});
+        }}
+
+        function installGlobalHandlers() {{
+            if (window.__astronomicalHMenuBodyHandlersInstalled) {{
+                return;
+            }}
+
+            window.__astronomicalHMenuBodyHandlersInstalled = true;
+
+            document.addEventListener('click', function(evt) {{
+                if (
+                    evt.target.closest('.al-hmenu-body-popover') ||
+                    evt.target.closest('.al-hmenu-root')
+                ) {{
+                    return;
+                }}
+
+                closeAllMenus();
+            }}, true);
+
+            document.addEventListener('keydown', function(evt) {{
+                if (evt.key !== 'Escape') {{
+                    return;
+                }}
+
+                closeAllMenus();
+            }}, true);
+        }}
+
+        function firstDirectSubmenu(item) {{
+            for (let i = 0; i < item.children.length; i++) {{
+                const child = item.children[i];
+                if (child.classList && child.classList.contains('al-hmenu-submenu')) {{
+                    return child;
+                }}
+            }}
+
+            return null;
+        }}
+
+        function installSubmenuFlipHandlers(menu) {{
+            const items = menu.querySelectorAll('.al-hmenu-has-submenu');
+
+            for (let i = 0; i < items.length; i++) {{
+                const item = items[i];
+
+                item.addEventListener('mouseenter', function() {{
+                    item.classList.remove('al-hmenu-flip');
+
+                    window.requestAnimationFrame(function() {{
+                        const submenu = firstDirectSubmenu(item);
+                        if (!submenu) {{
+                            return;
+                        }}
+
+                        const rect = submenu.getBoundingClientRect();
+                        const pad = 8;
+
+                        if (rect.right > window.innerWidth - pad) {{
+                            item.classList.add('al-hmenu-flip');
+                        }}
+                    }});
+                }});
+            }}
+        }}
+
+        function positionMenu(menu, button) {{
+            const rect = button.getBoundingClientRect();
+            const pad = 8;
+
+            menu.style.visibility = 'hidden';
+            document.body.appendChild(menu);
+
+            const menuRect = menu.getBoundingClientRect();
+
+            let left = rect.left;
+            let top = rect.bottom + 3;
+
+            if (left + menuRect.width > window.innerWidth - pad) {{
+                left = window.innerWidth - menuRect.width - pad;
+            }}
+
+            if (left < pad) {{
+                left = pad;
+            }}
+
+            if (top + menuRect.height > window.innerHeight - pad) {{
+                const above = rect.top - menuRect.height - 3;
+                if (above > pad) {{
+                    top = above;
+                }}
+            }}
+
+            menu.style.left = left + 'px';
+            menu.style.top = top + 'px';
+            menu.style.visibility = '';
+        }}
+
+        ensureBodyMenuCss();
+        installGlobalHandlers();
+
+        const existing = document.querySelector(
+            '.al-hmenu-body-popover[data-menu-token="' + token + '"]'
+        );
+
+        if (existing) {{
+            closeAllMenus();
+            return;
+        }}
+
+        closeAllMenus();
+
+        const menuHTML = root.getAttribute('data-menu-html') || '';
+        const wrapper = document.createElement('div');
+        wrapper.innerHTML = menuHTML.trim();
+
+        const menu = wrapper.querySelector(
+            '.al-hmenu-body-popover[data-menu-token="' + token + '"]'
+        );
+
+        if (!menu) {{
+            return;
+        }}
+
+        installSubmenuFlipHandlers(menu);
+        positionMenu(menu, this);
+
+        root.classList.add('al-hmenu-open');
+        """
+        return self._attr(js)
+
+    def _click_js(self) -> str:
+        target_name = self._js_string(self._target_name)
+
+        js = f"""
+        event.preventDefault();
+        event.stopPropagation();
+
+        const selectedValue = this.getAttribute('data-value') || '';
+        const payload = JSON.stringify({{
+            value: selectedValue,
+            nonce: Date.now().toString() + ':' + Math.random().toString()
+        }});
+
+        const targetName = {target_name};
+        let updated = false;
+
+        /*
+         * Bokeh 3.x reliable path: find the hidden Bokeh TextInput model by
+         * model.name and set its value directly.
+         */
+        if (window.Bokeh && Array.isArray(window.Bokeh.documents)) {{
+            for (const doc of window.Bokeh.documents) {{
+                if (!doc) {{
+                    continue;
+                }}
+
+                let model = null;
+
+                if (typeof doc.get_model_by_name === 'function') {{
+                    model = doc.get_model_by_name(targetName);
+                }}
+
+                if (!model && doc._all_models) {{
+                    const models = doc._all_models;
+                    const values = typeof models.values === 'function'
+                        ? Array.from(models.values())
+                        : Object.values(models);
+
+                    for (const candidate of values) {{
+                        if (candidate && candidate.name === targetName) {{
+                            model = candidate;
+                            break;
+                        }}
+                    }}
+                }}
+
+                if (model) {{
+                    if (typeof model.setv === 'function') {{
+                        model.setv({{ value: payload }});
+                    }} else {{
+                        model.value = payload;
+                    }}
+
+                    if (model.change && typeof model.change.emit === 'function') {{
+                        model.change.emit();
+                    }}
+
+                    updated = true;
+                    break;
+                }}
+            }}
+        }}
+
+        /*
+         * Fallback for non-shadow DOM render paths.
+         */
+        if (!updated) {{
+            const selector =
+                'input[name="' + targetName + '"], ' +
+                '[name="' + targetName + '"] input, ' +
+                '[name="' + targetName + '"] textarea';
+
+            const target = document.querySelector(selector);
+            if (target) {{
+                target.value = payload;
+                target.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                target.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                updated = true;
+            }}
+        }}
+
+        if (updated) {{
+            document.querySelectorAll('.al-hmenu-body-popover').forEach((menu) => {{
+                menu.remove();
+            }});
+
+            document.querySelectorAll('.al-hmenu-root.al-hmenu-open').forEach((menuRoot) => {{
+                menuRoot.classList.remove('al-hmenu-open');
+            }});
+        }} else if (window.console) {{
+            console.error('AstronomicAL menu could not find hidden Bokeh target model:', targetName);
+        }}
+        """
+        return self._attr(js)
+
+    def _body_menu_css(self) -> str:
+        return """
+        .al-hmenu-body-popover,
+        .al-hmenu-body-popover * {
+            box-sizing: border-box;
+        }
+
+        .al-hmenu-body-popover {
+            position: fixed;
+            z-index: 2147483000;
+            list-style: none;
+            margin: 0;
+            padding: 4px 0;
+            min-width: 210px;
+            background: #fff;
+            border: 1px solid rgba(0, 0, 0, 0.24);
+            border-radius: 4px;
+            box-shadow: 0 6px 18px rgba(0, 0, 0, 0.18);
+            overflow: visible;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            font-size: 13px;
+            line-height: 1.25;
+            color: #222;
+        }
+
+        .al-hmenu-body-popover .al-hmenu-menu {
+            list-style: none;
+            margin: 0;
+            padding: 4px 0;
+            min-width: 210px;
+            background: #fff;
+            border: 1px solid rgba(0, 0, 0, 0.24);
+            border-radius: 4px;
+            box-shadow: 0 6px 18px rgba(0, 0, 0, 0.18);
+            overflow: visible;
+        }
+
+        .al-hmenu-body-popover .al-hmenu-item {
+            position: relative;
+            margin: 0;
+            padding: 0;
+            min-height: 26px;
+            white-space: nowrap;
+            list-style: none;
+        }
+
+        .al-hmenu-body-popover .al-hmenu-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 18px;
+            padding: 6px 10px;
+            min-height: 26px;
+            cursor: default;
+        }
+
+        .al-hmenu-body-popover .al-hmenu-item:hover > .al-hmenu-row {
+            background: #e9f2ff;
+        }
+
+        .al-hmenu-body-popover .al-hmenu-submenu {
+            display: none;
+            position: absolute;
+            top: -5px;
+            left: calc(100% - 1px);
+            margin: 0;
+            z-index: 2147483001;
+        }
+
+        .al-hmenu-body-popover .al-hmenu-item:hover > .al-hmenu-submenu,
+        .al-hmenu-body-popover .al-hmenu-item:focus-within > .al-hmenu-submenu {
+            display: block;
+        }
+
+        .al-hmenu-body-popover .al-hmenu-has-submenu.al-hmenu-flip > .al-hmenu-submenu {
+            left: auto;
+            right: calc(100% - 1px);
+        }
+
+        .al-hmenu-body-popover .al-hmenu-arrow {
+            color: #777;
+            font-size: 16px;
+            line-height: 1;
+        }
+
+        .al-hmenu-body-popover .al-hmenu-leaf-button {
+            appearance: none;
+            border: 0;
+            background: transparent;
+            width: 100%;
+            min-height: 26px;
+            padding: 6px 10px;
+            text-align: left;
+            color: #222;
+            font: inherit;
+            cursor: default;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 14px;
+        }
+
+        .al-hmenu-body-popover .al-hmenu-leaf-button:hover,
+        .al-hmenu-body-popover .al-hmenu-leaf-button:focus {
+            outline: none;
+            background: #e9f2ff;
+        }
+
+        .al-hmenu-body-popover .al-hmenu-source {
+            color: #777;
+            font-size: 11px;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        }
+
+        .al-hmenu-body-popover .al-hmenu-empty {
+            padding: 8px 10px;
+            color: #777;
+        }
+        """
+
+    # ------------------------------------------------------------------
+    # Escaping helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _esc(value: Any) -> str:
+        return html.escape(str(value), quote=False)
+
+    @staticmethod
+    def _attr(value: Any) -> str:
+        return html.escape(str(value), quote=True)
+
+    @staticmethod
+    def _js_string(value: Any) -> str:
+        text = str(value)
+        text = text.replace("\\", "\\\\")
+        text = text.replace("'", "\\'")
+        text = text.replace("\n", "\\n")
+        text = text.replace("\r", "\\r")
+        return f"'{text}'"
