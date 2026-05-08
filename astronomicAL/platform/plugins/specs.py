@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
+from astronomicAL.platform.mapping_requirements import MappingRequirementLike
 
 class PluginStatus(str, Enum):
     DISCOVERED = "discovered"
@@ -57,14 +58,16 @@ class InputSpec:
     """Declarative inputs for a plugin action.
 
     A UI layer can use this to auto-render dataset selectors, column selectors,
-    row-selection toggles, artifact pickers, and parameter forms.
+    row-selection toggles, artifact pickers, parameter forms, and semantic
+    column-mapping requests.
     """
 
     dataset: bool = True
     selection: str = SelectionRequirement.OPTIONAL.value
     numeric_columns: str = ColumnRequirement.NONE.value
     columns: str = ColumnRequirement.OPTIONAL.value
-    required_mappings: List[str] = field(default_factory=list)
+    required_mappings: List[MappingRequirementLike] = field(default_factory=list)
+    optional_mappings: List[MappingRequirementLike] = field(default_factory=list)
     accepts_artifact_types: List[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
@@ -191,7 +194,8 @@ class PluginRegistration:
 @dataclass
 class PanelRegistration(PluginRegistration):
     factory: Callable[..., Any] = None  # type: ignore[assignment]
-    required_mappings: List[str] = field(default_factory=list)
+    required_mappings: List[MappingRequirementLike] = field(default_factory=list)
+    optional_mappings: List[MappingRequirementLike] = field(default_factory=list)
     uses_services: List[str] = field(default_factory=list)
     produces: List[str] = field(default_factory=list)
     default_layout: Optional[Dict[str, Any]] = None

@@ -16,6 +16,7 @@ import sys
 import traceback
 
 from astronomicAL.utils.debug import boot_print
+from .mapping_gate import MappingGatedPanel
 
 from .api import PluginAPI
 from .errors import (
@@ -826,12 +827,37 @@ class PluginManager:
 
     def create_panel(self, panel_id: str, context: Any, **kwargs: Any) -> Tuple[Any, Any]:
         reg = self.get_panel(panel_id)
+
         dependency_validation = self._validate_registration_dependencies(
             reg.requires,
             optional_requires=reg.optional_requires,
         )
+
         if not dependency_validation.ok:
             raise PluginValidationError("; ".join(dependency_validation.errors))
+
+        if getattr(reg, "required_mappings", None) or getattr(reg, "optional_mappings", None):
+            gate = MappingGatedPanel(
+                context=context,
+                manager=self,
+                registration=reg,
+                kwargs=kwargs,
+            )
+            return gate.view, gate
+
+        return self._create_panel_now(reg, context, **kwargs)
+
+    def _create_panel_now(
+        self,
+        reg: PanelRegistration,
+        context: Any,
+        **kwargs: Any,
+    ) -> Tuple[Any, Any]:
+        """Create a plugin panel immediately.
+
+        This is separated from ``create_panel`` so MappingGatedPanel can delay
+        construction until required semantic-column mappings are available.
+        """
 
         try:
             result = self._call_with_supported_args(
@@ -841,8 +867,9 @@ class PluginManager:
                 **kwargs,
             )
             return self._normalise_panel_result(result)
+
         except Exception as exc:
-            raise PluginExecutionError(f"Failed to create panel {panel_id}: {exc}") from exc
+            raise PluginExecutionError(f"Failed to create panel {reg.id}: {exc}") from exc
 
     def add_panel_to_workspace(
         self,

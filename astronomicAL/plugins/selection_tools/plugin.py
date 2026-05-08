@@ -38,6 +38,27 @@ def register(api) -> None:
         category="Selection",
         icon="list-checks",
         tags=["selection", "focus", "dataset", "review"],
+        optional_mappings=[
+            {
+                "semantic_name": "record_id",
+                "display_name": "ID column",
+                "description": (
+                    "Optional. Used to match platform selection row IDs back to "
+                    "dataframe rows. If unmapped, Selection Tools falls back to "
+                    "the dataframe index."
+                ),
+                "aliases": [
+                    "source_id",
+                    "sourceid",
+                    "object_id",
+                    "objid",
+                    "id",
+                    "ID",
+                    "row_id",
+                ],
+                "allow_index": True,
+            }
+        ],
         default_layout={"x": 0, "y": 0, "w": 6, "h": 5},
     )
 
@@ -45,7 +66,31 @@ def register(api) -> None:
         id="selection_to_dataset",
         title="Create dataset from active selection",
         handler=selection_to_dataset_action,
-        inputs=InputSpec(dataset=True, selection="optional", columns="none"),
+        inputs=InputSpec(
+            dataset=True,
+            selection="optional",
+            columns="none",
+            optional_mappings=[
+                {
+                    "semantic_name": "record_id",
+                    "display_name": "ID column",
+                    "description": (
+                        "Optional. Used to match selection row IDs to dataframe rows. "
+                        "If unmapped, the dataframe index is used."
+                    ),
+                    "aliases": [
+                        "source_id",
+                        "sourceid",
+                        "object_id",
+                        "objid",
+                        "id",
+                        "ID",
+                        "row_id",
+                    ],
+                    "allow_index": True,
+                }
+            ],
+        ),
         outputs=["dataset.loaded", "dataset.active.changed", "selection.dataset.created"],
         params_schema={
             "type": "object",
@@ -293,7 +338,7 @@ def _resolve_id_column(
     datasets = getattr(context, "datasets", None)
 
     if datasets is not None:
-        for semantic_name in ("id", "id_col", "row_id"):
+        for semantic_name in ("record_id", "id", "id_col", "row_id"):
             mapped = None
 
             try:
@@ -310,6 +355,9 @@ def _resolve_id_column(
                 except Exception:
                     mapped = None
 
+            if mapped == "Use Index":
+                return None
+
             if mapped and mapped in df.columns:
                 return str(mapped)
 
@@ -324,7 +372,7 @@ def _resolve_id_column(
         except Exception:
             pass
 
-    for candidate in ("id", "ID", "source_id", "object_id", "row_id"):
+    for candidate in ("source_id", "sourceid", "object_id", "objid", "id", "ID", "row_id"):
         if candidate in df.columns:
             return candidate
 

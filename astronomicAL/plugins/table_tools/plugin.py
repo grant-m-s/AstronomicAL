@@ -182,6 +182,12 @@ def create_subset_action(context, request: ActionRequest, **_kwargs) -> ActionRe
         created_by=manifest.id,
     )
 
+    _copy_dataset_mappings(
+        datasets,
+        source_dataset_id=base_dataset_id,
+        target_dataset_id=new_dataset_id,
+    )
+
     previous_dataset_id = base_dataset_id
 
     events = [
@@ -897,3 +903,51 @@ def _evaluate_boolean_expression(expr: str, df: pd.DataFrame) -> pd.Series:
         )
 
     return result.fillna(False).astype(bool)
+
+def _dataset_get_mappings(datasets, dataset_id: str) -> Dict[str, str]:
+    try:
+        get_mappings = getattr(datasets, "get_mappings", None)
+        if callable(get_mappings):
+            mappings = get_mappings(dataset_id)
+            if isinstance(mappings, dict):
+                return dict(mappings)
+    except Exception:
+        pass
+
+    try:
+        get = getattr(datasets, "get", None)
+        if callable(get):
+            record = get(dataset_id)
+
+            mappings = getattr(record, "mappings", None)
+            if isinstance(mappings, dict):
+                return dict(mappings)
+
+            metadata = getattr(record, "metadata", None)
+            if isinstance(metadata, dict):
+                for key in ("mappings", "column_mappings", "semantic_mappings"):
+                    if isinstance(metadata.get(key), dict):
+                        return dict(metadata[key])
+    except Exception:
+        pass
+
+    return {}
+
+
+def _copy_dataset_mappings(
+    datasets,
+    *,
+    source_dataset_id: str,
+    target_dataset_id: str,
+) -> None:
+    mappings = _dataset_get_mappings(datasets, source_dataset_id)
+    if not mappings:
+        return
+
+    set_mapping = getattr(datasets, "set_mapping", None)
+    if callable(set_mapping):
+        for semantic_name, column_name in mappings.items():
+            try:
+                set_mapping(target_dataset_id, semantic_name, column_name)
+            except Exception:
+                pass

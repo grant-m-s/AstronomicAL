@@ -14,6 +14,8 @@ from .specs import (
     WorkflowRegistration,
 )
 
+from astronomicAL.platform.mapping_requirements import MappingRequirementLike
+
 
 _ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]*$")
 
@@ -39,7 +41,8 @@ class PluginAPI:
         category: Optional[str] = None,
         icon: Optional[str] = None,
         tags: Optional[Sequence[str]] = None,
-        required_mappings: Optional[Sequence[str]] = None,
+        required_mappings: Optional[Sequence[MappingRequirementLike]] = None,
+        optional_mappings: Optional[Sequence[MappingRequirementLike]] = None,
         uses_services: Optional[Sequence[str]] = None,
         produces: Optional[Sequence[str]] = None,
         default_layout: Optional[Dict[str, Any]] = None,
@@ -47,6 +50,7 @@ class PluginAPI:
         optional_requires: Optional[Sequence[str]] = None,
     ) -> None:
         canonical_id = self._canonical_id(id)
+
         self.manager._register_panel(
             PanelRegistration(
                 plugin_id=self.plugin_id,
@@ -58,6 +62,7 @@ class PluginAPI:
                 tags=list(tags or []),
                 factory=factory,
                 required_mappings=list(required_mappings or []),
+                optional_mappings=list(optional_mappings or []),
                 uses_services=list(uses_services or []),
                 produces=list(produces or []),
                 default_layout=default_layout,
@@ -119,7 +124,8 @@ class PluginAPI:
         selection: str = "optional",
         numeric_columns: str = "none",
         columns: str = "optional",
-        required_mappings: Optional[Sequence[str]] = None,
+        required_mappings: Optional[Sequence[MappingRequirementLike]] = None,
+        optional_mappings: Optional[Sequence[MappingRequirementLike]] = None,
         params_schema: Optional[Dict[str, Any]] = None,
         settings_schema: Optional[Dict[str, Any]] = None,
         run_in_job: bool = True,
@@ -133,8 +139,7 @@ class PluginAPI:
         """Register a dataframe-oriented action with low authoring friction.
 
         The platform resolves the dataframe, selected rows, columns, params, and
-        cancellation token, then calls the handler with only the arguments it
-        accepts.
+        cancellation token, then calls the handler with only the arguments it accepts.
         """
 
         outputs = [output_type] if output_type else []
@@ -187,6 +192,7 @@ class PluginAPI:
                 numeric_columns=numeric_columns,
                 columns=columns,
                 required_mappings=list(required_mappings or []),
+                optional_mappings=list(optional_mappings or []),
             ),
             outputs=outputs,
             params_schema=params_schema,
@@ -249,7 +255,8 @@ class PluginAPI:
         selection: str = "optional",
         numeric_columns: str = "none",
         columns: str = "optional",
-        required_mappings: Optional[Sequence[str]] = None,
+        required_mappings: Optional[Sequence[MappingRequirementLike]] = None,
+        optional_mappings: Optional[Sequence[MappingRequirementLike]] = None,
         params_schema: Optional[Dict[str, Any]] = None,
         settings_schema: Optional[Dict[str, Any]] = None,
         run_in_job: bool = True,
@@ -270,6 +277,7 @@ class PluginAPI:
                 numeric_columns=numeric_columns,
                 columns=columns,
                 required_mappings=required_mappings,
+                optional_mappings=optional_mappings,
                 params_schema=params_schema,
                 settings_schema=settings_schema,
                 run_in_job=run_in_job,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from astronomicAL.platform.mapping_requirements import MappingRequirement
 from .api import PluginAPI
 from .errors import (
     PluginDiscoveryError,
@@ -49,6 +50,7 @@ __all__ = [
     "EventResult",
     "InputSpec",
     "OutputSpec",
+    "MappingRequirement",
     "PanelRegistration",
     "PluginInfo",
     "PluginStatus",

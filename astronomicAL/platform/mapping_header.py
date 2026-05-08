@@ -154,8 +154,19 @@ class MappingAlertController:
             self._subs.append(
                 self.context.events.subscribe("mapping.resolved", self._on_mapping_resolved)
             )
+            self._subs.append(
+                self.context.events.subscribe(
+                    "mapping.open_requested",
+                    self._on_mapping_open_requested,
+                )
+            )
 
         self._refresh_button()
+
+    def _on_mapping_open_requested(self, _topic: str, _payload: Any) -> None:
+        if self._pending:
+            self._rebuild_modal()
+            self.template.open_modal()
 
     def dispose(self) -> None:
         if getattr(self.context, "events", None) is None:
@@ -229,18 +240,17 @@ class MappingAlertController:
 
         dataset_id = payload.get("dataset_id")
         semantic_name = payload.get("semantic_name")
-        source = payload.get("source")
 
         if not dataset_id or not semantic_name:
             return
 
         to_remove = []
+
         for key, item in self._pending.items():
             same_dataset = item["dataset_id"] == dataset_id
             same_semantic = item["semantic_name"] == semantic_name
-            same_source = (source is None) or (item.get("source") == source)
 
-            if same_dataset and same_semantic and same_source:
+            if same_dataset and same_semantic:
                 to_remove.append(key)
 
         for key in to_remove:
@@ -459,7 +469,7 @@ class MappingAlertController:
         ]
 
     def _apply_mappings(self, _event=None) -> None:
-        resolved = []
+        resolved_semantics = []
 
         for key, selector in self._selectors.items():
             item = self._pending.get(key)
@@ -489,10 +499,16 @@ class MappingAlertController:
 
             self.context.events.publish("mapping.resolved", payload)
             self.context.events.publish("dataset.mapping_updated", payload)
-            resolved.append(key)
 
-        for key in resolved:
-            self._pending.pop(key, None)
+            resolved_semantics.append((dataset_id, semantic_name))
+
+        for dataset_id, semantic_name in resolved_semantics:
+            for key, item in list(self._pending.items()):
+                if (
+                    item.get("dataset_id") == dataset_id
+                    and item.get("semantic_name") == semantic_name
+                ):
+                    self._pending.pop(key, None)
 
         self._refresh_button()
         self._rebuild_modal()
