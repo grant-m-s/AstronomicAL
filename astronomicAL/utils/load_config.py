@@ -23,6 +23,8 @@ from astronomicAL.extensions.models import get_classifiers
 from astronomicAL.extensions.query_strategies import get_strategy_dict
 from astronomicAL.settings.data_selection import DataSelection
 from astronomicAL.platform.mapping_header import MappingAlertController
+from astronomicAL.platform.dataset_header import DatasetHeaderController
+from astronomicAL.platform.modal_utils import ensure_template_modal_host
 
 import os
 import json
@@ -169,10 +171,18 @@ def create_header(react, grid, context):
     }
     """)
 
+    ensure_template_modal_host(react)
+    
+    dataset_header = DatasetHeaderController(context=context, template=react)
     mapping_alert = MappingAlertController(context=context, template=react)
+
+    # Keep references on the template so the controllers are not garbage-collected.
+    react._dataset_header = dataset_header
+    react._mapping_alert = mapping_alert
 
     header_row = pn.Row(
         get_save_layout_button(confirmed, True, context=context),
+        dataset_header.view,
         # export_fits_file_button,
         # get_save_panel_data_button(confirmed),
         # get_save_logbook_button(confirmed),

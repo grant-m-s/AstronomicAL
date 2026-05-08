@@ -3,6 +3,8 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import Any, Dict, Tuple
 
+from astronomicAL.platform.modal_utils import mount_template_modal, open_template_modal
+
 import panel as pn
 
 
@@ -145,8 +147,6 @@ class MappingAlertController:
             )
         ]
 
-        self.template.modal[:] = [self.modal_root]
-
         if getattr(self.context, "events", None) is not None:
             self._subs.append(
                 self.context.events.subscribe("mapping.requested", self._on_mapping_requested)
@@ -166,7 +166,7 @@ class MappingAlertController:
     def _on_mapping_open_requested(self, _topic: str, _payload: Any) -> None:
         if self._pending:
             self._rebuild_modal()
-            self.template.open_modal()
+            open_template_modal(self.template, self.modal_root)
 
     def dispose(self) -> None:
         if getattr(self.context, "events", None) is None:
@@ -329,8 +329,9 @@ class MappingAlertController:
         )
 
     def _open_modal(self, _event=None) -> None:
+        print("[MappingHeader] opening mapping modal")
         self._rebuild_modal()
-        self.template.open_modal()
+        open_template_modal(self.template, self.modal_root)
 
     def _rebuild_modal(self) -> None:
         self._selectors = {}
