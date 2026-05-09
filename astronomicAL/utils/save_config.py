@@ -1,170 +1,124 @@
-from datetime import datetime
+from __future__ import annotations
 
-from astropy.table import Table
 import json
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
 import numpy as np
-
-save_layout_js_cb = """
-function FindReact(dom, traverseUp = 0) {
-const key = Object.keys(dom).find(key=>key.startsWith("__reactFiber$"));
-const domFiber = dom[key];
-if (domFiber == null) return null;
-
-// react 16+
-const GetCompFiber = fiber=>{
-//return fiber._debugOwner; // this also works, but is __DEV__ only
-let parentFiber = fiber.return;
-while (typeof parentFiber.type == "string") {
-parentFiber = parentFiber.return;
-}
-return parentFiber;
-};
-let compFiber = GetCompFiber(domFiber);
-for (let i = 0; i < traverseUp; i++) {
-compFiber = GetCompFiber(compFiber);
-}
-return compFiber.stateNode;
-}
-var react_layout = document.getElementById("responsive-grid")
-const someElement = react_layout.children[0];
-const myComp = FindReact(someElement);
-var layout_dict = {};
-
-for(var i = 0; i < myComp["props"]["layout"].length; i++) {
-
-layout_dict[i] = {
-"x":myComp["state"]["layout"][i]["x"],
-"y":myComp["state"]["layout"][i]["y"],
-"w":myComp["state"]["layout"][i]["w"],
-"h":myComp["state"]["layout"][i]["h"],
-}
-}
-
-console.log(layout_dict)
-
-text_area_input.value = JSON.stringify(layout_dict)
-
-"""
+from astropy.table import Table
 
 
 class NumpyEncoder(json.JSONEncoder):
-    """ Special json encoder for numpy types """
+    """JSON encoder that handles common numpy values."""
 
-    def default(self, obj):
+    def default(self, obj: Any) -> Any:
         if isinstance(obj, np.integer):
             return int(obj)
-        elif isinstance(obj, np.floating):
+
+        if isinstance(obj, np.floating):
             return float(obj)
-        elif isinstance(obj, np.ndarray):
+
+        if isinstance(obj, np.ndarray):
             return obj.tolist()
-        return json.JSONEncoder.default(self, obj)
-    
+
+        return super().default(obj)
 
 
+def _default_workspace_path(context: Any | None = None) -> Path:
+    if context is not None:
+        config = getattr(context, "config", None)
+        layout_file = getattr(config, "layout_file", None)
+        if layout_file:
+            return Path(layout_file).expanduser()
+
+    return Path("configs/workspace.json")
 
 
-def save_config_file_cb(attr, old, new, trigger_text, autosave, context = None):
-    save_config_file(new, trigger_text=trigger_text, autosave=autosave, context = context)
+def save_workspace(
+    context: Any,
+    path: str | Path | None = None,
+) -> dict[str, Any]:
+    """
+    Save the current plugin workspace.
+
+    This saves the platform workspace snapshot through context.persistence.
+    """
+    if context is None:
+        raise ValueError("save_workspace requires a non-null context.")
+
+    persistence = getattr(context, "persistence", None)
+    if persistence is None:
+        raise RuntimeError("context.persistence is not configured.")
+
+    workspace = getattr(context, "workspace", None)
+    if workspace is not None and hasattr(workspace, "register_existing"):
+        workspace.register_existing()
+
+    target = Path(path).expanduser() if path is not None else _default_workspace_path(context)
+
+    snapshot = persistence.save(target)
+
+    panel_count = len(snapshot.get("workspace", {}).get("panels", []))
+    grid_keys = snapshot.get("workspace", {}).get("grid", {}).get("keys", [])
+
+    print(
+        f"[save_workspace] saved {panel_count} persistent panels "
+        f"with grid_keys={grid_keys} to {target}"
+    )
+
+    return snapshot
 
 
+def save_workspace_timestamped(
+    context: Any,
+    directory: str | Path = "configs",
+    prefix: str = "workspace",
+) -> Path:
+    """
+    Save a timestamped workspace snapshot.
 
-def update_export_config(export_config, settings, key):
-    if key in settings:
-        export_config[key] = settings[key]
-    return export_config
+    Useful if you want the button to create a new file every time rather than
+    overwrite config.layout_file.
+    """
+    directory = Path(directory).expanduser()
+    directory.mkdir(parents=True, exist_ok=True)
 
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    path = directory / f"{prefix}_{timestamp}.json"
 
-def save_config_file(layout_from_js, trigger_text, autosave=False, test=False, context = None):
-
-    config = context.config
-
-    if layout_from_js == "":
-        return
-
-    layout = json.loads(layout_from_js)
-    trigger_text.value = ""
-    for i in layout:
-        curr_contents = config.dashboards[i].contents
-        layout[i]["contents"] = curr_contents
-        if curr_contents == "Basic Plot":
-            layout[i]["panel_contents"] = [
-                config.dashboards[i].panel_contents.X_variable,
-                config.dashboards[i].panel_contents.Y_variable,
-            ]
-
-    export_config = {}
-
-    export_config["Author"] = ""
-    export_config["doi"] = ""
-    export_config["dataset_filepath"] = config.settings["dataset_filepath"]
-    export_config["optimise_data"] = config.settings["optimise_data"]
-    export_config["layout"] = layout
-    export_config["id_col"] = config.settings["id_col"]
-    export_config["label_col"] = config.settings["label_col"]
-    export_config["labels"] = config.settings["labels"]
-    export_config["label_colours"] = config.settings["label_colours"]
-    export_config["labels_to_strings"] = config.settings["labels_to_strings"]
-    export_config["strings_to_labels"] = config.settings["strings_to_labels"]
-    export_config["ra_col_name"] = config.settings["ra_col_name"]
-    export_config["dec_col_name"] = config.settings["dec_col_name"]
-
-    #Settings not required in Exploring mode
-    key_list = ["default_vars",
-                "extra_info_cols", 
-                "extra_info_cols", 
-                "extra_image_cols",
-                "labels_to_train",
-                "features_for_training",
-                "exclude_labels",
-                "exclude_unknown_labels",
-                "unclassified_labels",
-                "scale_data",
-                "feature_generation",
-                "test_set_file"]
-    for key in key_list:
-        export_config = update_export_config(export_config, config.settings, key)
-
-    for i in layout:
-        curr_contents = config.dashboards[i].contents
-        if curr_contents == "BroadBand SED":
-            export_config["SED_bands"] = config.settings["SED_bands"]
-            export_config["SED_units"] = config.settings["SED_units"]
-        
-        elif curr_contents == "Euclid Cutout":
-            export_config["Euclid_cutout_settings"] = config.settings["Euclid_cutout_settings"]
-        
-        elif curr_contents == "Basic Plot":
-            export_config["Scatter_plot_settings"] = config.settings["Scatter_plot_settings"]
-
-        elif curr_contents == "Histogram Plot":
-            export_config["Histogram_plot_settings"] = config.settings["Histogram_plot_settings"]
+    save_workspace(context, path)
+    return path
 
 
-    if "classifiers" not in config.settings.keys():
-        config.settings["classifiers"] = {}
+def load_workspace_file(path: str | Path) -> dict[str, Any]:
+    """
+    Small helper for reading a workspace JSON file directly.
+    """
+    path = Path(path).expanduser()
 
-    export_config["classifiers"] = config.settings["classifiers"]
-
-    if autosave:
-        print("AUTOSAVING...")
-        with open("configs/autosave.json", "w") as fp:
-            json.dump(export_config, fp, cls=NumpyEncoder, indent=4)
-    elif test:
-        with open(f"configs/config_export.json", "w") as fp:
-            json.dump(export_config, fp, cls=NumpyEncoder, indent=4)
-    else:
-        now = datetime.now()
-        dt_string = now.strftime("%Y%m%d_%H%M%S")
-        with open(f"configs/config_{dt_string}.json", "w") as fp:
-            json.dump(export_config, fp, cls=NumpyEncoder, indent=4)
-
-        print(f"Final Export Config Settings: {export_config}")
-        print(f"Config File saved to: configs/config_{dt_string}.json")
+    with path.open("r", encoding="utf-8") as handle:
+        return json.load(handle)
 
 
-def save_dataframe_to_fits(df, filename, overwrite=True):
-    assert (
-        len(df.columns) <= 999
-    ), f"FITS Files only allow up to 999 columns, dataframe contains {len(df.columns)}"
-    t = Table.from_pandas(df)
-    t.write(filename, overwrite=overwrite)
+def save_dataframe_to_fits(
+    df,
+    filename: str | Path,
+    overwrite: bool = True,
+) -> None:
+    """
+    Export a dataframe to a FITS file.
+
+    Kept here because header export still uses this helper for labelled data.
+    """
+    if len(df.columns) > 999:
+        raise ValueError(
+            "FITS files only allow up to 999 columns; "
+            f"dataframe contains {len(df.columns)} columns."
+        )
+
+    filename = Path(filename).expanduser()
+    filename.parent.mkdir(parents=True, exist_ok=True)
+
+    table = Table.from_pandas(df)
+    table.write(filename, overwrite=overwrite)

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Union
 
+from astronomicAL.utils.debug import mapping_debug_print
 
 _COMMON_ALIASES: Dict[str, List[str]] = {
     "record_id": [
@@ -181,6 +182,48 @@ def coerce_mapping_requirements(
     ]
 
 
+def dataset_exists(context: Any, dataset_id: Optional[str]) -> bool:
+    if context is None or dataset_id is None:
+        return False
+
+    datasets = getattr(context, "datasets", None)
+    if datasets is None:
+        return False
+
+    try:
+        if hasattr(datasets, "has_dataset"):
+            return bool(datasets.has_dataset(dataset_id))
+
+        if hasattr(datasets, "_datasets"):
+            return str(dataset_id) in datasets._datasets
+
+        datasets.get_df(dataset_id)
+        return True
+    except Exception:
+        return False
+
+
+def _mapping_column_is_valid(
+    *,
+    context: Any,
+    dataset_id: str,
+    column_name: Optional[str],
+) -> bool:
+    if column_name is None:
+        return False
+
+    datasets = getattr(context, "datasets", None)
+    if datasets is None:
+        return False
+
+    try:
+        df = datasets.get_df(dataset_id)
+    except Exception:
+        return False
+
+    return str(column_name) in {str(col) for col in df.columns}
+
+
 def resolve_mapping_requirements(
     *,
     context: Any,
@@ -199,16 +242,66 @@ def resolve_mapping_requirements(
         required_default=False,
     )
 
-    missing_required = [
-        req
-        for req in required
-        if get_mapping(context, resolved_dataset_id, req.semantic_name) is None
-    ]
-    missing_optional = [
-        req
-        for req in optional
-        if get_mapping(context, resolved_dataset_id, req.semantic_name) is None
-    ]
+    # Important for workspace restore:
+    # if the dataset is not loaded yet, mappings cannot be considered valid.
+    # Panels should wait until the dataset exists, then re-check saved mappings.
+    if not dataset_exists(context, resolved_dataset_id):
+        mapping_debug_print(
+            "resolve requirements: dataset not loaded",
+            {
+                "dataset_id": resolved_dataset_id,
+                "required": [req.semantic_name for req in required],
+                "optional": [req.semantic_name for req in optional],
+            },
+        )
+        return MappingResolution(
+            dataset_id=resolved_dataset_id,
+            required=required,
+            optional=optional,
+            missing_required=required,
+            missing_optional=optional,
+        )
+
+    missing_required = []
+    for req in required:
+        column_name = get_mapping(context, resolved_dataset_id, req.semantic_name)
+
+        if column_name is None:
+            missing_required.append(req)
+            continue
+
+        if not _mapping_column_is_valid(
+            context=context,
+            dataset_id=resolved_dataset_id,
+            column_name=column_name,
+        ):
+            missing_required.append(req)
+
+    missing_optional = []
+    for req in optional:
+        column_name = get_mapping(context, resolved_dataset_id, req.semantic_name)
+
+        if column_name is None:
+            missing_optional.append(req)
+            continue
+
+        if not _mapping_column_is_valid(
+            context=context,
+            dataset_id=resolved_dataset_id,
+            column_name=column_name,
+        ):
+            missing_optional.append(req)
+
+    mapping_debug_print(
+        "resolve requirements",
+        {
+            "dataset_id": resolved_dataset_id,
+            "required": [req.semantic_name for req in required],
+            "optional": [req.semantic_name for req in optional],
+            "missing_required": [req.semantic_name for req in missing_required],
+            "missing_optional": [req.semantic_name for req in missing_optional],
+        },
+    )
 
     return MappingResolution(
         dataset_id=resolved_dataset_id,

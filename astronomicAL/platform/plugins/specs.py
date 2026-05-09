@@ -194,14 +194,31 @@ class PluginRegistration:
 @dataclass
 class PanelRegistration(PluginRegistration):
     factory: Callable[..., Any] = None  # type: ignore[assignment]
+
     required_mappings: List[MappingRequirementLike] = field(default_factory=list)
     optional_mappings: List[MappingRequirementLike] = field(default_factory=list)
+
     uses_services: List[str] = field(default_factory=list)
     produces: List[str] = field(default_factory=list)
+
     default_layout: Optional[Dict[str, Any]] = None
+    default_open_kwargs: Dict[str, Any] = field(default_factory=dict)
+
     requires: List[str] = field(default_factory=list)
     optional_requires: List[str] = field(default_factory=list)
 
+    state_version: int = 1
+    persist_layout: bool = True
+    persist_state: bool = True
+    restore_policy: str = "best_effort"
+
+@dataclass
+class CreatedPanel:
+    view: Any
+    controller: Any
+    registration: PanelRegistration
+    instance_id: str
+    title: str
 
 @dataclass
 class ActionRegistration(PluginRegistration):

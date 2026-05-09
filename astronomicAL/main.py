@@ -103,6 +103,7 @@ from astronomicAL.platform.workspace import WorkspaceManager
 from astronomicAL.platform.selection import SelectionManager
 from astronomicAL.platform.services import ServiceRegistry
 from astronomicAL.platform.plugins import PluginManager
+from astronomicAL.platform.persistence import WorkspacePersistence
 
 def _plugin_dirs() -> list[Path]:
     """Return plugin roots scanned by PluginManager.
@@ -251,6 +252,11 @@ boot_print("main.py: AppContext created")
 boot_print(f"main.py: context.plugins={type(context.plugins).__name__}")
 boot_print(f"main.py: context.config={type(context.config).__name__}")
 
+context.persistence = WorkspacePersistence(context)
+
+boot_print(f"main.py: context.persistence={type(context.persistence).__name__}")
+
+
 context.config.layout_file = getattr(
     context.config,
     "layout_file",
@@ -273,6 +279,7 @@ required = [
     "selection",
     "services",
     "plugins",
+    "persistence",
 ]
 
 missing = [name for name in required if getattr(context, name, None) is None]

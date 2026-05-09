@@ -12,6 +12,8 @@ from astronomicAL.platform.mapping_requirements import (
     resolve_mapping_requirements,
 )
 
+from astronomicAL.platform.panel_state import get_controller_state
+
 class MissingColumnsPanel:
     """Temporary placeholder shown while required plugin mappings are missing.
 
@@ -241,6 +243,8 @@ class MissingColumnsPanel:
 class MappingGatedPanel:
     """Wraps a plugin panel and delays construction until mappings are ready."""
 
+    state_version = 1
+
     def __init__(
         self,
         *,
@@ -248,11 +252,17 @@ class MappingGatedPanel:
         manager: Any,
         registration: Any,
         kwargs: Optional[Dict[str, Any]] = None,
+        instance_id: Optional[str] = None,
+        restore_state: Optional[Dict[str, Any]] = None,
+        restore_metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
         self.context = context
         self.manager = manager
         self.registration = registration
         self.kwargs = dict(kwargs or {})
+        self.instance_id = instance_id
+        self.restore_state = dict(restore_state or {})
+        self.restore_metadata = dict(restore_metadata or {})
 
         self.view = pn.Column(
             sizing_mode="stretch_both",
@@ -292,6 +302,7 @@ class MappingGatedPanel:
                 owner_kind="panel",
             )
         )
+
         self._subscriptions.append(
             events.subscribe(
                 "dataset.active.changed",
@@ -304,6 +315,28 @@ class MappingGatedPanel:
 
     def _dataset_id(self) -> str:
         return active_dataset_id(self.context) or "main"
+
+    def _show_waiting_for_dataset(self, dataset_id: str | None) -> None:
+        import panel as pn
+
+        label = dataset_id or "active dataset"
+
+        self.view[:] = [
+            pn.Column(
+                pn.pane.Markdown(
+                    f"""
+### Waiting for dataset
+
+This panel has column mapping requirements, but `{label}` is not loaded yet.
+
+Saved workspace mappings will be applied automatically after the dataset is loaded.
+                    """,
+                    sizing_mode="stretch_width",
+                ),
+                sizing_mode="stretch_both",
+                margin=10,
+            )
+        ]
 
     def _mapping_source(self) -> str:
         return getattr(self.registration, "id", None) or getattr(
@@ -325,6 +358,27 @@ class MappingGatedPanel:
 
     def _refresh(self) -> None:
         if self._disposed:
+            return
+
+        dataset_id = self._dataset_id()
+
+        datasets = getattr(self.context, "datasets", None)
+        dataset_loaded = False
+
+        if datasets is not None:
+            try:
+                if hasattr(datasets, "has_dataset"):
+                    dataset_loaded = bool(datasets.has_dataset(dataset_id))
+                elif hasattr(datasets, "_datasets"):
+                    dataset_loaded = dataset_id in datasets._datasets
+                else:
+                    datasets.get_df(dataset_id)
+                    dataset_loaded = True
+            except Exception:
+                dataset_loaded = False
+
+        if not dataset_loaded:
+            self._show_waiting_for_dataset(dataset_id)
             return
 
         state = self._resolve()
@@ -365,22 +419,29 @@ class MappingGatedPanel:
         self._refresh()
 
     def _show_real_panel(self) -> None:
-        if self._real_view is None:
-            view, controller = self.manager._create_panel_now(
-                self.registration,
-                self.context,
-                **self.kwargs,
-            )
-            self._real_view = view
-            self._real_controller = controller
+        if self._real_view is not None:
+            return
 
+        view, controller = self.manager._create_panel_now(
+            self.registration,
+            self.context,
+            instance_id=self.instance_id,
+            restore_state=self.restore_state,
+            restore_metadata=self.restore_metadata,
+            **self.kwargs,
+        )
+
+        self._real_view = view
+        self._real_controller = controller
         self.view[:] = [self._real_view]
 
     def _on_dataset_mapping_updated(self, _topic: str, payload: Any) -> None:
         if not payload:
             return
+
         if payload.get("dataset_id") != self._dataset_id():
             return
+
         self._refresh()
 
     def _on_dataset_active_changed(self, _topic: str, _payload: Any) -> None:
@@ -399,6 +460,18 @@ class MappingGatedPanel:
             except Exception:
                 pass
 
+    def get_state(self) -> dict[str, Any]:
+        if self._real_controller is not None:
+            return get_controller_state(self._real_controller)
+
+        return {
+            "gated": True,
+            "registration_id": getattr(self.registration, "id", None),
+            "restore_state": dict(self.restore_state),
+            "restore_metadata": dict(self.restore_metadata),
+            "open_kwargs": dict(self.kwargs),
+        }
+
     def dispose(self) -> None:
         if self._disposed:
             return
@@ -412,6 +485,6 @@ class MappingGatedPanel:
                     events.unsubscribe(sub)
                 except Exception:
                     pass
-        self._subscriptions.clear()
 
+        self._subscriptions.clear()
         self._dispose_real_controller()

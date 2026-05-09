@@ -15,52 +15,89 @@ settings = {"confirmed": False}
 
 
 def get_save_layout_button(enable_button, from_main, context=None):
-    from astronomicAL.utils import save_config
+    """
+    Build the workspace save button.
 
-    if ("save_button" not in settings.keys()) or from_main:
-        settings["save_button"] = pn.widgets.Button(
-            name="Save Current Configuration", disabled=not (enable_button)
-        )
-        #layout_dict = {}
-        text_area_input = TextAreaInput(value="")
-        text_area_input.on_change(
-            "value",
-            partial(
-                save_config.save_config_file_cb,
-                trigger_text=text_area_input,
-                autosave=False,
-                context=context
-            ),
-        )
+    This uses the new context.persistence save path instead of scraping the
+    React layout with JavaScript.
+    """
+    import panel as pn
 
-        settings["save_button"].jscallback(
-            clicks=save_config.save_layout_js_cb,
-            args=dict(text_area_input=text_area_input),
+    button_key = "save_button"
+
+    if (button_key not in settings) or from_main:
+        button = pn.widgets.Button(
+            name="Save Workspace",
+            disabled=not bool(enable_button),
+            button_type="primary",
+            width=150,
         )
 
-        settings["save_button"].on_click(lambda event: _save_layout_button_cb(event, context))
+        status = pn.pane.Markdown(
+            "",
+            visible=False,
+            width=260,
+            margin=(6, 0, 0, 8),
+        )
 
-        return settings["save_button"]
+        def _save(_event):
+            if context is None:
+                status.object = "Save failed: no context."
+                status.visible = True
+                button.name = "Save Workspace"
+                return
+
+            try:
+                from astronomicAL.utils.save_config import save_workspace
+
+                config_obj = getattr(context, "config", None)
+                path = getattr(config_obj, "layout_file", None) or "configs/workspace.json"
+
+                save_workspace(context, path)
+
+                button.name = "Saved"
+                status.object = f"Saved: `{path}`"
+                status.visible = True
+
+            except Exception as exc:
+                button.name = "Save failed"
+                status.object = f"Save failed: `{exc}`"
+                status.visible = True
+
+        button.on_click(_save)
+
+        settings[button_key] = pn.Row(
+            button,
+            status,
+            sizing_mode="fixed",
+        )
+
     if not from_main:
-        settings["save_button"].disabled = not (enable_button)
-        return settings["save_button"]
+        try:
+            settings[button_key][0].disabled = not bool(enable_button)
+        except Exception:
+            pass
+
+    return settings[button_key]
 
 
-def _save_layout_button_rename(context):
-    get_save_layout_button(settings["confirmed"], True, context=context).disabled = True
-    get_save_layout_button(
-        settings["confirmed"], True, context=context
-    ).name = "Configuration saved to configs folder with current timestamp."
-    time.sleep(3)
-    get_save_layout_button(
-        settings["confirmed"], True, context=context
-    ).name = "Save Current Configuration"
-    if settings["confirmed"]:
-        get_save_layout_button(settings["confirmed"], True, context=context).disabled = False
+def _save_layout_button_rename(context=None):
+    """
+    Removed old asynchronous rename behaviour.
+
+    Kept as a harmless no-op in case anything still imports it while the
+    surrounding UI is being cleaned up.
+    """
+    return None
 
 
-def _save_layout_button_cb(event, context):
-    Process(target=_save_layout_button_rename, args=(context,)).start()
+def _save_layout_button_cb(event=None, context=None):
+    """
+    Removed old JS-triggered save callback.
+
+    Saving is now handled directly by get_save_layout_button().
+    """
+    return None
 
 def get_save_panel_data_button(enable_button):
     settings["save_panel_button"] = pn.widgets.Button(name="Export Panel Data", disabled = not enable_button, button_type = "default")

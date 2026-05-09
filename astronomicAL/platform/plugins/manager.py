@@ -14,7 +14,9 @@ import logging
 import re
 import sys
 import traceback
+import uuid
 
+from astronomicAL.platform.panel_state import restore_controller_state
 from astronomicAL.utils.debug import boot_print
 from .mapping_gate import MappingGatedPanel
 
@@ -33,6 +35,7 @@ from .specs import (
     ActionResult,
     ArtifactResult,
     ArtifactViewerRegistration,
+    CreatedPanel,
     DatasetResult,
     EventResult,
     InputSpec,
@@ -817,7 +820,10 @@ class PluginManager:
         return [r for regs in self._artifact_viewers.values() for r in regs]
 
     def get_panel(self, panel_id: str) -> PanelRegistration:
-        return self._panels[panel_id]
+        try:
+            return self._panels[panel_id]
+        except KeyError as exc:
+            raise KeyError(f"Unknown plugin panel registration: {panel_id}") from exc
 
     def get_action(self, action_id: str) -> ActionRegistration:
         return self._actions[action_id]
@@ -825,14 +831,38 @@ class PluginManager:
     def get_workflow(self, workflow_id: str) -> WorkflowRegistration:
         return self._workflows[workflow_id]
 
-    def create_panel(self, panel_id: str, context: Any, **kwargs: Any) -> Tuple[Any, Any]:
+
+    def create_panel(
+        self,
+        panel_id: str,
+        context: Any,
+        *,
+        instance_id: Optional[str] = None,
+        restore_state: Optional[Dict[str, Any]] = None,
+        restore_metadata: Optional[Dict[str, Any]] = None,
+        open_kwargs: Optional[Dict[str, Any]] = None,
+        **kwargs: Any,
+    ) -> Tuple[Any, Any]:
+        """
+        Backwards-friendly panel factory.
+
+        Existing callers can still do:
+
+            view, controller = manager.create_panel(panel_id, context)
+
+        New workspace restore code should usually call open_panel() so panel
+        metadata and layout are recorded in WorkspaceManager.
+        """
         reg = self.get_panel(panel_id)
+
+        merged_kwargs = dict(getattr(reg, "default_open_kwargs", {}) or {})
+        merged_kwargs.update(open_kwargs or {})
+        merged_kwargs.update(kwargs)
 
         dependency_validation = self._validate_registration_dependencies(
             reg.requires,
             optional_requires=reg.optional_requires,
         )
-
         if not dependency_validation.ok:
             raise PluginValidationError("; ".join(dependency_validation.errors))
 
@@ -841,32 +871,95 @@ class PluginManager:
                 context=context,
                 manager=self,
                 registration=reg,
-                kwargs=kwargs,
+                kwargs=merged_kwargs,
+                instance_id=instance_id,
+                restore_state=restore_state or {},
+                restore_metadata=restore_metadata or {},
             )
             return gate.view, gate
 
-        return self._create_panel_now(reg, context, **kwargs)
+        return self._create_panel_now(
+            reg,
+            context,
+            instance_id=instance_id,
+            restore_state=restore_state or {},
+            restore_metadata=restore_metadata or {},
+            **merged_kwargs,
+        )
+
+    def create_panel_instance(
+        self,
+        panel_id: str,
+        context: Any,
+        *,
+        instance_id: Optional[str] = None,
+        restore_state: Optional[Dict[str, Any]] = None,
+        restore_metadata: Optional[Dict[str, Any]] = None,
+        open_kwargs: Optional[Dict[str, Any]] = None,
+        **kwargs: Any,
+    ) -> CreatedPanel:
+        reg = self.get_panel(panel_id)
+        resolved_instance_id = instance_id or f"{reg.id}:{uuid.uuid4().hex[:10]}"
+
+        view, controller = self.create_panel(
+            panel_id,
+            context,
+            instance_id=resolved_instance_id,
+            restore_state=restore_state,
+            restore_metadata=restore_metadata,
+            open_kwargs=open_kwargs,
+            **kwargs,
+        )
+
+        return CreatedPanel(
+            view=view,
+            controller=controller,
+            registration=reg,
+            instance_id=resolved_instance_id,
+            title=reg.title,
+        )
 
     def _create_panel_now(
         self,
         reg: PanelRegistration,
         context: Any,
+        *,
+        instance_id: Optional[str] = None,
+        restore_state: Optional[Dict[str, Any]] = None,
+        restore_metadata: Optional[Dict[str, Any]] = None,
         **kwargs: Any,
     ) -> Tuple[Any, Any]:
-        """Create a plugin panel immediately.
-
-        This is separated from ``create_panel`` so MappingGatedPanel can delay
-        construction until required semantic-column mappings are available.
         """
+        Create a plugin panel immediately.
 
+        MappingGatedPanel calls this once semantic column requirements are
+        satisfied.
+        """
         try:
             result = self._call_with_supported_args(
                 reg.factory,
                 context=context,
                 manager=self,
+                instance_id=instance_id,
+                restore_state=restore_state or {},
+                restore_metadata=restore_metadata or {},
                 **kwargs,
             )
-            return self._normalise_panel_result(result)
+            view, controller = self._normalise_panel_result(result)
+
+            try:
+                setattr(view, "_al_plugin_id", reg.plugin_id)
+                setattr(view, "_al_registration_id", reg.id)
+                setattr(view, "_al_instance_id", instance_id)
+                setattr(view, "_al_plugin_version", self._plugin_version(reg.plugin_id))
+                setattr(view, "_al_state_version", reg.state_version)
+            except Exception:
+                pass
+
+            if getattr(reg, "persist_state", True):
+                restore_controller_state(controller, restore_state or {})
+
+            return view, controller
 
         except Exception as exc:
             raise PluginExecutionError(f"Failed to create panel {reg.id}: {exc}") from exc
@@ -880,21 +973,99 @@ class PluginManager:
         title: Optional[str] = None,
         layout_item: Optional[Dict[str, Any]] = None,
         layout_items: Optional[Dict[str, Dict[str, Any]]] = None,
+        restore_state: Optional[Dict[str, Any]] = None,
+        restore_metadata: Optional[Dict[str, Any]] = None,
+        open_kwargs: Optional[Dict[str, Any]] = None,
         **kwargs: Any,
     ) -> str:
         reg = self.get_panel(panel_id)
-        view, controller = self.create_panel(panel_id, context, **kwargs)
-        workspace_id = instance_id or panel_id
+        workspace_id = instance_id or f"{reg.id}:{uuid.uuid4().hex[:10]}"
+
+        created = self.create_panel_instance(
+            panel_id,
+            context,
+            instance_id=workspace_id,
+            restore_state=restore_state,
+            restore_metadata=restore_metadata,
+            open_kwargs=open_kwargs,
+            **kwargs,
+        )
+
         context.workspace.add_panel(
             panel_id=workspace_id,
             title=title or reg.title,
-            view=view,
-            controller=controller,
-            layout_item=layout_item or reg.default_layout,
+            view=created.view,
+            controller=created.controller,
+            layout_item=layout_item if layout_item is not None else reg.default_layout,
             layout_items=layout_items,
+            kind="plugin_panel",
+            plugin_id=reg.plugin_id,
+            registration_id=reg.id,
+            plugin_version=self._plugin_version(reg.plugin_id),
+            state_version=reg.state_version,
+            persistent=reg.persist_layout,
+            open_kwargs=open_kwargs or {},
+            metadata={
+                "panel_registration_title": reg.title,
+                "panel_category": reg.category,
+                "restore_policy": reg.restore_policy,
+            },
         )
+
         self._workspace_panels_by_plugin.setdefault(reg.plugin_id, set()).add(workspace_id)
+
         return workspace_id
+
+    def open_panel(
+        self,
+        panel_id: str,
+        *,
+        context: Any,
+        instance_id: Optional[str] = None,
+        title: Optional[str] = None,
+        layout_item: Optional[Dict[str, Any]] = None,
+        layout_items: Optional[Dict[str, Dict[str, Any]]] = None,
+        restore_state: Optional[Dict[str, Any]] = None,
+        restore_metadata: Optional[Dict[str, Any]] = None,
+        open_kwargs: Optional[Dict[str, Any]] = None,
+        **kwargs: Any,
+    ) -> str:
+        """
+        Preferred workspace-facing panel opener.
+
+        This is intentionally thin over add_panel_to_workspace(), but the name
+        reads better in persistence and menu code.
+        """
+        return self.add_panel_to_workspace(
+            panel_id,
+            context,
+            instance_id=instance_id,
+            title=title,
+            layout_item=layout_item,
+            layout_items=layout_items,
+            restore_state=restore_state,
+            restore_metadata=restore_metadata,
+            open_kwargs=open_kwargs,
+            **kwargs,
+        )
+    
+    def _plugin_version(self, plugin_id: str) -> Optional[str]:
+        record = self._records.get(plugin_id)
+        if record is None:
+            return None
+        return getattr(record.manifest, "version", None)
+
+    def required_plugins_for_workspace(self, workspace_snapshot: Dict[str, Any]) -> List[str]:
+        required: set[str] = set()
+
+        for panel in workspace_snapshot.get("panels", []) or []:
+            if not isinstance(panel, dict):
+                continue
+            plugin_id = panel.get("plugin_id")
+            if plugin_id:
+                required.add(str(plugin_id))
+
+        return sorted(required)
 
     def run_action(
         self,

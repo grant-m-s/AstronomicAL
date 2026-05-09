@@ -46,8 +46,13 @@ class PluginAPI:
         uses_services: Optional[Sequence[str]] = None,
         produces: Optional[Sequence[str]] = None,
         default_layout: Optional[Dict[str, Any]] = None,
+        default_open_kwargs: Optional[Dict[str, Any]] = None,
         requires: Optional[Sequence[str]] = None,
         optional_requires: Optional[Sequence[str]] = None,
+        state_version: int = 1,
+        persist_layout: bool = True,
+        persist_state: bool = True,
+        restore_policy: str = "best_effort",
     ) -> None:
         canonical_id = self._canonical_id(id)
 
@@ -66,8 +71,13 @@ class PluginAPI:
                 uses_services=list(uses_services or []),
                 produces=list(produces or []),
                 default_layout=default_layout,
+                default_open_kwargs=dict(default_open_kwargs or {}),
                 requires=list(requires or []),
                 optional_requires=list(optional_requires or []),
+                state_version=int(state_version),
+                persist_layout=bool(persist_layout),
+                persist_state=bool(persist_state),
+                restore_policy=str(restore_policy),
             )
         )
 

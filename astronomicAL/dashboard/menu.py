@@ -204,6 +204,179 @@ class MenuDashboard:
         except Exception:
             _refresh()
 
+    def _workspace_grid(self):
+        workspace = getattr(self.context, "workspace", None)
+        if workspace is None:
+            return None
+        return getattr(workspace, "grid", None)
+
+    def _current_workspace_panel_id(self) -> Optional[str]:
+        """
+        Return the workspace tile id that contains this MenuDashboard.
+
+        self.main is the parent Dashboard controller created in add_menu_panel().
+        """
+        panel_id = getattr(self.main, "_al_panel_id", None)
+        if panel_id:
+            return str(panel_id)
+
+        # Fallback: try to find this Dashboard controller in workspace records.
+        workspace = getattr(self.context, "workspace", None)
+        if workspace is None:
+            return None
+
+        try:
+            for candidate_id, record in workspace.list_panels().items():
+                if record.controller is self.main:
+                    return str(candidate_id)
+        except Exception:
+            return None
+
+        return None
+
+    def _layout_items_for_existing_tile(self, panel_id: str) -> Dict[str, Dict[str, Any]]:
+        """
+        Capture the current tile position for every breakpoint.
+
+        The replacement plugin panel will reuse these layout items.
+        """
+        grid = self._workspace_grid()
+        if grid is None:
+            return {}
+
+        layout_items: Dict[str, Dict[str, Any]] = {}
+
+        for breakpoint, breakpoint_layout in (getattr(grid, "layouts", None) or {}).items():
+            for item in breakpoint_layout or []:
+                if str(item.get("i")) != str(panel_id):
+                    continue
+
+                item_copy = dict(item)
+                item_copy["i"] = str(panel_id)
+                layout_items[str(breakpoint)] = item_copy
+                break
+
+        return layout_items
+
+    @staticmethod
+    def _rects_overlap(a, b) -> bool:
+        return not (
+            a["x"] + a["w"] <= b["x"]
+            or b["x"] + b["w"] <= a["x"]
+            or a["y"] + a["h"] <= b["y"]
+            or b["y"] + b["h"] <= a["y"]
+        )
+
+    def _find_first_fit(self, layout_items, *, cols: int, w: int, h: int):
+        items = []
+
+        for item in layout_items or []:
+            try:
+                items.append(
+                    {
+                        "x": int(item.get("x", 0)),
+                        "y": int(item.get("y", 0)),
+                        "w": int(item.get("w", 1)),
+                        "h": int(item.get("h", 1)),
+                    }
+                )
+            except Exception:
+                continue
+
+        max_y = 0
+        for item in items:
+            max_y = max(max_y, item["y"] + item["h"])
+
+        for y in range(0, max_y + 100):
+            for x in range(0, max(1, cols - w + 1)):
+                candidate = {"x": x, "y": y, "w": w, "h": h}
+                if not any(self._rects_overlap(candidate, item) for item in items):
+                    return x, y
+
+        return 0, max_y
+
+    def _new_panel_layout_items(self, *, default_w=6, default_h=8):
+        """
+        Fallback only.
+
+        Used if the menu is somehow not inside a tracked workspace tile.
+        Normal menu behaviour should replace the existing menu tile.
+        """
+        grid = self._workspace_grid()
+        if grid is None:
+            return None
+
+        layouts = dict(getattr(grid, "layouts", None) or {})
+        cols_by_breakpoint = dict(
+            getattr(grid, "cols_by_breakpoint", None)
+            or {"lg": 12, "md": 12, "sm": 12}
+        )
+
+        layout_items = {}
+
+        for breakpoint, cols in cols_by_breakpoint.items():
+            cols = int(cols)
+            w = min(int(default_w), cols)
+            h = int(default_h)
+
+            if breakpoint == "sm":
+                w = cols
+
+            existing = list(layouts.get(breakpoint, []))
+            x, y = self._find_first_fit(existing, cols=cols, w=w, h=h)
+
+            layout_items[breakpoint] = {
+                "x": x,
+                "y": y,
+                "w": w,
+                "h": h,
+            }
+
+        return layout_items
+
+    def _open_plugin_panel(self, registration_id: str) -> None:
+        """
+        Replace this Menu tile with the selected plugin panel.
+
+        This intentionally reuses the menu tile's workspace panel id so the
+        selected panel appears exactly where the menu was.
+        """
+        manager = getattr(self.context, "plugins", None)
+        if manager is None:
+            print("[MenuDashboard] Cannot open plugin panel: context.plugins is unavailable")
+            return
+
+        current_panel_id = self._current_workspace_panel_id()
+
+        if current_panel_id:
+            layout_items = self._layout_items_for_existing_tile(current_panel_id)
+
+            print(
+                "[MenuDashboard] replacing menu tile "
+                f"panel_id={current_panel_id} with plugin panel "
+                f"registration_id={registration_id}"
+            )
+
+            manager.open_panel(
+                registration_id,
+                context=self.context,
+                instance_id=current_panel_id,
+                layout_items=layout_items,
+            )
+            return
+
+        # Defensive fallback. This should rarely happen.
+        print(
+            "[MenuDashboard] menu tile id unavailable; opening plugin panel "
+            f"as a new tile registration_id={registration_id}"
+        )
+
+        manager.open_panel(
+            registration_id,
+            context=self.context,
+            layout_items=self._new_panel_layout_items(default_w=6, default_h=8),
+        )
+
     def _on_target_changed(self, attr: str, old: str, new: str) -> None:
         if not new:
             return
@@ -228,7 +401,15 @@ class MenuDashboard:
             return
 
         try:
+            if value.startswith("plugin:"):
+                registration_id = value.split("plugin:", 1)[1]
+                self._open_plugin_panel(registration_id)
+                return
+
+            # Non-plugin entries retain the old behaviour for now: replace
+            # this Dashboard's internal contents.
             self.main.set_contents(value)
+
         except Exception:
             traceback.print_exc()
 
@@ -354,10 +535,12 @@ class MenuDashboard:
             title = getattr(reg, "title", None) or getattr(reg, "id", "Plugin Panel")
             category = getattr(reg, "category", None) or "Panels"
 
+            registration_id = getattr(reg, "id", "") or title
+
             entries.append(
                 MenuEntry(
                     title=title,
-                    value=title,
+                    value=f"plugin:{registration_id}",
                     source="Plugin",
                     domain=self._domain_for_plugin(reg, info),
                     category=category,

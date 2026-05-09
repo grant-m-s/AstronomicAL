@@ -246,3 +246,92 @@ class SelectionManager:
             return row_ids[0]
 
         return None
+    
+    def snapshot(self) -> dict[str, Any]:
+        focus = self.get_focus()
+        active_set = self.get_active_set()
+
+        focus_snapshot = None
+        if focus is not None and focus.dataset_id is not None and focus.row_id is not None:
+            focus_snapshot = {
+                "dataset_id": focus.dataset_id,
+                "row_id": focus.row_id,
+                "origin": focus.origin,
+                "panel_id": focus.panel_id,
+                "timestamp": focus.timestamp,
+            }
+
+        selection_set_snapshot = None
+        if active_set is not None:
+            selection_set_snapshot = {
+                "selection_set_id": active_set.selection_set_id,
+                "dataset_id": active_set.dataset_id,
+                "row_ids": list(active_set.row_ids),
+                "origin": active_set.origin,
+                "panel_id": active_set.panel_id,
+                "mode": active_set.mode,
+                "artifact_id": active_set.artifact_id,
+                "timestamp": active_set.timestamp,
+                "metadata": dict(active_set.metadata or {}),
+            }
+
+        return {
+            "focus": focus_snapshot,
+            "selection_set": selection_set_snapshot,
+        }
+
+    def restore_snapshot(self, snapshot: dict[str, Any], *, publish: bool = True) -> None:
+        if not snapshot:
+            return
+
+        selection_set = snapshot.get("selection_set")
+        focus = snapshot.get("focus")
+
+        if selection_set:
+            if publish:
+                self.set_selection_set(
+                    dataset_id=selection_set["dataset_id"],
+                    row_ids=list(selection_set.get("row_ids") or []),
+                    origin=selection_set.get("origin") or "workspace.restore",
+                    panel_id=selection_set.get("panel_id"),
+                    mode=selection_set.get("mode") or "replace",
+                    metadata=dict(selection_set.get("metadata") or {}),
+                    create_artifact=False,
+                    update_focus_policy="unchanged",
+                )
+
+                if self._active_set is not None:
+                    self._active_set.selection_set_id = selection_set.get(
+                        "selection_set_id",
+                        self._active_set.selection_set_id,
+                    )
+                    self._active_set.artifact_id = selection_set.get("artifact_id")
+            else:
+                self._active_set = SelectionSetState(
+                    selection_set_id=selection_set.get("selection_set_id") or f"selset:{uuid.uuid4().hex[:8]}",
+                    dataset_id=selection_set["dataset_id"],
+                    row_ids=[str(row_id) for row_id in selection_set.get("row_ids") or []],
+                    origin=selection_set.get("origin"),
+                    panel_id=selection_set.get("panel_id"),
+                    mode=selection_set.get("mode") or "replace",
+                    artifact_id=selection_set.get("artifact_id"),
+                    metadata=dict(selection_set.get("metadata") or {}),
+                )
+        else:
+            self._active_set = None
+
+        if focus:
+            if publish:
+                self.set_focus(
+                    dataset_id=focus["dataset_id"],
+                    row_id=focus["row_id"],
+                    origin=focus.get("origin") or "workspace.restore",
+                    panel_id=focus.get("panel_id"),
+                )
+            else:
+                self._focus = FocusState(
+                    dataset_id=focus.get("dataset_id"),
+                    row_id=str(focus.get("row_id")),
+                    origin=focus.get("origin"),
+                    panel_id=focus.get("panel_id"),
+                )
