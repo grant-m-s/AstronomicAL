@@ -1,6 +1,5 @@
 from astronomicAL.dashboard.active_learning import ActiveLearningDashboard
 from astronomicAL.dashboard.labelling import LabellingDashboard
-from astronomicAL.dashboard.exploration import ExplorationDashboard
 from astronomicAL.dashboard.menu import MenuDashboard
 from astronomicAL.dashboard.plot import HistoDashboard, ScatterPlotDashboard, DensityPlotDashboard
 from astronomicAL.dashboard.selected_source import SelectedSourceDashboard
@@ -21,9 +20,6 @@ NATIVE_CONTENTS = {
     # Built-in workflow/dashboard modes.
     # These are not custom plots and should not be validated against
     # get_customplot_dict() or get_plot_dict().
-    "Exploring",
-    "Explorer",
-    "Exploration",
     "Active Learning",
     "Labelling",
     "Labelling Test Set",
@@ -331,12 +327,6 @@ class Dashboard(param.Parameterized):
                 return
             self.df = self.config.main_df
             self.panel_contents = LabellingDashboard(self.src, self.df, context=self.context)
-
-        elif self.contents == "Exploring":
-            if not self._require_loaded_dataset():
-                return
-            self.df = self.config.main_df
-            self.panel_contents = ExplorationDashboard(self.df, context=self.context)
 
         elif self.contents == "Selected Source Info":
             if not self._require_loaded_dataset():
