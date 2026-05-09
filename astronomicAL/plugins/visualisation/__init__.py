@@ -1,0 +1,1 @@
+"""Bundled generic visualisation plugin."""
