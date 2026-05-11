@@ -25,8 +25,22 @@ SCATTER_RENDERER = "astronomical_visualisation_scatter_points"
 HIST_RENDERER = "astronomical_visualisation_histogram"
 DENSITY_RENDERER = "astronomical_visualisation_density"
 
+HOVER_ROW_ID = "hover_record_id"
+HOVER_LABEL = "hover_label"
 
-# Deliberately starts dark/visible for low-count pixels on a white background.
+HOVER_CSS = """
+.bk-tooltip {
+    max-height: 150px !important;
+    overflow-y: auto !important;
+    overflow-x: hidden !important;
+}
+.bk-tooltip > div {
+    max-height: 150px !important;
+    overflow-y: auto !important;
+    overflow-x: hidden !important;
+}
+"""
+
 VISIBLE_DENSITY_CMAP = [
     "#08306b",
     "#08519c",
@@ -55,6 +69,18 @@ def ensure_hv_extension() -> None:
     except Exception:
         pass
 
+    try:
+        import panel as pn
+
+        raw_css = list(getattr(pn.config, "raw_css", []) or [])
+        if HOVER_CSS not in raw_css:
+            try:
+                pn.config.raw_css.append(HOVER_CSS)
+            except Exception:
+                pn.extension(raw_css=[HOVER_CSS])
+    except Exception:
+        pass
+
     _HV_EXTENSION_LOADED = True
 
 
@@ -71,16 +97,10 @@ def force_wheel_zoom_hook(plot, element) -> None:
 
 
 def renderer_name_hook(name: str):
-    """Return a HoloViews hook that names and targets the main glyph renderer.
+    """Name and target the main glyph renderer.
 
-    Bokeh versions differ here:
-    - some support HoverTool.names;
-    - some only support HoverTool.renderers;
-    - some support HoverTool.limit;
-    - some do not.
-
-    We avoid HoverTool.names entirely and bind hover tools to the main renderer
-    after HoloViews has created it.
+    Do not use HoverTool.names because older Bokeh versions do not support it.
+    Bind hover tools to the main renderer through HoverTool.renderers instead.
     """
 
     def _hook(plot, element) -> None:
@@ -98,9 +118,6 @@ def renderer_name_hook(name: str):
                 if isinstance(tool, HoverTool):
                     _apply_hover_limit(tool)
 
-                    # Restrict hover to the main renderer where supported.
-                    # This avoids overlays/focus/selection glyphs contributing
-                    # extra tooltip rows.
                     if renderer is not None and hasattr(tool, "renderers"):
                         try:
                             tool.renderers = [renderer]
@@ -122,16 +139,7 @@ def _apply_hover_limit(tool: HoverTool) -> HoverTool:
     return tool
 
 
-def _hover_tool(*, tooltips, names: Optional[List[str]] = None) -> HoverTool:
-    """Create a compact hover tool.
-
-    Do not pass ``names`` to HoverTool. Some Bokeh versions do not support that
-    attribute and raise:
-
-        unexpected attribute 'names' to HoverTool
-
-    Renderer targeting is instead applied later in ``renderer_name_hook``.
-    """
+def _hover_tool(*, tooltips) -> HoverTool:
     kwargs = {
         "tooltips": tooltips,
         "mode": "mouse",
@@ -149,19 +157,17 @@ def _hover_tool(*, tooltips, names: Optional[List[str]] = None) -> HoverTool:
 
 def limited_point_hover_tool() -> HoverTool:
     return _hover_tool(
-        names=[SCATTER_RENDERER],
         tooltips=[
-            ("x", f"@{INTERNAL_X}"),
-            ("y", f"@{INTERNAL_Y}"),
-            ("id", f"@{INTERNAL_ROW_ID}"),
-            ("label", f"@{INTERNAL_LABEL_DISPLAY}"),
+            ("x", "$x"),
+            ("y", "$y"),
+            ("id", f"@{HOVER_ROW_ID}"),
+            ("label", f"@{HOVER_LABEL}"),
         ],
     )
 
 
 def limited_histogram_hover_tool() -> HoverTool:
     return _hover_tool(
-        names=[HIST_RENDERER],
         tooltips=[
             ("x", "$x"),
             ("count", "$y"),
@@ -171,7 +177,6 @@ def limited_histogram_hover_tool() -> HoverTool:
 
 def limited_density_hover_tool() -> HoverTool:
     return _hover_tool(
-        names=[DENSITY_RENDERER],
         tooltips=[
             ("x", "$x"),
             ("y", "$y"),
@@ -390,9 +395,16 @@ def prepare_plot_frame(context, state, *, require_y: bool) -> PreparedFrame:
 
     row_ids = _row_id_array(df, state.record_id_col, mask)
 
+    if label_display is None:
+        hover_labels = np.full(len(row_ids), "—", dtype=object)
+    else:
+        hover_labels = np.asarray(label_display, dtype=object)
+
     data: Dict[str, Any] = {
         INTERNAL_X: x[mask],
         INTERNAL_ROW_ID: row_ids,
+        HOVER_ROW_ID: row_ids,
+        HOVER_LABEL: hover_labels,
     }
 
     if require_y and y is not None:
@@ -436,16 +448,64 @@ def prepared_cache_key(context, state, *, require_y: bool) -> Tuple[Any, ...]:
     )
 
 
-def sample_prepared_frame(data: PreparedFrame, limit: int, *, seed: int = 0) -> PreparedFrame:
+def sample_prepared_frame(
+    data: PreparedFrame,
+    limit: int,
+    *,
+    seed: int = 0,
+    force_row_ids: Optional[Sequence[str]] = None,
+) -> PreparedFrame:
+    """Sample a PreparedFrame while always including forced row ids.
+
+    Forced ids are used for current focus and active selections. This prevents
+    a selected/focused source from disappearing just because it was not part of
+    the random sample.
+    """
     frame = data.frame
     n_rows = len(frame)
     limit = int(limit)
 
-    if n_rows <= limit or limit <= 0:
+    if n_rows == 0:
         return data
 
-    rng = np.random.default_rng(seed)
-    indices = np.sort(rng.choice(n_rows, size=limit, replace=False))
+    if limit <= 0 or n_rows <= limit:
+        return data
+
+    force_row_ids = [str(value) for value in (force_row_ids or [])]
+    forced_indices = np.asarray([], dtype=int)
+
+    if force_row_ids and INTERNAL_ROW_ID in frame.columns:
+        row_ids = frame[INTERNAL_ROW_ID].astype(str).to_numpy(copy=False)
+        forced_mask = np.isin(row_ids, np.asarray(force_row_ids, dtype=str))
+        forced_indices = np.flatnonzero(forced_mask)
+
+    # If the forced set is itself larger than the limit, keep the first forced
+    # rows. The selection overlay still draws selected points separately, so the
+    # main sampled renderer does not need to exceed the configured limit.
+    if len(forced_indices) >= limit:
+        indices = np.sort(forced_indices[:limit])
+    else:
+        remaining_limit = limit - len(forced_indices)
+
+        if len(forced_indices):
+            all_indices = np.arange(n_rows)
+            remaining_pool = np.setdiff1d(all_indices, forced_indices, assume_unique=False)
+        else:
+            remaining_pool = np.arange(n_rows)
+
+        rng = np.random.default_rng(seed)
+
+        if len(remaining_pool) > remaining_limit:
+            sampled_remaining = rng.choice(
+                remaining_pool,
+                size=remaining_limit,
+                replace=False,
+            )
+        else:
+            sampled_remaining = remaining_pool
+
+        indices = np.sort(np.concatenate([forced_indices, sampled_remaining]))
+
     sampled = frame.iloc[indices].copy()
 
     return PreparedFrame(
@@ -504,6 +564,99 @@ def frame_in_ranges(
         sampled_from=None,
     )
 
+def row_ids_in_polygon(
+    data: PreparedFrame,
+    xs: Sequence[float],
+    ys: Sequence[float],
+    *,
+    max_ids: int,
+) -> Tuple[List[str], int, bool]:
+    """Return row ids inside a lasso polygon.
+
+    This uses the full prepared dataframe, not the sampled rendered points.
+    That makes lasso behave like box select: the geometry defines the selected
+    data, rather than unstable renderer indices.
+    """
+    if data.empty or INTERNAL_Y not in data.frame.columns:
+        return [], 0, False
+
+    try:
+        xs_arr = np.asarray(xs, dtype="float64")
+        ys_arr = np.asarray(ys, dtype="float64")
+    except Exception:
+        return [], 0, False
+
+    if len(xs_arr) < 3 or len(ys_arr) < 3 or len(xs_arr) != len(ys_arr):
+        return [], 0, False
+
+    frame = data.frame
+
+    x = frame[INTERNAL_X].to_numpy(copy=False)
+    y = frame[INTERNAL_Y].to_numpy(copy=False)
+
+    x_min = float(np.nanmin(xs_arr))
+    x_max = float(np.nanmax(xs_arr))
+    y_min = float(np.nanmin(ys_arr))
+    y_max = float(np.nanmax(ys_arr))
+
+    bbox_mask = (
+        (x >= x_min)
+        & (x <= x_max)
+        & (y >= y_min)
+        & (y <= y_max)
+    )
+
+    candidate_positions = np.flatnonzero(bbox_mask)
+    if len(candidate_positions) == 0:
+        return [], 0, False
+
+    candidate_points = np.column_stack(
+        [
+            x[candidate_positions],
+            y[candidate_positions],
+        ]
+    )
+
+    try:
+        from matplotlib.path import Path
+
+        polygon = Path(np.column_stack([xs_arr, ys_arr]))
+        inside = polygon.contains_points(candidate_points)
+    except Exception:
+        # Vectorised ray-casting fallback.
+        px = candidate_points[:, 0]
+        py = candidate_points[:, 1]
+        inside = np.zeros(len(candidate_points), dtype=bool)
+
+        j = len(xs_arr) - 1
+        for i in range(len(xs_arr)):
+            yi = ys_arr[i]
+            yj = ys_arr[j]
+            xi = xs_arr[i]
+            xj = xs_arr[j]
+
+            crosses = (yi > py) != (yj > py)
+            x_intersect = (xj - xi) * (py - yi) / ((yj - yi) + 1e-300) + xi
+            inside ^= crosses & (px < x_intersect)
+            j = i
+
+    selected_positions = candidate_positions[np.flatnonzero(inside)]
+    total = int(len(selected_positions))
+
+    if total == 0:
+        return [], 0, False
+
+    truncated = total > int(max_ids)
+    if truncated:
+        selected_positions = selected_positions[: int(max_ids)]
+
+    row_ids = (
+        frame.iloc[selected_positions][INTERNAL_ROW_ID]
+        .astype(str)
+        .tolist()
+    )
+
+    return row_ids, total, truncated
 
 def row_ids_in_bounds(
     data: PreparedFrame,

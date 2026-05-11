@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import uuid
+import time
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import holoviews as hv
 import numpy as np
+import pandas as pd
 import panel as pn
 import param
 
@@ -70,6 +72,12 @@ class BaseVisualisationPanel(param.Parameterized):
         self._settings_built = False
 
         self._prepared_cache: Dict[Tuple[Any, ...], PreparedFrame] = {}
+        
+        self._row_index_cache_key = None
+        self._row_index_cache = None
+
+        self._last_x_range = None
+        self._last_y_range = None
 
         self.plot_pane = pn.pane.HoloViews(
             sizing_mode="stretch_both",
@@ -235,6 +243,8 @@ class BaseVisualisationPanel(param.Parameterized):
 
     def _clear_prepared_cache(self) -> None:
         self._prepared_cache.clear()
+        self._row_index_cache_key = None
+        self._row_index_cache = None
 
     def dispose(self) -> None:
         if self._disposed:
@@ -294,6 +304,85 @@ class BaseVisualisationPanel(param.Parameterized):
 
         return data
 
+    def _row_index_for(self, data: PreparedFrame):
+        """Return a cached pandas Index for fast row-id lookup.
+
+        Selection overlays should not repeatedly do full-array string isin()
+        checks over a million rows. Build one index per prepared frame and use
+        get_indexer() for selected/focused row IDs.
+        """
+        if data.empty or INTERNAL_ROW_ID not in data.frame.columns:
+            return None
+
+        key = (id(data.frame), len(data.frame))
+
+        if self._row_index_cache_key == key and self._row_index_cache is not None:
+            return self._row_index_cache
+
+        try:
+            index = pd.Index(data.frame[INTERNAL_ROW_ID].astype(str), copy=False)
+        except Exception:
+            return None
+
+        self._row_index_cache_key = key
+        self._row_index_cache = index
+        return index
+
+    def _rows_for_row_ids(
+        self,
+        data: PreparedFrame,
+        row_ids,
+        *,
+        visible_only: bool = False,
+        limit: Optional[int] = None,
+    ):
+        """Return rows matching row IDs using cached direct lookup.
+
+        This is much faster than np.isin over the whole frame for every
+        selection update.
+        """
+        if data.empty or not row_ids or INTERNAL_ROW_ID not in data.frame.columns:
+            return data.frame.iloc[0:0]
+
+        row_ids = [str(row_id) for row_id in row_ids if row_id is not None]
+        if not row_ids:
+            return data.frame.iloc[0:0]
+
+        if limit is not None and len(row_ids) > int(limit):
+            row_ids = row_ids[: int(limit)]
+
+        index = self._row_index_for(data)
+
+        try:
+            if index is None or not index.is_unique:
+                raise ValueError("row-id index unavailable or non-unique")
+
+            positions = index.get_indexer(row_ids)
+            positions = positions[positions >= 0]
+
+            if len(positions) == 0:
+                return data.frame.iloc[0:0]
+
+            sub = data.frame.iloc[positions]
+        except Exception:
+            # Safe fallback for duplicate IDs or unusual index behaviour.
+            selected = set(row_ids)
+            mask = data.frame[INTERNAL_ROW_ID].astype(str).isin(selected)
+            sub = data.frame.loc[mask]
+
+        if visible_only and not sub.empty:
+            if self._last_x_range is not None and INTERNAL_X in sub.columns:
+                x0, x1 = self._last_x_range
+                x = sub[INTERNAL_X].to_numpy(copy=False)
+                sub = sub.loc[(x >= x0) & (x <= x1)]
+
+            if self._last_y_range is not None and INTERNAL_Y in sub.columns:
+                y0, y1 = self._last_y_range
+                y = sub[INTERNAL_Y].to_numpy(copy=False)
+                sub = sub.loc[(y >= y0) & (y <= y1)]
+
+        return sub
+
     def _focus_point(self, data: PreparedFrame) -> Optional[Tuple[float, Optional[float]]]:
         selection = getattr(self.context, "selection", None)
         if selection is None or data.empty:
@@ -311,16 +400,20 @@ class BaseVisualisationPanel(param.Parameterized):
         if not row_id:
             return None
 
-        row_ids = data.row_ids.astype(str)
-        matches = np.flatnonzero(row_ids == row_id)
-        if len(matches) == 0:
+        row = self._rows_for_row_ids(
+            data,
+            [row_id],
+            visible_only=False,
+            limit=1,
+        )
+
+        if row.empty:
             return None
 
-        idx = int(matches[0])
-        x = float(data.frame.iloc[idx][INTERNAL_X])
+        x = float(row.iloc[0][INTERNAL_X])
         y = None
-        if INTERNAL_Y in data.frame.columns:
-            y = float(data.frame.iloc[idx][INTERNAL_Y])
+        if INTERNAL_Y in row.columns:
+            y = float(row.iloc[0][INTERNAL_Y])
 
         return x, y
 
@@ -339,16 +432,18 @@ class BaseVisualisationPanel(param.Parameterized):
 
         return [str(row_id) for row_id in list(getattr(active, "row_ids", []) or [])]
 
-    def _selection_points(self, data: PreparedFrame) -> Optional[pn.pane.HoloViews]:
+    def _selection_points(self, data: PreparedFrame):
         ids = self._active_selection_ids()
         if not ids or data.empty or INTERNAL_Y not in data.frame.columns:
             return None
 
-        mask = row_ids_to_mask(ids, data.row_ids)
-        if not mask.any():
-            return None
+        sub = self._rows_for_row_ids(
+            data,
+            ids,
+            visible_only=False,
+            limit=int(self.state.max_selection_ids),
+        )
 
-        sub = data.frame.loc[mask]
         if sub.empty:
             return None
 
@@ -368,6 +463,7 @@ class BaseVisualisationPanel(param.Parameterized):
             shared_axes=False,
             axiswise=True,
             framewise=True,
+            **self._current_range_opts(include_y=True),
         )
 
     def _focus_overlay(self, data: PreparedFrame, *, size: float = 14):
@@ -406,7 +502,109 @@ class BaseVisualisationPanel(param.Parameterized):
         self._clear_prepared_cache()
         self.refresh()
 
+    def _payload_value(self, payload, key: str, default=None):
+        """Read a value from dict-like or object-like event payloads."""
+        if payload is None:
+            return default
+
+        if isinstance(payload, dict):
+            if key in payload:
+                return payload.get(key)
+
+            metadata = payload.get("metadata")
+            if isinstance(metadata, dict) and key in metadata:
+                return metadata.get(key)
+
+            return default
+
+        if hasattr(payload, key):
+            return getattr(payload, key)
+
+        metadata = getattr(payload, "metadata", None)
+        if isinstance(metadata, dict) and key in metadata:
+            return metadata.get(key)
+
+        return default
+
+    def _payload_value(self, payload, key: str, default=None):
+        """Read a value from dict-like or object-like event payloads."""
+        if payload is None:
+            return default
+
+        if isinstance(payload, dict):
+            if key in payload:
+                return payload.get(key)
+
+            metadata = payload.get("metadata")
+            if isinstance(metadata, dict) and key in metadata:
+                return metadata.get(key)
+
+            return default
+
+        if hasattr(payload, key):
+            return getattr(payload, key)
+
+        metadata = getattr(payload, "metadata", None)
+        if isinstance(metadata, dict) and key in metadata:
+            return metadata.get(key)
+
+        return default
+
+    def _normalise_range(self, value):
+        if value is None or len(value) != 2:
+            return None
+
+        lo, hi = value
+        if lo is None or hi is None:
+            return None
+
+        try:
+            lo = float(lo)
+            hi = float(hi)
+        except Exception:
+            return None
+
+        if not np.isfinite(lo) or not np.isfinite(hi) or lo == hi:
+            return None
+
+        return (min(lo, hi), max(lo, hi))
+
+    def _remember_ranges(self, x_range=None, y_range=None) -> bool:
+        """Remember the current plot ranges.
+
+        Returns True if either remembered range changed.
+        """
+        changed = False
+
+        x_range = self._normalise_range(x_range)
+        y_range = self._normalise_range(y_range)
+
+        if x_range is not None and x_range != self._last_x_range:
+            self._last_x_range = x_range
+            changed = True
+
+        if y_range is not None and y_range != self._last_y_range:
+            self._last_y_range = y_range
+            changed = True
+
+        return changed
+
+    def _current_range_opts(self, *, include_y: bool = True) -> Dict[str, Any]:
+        opts: Dict[str, Any] = {}
+
+        if self._last_x_range is not None:
+            opts["xlim"] = self._last_x_range
+
+        if include_y and self._last_y_range is not None:
+            opts["ylim"] = self._last_y_range
+
+        return opts
+
     def _on_selection_event(self, topic, payload) -> None:
+        event_panel_id = self._payload_value(payload, "panel_id")
+        if event_panel_id is not None and str(event_panel_id) == str(self.panel_id):
+            return
+
         self._schedule_refresh()
 
     def _on_state_changed(self, event) -> None:
@@ -449,7 +647,7 @@ class BaseVisualisationPanel(param.Parameterized):
         tools: Optional[List[str]] = None,
         active_tools: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
-        return dict(
+        opts = dict(
             xlabel=str(xlabel if xlabel is not None else self.state.x),
             ylabel=str(ylabel if ylabel is not None else self.state.y),
             logx=self.state.log_x,
@@ -465,6 +663,9 @@ class BaseVisualisationPanel(param.Parameterized):
             shared_axes=False,
             toolbar="right",
         )
+
+        opts.update(self._current_range_opts(include_y=True))
+        return opts
 
     def _settings_controls(self):
         return settings_box(

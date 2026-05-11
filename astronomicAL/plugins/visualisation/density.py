@@ -6,15 +6,17 @@ from holoviews.operation.datashader import rasterize
 
 from .base import BaseVisualisationPanel
 from .constants import INTERNAL_X, INTERNAL_Y, PLOT_MIN_HEIGHT
+
 from .utils import (
     DENSITY_RENDERER,
     PreparedFrame,
     VISIBLE_DENSITY_CMAP,
     force_wheel_zoom_hook,
-    limited_point_hover_tool,
     renderer_name_hook,
     sample_prepared_frame,
 )
+
+
 from .widgets import (
     settings_box,
     settings_checkbox,
@@ -116,7 +118,7 @@ class DensityPanel(BaseVisualisationPanel):
             ylabel=str(self.state.y),
             logx=self.state.log_x,
             logy=self.state.log_y,
-            tools=[limited_point_hover_tool(), "pan", "wheel_zoom", "box_zoom", "reset"],
+            tools=["pan", "wheel_zoom", "box_zoom", "reset"],
             active_tools=["wheel_zoom"],
             hooks=[force_wheel_zoom_hook, renderer_name_hook(DENSITY_RENDERER)],
             show_grid=True,
