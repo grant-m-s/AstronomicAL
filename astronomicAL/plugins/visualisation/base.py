@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import uuid
-import time
+
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import holoviews as hv
@@ -25,7 +25,6 @@ from .utils import (
     force_wheel_zoom_hook,
     prepare_plot_frame,
     prepared_cache_key,
-    row_ids_to_mask,
 )
 from .widgets import (
     header_select,
@@ -501,30 +500,6 @@ class BaseVisualisationPanel(param.Parameterized):
 
         self._clear_prepared_cache()
         self.refresh()
-
-    def _payload_value(self, payload, key: str, default=None):
-        """Read a value from dict-like or object-like event payloads."""
-        if payload is None:
-            return default
-
-        if isinstance(payload, dict):
-            if key in payload:
-                return payload.get(key)
-
-            metadata = payload.get("metadata")
-            if isinstance(metadata, dict) and key in metadata:
-                return metadata.get(key)
-
-            return default
-
-        if hasattr(payload, key):
-            return getattr(payload, key)
-
-        metadata = getattr(payload, "metadata", None)
-        if isinstance(metadata, dict) and key in metadata:
-            return metadata.get(key)
-
-        return default
 
     def _payload_value(self, payload, key: str, default=None):
         """Read a value from dict-like or object-like event payloads."""

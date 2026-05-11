@@ -161,37 +161,6 @@ def _new_state(context, restore_state: Optional[Dict[str, Any]] = None):
 
     return state
 
-
-def _get_shared_state(context):
-    """Return the plugin-scoped shared state service.
-
-    Standalone panels currently use independent state instances for better
-    workspace behaviour. This shared service remains available for workflows or
-    external plugins that explicitly want shared visualisation state.
-    """
-    state_mod = _impl("state")
-
-    services = getattr(context, "services", None)
-    if services is None:
-        return state_mod.VisualisationState(context=context)
-
-    try:
-        state = services.get(STATE_SERVICE_KEY)
-    except Exception:
-        state = None
-
-    if state is None:
-        state = state_mod.VisualisationState(context=context)
-        try:
-            services.set(STATE_SERVICE_KEY, state, replace=True, owner=PLUGIN_ID)
-        except TypeError:
-            services.set(STATE_SERVICE_KEY, state)
-        except Exception:
-            pass
-
-    return state
-
-
 def create_scatter_panel(context, **kwargs):
     scatter_mod = _impl("scatter")
 

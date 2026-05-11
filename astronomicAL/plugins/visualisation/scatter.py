@@ -42,7 +42,7 @@ class ScatterPanel(BaseVisualisationPanel):
         self._clear_stream_watchers()
 
         data = self._plot_data(require_y=True)
-        self._full_interactive_data = data
+
         self._interactive_current_frame = data.frame
 
         if data.empty:
@@ -131,8 +131,6 @@ class ScatterPanel(BaseVisualisationPanel):
             y_range=self._last_y_range,
         )
 
-        self._interactive_full_data = data
-        self._interactive_full_frame_id = id(data.frame)
         self._selection_event_seq = getattr(self, "_selection_event_seq", 0)
         self._latest_selection_payload = None
 
@@ -164,7 +162,7 @@ class ScatterPanel(BaseVisualisationPanel):
                 f"{len(plot_data.frame):,} shown · interactive{sampled_note}"
             )
 
-            return self._scatter_points_element(plot_data, full_data=data)
+            return self._scatter_points_element(plot_data)
 
         dmap = hv.DynamicMap(make_points, streams=[range_stream])
 
@@ -324,7 +322,7 @@ class ScatterPanel(BaseVisualisationPanel):
 
         return dmap
 
-    def _scatter_points_element(self, data: PreparedFrame, full_data: Optional[PreparedFrame] = None):
+    def _scatter_points_element(self, data: PreparedFrame):
         frame = data.frame
 
         vdims = [HOVER_ROW_ID, HOVER_LABEL, INTERNAL_ROW_ID]

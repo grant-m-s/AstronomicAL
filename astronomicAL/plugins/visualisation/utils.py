@@ -175,16 +175,6 @@ def limited_histogram_hover_tool() -> HoverTool:
     )
 
 
-def limited_density_hover_tool() -> HoverTool:
-    return _hover_tool(
-        tooltips=[
-            ("x", "$x"),
-            ("y", "$y"),
-            ("count", "$image"),
-        ],
-    )
-
-
 @dataclass
 class PreparedFrame:
     dataset_id: Optional[str]
@@ -455,12 +445,7 @@ def sample_prepared_frame(
     seed: int = 0,
     force_row_ids: Optional[Sequence[str]] = None,
 ) -> PreparedFrame:
-    """Sample a PreparedFrame while always including forced row ids.
-
-    Forced ids are used for current focus and active selections. This prevents
-    a selected/focused source from disappearing just because it was not part of
-    the random sample.
-    """
+    
     frame = data.frame
     n_rows = len(frame)
     limit = int(limit)
@@ -564,100 +549,6 @@ def frame_in_ranges(
         sampled_from=None,
     )
 
-def row_ids_in_polygon(
-    data: PreparedFrame,
-    xs: Sequence[float],
-    ys: Sequence[float],
-    *,
-    max_ids: int,
-) -> Tuple[List[str], int, bool]:
-    """Return row ids inside a lasso polygon.
-
-    This uses the full prepared dataframe, not the sampled rendered points.
-    That makes lasso behave like box select: the geometry defines the selected
-    data, rather than unstable renderer indices.
-    """
-    if data.empty or INTERNAL_Y not in data.frame.columns:
-        return [], 0, False
-
-    try:
-        xs_arr = np.asarray(xs, dtype="float64")
-        ys_arr = np.asarray(ys, dtype="float64")
-    except Exception:
-        return [], 0, False
-
-    if len(xs_arr) < 3 or len(ys_arr) < 3 or len(xs_arr) != len(ys_arr):
-        return [], 0, False
-
-    frame = data.frame
-
-    x = frame[INTERNAL_X].to_numpy(copy=False)
-    y = frame[INTERNAL_Y].to_numpy(copy=False)
-
-    x_min = float(np.nanmin(xs_arr))
-    x_max = float(np.nanmax(xs_arr))
-    y_min = float(np.nanmin(ys_arr))
-    y_max = float(np.nanmax(ys_arr))
-
-    bbox_mask = (
-        (x >= x_min)
-        & (x <= x_max)
-        & (y >= y_min)
-        & (y <= y_max)
-    )
-
-    candidate_positions = np.flatnonzero(bbox_mask)
-    if len(candidate_positions) == 0:
-        return [], 0, False
-
-    candidate_points = np.column_stack(
-        [
-            x[candidate_positions],
-            y[candidate_positions],
-        ]
-    )
-
-    try:
-        from matplotlib.path import Path
-
-        polygon = Path(np.column_stack([xs_arr, ys_arr]))
-        inside = polygon.contains_points(candidate_points)
-    except Exception:
-        # Vectorised ray-casting fallback.
-        px = candidate_points[:, 0]
-        py = candidate_points[:, 1]
-        inside = np.zeros(len(candidate_points), dtype=bool)
-
-        j = len(xs_arr) - 1
-        for i in range(len(xs_arr)):
-            yi = ys_arr[i]
-            yj = ys_arr[j]
-            xi = xs_arr[i]
-            xj = xs_arr[j]
-
-            crosses = (yi > py) != (yj > py)
-            x_intersect = (xj - xi) * (py - yi) / ((yj - yi) + 1e-300) + xi
-            inside ^= crosses & (px < x_intersect)
-            j = i
-
-    selected_positions = candidate_positions[np.flatnonzero(inside)]
-    total = int(len(selected_positions))
-
-    if total == 0:
-        return [], 0, False
-
-    truncated = total > int(max_ids)
-    if truncated:
-        selected_positions = selected_positions[: int(max_ids)]
-
-    row_ids = (
-        frame.iloc[selected_positions][INTERNAL_ROW_ID]
-        .astype(str)
-        .tolist()
-    )
-
-    return row_ids, total, truncated
-
 def row_ids_in_bounds(
     data: PreparedFrame,
     bounds: Optional[Sequence[float]],
@@ -696,10 +587,3 @@ def row_ids_in_bounds(
 
     row_ids = frame.iloc[indices][INTERNAL_ROW_ID].astype(str).tolist()
     return row_ids, total, truncated
-
-
-def row_ids_to_mask(row_ids: Sequence[str], candidate_ids: np.ndarray) -> np.ndarray:
-    if not row_ids or len(candidate_ids) == 0:
-        return np.zeros(len(candidate_ids), dtype=bool)
-
-    return np.isin(candidate_ids.astype(str), np.asarray([str(value) for value in row_ids], dtype=str))
