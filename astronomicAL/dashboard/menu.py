@@ -42,34 +42,6 @@ class MenuDashboard:
     """
 
     NATIVE_ENTRIES: Tuple[MenuEntry, ...] = (
-        MenuEntry(
-            title="Basic Plot",
-            value="Basic Plot",
-            source="Built-in",
-            domain="Core",
-            category="Visualisation",
-        ),
-        MenuEntry(
-            title="Histogram Plot",
-            value="Histogram Plot",
-            source="Built-in",
-            domain="Core",
-            category="Visualisation",
-        ),
-        MenuEntry(
-            title="Density Plot",
-            value="Density Plot",
-            source="Built-in",
-            domain="Core",
-            category="Visualisation",
-        ),
-        MenuEntry(
-            title="Selected Source Info",
-            value="Selected Source Info",
-            source="Built-in",
-            domain="Core",
-            category="Details",
-        ),
     )
 
     # Transitional grouping while these panels still live in legacy custom_plots.
@@ -513,28 +485,49 @@ class MenuDashboard:
             return []
 
         plugin_info_by_id: Dict[str, Any] = {}
-
         try:
             for info in manager.list_plugins():
                 plugin_info_by_id[getattr(info, "id", "")] = info
         except Exception:
             plugin_info_by_id = {}
 
+        panel_regs: List[Any] = []
+
         try:
-            panel_regs = list(manager.list_panels())
+            panel_regs.extend(list(manager.list_panels()))
         except Exception:
             traceback.print_exc()
-            panel_regs = []
+
+        # Defensive fallback: if the public list_panels() view misses a panel
+        # registration for any reason, also read the registry directly.
+        #
+        # This is intentionally tolerant because the panel menu is transitional
+        # bridge code while plugin-driven menus settle.
+        try:
+            raw_panels = getattr(manager, "_panels", {}) or {}
+            for reg in raw_panels.values():
+                if reg not in panel_regs:
+                    panel_regs.append(reg)
+        except Exception:
+            pass
+
+        # Deduplicate by registration id while preserving first-seen order.
+        deduped_regs: List[Any] = []
+        seen_ids = set()
+        for reg in panel_regs:
+            reg_id = getattr(reg, "id", None)
+            if not reg_id or reg_id in seen_ids:
+                continue
+            seen_ids.add(reg_id)
+            deduped_regs.append(reg)
 
         entries: List[MenuEntry] = []
-
-        for reg in panel_regs:
+        for reg in deduped_regs:
             plugin_id = getattr(reg, "plugin_id", "") or ""
             info = plugin_info_by_id.get(plugin_id)
 
             title = getattr(reg, "title", None) or getattr(reg, "id", "Plugin Panel")
             category = getattr(reg, "category", None) or "Panels"
-
             registration_id = getattr(reg, "id", "") or title
 
             entries.append(

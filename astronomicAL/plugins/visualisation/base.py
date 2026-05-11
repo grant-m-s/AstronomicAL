@@ -1,0 +1,530 @@
+from __future__ import annotations
+
+import uuid
+from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+import holoviews as hv
+import numpy as np
+import panel as pn
+import param
+
+from .constants import (
+    INTERNAL_ROW_ID,
+    INTERNAL_X,
+    INTERNAL_Y,
+    PLOT_MIN_HEIGHT,
+    SETTINGS_HEIGHT,
+)
+from .utils import (
+    PreparedFrame,
+    _active_dataset_id,
+    _active_df,
+    ensure_hv_extension,
+    force_wheel_zoom_hook,
+    prepare_plot_frame,
+    prepared_cache_key,
+    row_ids_to_mask,
+)
+from .widgets import (
+    header_select,
+    settings_box,
+    settings_checkbox,
+    settings_float_slider,
+    settings_int_input,
+    settings_multichoice,
+    settings_select,
+)
+
+
+class BaseVisualisationPanel(param.Parameterized):
+    """Lifecycle-aware base class for visualisation plugin panels."""
+
+    title = "Visualisation"
+
+    def __init__(
+        self,
+        context,
+        state,
+        *,
+        show_controls: bool = True,
+        show_header: bool = True,
+        **params,
+    ):
+        ensure_hv_extension()
+        super().__init__(**params)
+
+        self.context = context
+        self.state = state
+        self.show_controls = show_controls
+        self.show_header = show_header
+
+        self.panel_id = str(uuid.uuid4())
+        self._subs: List[Any] = []
+        self._watchers: List[Tuple[Any, Any]] = []
+        self._stream_watchers: List[Tuple[Any, Any]] = []
+        self._disposed = False
+        self._refresh_scheduled = False
+
+        self.settings_visible = False
+        self._layout: Optional[pn.Column] = None
+        self._settings_built = False
+
+        self._prepared_cache: Dict[Tuple[Any, ...], PreparedFrame] = {}
+
+        self.plot_pane = pn.pane.HoloViews(
+            sizing_mode="stretch_both",
+            height_policy="max",
+            min_height=PLOT_MIN_HEIGHT,
+            margin=(0, 0, 0, 0),
+            styles={"min-height": "0"},
+        )
+
+        self.status_pane = pn.pane.HTML(
+            "",
+            width=230,
+            height=30,
+            margin=(2, 8, 0, 0),
+        )
+
+        self.settings_pane = pn.Column(
+            sizing_mode="stretch_width",
+            height=SETTINGS_HEIGHT,
+            min_height=SETTINGS_HEIGHT,
+            max_height=SETTINGS_HEIGHT,
+            height_policy="fixed",
+            visible=False,
+            margin=(0, 0, 0, 0),
+            styles={
+                "height": f"{SETTINGS_HEIGHT}px",
+                "min-height": f"{SETTINGS_HEIGHT}px",
+                "max-height": f"{SETTINGS_HEIGHT}px",
+                "overflow-y": "auto",
+                "overflow-x": "hidden",
+                "box-sizing": "border-box",
+            },
+        )
+
+        self.settings_button = pn.widgets.Button(
+            name="⚙",
+            width=32,
+            height=32,
+            button_type="light",
+            margin=(14, 0, 0, 0),
+            sizing_mode="fixed",
+        )
+        self.settings_button.on_click(self._toggle_settings)
+
+        for topic in (
+            "dataset.loaded",
+            "dataset.updated",
+            "dataset.active.changed",
+            "dataset.mapping_updated",
+            "labels.settings.updated",
+        ):
+            self._subscribe(topic, self._on_dataset_event)
+
+        for topic in (
+            "selection.focus.changed",
+            "selection.focus.cleared",
+            "selection.set.changed",
+            "selection.set.cleared",
+        ):
+            self._subscribe(topic, self._on_selection_event)
+
+        self._watch_state(
+            [
+                "x",
+                "y",
+                "label_filter",
+                "color_by",
+                "render_mode",
+                "datashade_threshold",
+                "interactive_sample_limit",
+                "max_selection_ids",
+                "point_size",
+                "point_alpha",
+                "log_x",
+                "log_y",
+                "bins",
+                "density",
+                "cumulative",
+                "log_density",
+            ]
+        )
+
+    def _ensure_settings_built(self) -> None:
+        if self._settings_built:
+            return
+
+        self.settings_pane[:] = [self._settings_controls()]
+        self._settings_built = True
+
+    def _apply_settings_visibility(self) -> None:
+        self._ensure_settings_built()
+        self.settings_pane.visible = self.settings_visible
+        self.settings_button.button_type = "primary" if self.settings_visible else "light"
+
+    def _toggle_settings(self, _event=None) -> None:
+        self.settings_visible = not self.settings_visible
+        self._apply_settings_visibility()
+
+    def _schedule_refresh(self) -> None:
+        """Defer selection-driven redraws until HoloViews callbacks complete."""
+        if self._disposed or self._refresh_scheduled:
+            return
+
+        self._refresh_scheduled = True
+
+        def _run():
+            self._refresh_scheduled = False
+            if not self._disposed:
+                self.refresh()
+
+        try:
+            doc = pn.state.curdoc
+            if doc is not None:
+                doc.add_next_tick_callback(_run)
+            else:
+                _run()
+        except Exception:
+            _run()
+
+    def _subscribe(self, topic: str, callback) -> None:
+        events = getattr(self.context, "events", None)
+        if events is None:
+            return
+
+        try:
+            sub = events.subscribe(
+                topic,
+                callback,
+                owner_id=self.panel_id,
+                owner_label=self.__class__.__name__,
+                owner_kind="plugin-panel",
+            )
+        except TypeError:
+            sub = events.subscribe(topic, callback)
+
+        self._subs.append(sub)
+
+    def _watch_state(self, names: Sequence[str]) -> None:
+        for name in names:
+            try:
+                watcher = self.state.param.watch(self._on_state_changed, name)
+                self._watchers.append((self.state, watcher))
+            except Exception:
+                pass
+
+    def _watch_param(self, owner: Any, callback, parameter_name: str, *, render_scoped: bool = False) -> None:
+        try:
+            watcher = owner.param.watch(callback, parameter_name)
+            if render_scoped:
+                self._stream_watchers.append((owner, watcher))
+            else:
+                self._watchers.append((owner, watcher))
+        except Exception:
+            pass
+
+    def _clear_stream_watchers(self) -> None:
+        for owner, watcher in list(self._stream_watchers):
+            try:
+                owner.param.unwatch(watcher)
+            except Exception:
+                pass
+        self._stream_watchers.clear()
+
+    def _clear_prepared_cache(self) -> None:
+        self._prepared_cache.clear()
+
+    def dispose(self) -> None:
+        if self._disposed:
+            return
+
+        self._disposed = True
+
+        events = getattr(self.context, "events", None)
+        if events is not None:
+            for sub in list(self._subs):
+                try:
+                    events.unsubscribe(sub)
+                except Exception:
+                    pass
+        self._subs.clear()
+
+        self._clear_stream_watchers()
+
+        for owner, watcher in list(self._watchers):
+            try:
+                owner.param.unwatch(watcher)
+            except Exception:
+                pass
+        self._watchers.clear()
+
+        self._clear_prepared_cache()
+
+    def get_state(self) -> Dict[str, Any]:
+        state = self.state.get_state()
+        state["settings_visible"] = self.settings_visible
+        return state
+
+    def restore_state(self, state: Dict[str, Any]) -> None:
+        if isinstance(state, dict):
+            self.settings_visible = bool(state.get("settings_visible", False))
+            self.state.restore_state(state)
+            self._clear_prepared_cache()
+            self.refresh()
+            self._apply_settings_visibility()
+
+    def _df(self):
+        return _active_df(self.context)
+
+    def _dataset_id(self) -> Optional[str]:
+        return _active_dataset_id(self.context)
+
+    def _plot_data(self, *, require_y: bool) -> PreparedFrame:
+        key = prepared_cache_key(self.context, self.state, require_y=require_y)
+        cached = self._prepared_cache.get(key)
+        if cached is not None:
+            return cached
+
+        data = prepare_plot_frame(self.context, self.state, require_y=require_y)
+
+        self._prepared_cache.clear()
+        self._prepared_cache[key] = data
+
+        return data
+
+    def _focus_point(self, data: PreparedFrame) -> Optional[Tuple[float, Optional[float]]]:
+        selection = getattr(self.context, "selection", None)
+        if selection is None or data.empty:
+            return None
+
+        try:
+            focus = selection.get_focus()
+        except Exception:
+            return None
+
+        if focus is None or getattr(focus, "dataset_id", None) != self._dataset_id():
+            return None
+
+        row_id = str(getattr(focus, "row_id", ""))
+        if not row_id:
+            return None
+
+        row_ids = data.row_ids.astype(str)
+        matches = np.flatnonzero(row_ids == row_id)
+        if len(matches) == 0:
+            return None
+
+        idx = int(matches[0])
+        x = float(data.frame.iloc[idx][INTERNAL_X])
+        y = None
+        if INTERNAL_Y in data.frame.columns:
+            y = float(data.frame.iloc[idx][INTERNAL_Y])
+
+        return x, y
+
+    def _active_selection_ids(self) -> List[str]:
+        selection = getattr(self.context, "selection", None)
+        if selection is None:
+            return []
+
+        try:
+            active = selection.get_active_set()
+        except Exception:
+            return []
+
+        if active is None or getattr(active, "dataset_id", None) != self._dataset_id():
+            return []
+
+        return [str(row_id) for row_id in list(getattr(active, "row_ids", []) or [])]
+
+    def _selection_points(self, data: PreparedFrame) -> Optional[pn.pane.HoloViews]:
+        ids = self._active_selection_ids()
+        if not ids or data.empty or INTERNAL_Y not in data.frame.columns:
+            return None
+
+        mask = row_ids_to_mask(ids, data.row_ids)
+        if not mask.any():
+            return None
+
+        sub = data.frame.loc[mask]
+        if sub.empty:
+            return None
+
+        return hv.Points(
+            sub,
+            kdims=[INTERNAL_X, INTERNAL_Y],
+        ).opts(
+            marker="circle",
+            size=max(float(self.state.point_size) + 4, 8),
+            fill_alpha=0.0,
+            line_color="orange",
+            line_width=2,
+            active_tools=[],
+            hooks=[force_wheel_zoom_hook],
+            logx=self.state.log_x,
+            logy=self.state.log_y,
+            shared_axes=False,
+            axiswise=True,
+            framewise=True,
+        )
+
+    def _focus_overlay(self, data: PreparedFrame, *, size: float = 14):
+        point = self._focus_point(data)
+        if point is None:
+            return None
+
+        x, y = point
+        if y is None:
+            return None
+
+        return hv.Points(
+            [(x, y)],
+            kdims=[INTERNAL_X, INTERNAL_Y],
+        ).opts(
+            marker="circle",
+            size=size,
+            fill_alpha=0.0,
+            line_color="black",
+            line_width=3,
+            active_tools=[],
+            hooks=[force_wheel_zoom_hook],
+            logx=self.state.log_x,
+            logy=self.state.log_y,
+            shared_axes=False,
+            axiswise=True,
+            framewise=True,
+        )
+
+    def _on_dataset_event(self, topic, payload) -> None:
+        if topic == "labels.settings.updated":
+            self.state.apply_label_settings(payload)
+        else:
+            self.state.refresh_from_context()
+
+        self._clear_prepared_cache()
+        self.refresh()
+
+    def _on_selection_event(self, topic, payload) -> None:
+        self._schedule_refresh()
+
+    def _on_state_changed(self, event) -> None:
+        self._clear_prepared_cache()
+        self.refresh()
+
+    def refresh(self) -> None:
+        if self._disposed:
+            return
+
+        try:
+            self._render()
+        except Exception as exc:
+            self.status_pane.object = f"Plot error: {exc}"
+            self.plot_pane.object = self._empty("Plot error")
+
+    def _render(self) -> None:
+        raise NotImplementedError
+
+    def _empty(self, message: str):
+        return hv.Text(0.5, 0.5, message).opts(
+            xlim=(0, 1),
+            ylim=(0, 1),
+            responsive=True,
+            min_height=PLOT_MIN_HEIGHT,
+            toolbar=None,
+            xaxis=None,
+            yaxis=None,
+            show_frame=False,
+            shared_axes=False,
+            axiswise=True,
+            framewise=True,
+        )
+
+    def _base_opts(
+        self,
+        *,
+        xlabel: Optional[str] = None,
+        ylabel: Optional[str] = None,
+        tools: Optional[List[str]] = None,
+        active_tools: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        return dict(
+            xlabel=str(xlabel if xlabel is not None else self.state.x),
+            ylabel=str(ylabel if ylabel is not None else self.state.y),
+            logx=self.state.log_x,
+            logy=self.state.log_y,
+            tools=tools or ["pan", "wheel_zoom", "box_zoom", "reset"],
+            active_tools=active_tools or ["wheel_zoom"],
+            hooks=[force_wheel_zoom_hook],
+            responsive=True,
+            min_height=PLOT_MIN_HEIGHT,
+            show_grid=True,
+            framewise=True,
+            axiswise=True,
+            shared_axes=False,
+            toolbar="right",
+        )
+
+    def _settings_controls(self):
+        return settings_box(
+            self.status_pane,
+            settings_select(self.state.param.color_by, name="Colour", width=130),
+            settings_multichoice(self.state.param.label_filter, name="Labels", width=210),
+            settings_select(self.state.param.render_mode, name="Render", width=130),
+            settings_int_input(self.state.param.datashade_threshold, name="Shade threshold", width=145),
+            settings_int_input(self.state.param.interactive_sample_limit, name="Sample limit", width=130),
+            settings_int_input(self.state.param.max_selection_ids, name="Max selected IDs", width=145),
+            settings_float_slider(self.state.param.point_size, name="Size", width=175),
+            settings_float_slider(self.state.param.point_alpha, name="Alpha", width=175),
+            settings_checkbox(self.state.param.log_x, name="Log X"),
+            settings_checkbox(self.state.param.log_y, name="Log Y"),
+        )
+
+    def _header(self):
+        return pn.GridBox(
+            header_select(self.state.param.x, name="X"),
+            header_select(self.state.param.y, name="Y"),
+            self.settings_button if self.show_controls else pn.Spacer(width=34, height=34),
+            ncols=3,
+            sizing_mode="stretch_width",
+            height=48,
+            margin=(0, 0, 0, 0),
+            styles={
+                "display": "grid",
+                "grid-template-columns": "minmax(70px, 1fr) minmax(70px, 1fr) 34px",
+                "gap": "4px",
+                "align-items": "start",
+            },
+        )
+
+    def _layout_children(self):
+        children = []
+        if self.show_header:
+            children.append(self._header())
+        if self.show_controls:
+            children.append(self.settings_pane)
+        children.append(self.plot_pane)
+        return children
+
+    def panel(self):
+        self.refresh()
+
+        if not self.show_header and not self.show_controls:
+            return self.plot_pane
+
+        self._ensure_settings_built()
+        self._apply_settings_visibility()
+
+        self._layout = pn.Column(
+            *self._layout_children(),
+            sizing_mode="stretch_both",
+            height_policy="max",
+            min_height=0,
+            margin=(0, 0, 0, 0),
+            styles={
+                "min-height": "0",
+                "overflow": "hidden",
+            },
+        )
+        return self._layout

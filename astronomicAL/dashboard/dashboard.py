@@ -1,7 +1,6 @@
 from astronomicAL.dashboard.active_learning import ActiveLearningDashboard
 from astronomicAL.dashboard.labelling import LabellingDashboard
 from astronomicAL.dashboard.menu import MenuDashboard
-from astronomicAL.dashboard.plot import HistoDashboard, ScatterPlotDashboard, DensityPlotDashboard
 from astronomicAL.dashboard.selected_source import SelectedSourceDashboard
 from astronomicAL.dashboard.settings_dashboard import SettingsDashboard
 from astronomicAL.extensions import extension_plots, custom_plots
@@ -12,9 +11,6 @@ import param
 
 NATIVE_CONTENTS = {
     "Menu",
-    "Basic Plot",
-    "Histogram Plot",
-    "Density Plot",
     "Selected Source Info",
 
     # Built-in workflow/dashboard modes.

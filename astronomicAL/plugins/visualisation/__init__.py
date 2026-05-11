@@ -1,1 +1,1 @@
-"""Bundled generic visualisation plugin."""
+"""Core visualisation plugin for AstronomicAL."""

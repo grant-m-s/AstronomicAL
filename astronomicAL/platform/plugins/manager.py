@@ -767,12 +767,92 @@ class PluginManager:
         self._require_record(plugin_id)
         self.settings.update(plugin_id, values)
 
+    def _registration_plugin_ids(self) -> set[str]:
+        """Return plugin ids that have registered contributions.
+
+        This catches orphan registrations where panels/actions/services exist
+        but the plugin does not currently have a discovered record in
+        ``self._records``. That should not be the normal long-term path, but it
+        is useful during migration and prevents Plugin Manager diagnostics from
+        hiding registered contributions.
+        """
+        plugin_ids: set[str] = set()
+
+        for registry in (
+            self._panels,
+            self._actions,
+            self._workflows,
+            self._services,
+        ):
+            for registration in registry.values():
+                plugin_id = getattr(registration, "plugin_id", None)
+                if plugin_id:
+                    plugin_ids.add(str(plugin_id))
+
+        for registrations in self._artifact_viewers.values():
+            for registration in registrations:
+                plugin_id = getattr(registration, "plugin_id", None)
+                if plugin_id:
+                    plugin_ids.add(str(plugin_id))
+
+        return plugin_ids
+
+    def _synthetic_plugin_info(self, plugin_id: str) -> PluginInfo:
+        """Build PluginInfo for a plugin id that has registrations but no record.
+
+        This should mainly happen during transitional code paths where a module
+        registers contributions directly without going through full discovery.
+        The status is marked enabled because contributions are already live.
+        """
+        display_name = plugin_id.replace("_", " ").replace(".", " / ").title()
+
+        return PluginInfo(
+            id=plugin_id,
+            name=display_name,
+            version="unknown",
+            status=PluginStatus.ENABLED,
+            description=(
+                "Runtime-registered plugin contributions were found, but no "
+                "discovered plugin record exists. This usually means the plugin "
+                "was registered through a transitional/direct-registration path."
+            ),
+            source="runtime_registration",
+            path=None,
+            error=None,
+            capabilities=[],
+            tags=[],
+            requires=[],
+            optional_requires=[],
+            requires_plugins=[],
+            panels=[r.id for r in self._panels.values() if r.plugin_id == plugin_id],
+            actions=[r.id for r in self._actions.values() if r.plugin_id == plugin_id],
+            workflows=[r.id for r in self._workflows.values() if r.plugin_id == plugin_id],
+            services=[r.key for r in self._services.values() if r.plugin_id == plugin_id],
+            artifact_viewers=[
+                r.artifact_type
+                for regs in self._artifact_viewers.values()
+                for r in regs
+                if r.plugin_id == plugin_id
+            ],
+        )
+
+
     def list_plugins(self) -> List[PluginInfo]:
-        return [self.plugin_info(plugin_id) for plugin_id in sorted(self._records)]
+        plugin_ids = set(self._records)
+        plugin_ids.update(self._registration_plugin_ids())
+
+        return [self.plugin_info(plugin_id) for plugin_id in sorted(plugin_ids)]
 
     def plugin_info(self, plugin_id: str) -> PluginInfo:
-        record = self._require_record(plugin_id)
+        record = self._records.get(plugin_id)
+
+        if record is None:
+            if plugin_id in self._registration_plugin_ids():
+                return self._synthetic_plugin_info(plugin_id)
+            raise KeyError(f"Unknown AstronomicAL plugin: {plugin_id}")
+
         manifest = record.manifest
+
         return PluginInfo(
             id=manifest.id,
             name=manifest.name,
