@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from collections import defaultdict
-from typing import Any, Dict, Tuple
-
-from astronomicAL.platform.modal_utils import mount_template_modal, open_template_modal
+from html import escape
+from typing import Any, Dict, List, Tuple
 
 import panel as pn
+
+from astronomicAL.platform.modal_utils import open_template_modal
 
 
 SHEET_STYLES = {
@@ -51,26 +51,68 @@ SOURCE_STYLES = {
     "font-size": "0.9rem",
 }
 
+SOURCE_CODE_STYLES = {
+    "font-family": "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+    "font-size": "0.84rem",
+    "color": "#2563eb",
+}
+
+BADGE_REQUIRED = """
+<span style="
+    display:inline-block;
+    color:#c2410c;
+    background:#fff7ed;
+    border:1px solid #fdba74;
+    border-radius:999px;
+    padding:2px 9px;
+    font-size:0.78rem;
+    font-weight:600;
+">
+Required
+</span>
+"""
+
+BADGE_OPTIONAL = """
+<span style="
+    display:inline-block;
+    color:#2563eb;
+    background:#eff6ff;
+    border:1px solid #bfdbfe;
+    border-radius:999px;
+    padding:2px 9px;
+    font-size:0.78rem;
+    font-weight:600;
+">
+Optional
+</span>
+"""
+
+
+PendingKey = Tuple[str, str]
+
 
 class MappingAlertController:
-    """
-    UI-local state only.
+    """UI-local mapping request controller.
 
-    It listens to:
-      - mapping.requested
-      - mapping.resolved
+    The controller listens to mapping requests from panels/plugins, collates
+    duplicate semantic requirements, and writes the resolved mappings to the
+    DatasetManager.
 
-    It writes mappings to DatasetManager and emits:
-      - mapping.resolved
-      - dataset.mapping_updated
+    Multiple active panels often request the same semantic column, for example
+    ``record_id``. Those requests are collapsed into one modal block per:
+
+        (dataset_id, semantic_name)
+
+    Required requests outrank optional requests. If any active panel requires a
+    semantic mapping, the combined modal row is treated as required.
     """
 
     def __init__(self, context, template) -> None:
         self.context = context
         self.template = template
 
-        self._pending: Dict[Tuple[str, str, str], dict] = {}
-        self._selectors: Dict[Tuple[str, str, str], pn.widgets.Select] = {}
+        self._pending: Dict[PendingKey, dict] = {}
+        self._selectors: Dict[PendingKey, pn.widgets.Select] = {}
         self._subs = []
 
         self.button = pn.widgets.Button(
@@ -104,7 +146,7 @@ class MappingAlertController:
 
         self.modal_body = pn.Column(
             sizing_mode="stretch_width",
-            height=430,
+            height=400,
             scroll=True,
             margin=(0, 0, 0, 0),
             styles={
@@ -117,11 +159,15 @@ class MappingAlertController:
 
         self.modal_footer = pn.Row(
             sizing_mode="stretch_width",
+            height=0,
+            max_height=0,
             margin=(0, 0, 0, 0),
             styles={
-                "border-top": "1px solid #e5e7eb",
-                "padding": "12px 20px 16px 20px",
-                "background": "transparent",
+                "height": "0px",
+                "max-height": "0px",
+                "overflow": "hidden",
+                "padding": "0px",
+                "border": "0px",
                 "box-sizing": "border-box",
             },
         )
@@ -149,10 +195,16 @@ class MappingAlertController:
 
         if getattr(self.context, "events", None) is not None:
             self._subs.append(
-                self.context.events.subscribe("mapping.requested", self._on_mapping_requested)
+                self.context.events.subscribe(
+                    "mapping.requested",
+                    self._on_mapping_requested,
+                )
             )
             self._subs.append(
-                self.context.events.subscribe("mapping.resolved", self._on_mapping_resolved)
+                self.context.events.subscribe(
+                    "mapping.resolved",
+                    self._on_mapping_resolved,
+                )
             )
             self._subs.append(
                 self.context.events.subscribe(
@@ -163,11 +215,6 @@ class MappingAlertController:
 
         self._refresh_button()
 
-    def _on_mapping_open_requested(self, _topic: str, _payload: Any) -> None:
-        if self._pending:
-            self._rebuild_modal()
-            open_template_modal(self.template, self.modal_root)
-
     def dispose(self) -> None:
         if getattr(self.context, "events", None) is None:
             return
@@ -177,14 +224,102 @@ class MappingAlertController:
                 self.context.events.unsubscribe(sub)
             except Exception:
                 pass
+
         self._subs = []
 
-    def _key_from_payload(self, payload: dict) -> Tuple[str, str, str]:
+    def _key_from_payload(self, payload: dict) -> PendingKey:
         return (
-            payload["dataset_id"],
-            payload.get("source", "unknown"),
-            payload["semantic_name"],
+            str(payload["dataset_id"]),
+            str(payload["semantic_name"]),
         )
+
+    def _normalise_payload(self, payload: dict) -> dict:
+        payload = dict(payload)
+
+        payload.setdefault("source", "unknown")
+        payload.setdefault("required", True)
+        payload.setdefault("candidates", [])
+        payload.setdefault("display_name", payload.get("semantic_name", "Column"))
+        payload.setdefault("description", "")
+        payload.setdefault("config_key", None)
+        payload.setdefault("suggested", None)
+        payload.setdefault("panel_id", None)
+
+        source = str(payload.get("source") or "unknown")
+        panel_id = payload.get("panel_id")
+        config_key = payload.get("config_key")
+
+        payload["sources"] = [source]
+        payload["panel_ids"] = [panel_id] if panel_id else []
+        payload["config_keys"] = [config_key] if config_key else []
+
+        payload["dataset_id"] = str(payload["dataset_id"])
+        payload["semantic_name"] = str(payload["semantic_name"])
+
+        payload["required"] = bool(payload.get("required", True))
+        payload["candidates"] = self._unique_list(payload.get("candidates", []))
+
+        return payload
+
+    def _merge_pending_item(self, existing: dict, incoming: dict) -> dict:
+        existing_was_required = bool(existing.get("required", True))
+        incoming_is_required = bool(incoming.get("required", True))
+
+        existing["required"] = existing_was_required or incoming_is_required
+
+        existing["sources"] = self._unique_list(
+            list(existing.get("sources", [])) + list(incoming.get("sources", []))
+        )
+        existing["panel_ids"] = self._unique_list(
+            list(existing.get("panel_ids", [])) + list(incoming.get("panel_ids", []))
+        )
+        existing["config_keys"] = self._unique_list(
+            list(existing.get("config_keys", [])) + list(incoming.get("config_keys", []))
+        )
+
+        existing["candidates"] = self._unique_list(
+            list(existing.get("candidates", [])) + list(incoming.get("candidates", []))
+        )
+
+        # Required metadata should win over optional metadata because it is the
+        # blocking version of the requirement.
+        if incoming_is_required and not existing_was_required:
+            existing["display_name"] = incoming.get("display_name") or existing.get("display_name")
+            existing["description"] = incoming.get("description") or existing.get("description")
+            existing["suggested"] = incoming.get("suggested") or existing.get("suggested")
+            existing["config_key"] = incoming.get("config_key") or existing.get("config_key")
+            return existing
+
+        if not existing.get("display_name"):
+            existing["display_name"] = incoming.get("display_name")
+
+        if not existing.get("description") and incoming.get("description"):
+            existing["description"] = incoming.get("description")
+
+        if not existing.get("suggested") and incoming.get("suggested"):
+            existing["suggested"] = incoming.get("suggested")
+
+        if not existing.get("config_key") and incoming.get("config_key"):
+            existing["config_key"] = incoming.get("config_key")
+
+        return existing
+
+    def _unique_list(self, values: List[Any]) -> List[Any]:
+        seen = set()
+        out = []
+
+        for value in values:
+            if value in (None, ""):
+                continue
+
+            key = str(value)
+            if key in seen:
+                continue
+
+            seen.add(key)
+            out.append(value)
+
+        return out
 
     def _required_count(self) -> int:
         return sum(1 for item in self._pending.values() if item.get("required", True))
@@ -208,30 +343,34 @@ class MappingAlertController:
             self.button.name = f"ℹ {total}"
             self.button.button_type = "primary"
 
+    def _on_mapping_open_requested(self, _topic: str, _payload: Any) -> None:
+        if self._pending:
+            self._rebuild_modal()
+            open_template_modal(self.template, self.modal_root)
+
     def _on_mapping_requested(self, _topic: str, payload: Any) -> None:
         if not payload:
             return
 
-        payload = dict(payload)
+        payload = self._normalise_payload(payload)
 
         dataset_id = payload.get("dataset_id")
         semantic_name = payload.get("semantic_name")
         if not dataset_id or not semantic_name:
             return
 
-        existing = self.context.datasets.get_mapping(dataset_id, semantic_name)
-        if existing is not None:
+        existing_mapping = self.context.datasets.get_mapping(dataset_id, semantic_name)
+        if existing_mapping is not None:
             return
 
-        payload.setdefault("source", "unknown")
-        payload.setdefault("required", True)
-        payload.setdefault("candidates", [])
-        payload.setdefault("display_name", semantic_name)
-        payload.setdefault("description", "")
-        payload.setdefault("config_key", None)
-        payload.setdefault("suggested", None)
+        key = self._key_from_payload(payload)
+        existing = self._pending.get(key)
 
-        self._pending[self._key_from_payload(payload)] = payload
+        if existing is None:
+            self._pending[key] = payload
+        else:
+            self._pending[key] = self._merge_pending_item(existing, payload)
+
         self._refresh_button()
 
     def _on_mapping_resolved(self, _topic: str, payload: Any) -> None:
@@ -244,71 +383,76 @@ class MappingAlertController:
         if not dataset_id or not semantic_name:
             return
 
-        to_remove = []
-
-        for key, item in self._pending.items():
-            same_dataset = item["dataset_id"] == dataset_id
-            same_semantic = item["semantic_name"] == semantic_name
-
-            if same_dataset and same_semantic:
-                to_remove.append(key)
-
-        for key in to_remove:
-            self._pending.pop(key, None)
-
+        key = (str(dataset_id), str(semantic_name))
+        self._pending.pop(key, None)
         self._refresh_button()
 
     def _status_badge(self, item: dict):
-        if item.get("required", True):
-            html = """
-            <span style="
-                display:inline-block;
-                background:#fff7ed;
-                color:#c2410c;
-                border:1px solid #fdba74;
-                border-radius:999px;
-                padding:3px 8px;
-                font-size:0.76rem;
-                font-weight:600;
-                line-height:1.15;
-            ">Required</span>
-            """
-        else:
-            html = """
-            <span style="
-                display:inline-block;
-                background:#eff6ff;
-                color:#1d4ed8;
-                border:1px solid #93c5fd;
-                border-radius:999px;
-                padding:3px 8px;
-                font-size:0.76rem;
-                font-weight:600;
-                line-height:1.15;
-            ">Optional</span>
-            """
-
+        html = BADGE_REQUIRED if item.get("required", True) else BADGE_OPTIONAL
         return pn.pane.HTML(
             html,
-            margin=(0, 0, 10, 0),
+            margin=(0, 0, 8, 0),
             sizing_mode="stretch_width",
         )
 
+    def _sources_text(self, item: dict) -> str:
+        sources = [str(source) for source in item.get("sources", []) if source]
+
+        if not sources:
+            return "unknown"
+
+        if len(sources) <= 4:
+            return ", ".join(sources)
+
+        shown = ", ".join(sources[:4])
+        return f"{shown}, +{len(sources) - 4} more"
+
     def _build_requirement_block(self, item: dict, selector: pn.widgets.Select):
         title = pn.pane.HTML(
-            f"<div style='font-size:0.98rem;font-weight:700;color:#0f172a;'>{item['display_name']}</div>",
+            f"""
+            <div style="font-weight:700;font-size:0.98rem;color:#0f172a;">
+                {escape(str(item.get("display_name") or item["semantic_name"]))}
+            </div>
+            """,
             margin=(0, 0, 6, 0),
             sizing_mode="stretch_width",
         )
 
+        description_text = str(item.get("description", "") or "")
         description = pn.pane.HTML(
-            f"<div style='color:#64748b;font-size:0.92rem;line-height:1.4;'>{item.get('description', '') or ''}</div>",
-            margin=(0, 0, 10, 0),
+            f"""
+            <div style="color:#64748b;font-size:0.88rem;line-height:1.35;">
+                {escape(description_text)}
+            </div>
+            """,
+            margin=(0, 0, 8, 0),
+            sizing_mode="stretch_width",
+            visible=bool(description_text),
+        )
+
+        requested_by = pn.pane.HTML(
+            f"""
+            <div style="color:#475569;font-size:0.86rem;margin-bottom:10px;">
+                Requested by:
+                <span style="
+                    font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;
+                    color:#2563eb;
+                    font-size:0.83rem;
+                ">
+                    {escape(self._sources_text(item))}
+                </span>
+            </div>
+            """,
+            margin=(0, 0, 6, 0),
             sizing_mode="stretch_width",
         )
 
         select_label = pn.pane.HTML(
-            "<div style='color:#334155;font-size:0.88rem;font-weight:600;'>Choose dataset column</div>",
+            """
+            <div style="font-weight:600;color:#1e293b;font-size:0.88rem;">
+                Choose dataset column
+            </div>
+            """,
             margin=(0, 0, 6, 0),
             sizing_mode="stretch_width",
         )
@@ -321,6 +465,7 @@ class MappingAlertController:
             title,
             self._status_badge(item),
             description,
+            requested_by,
             select_label,
             selector,
             styles=FIELD_BLOCK_STYLES,
@@ -329,34 +474,37 @@ class MappingAlertController:
         )
 
     def _open_modal(self, _event=None) -> None:
-        print("[MappingHeader] opening mapping modal")
         self._rebuild_modal()
         open_template_modal(self.template, self.modal_root)
 
     def _rebuild_modal(self) -> None:
         self._selectors = {}
 
-        header_blocks = [
+        self.modal_header[:] = [
             pn.pane.Markdown(
                 "# Resolve Dataset Requirements",
                 margin=(0, 0, 10, 0),
                 sizing_mode="stretch_width",
             ),
             pn.pane.HTML(
-                (
-                    f"<div style='color:{INTRO_STYLES['color']};"
-                    f"font-size:{INTRO_STYLES['font-size']};"
-                    f"line-height:{INTRO_STYLES['line-height']};'>"
-                    "Choose the dataset columns needed by currently active panels. "
-                    "Required fields must be mapped before those panels can continue."
-                    "</div>"
-                ),
+                """
+                <p>
+                    Choose the dataset columns needed by currently active panels.
+                    Duplicate requests are combined, and required requests take
+                    priority over optional requests.
+                </p>
+                """,
                 margin=(0, 0, 16, 0),
                 sizing_mode="stretch_width",
+                styles=INTRO_STYLES,
             ),
         ]
 
-        self.modal_header[:] = header_blocks
+        # Do not use a fixed footer for the apply/close buttons. In smaller
+        # browser windows the template modal can clip the footer, making the
+        # buttons unreachable. Instead, include the action row at the bottom of
+        # the scrollable modal body.
+        self.modal_footer[:] = []
 
         if not self._pending:
             self.modal_body[:] = [
@@ -366,72 +514,74 @@ class MappingAlertController:
                     margin=(0, 0, 0, 0),
                 )
             ]
-            self.modal_footer[:] = []
             return
 
-        grouped = defaultdict(list)
+        grouped: Dict[str, List[Tuple[PendingKey, dict]]] = {}
         for key, item in self._pending.items():
-            grouped[item["dataset_id"]].append((key, item))
+            grouped.setdefault(item["dataset_id"], []).append((key, item))
 
         body_blocks = []
 
         for dataset_id, items in grouped.items():
-            dataset = self.context.datasets.get(dataset_id)
+            try:
+                dataset = self.context.datasets.get(dataset_id)
+                dataset_name = getattr(dataset, "name", dataset_id)
+            except Exception:
+                dataset_name = dataset_id
 
             section_blocks = [
                 pn.pane.HTML(
-                    f"<div style='font-size:1.05rem;font-weight:700;color:#0f172a;'>{dataset.name}</div>",
+                    f"""
+                    <div style="font-weight:700;color:#0f172a;font-size:1rem;">
+                        {escape(str(dataset_name))}
+                    </div>
+                    """,
                     margin=(0, 0, 2, 0),
                     sizing_mode="stretch_width",
                 ),
                 pn.pane.HTML(
-                    f"<div style='color:{DATASET_ID_STYLES['color']};font-size:{DATASET_ID_STYLES['font-size']};'>{dataset_id}</div>",
+                    f"""
+                    <div style="color:#94a3b8;font-size:0.85rem;">
+                        {escape(str(dataset_id))}
+                    </div>
+                    """,
                     margin=(0, 0, 12, 0),
                     sizing_mode="stretch_width",
                 ),
             ]
 
-            by_source = defaultdict(list)
-            for key, item in items:
-                by_source[item.get("source", "unknown")].append((key, item))
+            sorted_items = sorted(
+                items,
+                key=lambda pair: (
+                    not bool(pair[1].get("required", True)),
+                    str(pair[1].get("display_name") or pair[1].get("semantic_name", "")).casefold(),
+                ),
+            )
 
-            for source_name, source_items in by_source.items():
-                section_blocks.append(
-                    pn.pane.HTML(
-                        (
-                            "<div style='margin-bottom:12px;'>"
-                            f"<span style='font-weight:600;color:{SOURCE_STYLES['color']};font-size:{SOURCE_STYLES['font-size']};'>Requested by:</span> "
-                            f"<span style='color:#2563eb;font-family:monospace;'>{source_name}</span>"
-                            "</div>"
-                        ),
-                        sizing_mode="stretch_width",
-                    )
+            for key, item in sorted_items:
+                current = self.context.datasets.get_mapping(
+                    dataset_id,
+                    item["semantic_name"],
                 )
 
-                for key, item in source_items:
-                    current = self.context.datasets.get_mapping(
-                        dataset_id,
-                        item["semantic_name"],
-                    )
+                default_value = current or item.get("suggested")
 
-                    default_value = current or item.get("suggested")
-                    options = list(item.get("candidates", []))
+                options = list(item.get("candidates", []))
+                if default_value is not None and default_value not in options:
+                    options = [default_value] + options
 
-                    if default_value is not None and default_value not in options:
-                        options = [default_value] + options
+                if not options:
+                    options = [""]
 
-                    if not options:
-                        options = [""]
+                selector = pn.widgets.Select(
+                    options=options,
+                    value=default_value if default_value in options else options[0],
+                    sizing_mode="stretch_width",
+                    margin=(0, 0, 0, 0),
+                )
 
-                    selector = pn.widgets.Select(
-                        options=options,
-                        value=default_value if default_value in options else options[0],
-                        sizing_mode="stretch_width",
-                        margin=(0, 0, 0, 0),
-                    )
-
-                    self._selectors[key] = selector
-                    section_blocks.append(self._build_requirement_block(item, selector))
+                self._selectors[key] = selector
+                section_blocks.append(self._build_requirement_block(item, selector))
 
             body_blocks.append(
                 pn.Column(
@@ -442,8 +592,6 @@ class MappingAlertController:
                 )
             )
 
-        body_blocks.append(pn.Spacer(height=4))
-
         apply_button = pn.widgets.Button(
             name="Apply mappings",
             button_type="primary",
@@ -451,6 +599,7 @@ class MappingAlertController:
             height=42,
             margin=(0, 0, 0, 0),
         )
+
         close_button = pn.widgets.Button(
             name="Close",
             button_type="light",
@@ -462,15 +611,27 @@ class MappingAlertController:
         apply_button.on_click(self._apply_mappings)
         close_button.on_click(lambda _e: self.template.close_modal())
 
-        self.modal_body[:] = body_blocks
-        self.modal_footer[:] = [
+        action_row = pn.Row(
             pn.layout.HSpacer(),
             close_button,
             apply_button,
-        ]
+            sizing_mode="stretch_width",
+            margin=(8, 0, 0, 0),
+            styles={
+                "border-top": "1px solid #e5e7eb",
+                "padding": "14px 0 4px 0",
+                "background": "#ffffff",
+                "box-sizing": "border-box",
+            },
+        )
+
+        body_blocks.append(action_row)
+        body_blocks.append(pn.Spacer(height=8))
+
+        self.modal_body[:] = body_blocks
 
     def _apply_mappings(self, _event=None) -> None:
-        resolved_semantics = []
+        resolved_keys: List[PendingKey] = []
 
         for key, selector in self._selectors.items():
             item = self._pending.get(key)
@@ -486,30 +647,36 @@ class MappingAlertController:
 
             self.context.datasets.set_mapping(dataset_id, semantic_name, chosen)
 
-            config_key = item.get("config_key")
-            if config_key and getattr(self.context, "config", None) is not None:
-                self.context.config.settings[config_key] = chosen
+            for config_key in item.get("config_keys", []):
+                if config_key and getattr(self.context, "config", None) is not None:
+                    self.context.config.settings[config_key] = chosen
 
-            payload = {
-                "source": item.get("source"),
+            dataset_payload = {
+                "source": "mapping_header",
+                "sources": list(item.get("sources", [])),
                 "dataset_id": dataset_id,
                 "semantic_name": semantic_name,
-                "config_key": config_key,
+                "config_key": item.get("config_key"),
+                "config_keys": list(item.get("config_keys", [])),
                 "column_name": chosen,
+                "required": bool(item.get("required", True)),
             }
 
-            self.context.events.publish("mapping.resolved", payload)
-            self.context.events.publish("dataset.mapping_updated", payload)
+            # Publish one mapping.resolved per requester for compatibility with
+            # existing panel/plugin code that expects its own source in the
+            # payload.
+            for source in item.get("sources", []) or ["unknown"]:
+                payload = dict(dataset_payload)
+                payload["source"] = source
+                self.context.events.publish("mapping.resolved", payload)
 
-            resolved_semantics.append((dataset_id, semantic_name))
+            # Publish one dataset-level update for the semantic mapping.
+            self.context.events.publish("dataset.mapping_updated", dataset_payload)
 
-        for dataset_id, semantic_name in resolved_semantics:
-            for key, item in list(self._pending.items()):
-                if (
-                    item.get("dataset_id") == dataset_id
-                    and item.get("semantic_name") == semantic_name
-                ):
-                    self._pending.pop(key, None)
+            resolved_keys.append(key)
+
+        for key in resolved_keys:
+            self._pending.pop(key, None)
 
         self._refresh_button()
         self._rebuild_modal()
