@@ -583,6 +583,63 @@ class ScatterPanel(BaseVisualisationPanel):
         except Exception:
             _run()
 
+    def _publish_focus(
+        self,
+        row_id: str,
+        *,
+        origin: str = "core.visualisation.scatter.tap",
+    ) -> None:
+        dataset_id = self._dataset_id()
+        selection = getattr(self.context, "selection", None)
+
+        if not row_id or not dataset_id or selection is None:
+            return
+
+        selection.set_focus(
+            dataset_id=dataset_id,
+            row_id=str(row_id),
+            origin=origin,
+            panel_id=self.panel_id,
+        )
+
+        # This panel ignores its own selection events to avoid feedback loops,
+        # so schedule a local refresh to show the focus overlay.
+        self._schedule_post_selection_refresh(delay_ms=120)
+
+    @staticmethod
+    def _is_single_focus_selection(
+        row_ids: List[str],
+        bounds: Optional[Sequence[float]],
+        *,
+        total_matches: Optional[int],
+        truncated: bool,
+    ) -> bool:
+        """
+        A single point selected without geometry should be treated as focus,
+        not as a one-row multi-selection set.
+
+        Tap events reach this path through Selection1D with:
+        - one selected row id
+        - no BoundsXY geometry
+        - total_matches often equal to 1
+        """
+        if len(row_ids) != 1:
+            return False
+
+        if bounds is not None:
+            return False
+
+        if truncated:
+            return False
+
+        if total_matches is None:
+            return True
+
+        try:
+            return int(total_matches) == 1
+        except Exception:
+            return False
+
     def _publish_selection(
         self,
         row_ids: List[str],
@@ -597,13 +654,18 @@ class ScatterPanel(BaseVisualisationPanel):
         if not row_ids or not dataset_id or selection is None:
             return
 
-        if len(row_ids) == 1 and not total_matches:
-            selection.set_focus(
-                dataset_id=dataset_id,
-                row_id=row_ids[0],
-                origin="core.visualisation.scatter.tap",
-                panel_id=self.panel_id,
-            )
+        row_ids = [str(row_id) for row_id in row_ids if row_id is not None]
+
+        if not row_ids:
+            return
+
+        if self._is_single_focus_selection(
+            row_ids,
+            bounds,
+            total_matches=total_matches,
+            truncated=truncated,
+        ):
+            self._publish_focus(row_ids[0])
             return
 
         metadata = {
@@ -623,10 +685,12 @@ class ScatterPanel(BaseVisualisationPanel):
 
         if total_matches is not None:
             metadata["total_matches"] = int(total_matches)
-            metadata["published_ids"] = int(len(row_ids))
-            metadata["truncated"] = bool(truncated)
-            if truncated:
-                metadata["truncation_reason"] = "max_selection_ids"
+
+        metadata["published_ids"] = int(len(row_ids))
+        metadata["truncated"] = bool(truncated)
+
+        if truncated:
+            metadata["truncation_reason"] = "max_selection_ids"
 
         selection.set_selection_set(
             dataset_id=dataset_id,
@@ -640,7 +704,6 @@ class ScatterPanel(BaseVisualisationPanel):
         )
 
         self._schedule_post_selection_refresh()
-
 
 def _colour_key_from_frame(frame: pd.DataFrame) -> dict:
     if INTERNAL_LABEL_DISPLAY not in frame.columns:
