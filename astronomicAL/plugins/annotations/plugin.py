@@ -3,24 +3,32 @@ from __future__ import annotations
 import html
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import pandas as pd
 import panel as pn
 
 from astronomicAL.platform.plugins import PluginManifest
+from astronomicAL.platform.plugins.specs import ArtifactResult
+
+
+ANNOTATION_NOTE_TYPE = "annotation.note"
+REVIEW_STATUS_TYPE = "review.status"
+SUMMARY_TABLE_TYPE = "table.annotations_summary"
+SUMMARY_CSV_TYPE = "annotation.summary.csv"
 
 
 manifest = PluginManifest(
     id="core.annotations",
     name="Annotations",
-    version="0.1.0",
+    version="0.2.0",
     description=(
         "Record-level notes, review state, tags, confidence, and optional "
         "label suggestions for human-in-the-loop analysis workflows."
     ),
     capabilities=[
         "panel",
+        "action",
         "datasets",
         "selection",
         "events",
@@ -57,12 +65,57 @@ def register(api) -> None:
             "review.status.changed",
             "labels.suggested",
             "artifact.created",
+            ANNOTATION_NOTE_TYPE,
+            REVIEW_STATUS_TYPE,
         ],
         default_layout={"x": 8, "y": 0, "w": 4, "h": 7},
+        state_version=2,
+        persist_layout=True,
+        persist_state=True,
+    )
+
+    api.register_panel(
+        id="summary",
+        title="Annotation Summary",
+        factory=create_annotation_summary_panel,
+        description=(
+            "Summarise all annotation.note and review.status artifacts for the "
+            "active dataset, with options to create a summary dataset or CSV artifact."
+        ),
+        category="Core",
+        icon="table",
+        tags=["core", "annotations", "summary", "export"],
+        produces=[
+            "artifact.created",
+            "dataset.loaded",
+            SUMMARY_TABLE_TYPE,
+            SUMMARY_CSV_TYPE,
+        ],
+        default_layout={"x": 8, "y": 7, "w": 4, "h": 5},
         state_version=1,
         persist_layout=True,
         persist_state=True,
     )
+
+    api.register_action(
+        id="build_summary",
+        title="Build Annotation Summary",
+        handler=build_annotation_summary_action,
+        outputs=[SUMMARY_TABLE_TYPE],
+        run_in_job=False,
+        description=(
+            "Build a table summarising all annotation.note and review.status "
+            "artifacts for the active dataset."
+        ),
+        category="Core",
+        icon="table",
+        tags=["core", "annotations", "summary", "export"],
+    )
+
+
+# ---------------------------------------------------------------------
+# Panel factories
+# ---------------------------------------------------------------------
 
 
 def create_annotations_panel(
@@ -83,23 +136,524 @@ def create_annotations_panel(
     return controller.panel(), controller
 
 
+def create_annotation_summary_panel(
+    context,
+    *,
+    instance_id: Optional[str] = None,
+    restore_state: Optional[Dict[str, Any]] = None,
+    restore_metadata: Optional[Dict[str, Any]] = None,
+    **kwargs,
+):
+    controller = AnnotationSummaryPanel(
+        context=context,
+        instance_id=instance_id,
+        restore_state=restore_state,
+        restore_metadata=restore_metadata,
+        **kwargs,
+    )
+    return controller.panel(), controller
+
+
+# ---------------------------------------------------------------------
+# Action handler
+# ---------------------------------------------------------------------
+
+
+def build_annotation_summary_action(
+    context,
+    request=None,
+    cancel_token=None,
+):
+    if cancel_token is not None and cancel_token.cancelled():
+        return None
+
+    dataset_id = getattr(request, "dataset_id", None) or _active_dataset_id(context)
+    df = build_annotation_summary_dataframe(context, dataset_id=dataset_id)
+
+    if cancel_token is not None and cancel_token.cancelled():
+        return None
+
+    return ArtifactResult(
+        type=SUMMARY_TABLE_TYPE,
+        payload=df.to_dict(orient="records"),
+        dataset_id=dataset_id,
+        row_ids=None,
+        params={
+            "source": "core.annotations",
+            "row_count": int(len(df)),
+            "created_at": _now(),
+        },
+        publish=True,
+    )
+
+
+# ---------------------------------------------------------------------
+# Shared artifact/history helpers
+# ---------------------------------------------------------------------
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _escape(value: Any) -> str:
+    return html.escape(str(value), quote=True)
+
+
+def _active_dataset_id(context) -> Optional[str]:
+    datasets = getattr(context, "datasets", None)
+    if datasets is None:
+        return None
+    try:
+        return datasets.active_id()
+    except Exception:
+        return None
+
+
+def _artifact_created_at(ref: Any) -> float:
+    try:
+        return float(getattr(ref, "created_at", 0.0) or 0.0)
+    except Exception:
+        return 0.0
+
+
+def _artifact_row_id(ref: Any) -> Optional[str]:
+    try:
+        row_ids = getattr(ref, "row_ids", None)
+    except Exception:
+        row_ids = None
+    if row_ids:
+        return str(row_ids[0])
+    return None
+
+
+def _safe_artifact_payload(context, artifact_id: str) -> Any:
+    artifacts = getattr(context, "artifacts", None)
+    if artifacts is None:
+        return None
+    try:
+        return artifacts.get(artifact_id)
+    except Exception:
+        return None
+
+
+def _find_artifacts(
+    context,
+    *,
+    artifact_type: str,
+    dataset_id: Optional[str] = None,
+    row_id: Optional[str] = None,
+) -> List[Any]:
+    artifacts = getattr(context, "artifacts", None)
+    if artifacts is None:
+        return []
+
+    try:
+        return list(
+            artifacts.find(
+                type=artifact_type,
+                dataset_id=dataset_id,
+                row_id=row_id,
+            )
+        )
+    except TypeError:
+        try:
+            return list(
+                artifacts.find(
+                    artifact_type=artifact_type,
+                    dataset_id=dataset_id,
+                    row_id=row_id,
+                )
+            )
+        except Exception:
+            return []
+    except Exception:
+        return []
+
+
+def _iter_artifact_payloads(
+    context,
+    *,
+    artifact_type: str,
+    dataset_id: Optional[str] = None,
+    row_id: Optional[str] = None,
+):
+    refs = _find_artifacts(
+        context,
+        artifact_type=artifact_type,
+        dataset_id=dataset_id,
+        row_id=row_id,
+    )
+
+    for ref in refs:
+        artifact_id = getattr(ref, "artifact_id", None)
+        if not artifact_id:
+            continue
+
+        payload = _safe_artifact_payload(context, artifact_id)
+        if not isinstance(payload, dict):
+            continue
+
+        yield ref, payload
+
+
+def _record_key(dataset_id: Optional[str], row_id: Optional[str]) -> Optional[str]:
+    if dataset_id is None or row_id is None:
+        return None
+    return f"{dataset_id}::{row_id}"
+
+
+def _default_record_state(
+    *,
+    dataset_id: Optional[str] = None,
+    row_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    return {
+        "dataset_id": dataset_id,
+        "row_id": row_id,
+        "status": "unreviewed",
+        "confidence": 0.0,
+        "tags": [],
+        "label_suggestion": "",
+        "notes": [],
+        "reviews": [],
+        "created_at": _now(),
+        "updated_at": _now(),
+    }
+
+
+def _normalise_note_payload(ref: Any, payload: Dict[str, Any]) -> Dict[str, Any]:
+    artifact_id = getattr(ref, "artifact_id", None)
+    dataset_id = payload.get("dataset_id") or getattr(ref, "dataset_id", None)
+    row_id = payload.get("row_id") or _artifact_row_id(ref)
+
+    created_at = payload.get("created_at") or payload.get("updated_at") or _now()
+    updated_at = payload.get("updated_at") or created_at
+
+    annotation_id = (
+        payload.get("annotation_id")
+        or payload.get("id")
+        or f"annotation:{artifact_id or uuid.uuid4().hex}"
+    )
+
+    tags = payload.get("tags") or []
+    if isinstance(tags, str):
+        tags = [tag.strip() for tag in tags.split(",") if tag.strip()]
+
+    return {
+        "annotation_id": str(annotation_id),
+        "artifact_id": artifact_id,
+        "dataset_id": str(dataset_id) if dataset_id is not None else None,
+        "row_id": str(row_id) if row_id is not None else None,
+        "text": str(payload.get("text", "") or ""),
+        "status": str(payload.get("status", "unreviewed") or "unreviewed"),
+        "confidence": _safe_float(payload.get("confidence", 0.0), default=0.0),
+        "tags": list(tags),
+        "label_suggestion": str(payload.get("label_suggestion", "") or ""),
+        "created_at": str(created_at),
+        "updated_at": str(updated_at),
+        "source": str(payload.get("source", "core.annotations") or "core.annotations"),
+        "instance_id": payload.get("instance_id"),
+        "_sort_time": _artifact_created_at(ref),
+    }
+
+
+def _normalise_review_payload(ref: Any, payload: Dict[str, Any]) -> Dict[str, Any]:
+    artifact_id = getattr(ref, "artifact_id", None)
+    dataset_id = payload.get("dataset_id") or getattr(ref, "dataset_id", None)
+    row_id = payload.get("row_id") or _artifact_row_id(ref)
+
+    updated_at = payload.get("updated_at") or payload.get("created_at") or _now()
+
+    review_id = (
+        payload.get("review_id")
+        or payload.get("id")
+        or f"review:{artifact_id or uuid.uuid4().hex}"
+    )
+
+    tags = payload.get("tags") or []
+    if isinstance(tags, str):
+        tags = [tag.strip() for tag in tags.split(",") if tag.strip()]
+
+    return {
+        "review_id": str(review_id),
+        "artifact_id": artifact_id,
+        "dataset_id": str(dataset_id) if dataset_id is not None else None,
+        "row_id": str(row_id) if row_id is not None else None,
+        "status": str(payload.get("status", "unreviewed") or "unreviewed"),
+        "confidence": _safe_float(payload.get("confidence", 0.0), default=0.0),
+        "tags": list(tags),
+        "label_suggestion": str(payload.get("label_suggestion", "") or ""),
+        "created_at": str(payload.get("created_at", updated_at) or updated_at),
+        "updated_at": str(updated_at),
+        "source": str(payload.get("source", "core.annotations") or "core.annotations"),
+        "instance_id": payload.get("instance_id"),
+        "_sort_time": _artifact_created_at(ref),
+    }
+
+
+def _safe_float(value: Any, *, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return default
+
+
+def _dedupe_items(items: Iterable[Dict[str, Any]], id_keys: Tuple[str, ...]) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    seen = set()
+
+    for item in items:
+        identity = None
+        for key in id_keys:
+            if item.get(key):
+                identity = (key, str(item.get(key)))
+                break
+
+        if identity is None:
+            identity = (
+                "content",
+                str(item.get("dataset_id")),
+                str(item.get("row_id")),
+                str(item.get("created_at") or item.get("updated_at")),
+                str(item.get("text", "")),
+                str(item.get("status", "")),
+            )
+
+        if identity in seen:
+            continue
+
+        seen.add(identity)
+        out.append(dict(item))
+
+    out.sort(
+        key=lambda item: (
+            _safe_float(item.get("_sort_time", 0.0), default=0.0),
+            str(item.get("created_at") or item.get("updated_at") or ""),
+        )
+    )
+    return out
+
+
+def _apply_latest_state_from_history(state: Dict[str, Any]) -> Dict[str, Any]:
+    reviews = state.get("reviews") or []
+    notes = state.get("notes") or []
+
+    latest = None
+    if reviews:
+        latest = reviews[-1]
+    elif notes:
+        latest = notes[-1]
+
+    if latest:
+        state["status"] = latest.get("status", "unreviewed")
+        state["confidence"] = _safe_float(latest.get("confidence", 0.0), default=0.0)
+        state["tags"] = list(latest.get("tags") or [])
+        state["label_suggestion"] = str(latest.get("label_suggestion", "") or "")
+        state["updated_at"] = str(
+            latest.get("updated_at") or latest.get("created_at") or state.get("updated_at") or _now()
+        )
+
+    if notes:
+        state["created_at"] = str(notes[0].get("created_at") or state.get("created_at") or _now())
+    elif reviews:
+        state["created_at"] = str(
+            reviews[0].get("created_at") or reviews[0].get("updated_at") or state.get("created_at") or _now()
+        )
+
+    return state
+
+
+def _merge_record_states(
+    old_state: Optional[Dict[str, Any]],
+    artifact_state: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    if old_state is None and artifact_state is None:
+        return _default_record_state()
+
+    if old_state is None:
+        return _apply_latest_state_from_history(dict(artifact_state or {}))
+
+    if artifact_state is None:
+        return _apply_latest_state_from_history(dict(old_state or {}))
+
+    merged = dict(old_state)
+
+    merged["dataset_id"] = artifact_state.get("dataset_id") or old_state.get("dataset_id")
+    merged["row_id"] = artifact_state.get("row_id") or old_state.get("row_id")
+
+    merged["notes"] = _dedupe_items(
+        list(old_state.get("notes") or []) + list(artifact_state.get("notes") or []),
+        ("annotation_id", "artifact_id"),
+    )
+    merged["reviews"] = _dedupe_items(
+        list(old_state.get("reviews") or []) + list(artifact_state.get("reviews") or []),
+        ("review_id", "artifact_id"),
+    )
+
+    return _apply_latest_state_from_history(merged)
+
+
+def build_record_state_from_artifacts(
+    context,
+    *,
+    dataset_id: Optional[str],
+    row_id: Optional[str],
+) -> Optional[Dict[str, Any]]:
+    if dataset_id is None or row_id is None:
+        return None
+
+    state = _default_record_state(dataset_id=str(dataset_id), row_id=str(row_id))
+
+    for ref, payload in _iter_artifact_payloads(
+        context,
+        artifact_type=ANNOTATION_NOTE_TYPE,
+        dataset_id=str(dataset_id),
+        row_id=str(row_id),
+    ):
+        note = _normalise_note_payload(ref, payload)
+        if note.get("dataset_id") == str(dataset_id) and note.get("row_id") == str(row_id):
+            state["notes"].append(note)
+
+    for ref, payload in _iter_artifact_payloads(
+        context,
+        artifact_type=REVIEW_STATUS_TYPE,
+        dataset_id=str(dataset_id),
+        row_id=str(row_id),
+    ):
+        review = _normalise_review_payload(ref, payload)
+        if review.get("dataset_id") == str(dataset_id) and review.get("row_id") == str(row_id):
+            state["reviews"].append(review)
+
+    state["notes"] = _dedupe_items(state["notes"], ("annotation_id", "artifact_id"))
+    state["reviews"] = _dedupe_items(state["reviews"], ("review_id", "artifact_id"))
+
+    if not state["notes"] and not state["reviews"]:
+        return None
+
+    return _apply_latest_state_from_history(state)
+
+
+def build_all_record_states_from_artifacts(
+    context,
+    *,
+    dataset_id: Optional[str] = None,
+) -> Dict[str, Dict[str, Any]]:
+    states: Dict[str, Dict[str, Any]] = {}
+
+    for ref, payload in _iter_artifact_payloads(
+        context,
+        artifact_type=ANNOTATION_NOTE_TYPE,
+        dataset_id=dataset_id,
+        row_id=None,
+    ):
+        note = _normalise_note_payload(ref, payload)
+        ds = note.get("dataset_id")
+        row = note.get("row_id")
+        key = _record_key(ds, row)
+        if key is None:
+            continue
+
+        states.setdefault(
+            key,
+            _default_record_state(dataset_id=ds, row_id=row),
+        )
+        states[key]["notes"].append(note)
+
+    for ref, payload in _iter_artifact_payloads(
+        context,
+        artifact_type=REVIEW_STATUS_TYPE,
+        dataset_id=dataset_id,
+        row_id=None,
+    ):
+        review = _normalise_review_payload(ref, payload)
+        ds = review.get("dataset_id")
+        row = review.get("row_id")
+        key = _record_key(ds, row)
+        if key is None:
+            continue
+
+        states.setdefault(
+            key,
+            _default_record_state(dataset_id=ds, row_id=row),
+        )
+        states[key]["reviews"].append(review)
+
+    for key, state in list(states.items()):
+        state["notes"] = _dedupe_items(state.get("notes") or [], ("annotation_id", "artifact_id"))
+        state["reviews"] = _dedupe_items(state.get("reviews") or [], ("review_id", "artifact_id"))
+        states[key] = _apply_latest_state_from_history(state)
+
+    return states
+
+
+def build_annotation_summary_dataframe(
+    context,
+    *,
+    dataset_id: Optional[str] = None,
+) -> pd.DataFrame:
+    states = build_all_record_states_from_artifacts(context, dataset_id=dataset_id)
+
+    rows: List[Dict[str, Any]] = []
+    for state in states.values():
+        notes = state.get("notes") or []
+        reviews = state.get("reviews") or []
+
+        latest_note = notes[-1] if notes else {}
+        latest_review = reviews[-1] if reviews else {}
+
+        rows.append(
+            {
+                "dataset_id": state.get("dataset_id"),
+                "row_id": state.get("row_id"),
+                "latest_status": state.get("status", "unreviewed"),
+                "latest_confidence": state.get("confidence", 0.0),
+                "tags": ", ".join(str(tag) for tag in (state.get("tags") or [])),
+                "label_suggestion": state.get("label_suggestion", ""),
+                "note_count": len(notes),
+                "review_count": len(reviews),
+                "latest_note": latest_note.get("text", ""),
+                "latest_note_at": latest_note.get("created_at", ""),
+                "latest_review_at": latest_review.get("updated_at", ""),
+                "first_annotated_at": state.get("created_at", ""),
+                "updated_at": state.get("updated_at", ""),
+            }
+        )
+
+    df = pd.DataFrame(rows)
+
+    if df.empty:
+        return pd.DataFrame(
+            columns=[
+                "dataset_id",
+                "row_id",
+                "latest_status",
+                "latest_confidence",
+                "tags",
+                "label_suggestion",
+                "note_count",
+                "review_count",
+                "latest_note",
+                "latest_note_at",
+                "latest_review_at",
+                "first_annotated_at",
+                "updated_at",
+            ]
+        )
+
+    return df.sort_values(
+        by=["dataset_id", "updated_at", "row_id"],
+        ascending=[True, False, True],
+        kind="stable",
+    ).reset_index(drop=True)
+
+
+# ---------------------------------------------------------------------
+# Main Annotations panel
+# ---------------------------------------------------------------------
+
+
 class AnnotationsPanel:
-    """Generic record-level annotation and review panel.
-
-    This panel intentionally avoids astronomy assumptions.
-
-    It only assumes:
-
-    - there is an active dataset
-    - the dataset has a semantic `record_id` mapping
-    - another panel, such as Record Browser or Visualisation, publishes focus
-      through `context.selection.set_focus(...)`
-
-    Saved notes/review decisions are kept in the controller state for workspace
-    persistence and are also emitted as artifacts/events so other plugins can
-    react to them.
-    """
-
     REVIEW_STATUSES = [
         "unreviewed",
         "in_review",
@@ -108,14 +662,6 @@ class AnnotationsPanel:
         "unsure",
         "needs_follow_up",
     ]
-
-    CONFIDENCE_LABELS = {
-        0.0: "No confidence set",
-        0.25: "Low",
-        0.5: "Medium",
-        0.75: "High",
-        1.0: "Certain",
-    }
 
     def __init__(
         self,
@@ -138,7 +684,9 @@ class AnnotationsPanel:
         self.row_id: Optional[str] = None
         self.row: Optional[pd.Series] = None
 
-        # Keyed by "dataset_id::row_id".
+        # Fallback/local cache keyed by "dataset_id::row_id".
+        # Artifacts are the canonical shared store; this helps persistence and
+        # protects notes during transitional states.
         self._records: Dict[str, Dict[str, Any]] = {}
 
         self._build_widgets()
@@ -152,7 +700,7 @@ class AnnotationsPanel:
         self._render()
 
     # ------------------------------------------------------------------
-    # Public panel/lifecycle/persistence API
+    # Public lifecycle / persistence API
     # ------------------------------------------------------------------
 
     def panel(self):
@@ -182,7 +730,7 @@ class AnnotationsPanel:
 
     def get_state(self) -> Dict[str, Any]:
         return {
-            "version": 1,
+            "version": 2,
             "records": self._records,
             "current_dataset_id": self.dataset_id,
             "current_row_id": self.row_id,
@@ -205,9 +753,9 @@ class AnnotationsPanel:
 
         records = state.get("records")
         if isinstance(records, dict):
-            # Keep this deliberately tolerant: older saved states may contain
-            # partially serialized annotation records.
-            self._records.update(records)
+            for key, value in records.items():
+                if isinstance(value, dict):
+                    self._records[str(key)] = value
 
         draft = state.get("draft")
         if isinstance(draft, dict):
@@ -221,17 +769,16 @@ class AnnotationsPanel:
             if status in self.REVIEW_STATUSES:
                 self.status_select.value = status
 
-            try:
-                confidence = float(draft.get("confidence", 0.0) or 0.0)
-                self.confidence_slider.value = max(0.0, min(1.0, confidence))
-            except Exception:
-                self.confidence_slider.value = 0.0
+            self.confidence_slider.value = max(
+                0.0,
+                min(1.0, _safe_float(draft.get("confidence", 0.0), default=0.0)),
+            )
 
         if "show_history" in state:
             self.show_history_checkbox.value = bool(state.get("show_history"))
 
     # ------------------------------------------------------------------
-    # UI construction
+    # UI
     # ------------------------------------------------------------------
 
     def _build_widgets(self) -> None:
@@ -289,6 +836,13 @@ class AnnotationsPanel:
             height=32,
             margin=(0, 8, 8, 0),
         )
+        self.reload_button = pn.widgets.Button(
+            name="Reload from artifacts",
+            button_type="default",
+            width=155,
+            height=32,
+            margin=(0, 8, 8, 0),
+        )
         self.clear_draft_button = pn.widgets.Button(
             name="Clear draft",
             button_type="default",
@@ -305,24 +859,9 @@ class AnnotationsPanel:
 
         self.save_note_button.on_click(self._on_save_note)
         self.save_review_button.on_click(self._on_save_review)
+        self.reload_button.on_click(self._on_reload_from_artifacts)
         self.clear_draft_button.on_click(self._on_clear_draft)
 
-        self._watchers.append(
-            self.status_select.param.watch(self._on_local_review_widget_changed, "value")
-        )
-        self._watchers.append(
-            self.confidence_slider.param.watch(
-                self._on_local_review_widget_changed, "value"
-            )
-        )
-        self._watchers.append(
-            self.tags_input.param.watch(self._on_local_review_widget_changed, "value")
-        )
-        self._watchers.append(
-            self.label_suggestion_input.param.watch(
-                self._on_local_review_widget_changed, "value"
-            )
-        )
         self._watchers.append(
             self.show_history_checkbox.param.watch(self._on_show_history_changed, "value")
         )
@@ -357,10 +896,7 @@ class AnnotationsPanel:
         self.root = pn.Column(
             self.header_pane,
             self.message_pane,
-            self._card(
-                "Focused record",
-                self.record_pane,
-            ),
+            self._card("Focused record", self.record_pane),
             self._card(
                 "Review state",
                 self.status_select,
@@ -369,6 +905,7 @@ class AnnotationsPanel:
                 self.label_suggestion_input,
                 pn.Row(
                     self.save_review_button,
+                    self.reload_button,
                     self.clear_draft_button,
                     sizing_mode="stretch_width",
                     margin=(0, 0, 0, 0),
@@ -384,10 +921,7 @@ class AnnotationsPanel:
                     margin=(0, 0, 0, 0),
                 ),
             ),
-            self._card(
-                "Annotation history",
-                self.history_pane,
-            ),
+            self._card("Annotation history", self.history_pane),
             sizing_mode="stretch_both",
             scroll=True,
             margin=(0, 0, 0, 0),
@@ -403,7 +937,7 @@ class AnnotationsPanel:
                 f"""
                 <div style="font-weight: 700; font-size: 14px;
                             margin-bottom: 8px;">
-                    {self._escape(title)}
+                    {_escape(title)}
                 </div>
                 """,
                 sizing_mode="stretch_width",
@@ -434,6 +968,7 @@ class AnnotationsPanel:
         self._subscribe("dataset.active.changed", self._on_dataset_active_changed)
         self._subscribe("dataset.updated", self._on_dataset_updated)
         self._subscribe("dataset.mapping_updated", self._on_dataset_mapping_updated)
+        self._subscribe("artifact.created", self._on_artifact_created)
 
     def _subscribe(self, topic: str, callback) -> None:
         events = getattr(self.context, "events", None)
@@ -455,19 +990,14 @@ class AnnotationsPanel:
             pass
 
     def _active_dataset_id(self) -> Optional[str]:
-        datasets = getattr(self.context, "datasets", None)
-        if datasets is None:
-            return None
-        try:
-            return datasets.active_id()
-        except Exception:
-            return None
+        return _active_dataset_id(self.context)
 
     def _active_df(self) -> Optional[pd.DataFrame]:
         datasets = getattr(self.context, "datasets", None)
         dataset_id = self._active_dataset_id()
         if datasets is None or dataset_id is None:
             return None
+
         try:
             return datasets.get_df(dataset_id)
         except TypeError:
@@ -488,6 +1018,7 @@ class AnnotationsPanel:
             method = getattr(datasets, method_name, None)
             if not callable(method):
                 continue
+
             try:
                 value = method(dataset_id, semantic_name)
             except TypeError:
@@ -497,6 +1028,7 @@ class AnnotationsPanel:
                     value = None
             except Exception:
                 value = None
+
             if value:
                 return str(value)
 
@@ -521,12 +1053,13 @@ class AnnotationsPanel:
         if df is not None and mapped in df.columns:
             return mapped
 
-        # Compatibility bridge for older settings-backed panels.
         config = getattr(self.context, "config", None)
         settings = getattr(config, "settings", {}) if config is not None else {}
         legacy = settings.get("id_col")
+
         if self._is_index_mapping(legacy):
             return "Use Index"
+
         if df is not None and legacy in df.columns:
             return legacy
 
@@ -541,6 +1074,7 @@ class AnnotationsPanel:
         config = getattr(self.context, "config", None)
         settings = getattr(config, "settings", {}) if config is not None else {}
         legacy = settings.get("label_col")
+
         if df is not None and legacy in df.columns:
             return legacy
 
@@ -550,6 +1084,7 @@ class AnnotationsPanel:
         selection = getattr(self.context, "selection", None)
         if selection is None:
             return None
+
         try:
             focus = selection.get_focus()
         except Exception:
@@ -557,6 +1092,7 @@ class AnnotationsPanel:
 
         if focus is None:
             return None
+
         if isinstance(focus, dict):
             return dict(focus)
 
@@ -588,15 +1124,25 @@ class AnnotationsPanel:
         if self._disposed or not isinstance(payload, dict):
             return
 
+        old_dataset_id = self.dataset_id
+        old_row_id = self.row_id
+
+        new_dataset_id = payload.get("dataset_id") or self._active_dataset_id()
+        new_row_id = payload.get("row_id")
+
+        if str(new_dataset_id) != str(old_dataset_id) or str(new_row_id) != str(old_row_id):
+            self._clear_message()
+
         self._set_focus(
-            dataset_id=payload.get("dataset_id") or self._active_dataset_id(),
-            row_id=payload.get("row_id"),
+            dataset_id=new_dataset_id,
+            row_id=new_row_id,
             render=True,
         )
 
     def _on_selection_focus_cleared(self, _topic: str, _payload: Dict[str, Any]) -> None:
         if self._disposed:
             return
+        self._clear_message()
         self.row_id = None
         self.row = None
         self._render()
@@ -604,6 +1150,7 @@ class AnnotationsPanel:
     def _on_dataset_active_changed(self, _topic: str, _payload: Dict[str, Any]) -> None:
         if self._disposed:
             return
+        self._clear_message()
         self.dataset_id = self._active_dataset_id()
         self.row_id = None
         self.row = None
@@ -612,10 +1159,12 @@ class AnnotationsPanel:
     def _on_dataset_updated(self, _topic: str, payload: Dict[str, Any]) -> None:
         if self._disposed:
             return
+
         if isinstance(payload, dict):
             dataset_id = payload.get("dataset_id")
             if self.dataset_id and dataset_id and dataset_id != self.dataset_id:
                 return
+
         if self.row_id is not None:
             self._set_focus(self.dataset_id, self.row_id, render=True)
         else:
@@ -624,13 +1173,36 @@ class AnnotationsPanel:
     def _on_dataset_mapping_updated(self, _topic: str, payload: Dict[str, Any]) -> None:
         if self._disposed:
             return
+
         if isinstance(payload, dict):
             dataset_id = payload.get("dataset_id")
             if self.dataset_id and dataset_id and dataset_id != self.dataset_id:
                 return
+
         if self.row_id is not None:
             self._set_focus(self.dataset_id, self.row_id, render=True)
         else:
+            self._render()
+
+    def _on_artifact_created(self, _topic: str, payload: Dict[str, Any]) -> None:
+        if self._disposed or not isinstance(payload, dict):
+            return
+
+        artifact_type = payload.get("type")
+        if artifact_type not in {ANNOTATION_NOTE_TYPE, REVIEW_STATUS_TYPE}:
+            return
+
+        dataset_id = payload.get("dataset_id")
+        row_ids = payload.get("row_ids") or []
+
+        if (
+            self.dataset_id is not None
+            and self.row_id is not None
+            and str(dataset_id) == str(self.dataset_id)
+            and str(self.row_id) in [str(row_id) for row_id in row_ids]
+        ):
+            self._refresh_current_record_from_artifacts()
+            self._load_record_state_into_widgets()
             self._render()
 
     def _set_focus(
@@ -644,6 +1216,7 @@ class AnnotationsPanel:
         self.row_id = str(row_id) if row_id is not None else None
         self.row = self._find_row(self.dataset_id, self.row_id)
 
+        self._refresh_current_record_from_artifacts()
         self._load_record_state_into_widgets()
 
         if render:
@@ -679,7 +1252,6 @@ class AnnotationsPanel:
                 if matches.any():
                     return df.loc[matches].iloc[0]
 
-            # Last-resort fallback: allow focus row_id to be an integer index.
             try:
                 idx = int(row_id)
                 if 0 <= idx < len(df):
@@ -692,28 +1264,26 @@ class AnnotationsPanel:
 
         return None
 
-    def _record_key(
-        self,
-        dataset_id: Optional[str] = None,
-        row_id: Optional[str] = None,
-    ) -> Optional[str]:
-        dataset_id = dataset_id if dataset_id is not None else self.dataset_id
-        row_id = row_id if row_id is not None else self.row_id
+    def _record_key(self) -> Optional[str]:
+        return _record_key(self.dataset_id, self.row_id)
 
-        if dataset_id is None or row_id is None:
-            return None
-        return f"{dataset_id}::{row_id}"
+    def _refresh_current_record_from_artifacts(self) -> None:
+        key = self._record_key()
+        if key is None:
+            return
 
-    def _default_record_state(self) -> Dict[str, Any]:
-        return {
-            "status": "unreviewed",
-            "confidence": 0.0,
-            "tags": [],
-            "label_suggestion": "",
-            "notes": [],
-            "created_at": self._now(),
-            "updated_at": self._now(),
-        }
+        artifact_state = build_record_state_from_artifacts(
+            self.context,
+            dataset_id=self.dataset_id,
+            row_id=self.row_id,
+        )
+
+        existing = self._records.get(key)
+        merged = _merge_record_states(existing, artifact_state)
+        merged["dataset_id"] = self.dataset_id
+        merged["row_id"] = self.row_id
+
+        self._records[key] = merged
 
     def _get_record_state(self) -> Optional[Dict[str, Any]]:
         key = self._record_key()
@@ -721,7 +1291,10 @@ class AnnotationsPanel:
             return None
 
         if key not in self._records:
-            self._records[key] = self._default_record_state()
+            self._records[key] = _default_record_state(
+                dataset_id=self.dataset_id,
+                row_id=self.row_id,
+            )
 
         return self._records[key]
 
@@ -739,12 +1312,10 @@ class AnnotationsPanel:
             status = "unreviewed"
 
         self.status_select.value = status
-
-        try:
-            confidence = float(state.get("confidence", 0.0) or 0.0)
-        except Exception:
-            confidence = 0.0
-        self.confidence_slider.value = max(0.0, min(1.0, confidence))
+        self.confidence_slider.value = max(
+            0.0,
+            min(1.0, _safe_float(state.get("confidence", 0.0), default=0.0)),
+        )
 
         tags = state.get("tags") or []
         if isinstance(tags, str):
@@ -755,7 +1326,7 @@ class AnnotationsPanel:
         self.label_suggestion_input.value = str(state.get("label_suggestion", "") or "")
 
     # ------------------------------------------------------------------
-    # Button/watch callbacks
+    # Button callbacks
     # ------------------------------------------------------------------
 
     def _on_save_note(self, _event=None) -> None:
@@ -773,7 +1344,7 @@ class AnnotationsPanel:
             return
 
         annotation_id = f"annotation:{uuid.uuid4().hex}"
-        timestamp = self._now()
+        timestamp = _now()
         tags = self._parse_tags(self.tags_input.value)
 
         note = {
@@ -791,18 +1362,23 @@ class AnnotationsPanel:
             "instance_id": self.instance_id,
         }
 
-        record_state.setdefault("notes", []).append(note)
-        record_state["status"] = self.status_select.value
-        record_state["confidence"] = float(self.confidence_slider.value or 0.0)
-        record_state["tags"] = tags
-        record_state["label_suggestion"] = self.label_suggestion_input.value.strip()
-        record_state["updated_at"] = timestamp
-
         artifact_id = self._put_artifact(
-            artifact_type="annotation.note",
+            artifact_type=ANNOTATION_NOTE_TYPE,
             payload=note,
             params={"annotation_id": annotation_id},
         )
+        note["artifact_id"] = artifact_id
+
+        record_state.setdefault("notes", []).append(note)
+        record_state["notes"] = _dedupe_items(
+            record_state.get("notes") or [],
+            ("annotation_id", "artifact_id"),
+        )
+        record_state["status"] = note["status"]
+        record_state["confidence"] = note["confidence"]
+        record_state["tags"] = list(tags)
+        record_state["label_suggestion"] = note["label_suggestion"]
+        record_state["updated_at"] = timestamp
 
         event_payload = {
             "dataset_id": self.dataset_id,
@@ -816,6 +1392,7 @@ class AnnotationsPanel:
             "source": "core.annotations",
             "instance_id": self.instance_id,
         }
+
         self._publish("annotation.created", event_payload)
 
         if artifact_id:
@@ -823,7 +1400,7 @@ class AnnotationsPanel:
                 "artifact.created",
                 {
                     "artifact_id": artifact_id,
-                    "type": "annotation.note",
+                    "type": ANNOTATION_NOTE_TYPE,
                     "dataset_id": self.dataset_id,
                     "row_ids": [self.row_id],
                     "source": "core.annotations",
@@ -856,32 +1433,41 @@ class AnnotationsPanel:
             self._show_message("No focused record to review.", "warning")
             return
 
-        timestamp = self._now()
+        timestamp = _now()
+        review_id = f"review:{uuid.uuid4().hex}"
         tags = self._parse_tags(self.tags_input.value)
 
         review_payload = {
+            "review_id": review_id,
             "dataset_id": self.dataset_id,
             "row_id": self.row_id,
             "status": self.status_select.value,
             "confidence": float(self.confidence_slider.value or 0.0),
             "tags": tags,
             "label_suggestion": self.label_suggestion_input.value.strip(),
+            "created_at": timestamp,
             "updated_at": timestamp,
             "source": "core.annotations",
             "instance_id": self.instance_id,
         }
 
+        artifact_id = self._put_artifact(
+            artifact_type=REVIEW_STATUS_TYPE,
+            payload=review_payload,
+            params={"review_id": review_id, "status": review_payload["status"]},
+        )
+        review_payload["artifact_id"] = artifact_id
+
+        record_state.setdefault("reviews", []).append(review_payload)
+        record_state["reviews"] = _dedupe_items(
+            record_state.get("reviews") or [],
+            ("review_id", "artifact_id"),
+        )
         record_state["status"] = review_payload["status"]
         record_state["confidence"] = review_payload["confidence"]
         record_state["tags"] = list(tags)
         record_state["label_suggestion"] = review_payload["label_suggestion"]
         record_state["updated_at"] = timestamp
-
-        artifact_id = self._put_artifact(
-            artifact_type="review.status",
-            payload=review_payload,
-            params={"status": review_payload["status"]},
-        )
 
         self._publish(
             "review.status.changed",
@@ -896,7 +1482,7 @@ class AnnotationsPanel:
                 "artifact.created",
                 {
                     "artifact_id": artifact_id,
-                    "type": "review.status",
+                    "type": REVIEW_STATUS_TYPE,
                     "dataset_id": self.dataset_id,
                     "row_ids": [self.row_id],
                     "source": "core.annotations",
@@ -910,12 +1496,23 @@ class AnnotationsPanel:
                     "dataset_id": self.dataset_id,
                     "row_id": self.row_id,
                     "label": review_payload["label_suggestion"],
+                    "review_id": review_id,
                     "source": "core.annotations",
                     "instance_id": self.instance_id,
                 },
             )
 
         self._show_message("Review state saved.", "success")
+        self._render()
+
+    def _on_reload_from_artifacts(self, _event=None) -> None:
+        if self.dataset_id is None or self.row_id is None:
+            self._show_message("No focused record to reload.", "warning")
+            return
+
+        self._refresh_current_record_from_artifacts()
+        self._load_record_state_into_widgets()
+        self._show_message("Reloaded annotation history from artifacts.", "success")
         self._render()
 
     def _on_clear_draft(self, _event=None) -> None:
@@ -925,11 +1522,6 @@ class AnnotationsPanel:
         self.status_select.value = "unreviewed"
         self.confidence_slider.value = 0.0
         self._show_message("Draft cleared.", "info")
-
-    def _on_local_review_widget_changed(self, _event=None) -> None:
-        # Widget changes are deliberately not published immediately. They become
-        # platform state only when the user clicks Save review state or Save note.
-        pass
 
     def _on_show_history_changed(self, _event=None) -> None:
         self._render_history()
@@ -951,13 +1543,11 @@ class AnnotationsPanel:
 
         row_ids = [self.row_id] if self.row_id is not None else None
 
-        # The branch examples use positional type/payload. Some versions also
-        # support keyword names, so keep both paths.
         try:
             return artifacts.put(
                 artifact_type,
                 payload,
-                dataset_id=self.dataset_id,
+                dataset_id=self.dataset_id or "default",
                 row_ids=row_ids,
                 params=params or {},
             )
@@ -966,7 +1556,7 @@ class AnnotationsPanel:
                 return artifacts.put(
                     type=artifact_type,
                     payload=payload,
-                    dataset_id=self.dataset_id,
+                    dataset_id=self.dataset_id or "default",
                     row_ids=row_ids,
                     params=params or {},
                 )
@@ -986,8 +1576,8 @@ class AnnotationsPanel:
         self._render_history()
 
     def _render_header(self) -> None:
-        dataset = self._escape(self.dataset_id or "No active dataset")
-        row_id = self._escape(self.row_id or "No focused record")
+        dataset = _escape(self.dataset_id or "No active dataset")
+        row_id = _escape(self.row_id or "No focused record")
 
         self.header_pane.object = f"""
         <div style="display: flex; flex-direction: column; gap: 2px;">
@@ -1004,9 +1594,7 @@ class AnnotationsPanel:
 
     def _render_record(self) -> None:
         if self.dataset_id is None:
-            self.record_pane.object = self._empty_html(
-                "No active dataset is loaded."
-            )
+            self.record_pane.object = self._empty_html("No active dataset is loaded.")
             return
 
         if self.row_id is None:
@@ -1032,7 +1620,6 @@ class AnnotationsPanel:
         if label_col and label_col in self.row.index:
             rows.append(("Current label", self.row[label_col]))
 
-        # Show a compact preview of non-empty row values.
         preview_count = 0
         for col in self.row.index:
             if label_col and col == label_col:
@@ -1061,30 +1648,64 @@ class AnnotationsPanel:
             )
             return
 
-        notes = state.get("notes") or []
-        if not notes:
+        notes = list(state.get("notes") or [])
+        reviews = list(state.get("reviews") or [])
+
+        events: List[Dict[str, Any]] = []
+        for note in notes:
+            item = dict(note)
+            item["_history_type"] = "note"
+            item["_history_time"] = item.get("created_at") or item.get("updated_at") or ""
+            events.append(item)
+
+        for review in reviews:
+            item = dict(review)
+            item["_history_type"] = "review"
+            item["_history_time"] = item.get("updated_at") or item.get("created_at") or ""
+            events.append(item)
+
+        if not events:
             self.history_pane.object = self._empty_html(
-                "No notes saved for this record yet."
+                "No notes or review states saved for this record yet."
             )
             return
 
+        events.sort(
+            key=lambda item: (
+                str(item.get("_history_time", "")),
+                _safe_float(item.get("_sort_time", 0.0), default=0.0),
+            ),
+            reverse=True,
+        )
+
         cards = []
-        for note in reversed(notes):
-            created = self._escape(note.get("created_at", ""))
-            status = self._escape(note.get("status", ""))
-            confidence = self._escape(f"{float(note.get('confidence', 0.0)):.2f}")
-            label = self._escape(note.get("label_suggestion", "") or "—")
-            tags = note.get("tags") or []
-            tag_text = self._escape(", ".join(str(tag) for tag in tags) or "—")
-            text = self._escape(note.get("text", ""))
+        for item in events:
+            kind = item.get("_history_type", "event")
+            timestamp = _escape(item.get("_history_time", ""))
+            status = _escape(item.get("status", ""))
+            confidence = _escape(f"{_safe_float(item.get('confidence', 0.0), default=0.0):.2f}")
+            label = _escape(item.get("label_suggestion", "") or "—")
+            tags = item.get("tags") or []
+            tag_text = _escape(", ".join(str(tag) for tag in tags) or "—")
+
+            if kind == "note":
+                title = "Note"
+                text = _escape(item.get("text", ""))
+            else:
+                title = "Review state"
+                text = _escape(
+                    f"Status set to {item.get('status', 'unreviewed')}"
+                )
 
             cards.append(
                 f"""
                 <div style="border: 1px solid #e1e1e1; border-radius: 6px;
                             padding: 8px; margin-bottom: 8px;
                             background: #fafafa;">
-                    <div style="font-size: 11px; color: #666; margin-bottom: 4px;">
-                        {created}
+                    <div style="display: flex; justify-content: space-between;
+                                gap: 8px; margin-bottom: 4px;">
+                        <strong style="font-size: 13px;">{_escape(title)}</strong>
+                        <span style="font-size: 11px; color: #666;">{timestamp}</span>
                     </div>
                     <div style="font-size: 12px; margin-bottom: 4px;">
                         <strong>Status:</strong> {status}
@@ -1116,6 +1737,7 @@ class AnnotationsPanel:
             self.note_input,
             self.save_note_button,
             self.save_review_button,
+            self.reload_button,
             self.clear_draft_button,
         ):
             widget.disabled = not enabled
@@ -1124,9 +1746,13 @@ class AnnotationsPanel:
         self.message_pane.object = message
         self.message_pane.alert_type = alert_type
         self.message_pane.visible = True
+    
+    def _clear_message(self) -> None:
+        self.message_pane.object = ""
+        self.message_pane.visible = False
 
     # ------------------------------------------------------------------
-    # Validation / formatting helpers
+    # Validation / formatting
     # ------------------------------------------------------------------
 
     def _ensure_can_save(self) -> bool:
@@ -1155,16 +1781,10 @@ class AnnotationsPanel:
                 tags.append(tag)
         return tags
 
-    def _now(self) -> str:
-        return datetime.now(timezone.utc).isoformat()
-
-    def _escape(self, value: Any) -> str:
-        return html.escape(str(value), quote=True)
-
     def _empty_html(self, text: str) -> str:
         return f"""
         <div style="font-size: 13px; color: #666; padding: 4px 0;">
-            {self._escape(text)}
+            {_escape(text)}
         </div>
         """
 
@@ -1177,11 +1797,11 @@ class AnnotationsPanel:
                     <th style="text-align: left; vertical-align: top;
                                padding: 4px 8px 4px 0; color: #555;
                                font-weight: 600; white-space: nowrap;">
-                        {self._escape(key)}
+                        {_escape(key)}
                     </th>
                     <td style="text-align: left; vertical-align: top;
                                padding: 4px 0; word-break: break-word;">
-                        {self._escape(value)}
+                        {_escape(value)}
                     </td>
                 </tr>
                 """
@@ -1194,3 +1814,301 @@ class AnnotationsPanel:
             </tbody>
         </table>
         """
+
+
+# ---------------------------------------------------------------------
+# Summary / export panel
+# ---------------------------------------------------------------------
+
+
+class AnnotationSummaryPanel:
+    def __init__(
+        self,
+        *,
+        context,
+        instance_id: Optional[str] = None,
+        restore_state: Optional[Dict[str, Any]] = None,
+        restore_metadata: Optional[Dict[str, Any]] = None,
+        **_kwargs,
+    ) -> None:
+        self.context = context
+        self.instance_id = instance_id or f"core.annotations.summary:{uuid.uuid4().hex[:10]}"
+        self.restore_metadata = restore_metadata or {}
+
+        self._subscriptions: List[Any] = []
+        self._watchers: List[Any] = []
+        self._disposed = False
+
+        self.dataset_id: Optional[str] = _active_dataset_id(self.context)
+        self.summary_df = pd.DataFrame()
+
+        self._build_widgets()
+        self._build_root()
+        self._subscribe_events()
+
+        if restore_state:
+            self.restore_state(restore_state)
+
+        self.refresh()
+
+    def panel(self):
+        return self.root
+
+    def dispose(self) -> None:
+        self._disposed = True
+
+        events = getattr(self.context, "events", None)
+        if events is not None:
+            for sub in list(self._subscriptions):
+                try:
+                    events.unsubscribe(sub)
+                except Exception:
+                    pass
+        self._subscriptions.clear()
+
+    def get_state(self) -> Dict[str, Any]:
+        return {
+            "version": 1,
+            "dataset_id": self.dataset_id,
+        }
+
+    def snapshot_state(self) -> Dict[str, Any]:
+        return self.get_state()
+
+    def restore_state(self, state: Dict[str, Any]) -> None:
+        if not isinstance(state, dict):
+            return
+        if state.get("dataset_id"):
+            self.dataset_id = str(state.get("dataset_id"))
+
+    def _build_widgets(self) -> None:
+        self.refresh_button = pn.widgets.Button(
+            name="Refresh",
+            button_type="primary",
+            width=90,
+            height=32,
+            margin=(0, 8, 8, 0),
+        )
+        self.dataset_button = pn.widgets.Button(
+            name="Create summary dataset",
+            button_type="success",
+            width=175,
+            height=32,
+            margin=(0, 8, 8, 0),
+        )
+        self.csv_button = pn.widgets.Button(
+            name="Create CSV artifact",
+            button_type="default",
+            width=150,
+            height=32,
+            margin=(0, 0, 8, 0),
+        )
+
+        self.refresh_button.on_click(lambda _event: self.refresh())
+        self.dataset_button.on_click(self._on_create_summary_dataset)
+        self.csv_button.on_click(self._on_create_csv_artifact)
+
+    def _build_root(self) -> None:
+        self.header_pane = pn.pane.HTML("", sizing_mode="stretch_width")
+        self.message_pane = pn.pane.Alert(
+            "",
+            alert_type="info",
+            visible=False,
+            sizing_mode="stretch_width",
+            margin=(0, 0, 8, 0),
+        )
+        self.table_pane = pn.pane.DataFrame(
+            pd.DataFrame(),
+            index=False,
+            sizing_mode="stretch_both",
+            margin=(0, 0, 8, 0),
+        )
+
+        self.root = pn.Column(
+            self.header_pane,
+            self.message_pane,
+            pn.Row(
+                self.refresh_button,
+                self.dataset_button,
+                self.csv_button,
+                sizing_mode="stretch_width",
+            ),
+            self.table_pane,
+            sizing_mode="stretch_both",
+            scroll=True,
+            margin=(0, 0, 0, 0),
+            styles={
+                "padding": "4px",
+                "box-sizing": "border-box",
+            },
+        )
+
+    def _subscribe_events(self) -> None:
+        self._subscribe("dataset.active.changed", self._on_dataset_active_changed)
+        self._subscribe("artifact.created", self._on_artifact_created)
+
+    def _subscribe(self, topic: str, callback) -> None:
+        events = getattr(self.context, "events", None)
+        if events is None:
+            return
+        try:
+            sub = events.subscribe(topic, callback)
+            self._subscriptions.append(sub)
+        except Exception:
+            pass
+
+    def _publish(self, topic: str, payload: Dict[str, Any]) -> None:
+        events = getattr(self.context, "events", None)
+        if events is None:
+            return
+        try:
+            events.publish(topic, payload)
+        except Exception:
+            pass
+
+    def _on_dataset_active_changed(self, _topic: str, _payload: Dict[str, Any]) -> None:
+        if self._disposed:
+            return
+        self.dataset_id = _active_dataset_id(self.context)
+        self.refresh()
+
+    def _on_artifact_created(self, _topic: str, payload: Dict[str, Any]) -> None:
+        if self._disposed or not isinstance(payload, dict):
+            return
+
+        if payload.get("type") in {ANNOTATION_NOTE_TYPE, REVIEW_STATUS_TYPE}:
+            if self.dataset_id is None or str(payload.get("dataset_id")) == str(self.dataset_id):
+                self.refresh(show_message=False)
+
+    def refresh(self, show_message: bool = True) -> None:
+        self.dataset_id = self.dataset_id or _active_dataset_id(self.context)
+        self.summary_df = build_annotation_summary_dataframe(
+            self.context,
+            dataset_id=self.dataset_id,
+        )
+        self._render()
+
+        if show_message:
+            self._show_message(
+                f"Summary refreshed. {len(self.summary_df)} annotated records found.",
+                "success",
+            )
+
+    def _render(self) -> None:
+        dataset = _escape(self.dataset_id or "No active dataset")
+        count = len(self.summary_df)
+
+        self.header_pane.object = f"""
+        <div style="display: flex; flex-direction: column; gap: 2px;">
+            <div style="font-weight: 700; font-size: 15px;">
+                Annotation Summary
+            </div>
+            <div style="font-size: 12px; color: #666;">
+                Dataset: <code>{dataset}</code>
+                &nbsp; | &nbsp;
+                Annotated records: <strong>{count}</strong>
+            </div>
+        </div>
+        """
+
+        self.table_pane.object = self.summary_df
+
+    def _on_create_summary_dataset(self, _event=None) -> None:
+        self.refresh(show_message=False)
+
+        if self.summary_df.empty:
+            self._show_message("No annotations to export as a dataset.", "warning")
+            return
+
+        datasets = getattr(self.context, "datasets", None)
+        if datasets is None:
+            self._show_message("Dataset manager is unavailable.", "danger")
+            return
+
+        dataset_id = f"annotation_summary_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
+
+        try:
+            datasets.register(
+                dataset_id,
+                self.summary_df.copy(),
+                name="Annotation Summary",
+                derived_from=self.dataset_id,
+                source="core.annotations",
+                created_at=_now(),
+            )
+        except Exception as exc:
+            self._show_message(f"Could not create summary dataset: {exc}", "danger")
+            return
+
+        self._publish(
+            "dataset.loaded",
+            {
+                "dataset_id": dataset_id,
+                "name": "Annotation Summary",
+                "derived_from": self.dataset_id,
+                "source": "core.annotations",
+            },
+        )
+
+        self._show_message(
+            f"Created summary dataset: {dataset_id}",
+            "success",
+        )
+
+    def _on_create_csv_artifact(self, _event=None) -> None:
+        self.refresh(show_message=False)
+
+        if self.summary_df.empty:
+            self._show_message("No annotations to export as CSV.", "warning")
+            return
+
+        artifacts = getattr(self.context, "artifacts", None)
+        if artifacts is None:
+            self._show_message("Artifact store is unavailable.", "danger")
+            return
+
+        csv_text = self.summary_df.to_csv(index=False)
+
+        try:
+            artifact_id = artifacts.put(
+                SUMMARY_CSV_TYPE,
+                {
+                    "filename": "annotation_summary.csv",
+                    "csv": csv_text,
+                    "row_count": int(len(self.summary_df)),
+                    "dataset_id": self.dataset_id,
+                    "created_at": _now(),
+                    "source": "core.annotations",
+                },
+                dataset_id=self.dataset_id or "default",
+                row_ids=None,
+                params={
+                    "source": "core.annotations",
+                    "format": "csv",
+                    "row_count": int(len(self.summary_df)),
+                },
+            )
+        except Exception as exc:
+            self._show_message(f"Could not create CSV artifact: {exc}", "danger")
+            return
+
+        self._publish(
+            "artifact.created",
+            {
+                "artifact_id": artifact_id,
+                "type": SUMMARY_CSV_TYPE,
+                "dataset_id": self.dataset_id,
+                "row_ids": None,
+                "source": "core.annotations",
+            },
+        )
+
+        self._show_message(
+            f"Created CSV artifact: {artifact_id}",
+            "success",
+        )
+
+    def _show_message(self, message: str, alert_type: str = "info") -> None:
+        self.message_pane.object = message
+        self.message_pane.alert_type = alert_type
+        self.message_pane.visible = True
