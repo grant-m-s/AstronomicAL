@@ -285,6 +285,48 @@ class MappingGatedPanel:
         self._subscribe()
         self._refresh()
 
+    def _show_loading(self) -> None:
+        title = getattr(self.registration, "title", "Plugin panel")
+
+        self.view[:] = [
+            pn.Column(
+                pn.Spacer(height=8),
+                pn.indicators.LoadingSpinner(
+                    value=True,
+                    width=42,
+                    height=42,
+                    sizing_mode="fixed",
+                    margin=(8, 0, 8, 0),
+                ),
+                pn.pane.HTML(
+                    f"""
+                    <div style="text-align: center; padding: 0 12px;">
+                        <div style="font-weight: 700; font-size: 15px; margin-bottom: 6px;">
+                            Loading {escape(str(title))}
+                        </div>
+                        <div style="font-size: 12px; color: #666;">
+                            Preparing mapped panel...
+                        </div>
+                    </div>
+                    """,
+                    sizing_mode="stretch_width",
+                ),
+                sizing_mode="stretch_both",
+                align="center",
+                margin=(0, 0, 0, 0),
+                styles={
+                    "height": "100%",
+                    "width": "100%",
+                    "box-sizing": "border-box",
+                    "display": "flex",
+                    "align-items": "center",
+                    "justify-content": "center",
+                    "overflow": "hidden",
+                    "background": "#fafafa",
+                },
+            )
+        ]
+
     def _subscribe(self) -> None:
         events = getattr(self.context, "events", None)
         if events is None:
@@ -422,18 +464,73 @@ Saved workspace mappings will be applied automatically after the dataset is load
         if self._real_view is not None:
             return
 
-        view, controller = self.manager._create_panel_now(
-            self.registration,
-            self.context,
-            instance_id=self.instance_id,
-            restore_state=self.restore_state,
-            restore_metadata=self.restore_metadata,
-            **self.kwargs,
-        )
+        self._show_loading()
 
-        self._real_view = view
-        self._real_controller = controller
-        self.view[:] = [self._real_view]
+        def _finish() -> None:
+            if self._disposed or self._real_view is not None:
+                return
+
+            try:
+                view, controller = self.manager._create_panel_now(
+                    self.registration,
+                    self.context,
+                    instance_id=self.instance_id,
+                    restore_state=self.restore_state,
+                    restore_metadata=self.restore_metadata,
+                    **self.kwargs,
+                )
+                self._real_view = view
+                self._real_controller = controller
+                self.view[:] = [self._real_view]
+
+            except Exception as exc:
+                self.view[:] = [
+                    pn.Column(
+                        pn.pane.Alert(
+                            f"Could not load **{escape(str(getattr(self.registration, 'title', 'Plugin panel')))}**.",
+                            alert_type="danger",
+                            sizing_mode="stretch_width",
+                            margin=(0, 0, 8, 0),
+                        ),
+                        pn.pane.HTML(
+                            f"""
+                            <div style="font-size: 12px; color: #555; white-space: pre-wrap;
+                                        border: 1px solid #e1e1e1; border-radius: 6px;
+                                        padding: 8px; background: #fff;">
+                                {escape(str(exc))}
+                            </div>
+                            """,
+                            sizing_mode="stretch_width",
+                        ),
+                        sizing_mode="stretch_both",
+                        margin=(0, 0, 0, 0),
+                        styles={
+                            "height": "100%",
+                            "width": "100%",
+                            "box-sizing": "border-box",
+                            "padding": "10px",
+                            "overflow": "auto",
+                        },
+                    )
+                ]
+
+        try:
+            doc = pn.state.curdoc
+        except Exception:
+            doc = None
+
+        if doc is not None:
+            try:
+                doc.add_timeout_callback(_finish, 50)
+                return
+            except Exception:
+                try:
+                    doc.add_next_tick_callback(_finish)
+                    return
+                except Exception:
+                    pass
+
+        _finish()
 
     def _on_dataset_mapping_updated(self, _topic: str, payload: Any) -> None:
         if not payload:

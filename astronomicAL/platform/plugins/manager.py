@@ -16,6 +16,11 @@ import sys
 import traceback
 import uuid
 
+import html
+import time
+
+import panel as pn
+
 from astronomicAL.platform.panel_state import restore_controller_state
 from astronomicAL.utils.debug import boot_print
 from .mapping_gate import MappingGatedPanel
@@ -59,6 +64,150 @@ except Exception:
 
 logger = logging.getLogger(__name__)
 
+
+class LoadingPanelController:
+    """Temporary controller shown while a plugin panel is being constructed."""
+
+    state_version = 1
+
+    def __init__(self, title: str, detail: str = "") -> None:
+        self.title = str(title or "Panel")
+        self.detail = str(detail or "Preparing panel...")
+        self.started_at = time.time()
+
+    def dispose(self) -> None:
+        pass
+
+    def get_state(self) -> dict[str, Any]:
+        return {
+            "loading": True,
+            "title": self.title,
+            "detail": self.detail,
+            "started_at": self.started_at,
+        }
+
+
+def make_loading_panel(title: str, detail: str = "") -> tuple[Any, Any]:
+    safe_title = html.escape(str(title or "Panel"), quote=True)
+    safe_detail = html.escape(str(detail or "Preparing panel..."), quote=True)
+
+    view = pn.Column(
+        pn.Spacer(height=8),
+        pn.indicators.LoadingSpinner(
+            value=True,
+            width=44,
+            height=44,
+            sizing_mode="fixed",
+            margin=(8, 0, 8, 0),
+        ),
+        pn.pane.HTML(
+            f"""
+            <div style="text-align: center; padding: 0 12px;">
+                <div style="font-weight: 700; font-size: 15px; margin-bottom: 6px;">
+                    Loading {safe_title}
+                </div>
+                <div style="font-size: 12px; color: #666;">
+                    {safe_detail}
+                </div>
+            </div>
+            """,
+            sizing_mode="stretch_width",
+        ),
+        sizing_mode="stretch_both",
+        align="center",
+        margin=(0, 0, 0, 0),
+        styles={
+            "height": "100%",
+            "width": "100%",
+            "box-sizing": "border-box",
+            "display": "flex",
+            "align-items": "center",
+            "justify-content": "center",
+            "overflow": "hidden",
+            "background": "#fafafa",
+        },
+    )
+
+    return view, LoadingPanelController(title=title, detail=detail)
+
+
+class PanelLoadErrorController:
+    state_version = 1
+
+    def __init__(self, title: str, error: str) -> None:
+        self.title = str(title or "Panel")
+        self.error = str(error)
+
+    def dispose(self) -> None:
+        pass
+
+    def get_state(self) -> dict[str, Any]:
+        return {
+            "error": True,
+            "title": self.title,
+            "message": self.error,
+        }
+
+
+def make_panel_load_error_panel(title: str, error: BaseException | str) -> tuple[Any, Any]:
+    safe_title = html.escape(str(title or "Panel"), quote=True)
+    safe_error = html.escape(str(error), quote=True)
+
+    view = pn.Column(
+        pn.pane.Alert(
+            f"Could not load **{safe_title}**.",
+            alert_type="danger",
+            sizing_mode="stretch_width",
+            margin=(0, 0, 8, 0),
+        ),
+        pn.pane.HTML(
+            f"""
+            <div style="font-size: 12px; color: #555; white-space: pre-wrap;
+                        border: 1px solid #e1e1e1; border-radius: 6px;
+                        padding: 8px; background: #fff;">
+                {safe_error}
+            </div>
+            """,
+            sizing_mode="stretch_width",
+        ),
+        sizing_mode="stretch_both",
+        margin=(0, 0, 0, 0),
+        styles={
+            "height": "100%",
+            "width": "100%",
+            "box-sizing": "border-box",
+            "padding": "10px",
+            "overflow": "auto",
+        },
+    )
+
+    return view, PanelLoadErrorController(title=title, error=str(error))
+
+
+def schedule_panel_callback(callback) -> None:
+    """Run callback shortly after the current UI callback returns.
+
+    This gives the browser a chance to render the loading placeholder before
+    expensive panel construction starts.
+    """
+
+    try:
+        doc = pn.state.curdoc
+    except Exception:
+        doc = None
+
+    if doc is not None:
+        try:
+            doc.add_timeout_callback(callback, 50)
+            return
+        except Exception:
+            try:
+                doc.add_next_tick_callback(callback)
+                return
+            except Exception:
+                pass
+
+    callback()
 
 @dataclass
 class PluginCandidate:
@@ -1044,6 +1193,22 @@ class PluginManager:
         except Exception as exc:
             raise PluginExecutionError(f"Failed to create panel {reg.id}: {exc}") from exc
 
+    def _workspace_panel_exists(self, context: Any, workspace_id: str) -> bool:
+
+        workspace = getattr(context, "workspace", None)
+        if workspace is None:
+            return False
+
+        try:
+            return str(workspace_id) in workspace.list_panels()
+        except Exception:
+            try:
+                keys = [str(key) for key in (workspace.grid.keys or [])]
+                return str(workspace_id) in keys
+            except Exception:
+                return True
+
+
     def add_panel_to_workspace(
         self,
         panel_id: str,
@@ -1058,34 +1223,33 @@ class PluginManager:
         open_kwargs: Optional[Dict[str, Any]] = None,
         **kwargs: Any,
     ) -> str:
-        reg = self.get_panel(panel_id)
-        workspace_id = instance_id or f"{reg.id}:{uuid.uuid4().hex[:10]}"
 
-        created = self.create_panel_instance(
-            panel_id,
-            context,
-            instance_id=workspace_id,
-            restore_state=restore_state,
-            restore_metadata=restore_metadata,
-            open_kwargs=open_kwargs,
-            **kwargs,
+        reg = self.get_panel(panel_id)
+
+        workspace_id = instance_id or f"{reg.id}:{uuid.uuid4().hex[:10]}"
+        visible_title = title or reg.title
+
+        loading_view, loading_controller = make_loading_panel(
+            visible_title,
+            detail="Preparing panel...",
         )
 
         context.workspace.add_panel(
             panel_id=workspace_id,
-            title=title or reg.title,
-            view=created.view,
-            controller=created.controller,
+            title=visible_title,
+            view=loading_view,
+            controller=loading_controller,
             layout_item=layout_item if layout_item is not None else reg.default_layout,
             layout_items=layout_items,
-            kind="plugin_panel",
+            kind="loading_panel",
             plugin_id=reg.plugin_id,
             registration_id=reg.id,
             plugin_version=self._plugin_version(reg.plugin_id),
-            state_version=reg.state_version,
-            persistent=reg.persist_layout,
+            state_version=1,
+            persistent=False,
             open_kwargs=open_kwargs or {},
             metadata={
+                "loading_for": reg.id,
                 "panel_registration_title": reg.title,
                 "panel_category": reg.category,
                 "restore_policy": reg.restore_policy,
@@ -1094,7 +1258,147 @@ class PluginManager:
 
         self._workspace_panels_by_plugin.setdefault(reg.plugin_id, set()).add(workspace_id)
 
+        def _build_panel_job(*, cancel_token) -> CreatedPanel:
+            if cancel_token is not None and cancel_token.cancelled():
+                raise RuntimeError("Panel opening was cancelled.")
+
+            created = self.create_panel_instance(
+                panel_id,
+                context,
+                instance_id=workspace_id,
+                restore_state=restore_state,
+                restore_metadata=restore_metadata,
+                open_kwargs=open_kwargs,
+                **kwargs,
+            )
+
+            if cancel_token is not None and cancel_token.cancelled():
+                raise RuntimeError("Panel opening was cancelled.")
+
+            return created
+
+        def _on_panel_ready(created: CreatedPanel) -> None:
+            if not self._workspace_panel_exists(context, workspace_id):
+                # The user closed the loading tile before the panel finished.
+                controller = getattr(created, "controller", None)
+                view = getattr(created, "view", None)
+                try:
+                    if controller is not None and hasattr(controller, "dispose"):
+                        controller.dispose()
+                except Exception:
+                    pass
+                try:
+                    if view is not None and view is not controller and hasattr(view, "dispose"):
+                        view.dispose()
+                except Exception:
+                    pass
+                return
+
+            context.workspace.add_panel(
+                panel_id=workspace_id,
+                title=visible_title,
+                view=created.view,
+                controller=created.controller,
+                layout_item=layout_item if layout_item is not None else reg.default_layout,
+                layout_items=layout_items,
+                kind="plugin_panel",
+                plugin_id=reg.plugin_id,
+                registration_id=reg.id,
+                plugin_version=self._plugin_version(reg.plugin_id),
+                state_version=reg.state_version,
+                persistent=reg.persist_layout,
+                open_kwargs=open_kwargs or {},
+                metadata={
+                    "panel_registration_title": reg.title,
+                    "panel_category": reg.category,
+                    "restore_policy": reg.restore_policy,
+                },
+            )
+
+            if hasattr(context, "events"):
+                try:
+                    context.events.publish(
+                        "plugin.panel.opened",
+                        {
+                            "panel_id": workspace_id,
+                            "registration_id": reg.id,
+                            "plugin_id": reg.plugin_id,
+                            "title": visible_title,
+                        },
+                    )
+                except Exception:
+                    pass
+
+        def _on_panel_error(exc: BaseException) -> None:
+            if not self._workspace_panel_exists(context, workspace_id):
+                return
+
+            error_view, error_controller = make_panel_load_error_panel(
+                visible_title,
+                exc,
+            )
+
+            context.workspace.add_panel(
+                panel_id=workspace_id,
+                title=f"{visible_title} failed",
+                view=error_view,
+                controller=error_controller,
+                layout_item=layout_item if layout_item is not None else reg.default_layout,
+                layout_items=layout_items,
+                kind="error_panel",
+                plugin_id=reg.plugin_id,
+                registration_id=reg.id,
+                plugin_version=self._plugin_version(reg.plugin_id),
+                state_version=1,
+                persistent=False,
+                open_kwargs=open_kwargs or {},
+                metadata={
+                    "failed_panel_registration": reg.id,
+                    "panel_registration_title": reg.title,
+                    "panel_category": reg.category,
+                    "restore_policy": reg.restore_policy,
+                    "error": str(exc),
+                },
+            )
+
+            logger.exception("Failed to open plugin panel %s", reg.id, exc_info=exc)
+
+            if hasattr(context, "events"):
+                try:
+                    context.events.publish(
+                        "plugin.panel.open_failed",
+                        {
+                            "panel_id": workspace_id,
+                            "registration_id": reg.id,
+                            "plugin_id": reg.plugin_id,
+                            "title": visible_title,
+                            "error": str(exc),
+                        },
+                    )
+                except Exception:
+                    pass
+
+        jobs = getattr(context, "jobs", None)
+
+        if jobs is not None:
+            handle = jobs.submit(
+                _build_panel_job,
+                title=f"Open panel: {visible_title}",
+                key=f"plugin-panel-open:{workspace_id}",
+                on_done=_on_panel_ready,
+                on_error=_on_panel_error,
+            )
+            self._job_handles_by_plugin.setdefault(reg.plugin_id, []).append(handle)
+        else:
+            # Fallback for tests or contexts without JobManager.
+            try:
+                _on_panel_ready(_build_panel_job(cancel_token=None))
+            except BaseException as exc:
+                _on_panel_error(exc)
+
         return workspace_id
+
+
 
     def open_panel(
         self,
