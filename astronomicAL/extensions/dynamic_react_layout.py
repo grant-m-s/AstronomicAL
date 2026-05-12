@@ -20,10 +20,15 @@ class DynamicReactGrid(ReactComponent):
 
     margin = param.List(default=[10, 10])
 
-    compact_type = param.ObjectSelector(default=None, objects=[None, "vertical", "horizontal"])
-    prevent_collision = param.Boolean(default=True)
+    compact_type = param.ObjectSelector(
+        default=None,
+        objects=[None, "vertical", "horizontal"],
+    )
 
-    resize_handles = param.List(default=["se"])
+    prevent_collision = param.Boolean(default=False)
+    resize_handles = param.List(
+        default=["s", "w", "e", "n", "sw", "nw", "se", "ne"]
+    )
 
     _stylesheets = [
         "https://unpkg.com/react-grid-layout/css/styles.css",
@@ -358,9 +363,9 @@ export function render({ model }) {
     ? margin.map((value) => integerOr(value, 10))
     : [10, 10];
 
-  const safeResizeHandles = Array.isArray(resizeHandles)
+  const safeResizeHandles = Array.isArray(resizeHandles) && resizeHandles.length > 0
     ? resizeHandles.map((value) => String(value))
-    : ["se"];
+    : ["s", "w", "e", "n", "sw", "nw", "se", "ne"];
 
   return (
     <div className="pn-dynamic-rgl">
@@ -399,12 +404,25 @@ export function render({ model }) {
             colsByBp || {}
           );
 
-          setCurrentLayout(cleanCur || []);
-
           if (suppressProgrammaticLayoutWriteRef.current) {
             suppressProgrammaticLayoutWriteRef.current = false;
+
+            // ReactGridLayout can emit a generated/default layout during programmatic
+            // key/object changes. Do not accept that temporary layout as user state.
+            const expectedCurrent = sanitizeLayout(
+              ((normalizedLayouts || layouts || {})[bp] || []),
+              stableKeys,
+              integerOr((colsByBp || {})[bp], 12)
+            );
+
+            if (expectedCurrent.length > 0) {
+              setCurrentLayout(expectedCurrent);
+            }
+
             return;
           }
+
+          setCurrentLayout(cleanCur || []);
 
           if (!sameJSON(layouts || {}, cleanAll || {})) {
             setLayouts(cleanAll || {});

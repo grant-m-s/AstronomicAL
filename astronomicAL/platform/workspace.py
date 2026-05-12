@@ -14,7 +14,6 @@ from astronomicAL.platform.panel_state import (
 
 from astronomicAL.utils.debug import workspace_debug_print
 
-
 @dataclass
 class PanelRecord:
     panel_id: str
@@ -68,12 +67,20 @@ class WorkspaceManager:
 
         if live is not None and live is not self.grid:
             self._detach_close_watchers()
+
             self.grid = live
+
             self._normalize_grid_state()
             self._ensure_close_watcher()
+
+            workspace_debug_print(
+                "sync_grid.swapped_live_grid",
+                {"grid_id": hex(id(self.grid))},
+            )
             return
 
         self._ensure_close_watcher()
+
 
     def _detach_close_watchers(self) -> None:
         for grid, watcher in list(self._close_watchers):
@@ -105,6 +112,59 @@ class WorkspaceManager:
 
         return names
     
+    def _merge_current_layout_into_layouts(self) -> None:
+
+        current_layout = list(getattr(self.grid, "current_layout", None) or [])
+        if not current_layout:
+            return
+
+        keys = [str(key) for key in (getattr(self.grid, "keys", None) or [])]
+        if not keys:
+            return
+
+        key_set = set(keys)
+
+        cleaned_current = []
+        for item in current_layout:
+            if not isinstance(item, dict):
+                continue
+
+            item_id = item.get("i")
+            if item_id is None:
+                continue
+
+            item_id = str(item_id)
+            if item_id not in key_set:
+                continue
+
+            cleaned_current.append(
+                self._sanitize_layout_item(
+                    dict(item),
+                    breakpoint=str(getattr(self.grid, "current_breakpoint", None) or "lg"),
+                )
+            )
+
+        current_ids = {str(item.get("i")) for item in cleaned_current}
+
+        # Only merge when current_layout is a complete layout for the existing
+        # open panels. This avoids partially replacing layouts during startup or
+        # during transient key/object mismatch states.
+        if current_ids != key_set:
+            return
+
+        breakpoint = str(getattr(self.grid, "current_breakpoint", None) or "lg")
+        layouts = deepcopy(dict(getattr(self.grid, "layouts", None) or {}))
+
+        if layouts.get(breakpoint) == cleaned_current:
+            return
+
+        layouts[breakpoint] = cleaned_current
+
+        self.grid.param.update(
+            layouts=layouts,
+            current_layout=deepcopy(cleaned_current),
+        )
+
     def _current_breakpoint_layout(
         self,
         layouts: dict[str, list[dict[str, Any]]],
@@ -293,6 +353,7 @@ class WorkspaceManager:
         )
 
     def _normalize_grid_state(self) -> None:
+
         keys = [str(key) for key in (self.grid.keys or [])]
         key_set = set(keys)
 
@@ -325,6 +386,13 @@ class WorkspaceManager:
             layouts[str(breakpoint)] = new_breakpoint_layout
 
         if keys != (self.grid.keys or []) or layouts != (self.grid.layouts or {}):
+            workspace_debug_print(
+                "normalize_grid_state.updated",
+                {
+                    "keys": keys,
+                    "breakpoints": list(layouts.keys()),
+                },
+            )
             self.grid.param.update(keys=keys, layouts=layouts)
 
     def _ensure_close_watcher(self) -> None:
@@ -366,6 +434,7 @@ class WorkspaceManager:
         This is mostly useful during startup or while old code is being removed.
         """
         self._sync_grid()
+        self._merge_current_layout_into_layouts()
         self._normalize_grid_state()
 
         for panel_id, view in zip(self.grid.keys or [], self.grid.objects or []):
@@ -390,6 +459,140 @@ class WorkspaceManager:
             )
             self._panels[panel_id] = record
 
+    def _replace_panel_in_place(
+        self,
+        panel_id: str,
+        view: Any,
+        *,
+        title: Optional[str] = None,
+        controller: Any = None,
+        layout_item: Optional[dict[str, Any]] = None,
+        layout_items: Optional[dict[str, dict[str, Any]]] = None,
+        kind: str = "plugin_panel",
+        plugin_id: Optional[str] = None,
+        registration_id: Optional[str] = None,
+        plugin_version: Optional[str] = None,
+        state_version: int = 1,
+        persistent: bool = True,
+        open_kwargs: Optional[dict[str, Any]] = None,
+        metadata: Optional[dict[str, Any]] = None,
+    ) -> bool:
+
+        panel_id = str(panel_id)
+        keys = [str(key) for key in (self.grid.keys or [])]
+
+        if panel_id not in keys:
+            return False
+
+        index = keys.index(panel_id)
+
+        old_record = self._panels.get(panel_id)
+        old_view = old_record.view if old_record else None
+        old_controller = old_record.controller if old_record else None
+
+        if old_controller is None and old_view is not None:
+            old_controller = getattr(old_view, "_al_controller", None)
+
+        record = PanelRecord(
+            panel_id=panel_id,
+            title=title or panel_id,
+            view=view,
+            controller=controller,
+            kind=kind,
+            plugin_id=plugin_id,
+            registration_id=registration_id,
+            plugin_version=plugin_version,
+            state_version=state_version,
+            persistent=persistent,
+            open_kwargs=dict(open_kwargs or {}),
+            metadata=dict(metadata or {}),
+        )
+
+        self._panels[panel_id] = record
+        self._attach_metadata_to_view(record)
+
+        new_objects = list(self.grid.objects or [])
+
+        # Keep objects aligned with keys defensively.
+        while len(new_objects) < len(keys):
+            new_objects.append(pn.Spacer(sizing_mode="stretch_both"))
+
+        new_objects[index] = view
+
+        # Preserve existing layout items. Only add a layout item if one is missing.
+        new_layouts = deepcopy(dict(self.grid.layouts or {}))
+        breakpoints = self._breakpoint_names(new_layouts)
+
+        for breakpoint in breakpoints:
+            breakpoint = str(breakpoint)
+            existing_layout = [
+                self._sanitize_layout_item(
+                    dict(item),
+                    breakpoint=breakpoint,
+                )
+                for item in list(new_layouts.get(breakpoint, []) or [])
+                if item is not None and str(item.get("i")) in keys
+            ]
+
+            has_item = any(str(item.get("i")) == panel_id for item in existing_layout)
+
+            if not has_item:
+                supplied_item = None
+                if layout_items is not None:
+                    supplied_item = layout_items.get(breakpoint)
+
+                if supplied_item is not None:
+                    item_copy = self._sanitize_layout_item(
+                        dict(supplied_item),
+                        panel_id=panel_id,
+                        breakpoint=breakpoint,
+                    )
+                else:
+                    item_copy = self._new_default_layout_item(
+                        panel_id,
+                        breakpoint=breakpoint,
+                        existing_layout=[
+                            item for item in existing_layout
+                            if str(item.get("i")) != panel_id
+                        ],
+                        layout_item=layout_item,
+                    )
+
+                existing_layout.append(item_copy)
+
+            new_layouts[breakpoint] = existing_layout
+
+        self.grid.param.update(
+            objects=new_objects,
+            layouts=new_layouts,
+            current_layout=self._current_breakpoint_layout(new_layouts),
+        )
+
+        # Dispose the old panel after the grid no longer references it.
+        if old_controller is not None and old_controller is not controller:
+            self._safe_dispose(old_controller)
+
+        if (
+            old_view is not None
+            and old_view is not view
+            and old_view is not old_controller
+        ):
+            self._safe_dispose(old_view)
+
+        workspace_debug_print(
+            "replace_panel_in_place",
+            {
+                "panel_id": panel_id,
+                "title": title or panel_id,
+                "kind": kind,
+                "plugin_id": plugin_id,
+                "registration_id": registration_id,
+                "persistent": persistent,
+            },
+        )
+
+        return True
+
     def add_panel(
         self,
         panel_id: Any,
@@ -408,13 +611,37 @@ class WorkspaceManager:
         open_kwargs: Optional[dict[str, Any]] = None,
         metadata: Optional[dict[str, Any]] = None,
     ) -> None:
+
         self._sync_grid()
+        self._merge_current_layout_into_layouts()
         self._normalize_grid_state()
 
         panel_id = str(panel_id)
         title = title or panel_id
 
-        if panel_id in self._panels or panel_id in [str(k) for k in (self.grid.keys or [])]:
+        existing_keys = [str(k) for k in (self.grid.keys or [])]
+
+        if panel_id in existing_keys:
+            replaced = self._replace_panel_in_place(
+                panel_id,
+                view,
+                title=title,
+                controller=controller,
+                layout_item=layout_item,
+                layout_items=layout_items,
+                kind=kind,
+                plugin_id=plugin_id,
+                registration_id=registration_id,
+                plugin_version=plugin_version,
+                state_version=state_version,
+                persistent=persistent,
+                open_kwargs=open_kwargs,
+                metadata=metadata,
+            )
+            if replaced:
+                return
+
+        if panel_id in self._panels:
             self.remove_panel(panel_id)
 
         record = PanelRecord(
@@ -475,11 +702,13 @@ class WorkspaceManager:
             breakpoint_layout.append(item_copy)
             new_layouts[breakpoint] = breakpoint_layout
 
+        new_current_layout = self._current_breakpoint_layout(new_layouts)
+
         self.grid.param.update(
             keys=new_keys,
             objects=new_objects,
             layouts=new_layouts,
-            current_layout=self._current_breakpoint_layout(new_layouts),
+            current_layout=new_current_layout,
         )
 
         workspace_debug_print(
@@ -530,7 +759,9 @@ class WorkspaceManager:
             pass
 
     def remove_panel(self, panel_id: str) -> None:
+
         self._sync_grid()
+        self._merge_current_layout_into_layouts()
         self._normalize_grid_state()
 
         panel_id = str(panel_id)
@@ -606,6 +837,11 @@ class WorkspaceManager:
             pass
 
     def clear(self) -> None:
+
+        self._sync_grid()
+        self._merge_current_layout_into_layouts()
+        self._normalize_grid_state()
+
         for panel_id in list(self._panels.keys()):
             self.remove_panel(panel_id)
 
@@ -631,7 +867,9 @@ class WorkspaceManager:
         return self._panels[str(panel_id)]
 
     def snapshot_grid(self) -> dict[str, Any]:
+
         self._sync_grid()
+        self._merge_current_layout_into_layouts()
         self._normalize_grid_state()
 
         snapshot = {
