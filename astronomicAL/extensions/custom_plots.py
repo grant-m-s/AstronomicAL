@@ -175,12 +175,6 @@ def get_customplot_dict(context=None):
             extra_features=[],
             context=context,
         ),
-        "Notes Panel": lambda data, close_button, context: LogBookClass(
-            data,
-            close_button,
-            extra_features=[],
-            context=context,
-        ),
         "Aladin Lite": lambda data, close_button, context: AladinClass(
             data,
             close_button,
@@ -4563,48 +4557,6 @@ class AladinClass(CustomPlotClass):
             sizing_mode="stretch_both",
             margin=0,
         )
-    
-class LogBookClass(CustomPlotClass):
-    
-    def __init__(self, data, close_button, extra_features, context = None):
-        super().__init__(data, close_button, extra_features, panel_name = "Notes Panel", context = context)
-
-        self.context = context
-
-        if (context is not None and getattr(context, "config", None) is not None):
-            self.config = context.config
-
-        self._bind_selection_runtime_subscriptions()
-        
-        self._bind_dataset_runtime_subscriptions(
-            include_loaded=False,
-            include_mapping=False,
-        )
-
-    def _selection_focus_changed_cb(self, topic, payload):
-        self.logbook_panel.value = ""
-
-    def _selection_focus_cleared_cb(self, topic, payload):
-        self.logbook_panel.value = ""
-
-    def get_layout(self):
-        self._initialise_widgets()
-        return  pn.Column(self.logbook_panel, 
-                          scroll = True, 
-                          sizing_mode = "stretch_both")
-    
-    def _initialise_widgets(self):
-
-        self.logbook_panel = pn.widgets.TextAreaInput(name = "Logbook",
-                                                      auto_grow = False, 
-                                                      placeholder='Take your notes here...')
-
-    def _save_panel(self, directory_path= "data/saved_sources", save_fits_files= False, prefix = None):
-        paths = {}
-        paths["text"] = self.logbook_panel.value.strip()
-        return paths
-                                                      
-
 
 ######
 
