@@ -62,6 +62,23 @@ class WorkspaceManager:
         self._normalize_grid_state()
         self._ensure_close_watcher()
 
+    def _grid_titles(self) -> dict[str, str]:
+        """Return visible tile titles keyed by stable panel id."""
+
+        keys = [str(key) for key in (self.grid.keys or [])]
+        existing = dict(getattr(self.grid, "titles", {}) or {})
+
+        titles: dict[str, str] = {}
+
+        for key in keys:
+            record = self._panels.get(key)
+            if record is not None and record.title:
+                titles[key] = str(record.title)
+            else:
+                titles[key] = str(existing.get(key, key))
+
+        return titles
+
     def _sync_grid(self) -> None:
         live = getattr(self.react, "_dynamic_grid", None)
 
@@ -562,11 +579,18 @@ class WorkspaceManager:
 
             new_layouts[breakpoint] = existing_layout
 
-        self.grid.param.update(
-            objects=new_objects,
-            layouts=new_layouts,
-            current_layout=self._current_breakpoint_layout(new_layouts),
-        )
+        update = {
+            "objects": new_objects,
+            "layouts": new_layouts,
+            "current_layout": self._current_breakpoint_layout(new_layouts),
+        }
+
+        if hasattr(self.grid, "titles"):
+            new_titles = dict(getattr(self.grid, "titles", {}) or {})
+            new_titles[panel_id] = str(title or panel_id)
+            update["titles"] = new_titles
+
+        self.grid.param.update(**update)
 
         # Dispose the old panel after the grid no longer references it.
         if old_controller is not None and old_controller is not controller:
@@ -704,12 +728,23 @@ class WorkspaceManager:
 
         new_current_layout = self._current_breakpoint_layout(new_layouts)
 
-        self.grid.param.update(
-            keys=new_keys,
-            objects=new_objects,
-            layouts=new_layouts,
-            current_layout=new_current_layout,
-        )
+        update = {
+            "keys": new_keys,
+            "objects": new_objects,
+            "layouts": new_layouts,
+            "current_layout": self._current_breakpoint_layout(new_layouts),
+        }
+
+        if hasattr(self.grid, "titles"):
+            new_titles = dict(getattr(self.grid, "titles", {}) or {})
+            new_titles = {
+                str(key): str(new_titles.get(str(key), str(key)))
+                for key in new_keys
+            }
+            new_titles[panel_id] = str(title)
+            update["titles"] = new_titles
+
+        self.grid.param.update(**update)
 
         workspace_debug_print(
             "add_panel",
@@ -798,8 +833,10 @@ class WorkspaceManager:
 
         self._panels.pop(panel_id, None)
 
+        remaining_keys = [key for key in keys if key != panel_id]
+
         update = {
-            "keys": [key for key in keys if key != panel_id],
+            "keys": remaining_keys,
             "objects": [
                 obj
                 for obj_index, obj in enumerate(self.grid.objects or [])
@@ -809,6 +846,13 @@ class WorkspaceManager:
             "current_layout": self._current_breakpoint_layout(new_layouts),
             "close_key": "",
         }
+
+        if hasattr(self.grid, "titles"):
+            existing_titles = dict(getattr(self.grid, "titles", {}) or {})
+            update["titles"] = {
+                str(key): str(existing_titles.get(str(key), str(key)))
+                for key in remaining_keys
+            }
 
         if hasattr(self.grid, "close_click_count"):
             update["close_click_count"] = getattr(self.grid, "close_click_count", 0)
@@ -855,6 +899,9 @@ class WorkspaceManager:
             "close_key": "",
         }
 
+        if hasattr(self.grid, "titles"):
+            update["titles"] = {}
+
         if hasattr(self.grid, "close_click_count"):
             update["close_click_count"] = getattr(self.grid, "close_click_count", 0)
 
@@ -887,6 +934,9 @@ class WorkspaceManager:
 
         if hasattr(self.grid, "prevent_collision"):
             snapshot["prevent_collision"] = self.grid.prevent_collision
+
+        if hasattr(self.grid, "titles"):
+            snapshot["titles"] = dict(self.grid.titles or {})
 
         return snapshot
 

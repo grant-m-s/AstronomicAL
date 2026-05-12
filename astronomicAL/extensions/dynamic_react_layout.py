@@ -2,8 +2,10 @@ import param
 from panel.custom import Children, ReactComponent
 
 class DynamicReactGrid(ReactComponent):
+
     objects = Children()
     keys = param.List(default=[])
+    titles = param.Dict(default={})
     layouts = param.Dict(default={})
 
     breakpoints = param.Dict(default={"lg": 1500, "md": 1050, "sm": 0})
@@ -274,7 +276,9 @@ function stopPanelChromeEvent(event) {
 }
 
 export function render({ model }) {
+
   const [keys] = model.useState("keys");
+  const [titles] = model.useState("titles");
   const [layouts, setLayouts] = model.useState("layouts");
 
   const [breakpoints] = model.useState("breakpoints");
@@ -332,6 +336,16 @@ export function render({ model }) {
 
   for (let i = 0; i < stableKeys.length; i++) {
     contentByKey[String(stableKeys[i])] = stableChildren[i];
+  }
+
+  const titleByKey = {};
+  for (const key of stableKeys || []) {
+    const keyString = String(key);
+    const title = titles?.[keyString];
+    titleByKey[keyString] =
+      title === undefined || title === null || String(title).trim() === ""
+        ? keyString
+        : String(title);
   }
 
   const normalizedLayouts = React.useMemo(
@@ -432,7 +446,7 @@ export function render({ model }) {
         {(stableKeys || []).map((k) => (
           <div key={String(k)} className="tile">
             <div className="tile-header">
-              <div className="tile-title">{String(k)}</div>
+              <div className="tile-title">{titleByKey[String(k)] || String(k)}</div>
               <button
                 type="button"
                 className="tile-close"
