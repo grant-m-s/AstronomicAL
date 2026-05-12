@@ -10,12 +10,19 @@ class DynamicReactGrid(ReactComponent):
     cols_by_breakpoint = param.Dict(default={"lg": 12, "md": 12, "sm": 12})
 
     close_key = param.String(default="")
+    close_click_count = param.Integer(default=0)
+
     current_breakpoint = param.String(default="lg")
+
     current_layout = param.List(default=[])
 
     row_height = param.Integer(default=80)
+
     margin = param.List(default=[10, 10])
-    compact_type = param.ObjectSelector(default="vertical", objects=[None, "vertical", "horizontal"])
+
+    compact_type = param.ObjectSelector(default=None, objects=[None, "vertical", "horizontal"])
+    prevent_collision = param.Boolean(default=True)
+
     resize_handles = param.List(default=["se"])
 
     _stylesheets = [
@@ -46,169 +53,395 @@ class DynamicReactGrid(ReactComponent):
     }
 
     _esm = r"""
-    import * as RGLib from "react-grid-layout";
+import * as RGLib from "react-grid-layout";
 
-    // React is already provided by Panel; DO NOT import it again.
+// React is already provided by Panel; DO NOT import it again.
 
-    // Robust CJS/ESM interop: try common locations.
-    const Root = RGLib?.default ?? RGLib;
-    const Responsive = RGLib?.Responsive ?? Root?.Responsive;
-    const WidthProvider = RGLib?.WidthProvider ?? Root?.WidthProvider;
+// Robust CJS/ESM interop: try common locations.
+const Root = RGLib?.default ?? RGLib;
+const Responsive = RGLib?.Responsive ?? Root?.Responsive;
+const WidthProvider = RGLib?.WidthProvider ?? Root?.WidthProvider;
 
-    if (!Responsive || !WidthProvider) {
-      console.error("react-grid-layout module keys:", Object.keys(RGLib || {}));
-      console.error("react-grid-layout default keys:", Object.keys(RGLib?.default || {}));
-      throw new Error("Could not resolve Responsive/WidthProvider from react-grid-layout (CJS/ESM interop).");
+if (!Responsive || !WidthProvider) {
+  console.error("react-grid-layout module keys:", Object.keys(RGLib || {}));
+  console.error("react-grid-layout default keys:", Object.keys(RGLib?.default || {}));
+  throw new Error("Could not resolve Responsive/WidthProvider from react-grid-layout (CJS/ESM interop).");
+}
+
+const ResponsiveRGL = WidthProvider(Responsive);
+
+function numberOr(value, fallback) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function integerOr(value, fallback) {
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.trunc(n) : fallback;
+}
+
+function safeString(value, fallback = "") {
+  if (value === undefined || value === null) {
+    return fallback;
+  }
+  return String(value);
+}
+
+function sameJSON(a, b) {
+  return JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+}
+
+function bottomY(layout) {
+  let bottom = 0;
+
+  for (const item of layout || []) {
+    bottom = Math.max(
+      bottom,
+      integerOr(item?.y, 0) + integerOr(item?.h, 1)
+    );
+  }
+
+  return bottom;
+}
+
+function sanitizeLayoutItem(item, keys, cols) {
+  const rawId = item?.i;
+
+  if (rawId === undefined || rawId === null) {
+    return null;
+  }
+
+  const id = String(rawId);
+  const keySet = new Set((keys || []).map((key) => String(key)));
+
+  if (!keySet.has(id)) {
+    return null;
+  }
+
+  const C = Math.max(1, integerOr(cols, 12));
+
+  let w = integerOr(item?.w, 4);
+  let h = integerOr(item?.h, 4);
+  let x = integerOr(item?.x, 0);
+  let y = integerOr(item?.y, 0);
+
+  w = Math.max(1, Math.min(w, C));
+  h = Math.max(1, h);
+
+  const maxX = Math.max(0, C - w);
+  x = Math.max(0, Math.min(x, maxX));
+  y = Math.max(0, y);
+
+  // Important: return only JSON-safe fields. Do not spread raw RGL items,
+  // because raw items may contain undefined optional fields that Bokeh cannot
+  // serialize.
+  const cleaned = {
+    i: id,
+    x,
+    y,
+    w,
+    h,
+    static: !!item?.static,
+  };
+
+  const minW = numberOr(item?.minW, NaN);
+  if (Number.isFinite(minW)) {
+    cleaned.minW = Math.max(1, Math.trunc(minW));
+  }
+
+  const minH = numberOr(item?.minH, NaN);
+  if (Number.isFinite(minH)) {
+    cleaned.minH = Math.max(1, Math.trunc(minH));
+  }
+
+  const maxW = numberOr(item?.maxW, NaN);
+  if (Number.isFinite(maxW)) {
+    cleaned.maxW = Math.max(1, Math.trunc(maxW));
+  }
+
+  const maxH = numberOr(item?.maxH, NaN);
+  if (Number.isFinite(maxH)) {
+    cleaned.maxH = Math.max(1, Math.trunc(maxH));
+  }
+
+  return cleaned;
+}
+
+function sanitizeLayout(layout, keys, cols) {
+  const out = [];
+
+  for (const item of layout || []) {
+    const cleaned = sanitizeLayoutItem(item, keys, cols);
+
+    if (cleaned) {
+      out.push(cleaned);
+    }
+  }
+
+  return out;
+}
+
+function defaultLayoutItem(key, existingLayout, cols) {
+  const C = Math.max(1, integerOr(cols, 12));
+  const w = Math.max(1, Math.min(4, C));
+
+  return {
+    i: String(key),
+    x: 0,
+    y: bottomY(existingLayout || []),
+    w,
+    h: 4,
+    static: false,
+  };
+}
+
+function ensureLayoutsForKeys(layouts, keys, colsByBp) {
+  const safeKeys = (keys || []).map((key) => String(key));
+  const colsMap = colsByBp || {};
+  const source = layouts || {};
+
+  const breakpoints = new Set([
+    ...Object.keys(colsMap),
+    ...Object.keys(source),
+  ]);
+
+  if (breakpoints.size === 0) {
+    breakpoints.add("lg");
+    breakpoints.add("md");
+    breakpoints.add("sm");
+  }
+
+  const out = {};
+
+  for (const bp of breakpoints) {
+    const cols = integerOr(colsMap[bp], 12);
+
+    const existingClean = sanitizeLayout(
+      source[bp] || [],
+      safeKeys,
+      cols
+    );
+
+    const existingByKey = new Map(
+      existingClean.map((item) => [String(item.i), item])
+    );
+
+    const full = [];
+
+    for (const key of safeKeys) {
+      const hit = existingByKey.get(String(key));
+
+      if (hit) {
+        full.push(hit);
+      } else {
+        full.push(defaultLayoutItem(key, full, cols));
+      }
     }
 
-    const ResponsiveRGL = WidthProvider(Responsive);
+    out[bp] = sanitizeLayout(full, safeKeys, cols);
+  }
 
-    function sanitizeLayout(arr, keys, cols) {
-      const keySet = new Set(keys || []);
-      const C = Number.isFinite(cols) ? cols : 12;
+  return out;
+}
 
-      return (arr || [])
-        .filter((it) => it && keySet.has(String(it.i)))
-        .map((it) => {
-          let w = Number.isFinite(it.w) ? it.w : 1;
-          let h = Number.isFinite(it.h) ? it.h : 1;
-          let x = Number.isFinite(it.x) ? it.x : 0;
-          let y = Number.isFinite(it.y) ? it.y : 0;
+function mergeActiveBreakpointLayout(layouts, breakpoint, currentLayout, keys, colsByBp) {
+  const bp = safeString(breakpoint, "lg") || "lg";
+  const safeKeys = (keys || []).map((key) => String(key));
+  const colsMap = colsByBp || {};
+  const cols = integerOr(colsMap[bp], 12);
 
-          w = Math.max(1, Math.min(w, C));
-          const maxX = Math.max(0, C - w);
-          x = Math.max(0, Math.min(x, maxX));
+  const previous = ensureLayoutsForKeys(layouts || {}, safeKeys, colsMap);
+  const currentClean = sanitizeLayout(currentLayout || [], safeKeys, cols);
 
-          return { i: String(it.i), x, y, w, h, static: !!it.static };
-        });
+  return ensureLayoutsForKeys(
+    {
+      ...previous,
+      [bp]: currentClean,
+    },
+    safeKeys,
+    colsMap
+  );
+}
+
+function stopPanelChromeEvent(event) {
+  event.preventDefault();
+  event.stopPropagation();
+}
+
+export function render({ model }) {
+  const [keys] = model.useState("keys");
+  const [layouts, setLayouts] = model.useState("layouts");
+
+  const [breakpoints] = model.useState("breakpoints");
+  const [colsByBp] = model.useState("cols_by_breakpoint");
+  const [rowHeight] = model.useState("row_height");
+  const [margin] = model.useState("margin");
+  const [compactType] = model.useState("compact_type");
+  const [preventCollision] = model.useState("prevent_collision");
+  const [resizeHandles] = model.useState("resize_handles");
+
+  const [, setCloseKey] = model.useState("close_key");
+  const [closeEventCount, setCloseEventCount] = model.useState("close_click_count");
+
+  const [currentBp, setCurrentBp] = model.useState("current_breakpoint");
+  const [, setCurrentLayout] = model.useState("current_layout");
+
+  const currentBpRef = React.useRef(safeString(currentBp, "lg") || "lg");
+  const closeEventCountRef = React.useRef(integerOr(closeEventCount, 0));
+
+  React.useEffect(() => {
+    currentBpRef.current = safeString(currentBp, "lg") || "lg";
+  }, [currentBp]);
+
+  React.useEffect(() => {
+    closeEventCountRef.current = integerOr(closeEventCount, closeEventCountRef.current || 0);
+  }, [closeEventCount]);
+
+  const childrenArray = React.Children.toArray(model.get_child("objects"));
+
+  // Stability trick to avoid mismatched title/content while Panel patches
+  // `keys` and `objects`.
+  const incomingKeys = (keys || []).map((key) => String(key));
+  const stable = React.useRef({ keys: [], children: [] });
+
+  if (incomingKeys.length === childrenArray.length) {
+    stable.current = {
+      keys: incomingKeys,
+      children: childrenArray,
+    };
+  }
+
+  const stableKeys = stable.current.keys;
+  const stableChildren = stable.current.children;
+
+  const keySignature = stableKeys.join("|");
+  const previousKeySignatureRef = React.useRef(keySignature);
+  const suppressProgrammaticLayoutWriteRef = React.useRef(false);
+
+  if (previousKeySignatureRef.current !== keySignature) {
+    previousKeySignatureRef.current = keySignature;
+    suppressProgrammaticLayoutWriteRef.current = true;
+  }
+
+  const contentByKey = {};
+
+  for (let i = 0; i < stableKeys.length; i++) {
+    contentByKey[String(stableKeys[i])] = stableChildren[i];
+  }
+
+  const normalizedLayouts = React.useMemo(
+    () => ensureLayoutsForKeys(layouts || {}, stableKeys, colsByBp || {}),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [
+      JSON.stringify(layouts || {}),
+      keySignature,
+      JSON.stringify(colsByBp || {}),
+    ]
+  );
+
+  React.useEffect(() => {
+    if (!sameJSON(layouts || {}, normalizedLayouts || {})) {
+      setLayouts(normalizedLayouts || {});
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    keySignature,
+    JSON.stringify(normalizedLayouts || {}),
+  ]);
 
-    function ensureLayoutsForKeys(layouts, keys, colsByBp) {
-      const out = { ...(layouts || {}) };
-      const ks = keys || [];
-      const colsMap = colsByBp || {};
+  const resolvedCompactType =
+    compactType === undefined || compactType === null || compactType === "none"
+      ? null
+      : compactType;
 
-      for (const bp of Object.keys(colsMap)) {
-        const cols = colsMap[bp] ?? 12;
-        const existing = new Map((out[bp] || []).map((it) => [String(it.i), it]));
-        const full = ks.map((k, i) => {
-          const hit = existing.get(String(k));
-          if (hit) return hit;
-          return { i: String(k), x: (i * 4) % cols, y: 1000000, w: 4, h: 4 };
-        });
-        out[bp] = sanitizeLayout(full, ks);
-      }
+  const safeMargin = Array.isArray(margin)
+    ? margin.map((value) => integerOr(value, 10))
+    : [10, 10];
 
-      for (const bp of Object.keys(out)) {
-        out[bp] = sanitizeLayout(out[bp], ks);
-      }
+  const safeResizeHandles = Array.isArray(resizeHandles)
+    ? resizeHandles.map((value) => String(value))
+    : ["se"];
 
-      return out;
-    }
+  return (
+    <div className="pn-dynamic-rgl">
+      <ResponsiveRGL
+        layouts={normalizedLayouts || {}}
+        breakpoints={breakpoints || {}}
+        cols={colsByBp || {}}
+        rowHeight={integerOr(rowHeight, 80)}
+        margin={safeMargin}
+        compactType={resolvedCompactType}
+        preventCollision={!!preventCollision}
+        draggableHandle=".tile-header"
+        draggableCancel=".tile-close"
+        resizeHandles={safeResizeHandles}
+        onBreakpointChange={(bp) => {
+          const nextBp = safeString(bp, "lg") || "lg";
+          currentBpRef.current = nextBp;
+          setCurrentBp(nextBp);
+        }}
+        onLayoutChange={(currentLayout) => {
+          const bp = currentBpRef.current || "lg";
 
-    export function render({ model }) {
-      const [keys] = model.useState("keys");
+          const cleanCur = sanitizeLayout(
+            currentLayout || [],
+            stableKeys,
+            integerOr((colsByBp || {})[bp], 12)
+          );
 
-      const [layouts, setLayouts] = model.useState("layouts");
-      const [breakpoints] = model.useState("breakpoints");
-      const [colsByBp] = model.useState("cols_by_breakpoint");
+          // Do not write ReactGridLayout's generated allLayouts back wholesale.
+          // It can rewrite untouched breakpoints and reflow unrelated panels.
+          const cleanAll = mergeActiveBreakpointLayout(
+            layouts || {},
+            bp,
+            cleanCur,
+            stableKeys,
+            colsByBp || {}
+          );
 
-      const [rowHeight] = model.useState("row_height");
-      const [margin] = model.useState("margin");
-      const [compactType] = model.useState("compact_type");
-      const [resizeHandles] = model.useState("resize_handles");
-      const [, setCloseKey] = model.useState("close_key");
+          setCurrentLayout(cleanCur || []);
 
-      const [currentBp, setCurrentBp] = model.useState("current_breakpoint");
-      const [, setCurrentLayout] = model.useState("current_layout");
+          if (suppressProgrammaticLayoutWriteRef.current) {
+            suppressProgrammaticLayoutWriteRef.current = false;
+            return;
+          }
 
+          if (!sameJSON(layouts || {}, cleanAll || {})) {
+            setLayouts(cleanAll || {});
+          }
+        }}
+      >
+        {(stableKeys || []).map((k) => (
+          <div key={String(k)} className="tile">
+            <div className="tile-header">
+              <div className="tile-title">{String(k)}</div>
+              <button
+                type="button"
+                className="tile-close"
+                title="Close"
+                onPointerDownCapture={stopPanelChromeEvent}
+                onMouseDownCapture={stopPanelChromeEvent}
+                onTouchStartCapture={stopPanelChromeEvent}
+                onClickCapture={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
 
-      const bp = currentBp || "lg";
+                  closeEventCountRef.current += 1;
 
-      const childrenArray = React.Children.toArray(model.get_child("objects"));
-
-      // Stability trick to avoid mismatched title/content during patching.
-      const stable = React.useRef({ keys: [], children: [] });
-      if ((keys || []).length === childrenArray.length) {
-        stable.current = { keys: [...(keys || [])], children: childrenArray };
-      }
-      const stableKeys = stable.current.keys;
-      const stableChildren = stable.current.children;
-
-      const contentByKey = {};
-      for (let i = 0; i < stableKeys.length; i++) {
-        contentByKey[stableKeys[i]] = stableChildren[i];
-      }
-
-      const normalizedLayouts = React.useMemo(
-        () => ensureLayoutsForKeys(layouts, stableKeys, colsByBp),
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-        [JSON.stringify(layouts || {}), stableKeys.join("|"), JSON.stringify(colsByBp || {})]
-      );
-
-      React.useEffect(() => {
-        const clean = sanitizeLayouts(normalizedLayouts, stableKeys, colsByBp);
-        const a = JSON.stringify(layouts || {});
-        const b = JSON.stringify(clean || {});
-        if (a !== b) setLayouts(clean);
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-      }, [stableKeys.join("|")]);
-
-      return (
-        <div className="pn-dynamic-rgl">
-          <ResponsiveRGL
-            layouts={normalizedLayouts || {}}
-            breakpoints={breakpoints || {}}
-            cols={colsByBp || {}}
-            rowHeight={rowHeight}
-            margin={margin}
-            compactType={compactType === null ? null : compactType}
-            draggableHandle=".tile-header"
-            resizeHandles={resizeHandles}
-            onBreakpointChange={(bp) => setCurrentBp(bp)}
-
-            onLayoutChange={(currentLayout, allLayouts) => {
-            const cleanAll = sanitizeLayouts(allLayouts, stableKeys, colsByBp);
-            const bp = currentBp || "lg";
-            const cleanCur = sanitizeLayout(currentLayout, stableKeys, (colsByBp && colsByBp[bp]) || 12);
-
-            setLayouts(cleanAll);
-            setCurrentLayout(cleanCur);
-            }}
-          >
-            {(stableKeys || []).map((k) => (
-              <div
-                key={k}
-                className="tile"
+                  setCloseKey(String(k));
+                  setCloseEventCount(closeEventCountRef.current);
+                }}
               >
-                <div className="tile-header">
-                  <div className="tile-title">{k}</div>
-                  <button
-                    className="tile-close"
-                    title="Close"
-                    onMouseDown={(e) => e.stopPropagation()}
-                    onClick={(e) => { e.stopPropagation(); setCloseKey(k); }}
-                  >
-                    ×
-                  </button>
-                </div>
-                <div className="tile-body">
-                  {contentByKey[k] ?? <div>Missing content for {k}</div>}
-                </div>
-              </div>
-            ))}
-          </ResponsiveRGL>
-        </div>
-      );
-    }
-
-    function sanitizeLayouts(allLayouts, keys, colsByBp) {
-      const out = {};
-      const src = allLayouts || {};
-      const colsMap = colsByBp || {};
-      for (const bp of Object.keys(src)) {
-        out[bp] = sanitizeLayout(src[bp], keys, colsMap[bp] ?? 12);
-      }
-      return out;
-    }
-    """
+                ×
+              </button>
+            </div>
+            <div className="tile-body">
+              {contentByKey[String(k)] ?? <div>Missing content for {String(k)}</div>}
+            </div>
+          </div>
+        ))}
+      </ResponsiveRGL>
+    </div>
+  );
+}
+"""

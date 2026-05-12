@@ -938,7 +938,7 @@ class MenuDashboard:
         const selectedValue = this.getAttribute('data-value') || '';
         const payload = JSON.stringify({{
             value: selectedValue,
-            nonce: Date.now().toString() + ':' + Math.random().toString()
+            event_id: Date.now().toString() + ':' + Math.random().toString()
         }});
 
         const targetName = {target_name};

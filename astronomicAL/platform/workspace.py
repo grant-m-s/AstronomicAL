@@ -57,49 +57,307 @@ class WorkspaceManager:
         self.grid = grid
         self._panels: Dict[str, PanelRecord] = {}
 
+        self._close_watchers: list[tuple[Any, Any]] = []
+        self._close_watched_grid: Any = None
+
         self._normalize_grid_state()
         self._ensure_close_watcher()
 
-    @staticmethod
-    def _sid(value: Any) -> str:
-        return str(value)
-
     def _sync_grid(self) -> None:
         live = getattr(self.react, "_dynamic_grid", None)
+
         if live is not None and live is not self.grid:
+            self._detach_close_watchers()
             self.grid = live
+            self._normalize_grid_state()
             self._ensure_close_watcher()
+            return
+
+        self._ensure_close_watcher()
+
+    def _detach_close_watchers(self) -> None:
+        for grid, watcher in list(self._close_watchers):
+            try:
+                grid.param.unwatch(watcher)
+            except Exception:
+                pass
+
+        self._close_watchers.clear()
+        self._close_watched_grid = None
+
+    def _breakpoint_names(self, layouts: Optional[dict[str, Any]] = None) -> list[str]:
+        names: list[str] = []
+
+        for source in (
+            getattr(self.grid, "cols_by_breakpoint", {}) or {},
+            layouts or {},
+            getattr(self.grid, "layouts", {}) or {},
+        ):
+            for key in source.keys():
+                key = str(key)
+
+                if key not in names:
+                    names.append(key)
+
+        for key in ("lg", "md", "sm"):
+            if key not in names:
+                names.append(key)
+
+        return names
+    
+    def _current_breakpoint_layout(
+        self,
+        layouts: dict[str, list[dict[str, Any]]],
+    ) -> list[dict[str, Any]]:
+        breakpoint = getattr(self.grid, "current_breakpoint", None) or "lg"
+
+        if breakpoint in layouts:
+            return deepcopy(layouts[breakpoint])
+
+        for fallback in ("lg", "md", "sm"):
+            if fallback in layouts:
+                return deepcopy(layouts[fallback])
+
+        return []
+
+    def _cols_for_breakpoint(self, breakpoint: str) -> int:
+        try:
+            return max(1, int((self.grid.cols_by_breakpoint or {}).get(breakpoint, 12)))
+        except Exception:
+            return 12
+
+    @staticmethod
+    def _layout_bottom_y(layout: list[dict[str, Any]]) -> int:
+        bottom = 0
+
+        for item in layout or []:
+            try:
+                y = int(item.get("y", 0))
+                h = int(item.get("h", 1))
+            except Exception:
+                y = 0
+                h = 1
+
+            bottom = max(bottom, y + h)
+
+        return bottom
+
+    @staticmethod
+    def _items_collide(left: dict[str, Any], right: dict[str, Any]) -> bool:
+        left_x = int(left.get("x", 0))
+        left_y = int(left.get("y", 0))
+        left_w = int(left.get("w", 1))
+        left_h = int(left.get("h", 1))
+
+        right_x = int(right.get("x", 0))
+        right_y = int(right.get("y", 0))
+        right_w = int(right.get("w", 1))
+        right_h = int(right.get("h", 1))
+
+        return not (
+            left_x + left_w <= right_x
+            or right_x + right_w <= left_x
+            or left_y + left_h <= right_y
+            or right_y + right_h <= left_y
+        )
+
+    def _collides_with_layout(
+        self,
+        item: dict[str, Any],
+        layout: list[dict[str, Any]],
+    ) -> bool:
+        return any(self._items_collide(item, existing) for existing in layout or [])
+
+    def _place_item_without_colliding(
+        self,
+        item: dict[str, Any],
+        existing_layout: list[dict[str, Any]],
+        *,
+        breakpoint: str,
+    ) -> dict[str, Any]:
+
+        item = self._sanitize_layout_item(
+            dict(item),
+            breakpoint=breakpoint,
+        )
+
+        guard = 0
+
+        while self._collides_with_layout(item, existing_layout) and guard < 500:
+            item["y"] = self._layout_bottom_y(existing_layout)
+            item = self._sanitize_layout_item(
+                item,
+                breakpoint=breakpoint,
+            )
+
+            # If bottom_y still collides because of unusual saved layouts,
+            # nudge down one row and try again.
+            if self._collides_with_layout(item, existing_layout):
+                item["y"] = int(item.get("y", 0)) + 1
+
+            guard += 1
+
+        return item
+
+    def _sanitize_layout_item(
+        self,
+        item: dict[str, Any],
+        *,
+        panel_id: Optional[str] = None,
+        breakpoint: str = "lg",
+    ) -> dict[str, Any]:
+        item = dict(item or {})
+
+        if panel_id is not None:
+            item["i"] = str(panel_id)
+        elif "i" in item:
+            item["i"] = str(item["i"])
+
+        cols = self._cols_for_breakpoint(breakpoint)
+
+        def as_int(value: Any, default: int, minimum: int = 0) -> int:
+            try:
+                out = int(value)
+            except Exception:
+                out = default
+
+            return max(minimum, out)
+
+        w = as_int(item.get("w", 4), 4, minimum=1)
+        h = as_int(item.get("h", 4), 4, minimum=1)
+        x = as_int(item.get("x", 0), 0, minimum=0)
+        y = as_int(item.get("y", 0), 0, minimum=0)
+
+        w = min(w, cols)
+        x = min(x, max(0, cols - w))
+
+        clean = {
+            "i": str(item.get("i", panel_id or "")),
+            "x": x,
+            "y": y,
+            "w": w,
+            "h": h,
+        }
+
+        if "static" in item:
+            clean["static"] = bool(item["static"])
+
+        if "minW" in item:
+            clean["minW"] = as_int(item.get("minW"), 1, minimum=1)
+
+        if "minH" in item:
+            clean["minH"] = as_int(item.get("minH"), 1, minimum=1)
+
+        if "maxW" in item:
+            clean["maxW"] = as_int(item.get("maxW"), cols, minimum=1)
+
+        if "maxH" in item:
+            clean["maxH"] = as_int(item.get("maxH"), h, minimum=1)
+
+        return clean
+
+    def _new_default_layout_item(
+        self,
+        panel_id: str,
+        *,
+        breakpoint: str,
+        existing_layout: list[dict[str, Any]],
+        layout_item: Optional[dict[str, Any]] = None,
+    ) -> dict[str, Any]:
+
+        hint = dict(layout_item or {})
+
+        item = {
+            "i": panel_id,
+            "x": hint.get("x", 0),
+            "y": self._layout_bottom_y(existing_layout),
+            "w": hint.get("w", 4),
+            "h": hint.get("h", 4),
+        }
+
+        # Preserve constraints, but do not preserve y from plugin default_layout.
+        for key in ("minW", "minH", "maxW", "maxH", "static"):
+            if key in hint:
+                item[key] = hint[key]
+
+        item = self._sanitize_layout_item(
+            item,
+            panel_id=panel_id,
+            breakpoint=breakpoint,
+        )
+
+        return self._place_item_without_colliding(
+            item,
+            existing_layout,
+            breakpoint=breakpoint,
+        )
 
     def _normalize_grid_state(self) -> None:
         keys = [str(key) for key in (self.grid.keys or [])]
+        key_set = set(keys)
+
         layouts = {}
 
         for breakpoint, breakpoint_layout in dict(self.grid.layouts or {}).items():
             new_breakpoint_layout = []
+
             for item in breakpoint_layout or []:
                 if item is None:
                     continue
+
                 item_copy = dict(item)
-                if "i" in item_copy:
-                    item_copy["i"] = str(item_copy["i"])
-                new_breakpoint_layout.append(item_copy)
-            layouts[breakpoint] = new_breakpoint_layout
+
+                if "i" not in item_copy:
+                    continue
+
+                if str(item_copy["i"]) not in key_set:
+                    continue
+
+                item_copy["i"] = str(item_copy["i"])
+
+                new_breakpoint_layout.append(
+                    self._sanitize_layout_item(
+                        item_copy,
+                        breakpoint=str(breakpoint),
+                    )
+                )
+
+            layouts[str(breakpoint)] = new_breakpoint_layout
 
         if keys != (self.grid.keys or []) or layouts != (self.grid.layouts or {}):
             self.grid.param.update(keys=keys, layouts=layouts)
 
     def _ensure_close_watcher(self) -> None:
-        if getattr(self.grid, "_close_watcher_attached", False):
+        if self._close_watched_grid is self.grid:
             return
 
-        def _close_from_js(event) -> None:
-            tile_id = event.new
-            if not tile_id:
-                return
-            self.remove_panel(str(tile_id))
+        self._detach_close_watchers()
 
-        self.grid.param.watch(_close_from_js, "close_key")
-        self.grid._close_watcher_attached = True
+        def _close_from_close_event(event) -> None:
+            if not event.new:
+                return
+
+            panel_id = getattr(self.grid, "close_key", "")
+
+            if not panel_id:
+                return
+
+            self.remove_panel(str(panel_id))
+
+        def _close_from_key(event) -> None:
+            if not event.new:
+                return
+
+            self.remove_panel(str(event.new))
+
+        if hasattr(self.grid, "close_click_count"):
+            watcher = self.grid.param.watch(_close_from_close_event, "close_click_count")
+            self._close_watchers.append((self.grid, watcher))
+        elif hasattr(self.grid, "close_key"):
+            watcher = self.grid.param.watch(_close_from_key, "close_key")
+            self._close_watchers.append((self.grid, watcher))
+
+        self._close_watched_grid = self.grid
 
     def register_existing(self) -> None:
         """
@@ -173,44 +431,55 @@ class WorkspaceManager:
             open_kwargs=dict(open_kwargs or {}),
             metadata=dict(metadata or {}),
         )
-        self._panels[panel_id] = record
 
+        self._panels[panel_id] = record
         self._attach_metadata_to_view(record)
 
         new_keys = [*list(self.grid.keys or []), panel_id]
         new_objects = [*list(self.grid.objects or []), view]
-        new_layouts = deepcopy(dict(self.grid.layouts or {}))
 
-        if layout_items is not None:
-            for breakpoint, item in layout_items.items():
-                breakpoint_layout = list(new_layouts.get(breakpoint, []))
-                item_copy = dict(item)
-                item_copy["i"] = panel_id
-                breakpoint_layout = [
-                    existing
-                    for existing in breakpoint_layout
-                    if str(existing.get("i")) != panel_id
-                ]
-                breakpoint_layout.append(item_copy)
-                new_layouts[breakpoint] = breakpoint_layout
-        elif layout_item is not None:
-            breakpoints = list(new_layouts.keys()) or ["lg", "md", "sm"]
-            for breakpoint in breakpoints:
-                breakpoint_layout = list(new_layouts.get(breakpoint, []))
-                item_copy = dict(layout_item)
-                item_copy["i"] = panel_id
-                breakpoint_layout = [
-                    existing
-                    for existing in breakpoint_layout
-                    if str(existing.get("i")) != panel_id
-                ]
-                breakpoint_layout.append(item_copy)
-                new_layouts[breakpoint] = breakpoint_layout
+        new_layouts = deepcopy(dict(self.grid.layouts or {}))
+        breakpoints = self._breakpoint_names(new_layouts)
+
+        for breakpoint in breakpoints:
+            breakpoint_layout = [
+                self._sanitize_layout_item(
+                    dict(existing),
+                    breakpoint=breakpoint,
+                )
+                for existing in list(new_layouts.get(breakpoint, []) or [])
+                if str(existing.get("i")) != panel_id
+            ]
+
+            supplied_item = None
+
+            if layout_items is not None:
+                supplied_item = layout_items.get(breakpoint)
+
+            if supplied_item is not None:
+
+                item_copy = self._sanitize_layout_item(
+                    dict(supplied_item),
+                    panel_id=panel_id,
+                    breakpoint=breakpoint,
+                )
+            else:
+
+                item_copy = self._new_default_layout_item(
+                    panel_id,
+                    breakpoint=breakpoint,
+                    existing_layout=breakpoint_layout,
+                    layout_item=layout_item,
+                )
+
+            breakpoint_layout.append(item_copy)
+            new_layouts[breakpoint] = breakpoint_layout
 
         self.grid.param.update(
             keys=new_keys,
             objects=new_objects,
             layouts=new_layouts,
+            current_layout=self._current_breakpoint_layout(new_layouts),
         )
 
         workspace_debug_print(
@@ -298,16 +567,22 @@ class WorkspaceManager:
 
         self._panels.pop(panel_id, None)
 
-        self.grid.param.update(
-            keys=[key for key in keys if key != panel_id],
-            objects=[
+        update = {
+            "keys": [key for key in keys if key != panel_id],
+            "objects": [
                 obj
                 for obj_index, obj in enumerate(self.grid.objects or [])
                 if obj_index != index
             ],
-            layouts=new_layouts,
-            close_key="",
-        )
+            "layouts": new_layouts,
+            "current_layout": self._current_breakpoint_layout(new_layouts),
+            "close_key": "",
+        }
+
+        if hasattr(self.grid, "close_click_count"):
+            update["close_click_count"] = getattr(self.grid, "close_click_count", 0)
+
+        self.grid.param.update(**update)
 
         workspace_debug_print(
             "remove_panel",
@@ -335,12 +610,19 @@ class WorkspaceManager:
             self.remove_panel(panel_id)
 
         self._panels.clear()
-        self.grid.param.update(
-            keys=[],
-            objects=[],
-            layouts={},
-            close_key="",
-        )
+
+        update = {
+            "keys": [],
+            "objects": [],
+            "layouts": {},
+            "current_layout": [],
+            "close_key": "",
+        }
+
+        if hasattr(self.grid, "close_click_count"):
+            update["close_click_count"] = getattr(self.grid, "close_click_count", 0)
+
+        self.grid.param.update(**update)
 
     def list_panels(self) -> Dict[str, PanelRecord]:
         return dict(self._panels)
@@ -352,7 +634,7 @@ class WorkspaceManager:
         self._sync_grid()
         self._normalize_grid_state()
 
-        return {
+        snapshot = {
             "keys": [str(key) for key in (self.grid.keys or [])],
             "layouts": deepcopy(dict(self.grid.layouts or {})),
             "breakpoints": dict(self.grid.breakpoints or {}),
@@ -364,6 +646,11 @@ class WorkspaceManager:
             "compact_type": self.grid.compact_type,
             "resize_handles": list(self.grid.resize_handles or []),
         }
+
+        if hasattr(self.grid, "prevent_collision"):
+            snapshot["prevent_collision"] = self.grid.prevent_collision
+
+        return snapshot
 
     def apply_grid_snapshot(self, grid_snapshot: dict[str, Any]) -> None:
         self._sync_grid()
@@ -384,6 +671,9 @@ class WorkspaceManager:
 
         if "compact_type" in grid_snapshot:
             update["compact_type"] = grid_snapshot["compact_type"]
+
+        if "prevent_collision" in grid_snapshot and hasattr(self.grid, "prevent_collision"):
+            update["prevent_collision"] = grid_snapshot["prevent_collision"]
 
         if "resize_handles" in grid_snapshot:
             update["resize_handles"] = grid_snapshot["resize_handles"]
