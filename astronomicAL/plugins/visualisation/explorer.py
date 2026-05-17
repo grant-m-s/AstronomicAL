@@ -232,6 +232,11 @@ class LinkedExplorerPanel(param.Parameterized):
             self._apply_settings_visibility()
 
     def dispose(self) -> None:
+        if self._disposed:
+            return
+
+        self._disposed = True
+        
         for owner, watcher in list(self._watchers):
             try:
                 owner.param.unwatch(watcher)

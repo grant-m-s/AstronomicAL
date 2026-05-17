@@ -60,6 +60,15 @@ def create_record_browser_panel(context, **kwargs):
     controller = RecordBrowserPanel(context=context)
     return controller.panel(), controller
 
+def _safe_unwatch(watcher):
+    for attr in ("obj", "inst"):
+        owner = getattr(watcher, attr, None)
+        if owner is not None and hasattr(owner, "param"):
+            try:
+                owner.param.unwatch(watcher)
+                return
+            except Exception:
+                pass
 
 class RecordBrowserPanel(param.Parameterized):
     """Plugin-native replacement for the generic part of ExplorationDashboard.
@@ -1669,7 +1678,7 @@ class RecordBrowserPanel(param.Parameterized):
 
         for watcher in list(getattr(self, "_watchers", [])):
             try:
-                watcher.inst.param.unwatch(watcher)
+                _safe_unwatch(watcher)
             except Exception:
                 pass
 
@@ -1681,3 +1690,5 @@ class RecordBrowserPanel(param.Parameterized):
             except Exception:
                 pass
             self.selector_watcher = None
+
+        self._running_panels = []

@@ -1426,11 +1426,13 @@ class SelectionSetPanel:
             return
 
         self._disposed = True
+        self._refresh_pending = False
 
-        if self.events is not None:
+        events = getattr(self.context, "events", None)
+        if events is not None:
             for sub in list(self._subscriptions):
                 try:
-                    self.events.unsubscribe(sub)
+                    events.unsubscribe(sub)
                 except Exception:
                     pass
 
