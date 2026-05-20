@@ -10,6 +10,7 @@ import panel as pn
 
 from astronomicAL.platform.modal_utils import open_template_modal
 from astronomicAL.settings.data_selection import DataSelection
+from astronomicAL.platform.fits_import import register_fits_table
 
 
 class DatasetHeaderController:
@@ -174,11 +175,34 @@ class DatasetHeaderController:
     def _dataset_label(self, dataset_id: str) -> str:
         try:
             dataset = self.context.datasets.get(dataset_id)
-            rows = len(dataset.df)
-            cols = len(dataset.df.columns)
-            return f"{dataset.name} · {rows:,} × {cols:,}"
+
+            try:
+                rows = self.context.datasets.row_count(dataset_id)
+            except Exception:
+                rows = None
+
+            try:
+                columns = self.context.datasets.list_columns(dataset_id)
+                cols = len(columns)
+            except Exception:
+                cols = None
+
+            if rows is not None and cols is not None:
+                return f"{dataset.name} · {rows:,} × {cols:,}"
+
+            if cols is not None:
+                return f"{dataset.name} · ? × {cols:,}"
+
+            return dataset.name
+
         except Exception:
             return dataset_id
+
+    def _cache_dir_for_file(self, filename: str) -> Path:
+        try:
+            return Path(filename).expanduser().resolve().parent / ".astronomical_cache"
+        except Exception:
+            return Path.cwd() / ".astronomical_cache"
 
     # ------------------------------------------------------------------
     # Modal
@@ -193,10 +217,10 @@ class DatasetHeaderController:
         dataset_id: str,
         dataset_name: str,
         filename: str,
-        df: pd.DataFrame,
         optimise_data: bool,
-    ) -> None:
-        self._register_loaded_dataset(
+        df: pd.DataFrame | None = None,
+    ) -> dict:
+        result = self._register_loaded_dataset(
             dataset_id=dataset_id,
             dataset_name=dataset_name,
             filename=filename,
@@ -205,10 +229,13 @@ class DatasetHeaderController:
             set_active=True,
         )
         self._refresh_header()
+        return result
 
     # ------------------------------------------------------------------
     # Dataset operations
     # ------------------------------------------------------------------
+
+
 
     def _register_loaded_dataset(
         self,
@@ -216,27 +243,100 @@ class DatasetHeaderController:
         dataset_id: str,
         dataset_name: str,
         filename: str,
-        df: pd.DataFrame,
+        df: pd.DataFrame | None = None,
         optimise_data: bool,
         set_active: bool = True,
-    ) -> None:
+    ) -> dict:
         previous_dataset_id = self._active_dataset_id_or_none()
+        lower_filename = str(filename).lower()
+        cache_dir = self._cache_dir_for_file(filename)
 
-        self.context.datasets.register(
-            dataset_id,
-            df,
-            name=dataset_name,
-            source_path=filename,
-            loader_id="settings.data_selection",
-            optimise_data=optimise_data,
-            rows=len(df),
-            columns=list(df.columns),
-        )
+        print("[AstronomicAL loader] --------------------------------------------------", flush=True)
+        print(f"[AstronomicAL loader] Loading dataset: {dataset_name}", flush=True)
+        print(f"[AstronomicAL loader] Dataset id: {dataset_id}", flush=True)
+        print(f"[AstronomicAL loader] Source file: {filename}", flush=True)
+        print(f"[AstronomicAL loader] Optimise data: {optimise_data}", flush=True)
+        print(f"[AstronomicAL loader] Cache dir: {cache_dir}", flush=True)
+
+        if lower_filename.endswith((".fits", ".fit", ".fits.gz", ".fit.gz")):
+            print("[AstronomicAL loader] Detected FITS input.", flush=True)
+
+            result = register_fits_table(
+                self.context.datasets,
+                filename,
+                cache_dir=cache_dir,
+                hdu=1,
+                dataset_id=dataset_id,
+                name=dataset_name,
+                overwrite=False,
+            )
+
+        elif lower_filename.endswith((".parquet", ".pq")):
+            print("[AstronomicAL loader] Detected Parquet input.", flush=True)
+            print("[AstronomicAL loader] Registering Parquet lazily with DuckDB.", flush=True)
+
+            self.context.datasets.register_parquet(
+                dataset_id,
+                filename,
+                name=dataset_name,
+                source_path=filename,
+                loader_id="settings.data_selection",
+                optimise_data=optimise_data,
+            )
+            result = {
+                "dataset_id": dataset_id,
+                "parquet_path": filename,
+                "created": False,
+            }
+
+        else:
+            print("[AstronomicAL loader] Falling back to pandas registration.", flush=True)
+
+            if df is None:
+                raise ValueError(
+                    "This large-data loading path currently supports FITS and "
+                    "Parquet directly. Non-FITS/non-Parquet loaders must pass a "
+                    "DataFrame during the transition."
+                )
+
+            self.context.datasets.register(
+                dataset_id,
+                df,
+                name=dataset_name,
+                source_path=filename,
+                loader_id="settings.data_selection",
+                optimise_data=optimise_data,
+                rows=len(df),
+                columns=list(df.columns),
+            )
+            result = {
+                "dataset_id": dataset_id,
+                "pandas_fallback": True,
+                "created": True,
+            }
+
+        print("[AstronomicAL loader] Dataset backend registration complete.", flush=True)
+
+        try:
+            rows = self.context.datasets.row_count(dataset_id)
+        except Exception:
+            rows = len(df) if df is not None else None
+
+        try:
+            columns = self.context.datasets.list_columns(dataset_id)
+        except Exception:
+            columns = list(df.columns) if df is not None else []
+
+        try:
+            preview_df = self.context.datasets.head(dataset_id, n=1)
+        except Exception:
+            preview_df = df.head(1) if df is not None else pd.DataFrame(columns=columns)
 
         self._sync_legacy_config(
             dataset_id=dataset_id,
             filename=filename,
-            df=df,
+            df=preview_df,
+            columns=columns,
             optimise_data=optimise_data,
         )
 
@@ -245,18 +345,18 @@ class DatasetHeaderController:
             {
                 "dataset_id": dataset_id,
                 "name": dataset_name,
-                "rows": len(df),
-                "columns": list(df.columns),
+                "rows": rows,
+                "columns": columns,
                 "source_path": filename,
                 "loader_id": "settings.data_selection",
                 "optimise_data": optimise_data,
+                "backend": self.context.datasets.get_meta(dataset_id).get("backend"),
             },
         )
 
         if set_active:
             self.context.datasets.set_active(dataset_id)
             self._clear_selection_for_dataset_switch()
-
             self._publish(
                 "dataset.active.changed",
                 {
@@ -266,11 +366,13 @@ class DatasetHeaderController:
                 },
             )
 
+        return result
+
+
     def _set_active_dataset(self, dataset_id: str) -> None:
         previous_dataset_id = self._active_dataset_id_or_none()
 
         self.context.datasets.set_active(dataset_id)
-        df = self.context.datasets.get_df(dataset_id)
 
         try:
             dataset = self.context.datasets.get(dataset_id)
@@ -280,10 +382,16 @@ class DatasetHeaderController:
             filename = ""
             optimise_data = True
 
+        columns = []
+        try:
+            columns = self.context.datasets.list_columns(dataset_id)
+        except Exception:
+            pass
+
         self._sync_legacy_config(
             dataset_id=dataset_id,
             filename=filename,
-            df=df,
+            df=pd.DataFrame(columns=columns),
             optimise_data=optimise_data,
         )
 
@@ -313,12 +421,45 @@ class DatasetHeaderController:
                 pass
         return None
 
+    def _normalise_columns(
+        self,
+        *,
+        df: pd.DataFrame | None = None,
+        columns: object | None = None,
+    ) -> list[str]:
+        if columns is None:
+            if df is None:
+                raw_columns = []
+            else:
+                raw_columns = getattr(df, "columns", [])
+        else:
+            raw_columns = columns
+
+        if raw_columns is None:
+            return []
+
+        # Handles pandas Index cleanly.
+        if isinstance(raw_columns, pd.Index):
+            raw_columns = raw_columns.tolist()
+
+        normalised: list[str] = []
+
+        for col in list(raw_columns):
+            # Useful if you accidentally pass metadata entries like {"name": "..."}.
+            if isinstance(col, dict) and "name" in col:
+                col = col["name"]
+
+            normalised.append(str(col))
+
+        return normalised
+
     def _sync_legacy_config(
         self,
         *,
         dataset_id: str,
         filename: str,
-        df: pd.DataFrame,
+        df: pd.DataFrame | None,
+        columns: list[str] | pd.Index | None = None,
         optimise_data: bool,
     ) -> None:
         config = getattr(self.context, "config", None)
@@ -328,20 +469,23 @@ class DatasetHeaderController:
         if not hasattr(config, "settings") or config.settings is None:
             config.settings = {}
 
+        columns = self._normalise_columns(df=df, columns=columns)
+
         config.settings["dataset_filepath"] = filename
         config.settings["optimise_data"] = optimise_data
         config.settings["active_dataset_id"] = dataset_id
 
+        # Very important for Parquet-backed datasets:
+        # do not store the full dataframe in legacy config.
         try:
-            config.main_df = df
+            config.main_df = pd.DataFrame(columns=columns)
         except Exception:
             pass
 
         try:
-            config.source.data = {f"{col}": [] for col in df.columns}
+            config.source.data = {str(col): [] for col in columns}
         except Exception:
             pass
-
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
@@ -691,8 +835,9 @@ class HeaderDataSelection(DataSelection):
 
     def _load_data_cb(self, event):
         self.load_data_button.disabled = True
-        self.load_data_button.name = "Loading File..."
-
+        self.load_data_button.name = "Preparing dataset import..."
+        print("[AstronomicAL loader] Load button clicked.", flush=True)
+        
         try:
             filename = self.dataset
             optimise_data = bool(self.memory_optimisation_check.value)
@@ -700,42 +845,54 @@ class HeaderDataSelection(DataSelection):
             if self.config is not None:
                 self.config.settings["dataset_filepath"] = filename
 
-            df = self.get_dataframe_from_fits_file(
-                filename,
-                optimise_data=optimise_data,
-            )
-
-            self.df = df
-
-            if self.config is not None:
-                self.config.main_df = df
-
-            self._initialise_src()
-
             dataset_id = self._unique_dataset_id(
                 self._normalise_dataset_id(Path(filename).stem)
             )
             dataset_name = Path(filename).stem.replace("_", " ").replace("-", " ").title()
 
-            self._on_dataset_loaded_callback(
+            self.load_data_button.name = "Importing and caching dataset..."
+            print("[AstronomicAL loader] Starting dataset import callback.", flush=True)
+
+            result = self._on_dataset_loaded_callback(
                 dataset_id=dataset_id,
                 dataset_name=dataset_name,
                 filename=filename,
-                df=df,
                 optimise_data=optimise_data,
+                df=None,
             )
+
+            self.load_data_button.name = "Finalising dataset..."
+            print("[AstronomicAL loader] Dataset import callback complete.", flush=True)
+
+            # Keep DataSelection internals alive with a one-row preview only.
+            try:
+                self.df = self.context.datasets.head(dataset_id, n=1)
+            except Exception:
+                try:
+                    columns = self.context.datasets.list_columns(dataset_id)
+                except Exception:
+                    columns = []
+                self.df = pd.DataFrame(columns=columns)
+
+            if self.config is not None:
+                self.config.main_df = self.df
+
+            self._initialise_src()
 
             self.ready = True
             self.load_data_button.name = "File Loaded."
+            print("[AstronomicAL loader] File loaded successfully.", flush=True)
 
-            # Legacy/inner close button passed into DataSelection.
             self.close_settings_button.disabled = False
             self.close_settings_button.button_type = "success"
             self.close_settings_button.name = "Close Settings"
 
-            # Visible modal close button owned by DatasetHeaderController.
             try:
-                modal_close_button = getattr(self.context, "_dataset_header_modal_close_button", None)
+                modal_close_button = getattr(
+                    self.context,
+                    "_dataset_header_modal_close_button",
+                    None,
+                )
                 if modal_close_button is not None:
                     modal_close_button.disabled = False
                     modal_close_button.button_type = "success"
@@ -743,9 +900,12 @@ class HeaderDataSelection(DataSelection):
             except Exception:
                 pass
 
+            return result
+
         except Exception as exc:
             self.error_message = f"Unable to load data file: `{exc}`"
             self.load_data_button.name = "Unable to load file"
+            print(f"[AstronomicAL loader] ERROR: {exc}", flush=True)
             self._refresh_layout()
             raise
 

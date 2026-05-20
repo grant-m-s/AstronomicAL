@@ -1,10 +1,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional
+from pathlib import Path
+from typing import Any, Dict, Optional, Sequence
 
 import pandas as pd
 
+from astronomicAL.platform.dataset_sources import (
+    DatasetSource,
+    DuckDBParquetDatasetSource,
+    PandasDatasetSource,
+    coerce_dataset_source,
+)
 from astronomicAL.utils.debug import (
     compact_list,
     dataset_debug_print,
@@ -12,12 +19,33 @@ from astronomicAL.utils.debug import (
     summarize_pending_restore_items,
 )
 
+
 @dataclass
 class Dataset:
     dataset_id: str
     name: str
-    df: pd.DataFrame
+    source: DatasetSource
     meta: Dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def df(self) -> pd.DataFrame:
+        """
+        Compatibility shim for older code.
+
+        New code should use Dataset.source or DatasetManager.get_source().
+        """
+        return self.source.to_pandas()
+
+    @df.setter
+    def df(self, value: pd.DataFrame) -> None:
+        """
+        Compatibility shim for old code that mutates dataset.df.
+
+        This intentionally converts the dataset back to an in-memory pandas
+        source. Avoid using this in new code.
+        """
+        self.source = PandasDatasetSource(value)
+
 
 def _json_safe_metadata(value: Any) -> Any:
     if value is None:
@@ -40,14 +68,14 @@ def _json_safe_metadata(value: Any) -> Any:
 
 class DatasetManager:
     """
-    Manages datasets. Phase 1 can still run single dataset, but we keep the API multi-ready.
+    Manages datasets.
 
-    Added for mapping POC:
-    - ensure_registered()
-    - list_columns()
-    - get_meta()
-    - get_mapping() / set_mapping()
-    - get_mappings()
+    The canonical data payload is now DatasetSource, not pd.DataFrame.
+
+    Compatibility:
+        - register(..., df=...) still works.
+        - get_df(...) still works but materializes a pandas view.
+        - Dataset.df still works but should be treated as legacy.
     """
 
     def __init__(self) -> None:
@@ -55,6 +83,10 @@ class DatasetManager:
         self._active_id: Optional[str] = None
         self._pending_restore_items = []
         self._pending_active_id = None
+
+    # ------------------------------------------------------------------
+    # Registration
+    # ------------------------------------------------------------------
 
     def register(
         self,
@@ -64,16 +96,37 @@ class DatasetManager:
         name: Optional[str] = None,
         **meta: Any,
     ) -> None:
+        """
+        Backward-compatible pandas registration.
+
+        New code should prefer register_source() or register_parquet().
+        """
+        self.register_source(
+            dataset_id,
+            PandasDatasetSource(df),
+            name=name,
+            **meta,
+        )
+
+    def register_source(
+        self,
+        dataset_id: str,
+        source: DatasetSource,
+        *,
+        name: Optional[str] = None,
+        **meta: Any,
+    ) -> None:
         if name is None:
             name = dataset_id
 
         meta = dict(meta)
         meta.setdefault("column_mappings", {})
+        meta.setdefault("backend", getattr(source, "backend_name", "unknown"))
 
         self._datasets[dataset_id] = Dataset(
             dataset_id=dataset_id,
             name=name,
-            df=df,
+            source=source,
             meta=meta,
         )
 
@@ -82,12 +135,15 @@ class DatasetManager:
 
         self._ensure_pending_restore_state()
 
+        columns = source.columns()
         dataset_debug_print(
-            "register",
+            "register_source",
             {
                 "dataset_id": dataset_id,
-                "column_count": len(df.columns),
-                "columns_preview": compact_list([str(col) for col in df.columns]),
+                "backend": getattr(source, "backend_name", "unknown"),
+                "row_count": source.row_count(),
+                "column_count": len(columns),
+                "columns_preview": compact_list([str(col) for col in columns]),
                 "pending_restore_items": summarize_pending_restore_items(
                     self._pending_restore_items
                 ),
@@ -97,14 +153,64 @@ class DatasetManager:
         self._apply_pending_restore_to_dataset(dataset_id)
 
         dataset_debug_print(
-            "register after pending restore",
+            "register_source after pending restore",
             {
                 "dataset_id": dataset_id,
-                "mappings": self.get_mappings(dataset_id)
-                if hasattr(self, "get_mappings")
-                else self._datasets[dataset_id].meta.get("column_mappings"),
+                "mappings": self.get_mappings(dataset_id),
             },
         )
+
+    def register_parquet(
+        self,
+        dataset_id: str,
+        path: str | Path | Sequence[str | Path],
+        *,
+        name: Optional[str] = None,
+        **meta: Any,
+    ) -> None:
+        """
+        Register a Parquet dataset lazily through DuckDB.
+
+        Metadata hints are important because UI refreshes should not repeatedly
+        inspect/count large Parquet files.
+        """
+        columns_hint = None
+        row_count_hint = None
+
+        raw_columns = meta.get("columns")
+        if isinstance(raw_columns, dict):
+            columns_hint = list(raw_columns.keys())
+        elif isinstance(raw_columns, (list, tuple)):
+            columns_hint = [str(col) for col in raw_columns]
+
+        for key in ("row_count", "rows", "n_rows"):
+            value = meta.get(key)
+            if value is not None:
+                try:
+                    row_count_hint = int(value)
+                    break
+                except Exception:
+                    pass
+
+        source = DuckDBParquetDatasetSource(
+            path,
+            dataset_name=name or dataset_id,
+            columns_hint=columns_hint,
+            row_count_hint=row_count_hint,
+        )
+
+        meta = dict(meta)
+        meta.setdefault("source_format", "parquet")
+        meta.setdefault("source_path", str(path))
+        meta.setdefault("backend", "duckdb_parquet")
+
+        if columns_hint is not None:
+            meta.setdefault("columns", columns_hint)
+
+        if row_count_hint is not None:
+            meta.setdefault("row_count", row_count_hint)
+
+        self.register_source(dataset_id, source, name=name, **meta)
 
     def ensure_registered(
         self,
@@ -115,14 +221,35 @@ class DatasetManager:
         **meta: Any,
     ) -> None:
         """
-        Register the dataset if missing; otherwise update the existing dataset in place.
+        Register the dataset if missing; otherwise update the existing dataset.
+
+        Backward-compatible pandas method.
         """
         if dataset_id not in self._datasets:
             self.register(dataset_id, df, name=name, **meta)
             return
 
+        self.ensure_source_registered(
+            dataset_id,
+            PandasDatasetSource(df),
+            name=name,
+            **meta,
+        )
+
+    def ensure_source_registered(
+        self,
+        dataset_id: str,
+        source: DatasetSource,
+        *,
+        name: Optional[str] = None,
+        **meta: Any,
+    ) -> None:
+        if dataset_id not in self._datasets:
+            self.register_source(dataset_id, source, name=name, **meta)
+            return
+
         ds = self._datasets[dataset_id]
-        ds.df = df
+        ds.source = coerce_dataset_source(source)
 
         if name is not None:
             ds.name = name
@@ -131,6 +258,11 @@ class DatasetManager:
             ds.meta.update(meta)
 
         ds.meta.setdefault("column_mappings", {})
+        ds.meta.setdefault("backend", getattr(ds.source, "backend_name", "unknown"))
+
+    # ------------------------------------------------------------------
+    # Basic access
+    # ------------------------------------------------------------------
 
     def list_ids(self) -> list[str]:
         return list(self._datasets.keys())
@@ -159,26 +291,109 @@ class DatasetManager:
 
         return self._datasets[dataset_id]
 
-    def get_df(self, dataset_id: Optional[str] = None) -> pd.DataFrame:
-        return self.get(dataset_id).df
+    def get_source(self, dataset_id: Optional[str] = None) -> DatasetSource:
+        return self.get(dataset_id).source
+
+    def get_df(
+        self,
+        dataset_id: Optional[str] = None,
+        *,
+        columns: Optional[Sequence[str]] = None,
+        limit: Optional[int] = None,
+        where_sql: Optional[str] = None,
+        params: Optional[Sequence[Any]] = None,
+    ) -> pd.DataFrame:
+        """
+        Compatibility method.
+
+        New code should prefer get_source(), list_columns(), row_count(),
+        get_row_by_position(), or source.to_pandas(columns=[...], limit=...).
+        """
+        return self.get_source(dataset_id).to_pandas(
+            columns=columns,
+            limit=limit,
+            where_sql=where_sql,
+            params=params,
+        )
 
     def get_meta(self, dataset_id: Optional[str] = None) -> Dict[str, Any]:
         return self.get(dataset_id).meta
 
     def list_columns(self, dataset_id: Optional[str] = None) -> list[str]:
-        return list(self.get_df(dataset_id).columns)
+        return self.get_source(dataset_id).columns()
+
+    def row_count(self, dataset_id: Optional[str] = None) -> Optional[int]:
+        return self.get_source(dataset_id).row_count()
+
+    def head(
+        self,
+        dataset_id: Optional[str] = None,
+        n: int = 5,
+        *,
+        columns: Optional[Sequence[str]] = None,
+    ) -> pd.DataFrame:
+        return self.get_source(dataset_id).head(n=n, columns=columns)
+
+    def dtypes(self, dataset_id: Optional[str] = None) -> dict[str, str]:
+        source = self.get_source(dataset_id)
+
+        if hasattr(source, "dtypes"):
+            return source.dtypes()
+
+        preview = source.head(0)
+        return {str(col): str(dtype) for col, dtype in preview.dtypes.items()}
+
+    def get_row_by_position(
+        self,
+        dataset_id: Optional[str],
+        position: int,
+        *,
+        columns: Optional[Sequence[str]] = None,
+    ) -> pd.DataFrame:
+        return self.get_source(dataset_id).get_row_by_position(
+            position,
+            columns=columns,
+        )
+
+    def get_row_by_id(
+        self,
+        dataset_id: Optional[str],
+        row_id: Any,
+        *,
+        id_column: str,
+        columns: Optional[Sequence[str]] = None,
+    ) -> pd.DataFrame:
+        return self.get_source(dataset_id).get_row_by_id(
+            row_id,
+            id_column=id_column,
+            columns=columns,
+        )
+
+    def find_position_by_id(
+        self,
+        dataset_id: Optional[str],
+        row_id: Any,
+        *,
+        id_column: str,
+    ) -> Optional[int]:
+        return self.get_source(dataset_id).find_position_by_id(
+            row_id,
+            id_column=id_column,
+        )
+
+    # ------------------------------------------------------------------
+    # Pending restore helpers
+    # ------------------------------------------------------------------
 
     def _ensure_pending_restore_state(self) -> None:
         if not hasattr(self, "_pending_restore_items"):
             self._pending_restore_items = []
-
         if not hasattr(self, "_pending_active_id"):
             self._pending_active_id = None
 
     def _dataset_columns(self, dataset_id: str) -> list[str]:
         try:
-            df = self.get_df(dataset_id)
-            return [str(col) for col in df.columns]
+            return [str(col) for col in self.list_columns(dataset_id)]
         except Exception:
             return []
 
@@ -186,14 +401,12 @@ class DatasetManager:
         dataset = self._datasets.get(dataset_id)
         if dataset is None:
             return {}
-
         return dict(getattr(dataset, "meta", {}) or {})
 
     def _dataset_name(self, dataset_id: str) -> str | None:
         dataset = self._datasets.get(dataset_id)
         if dataset is None:
             return None
-
         return getattr(dataset, "name", None)
 
     @staticmethod
@@ -210,7 +423,6 @@ class DatasetManager:
             value = meta.get(key)
             if value:
                 return str(value)
-
         return None
 
     def _dataset_source(self, dataset_id: str) -> str | None:
@@ -222,14 +434,16 @@ class DatasetManager:
             return None
 
         value = str(value)
-
         if value.lower() in {"use index", "use_index", "__index__", "index"}:
             return "Use Index"
 
         return value
 
-
-    def _mapping_columns_exist(self, mappings: dict[str, Any], columns: list[str]) -> bool:
+    def _mapping_columns_exist(
+        self,
+        mappings: dict[str, Any],
+        columns: list[str],
+    ) -> bool:
         if not mappings:
             return True
 
@@ -275,11 +489,11 @@ class DatasetManager:
         registered dataset.
 
         Matching order:
-        1. Exact dataset id
-        2. Same source/path metadata
-        3. Same dataset name
-        4. If there is only one pending item, allow it for the first dataset
-        as long as mapped columns exist.
+            1. Exact dataset id
+            2. Same source/path metadata
+            3. Same dataset name
+            4. If there is only one pending item, allow it for the first
+               dataset as long as mapped columns exist.
         """
         item_id = item.get("id")
         if item_id and str(item_id) == str(dataset_id):
@@ -295,7 +509,6 @@ class DatasetManager:
         item_meta = dict(item.get("meta") or {})
         item_source = self._source_from_meta(item_meta)
         dataset_source = self._dataset_source(dataset_id)
-
         if item_source and dataset_source and str(item_source) == str(dataset_source):
             dataset_debug_print(
                 "pending restore match by source",
@@ -308,7 +521,6 @@ class DatasetManager:
 
         item_name = item.get("name")
         dataset_name = self._dataset_name(dataset_id)
-
         if item_name and dataset_name and str(item_name) == str(dataset_name):
             dataset_debug_print(
                 "pending restore match by name",
@@ -320,7 +532,6 @@ class DatasetManager:
             return True
 
         self._ensure_pending_restore_state()
-
         mappings = dict(item.get("mappings") or {})
         columns = self._dataset_columns(dataset_id)
 
@@ -354,16 +565,13 @@ class DatasetManager:
                 "columns_preview": compact_list(columns),
             },
         )
-
         return False
 
-    def _publish_mapping_restored(self, dataset_id: str, mappings: dict[str, Any]) -> None:
-        """
-        Best-effort event publication.
-
-        DatasetManager may or may not have a direct events reference depending
-        on your current constructor. This keeps the method safe either way.
-        """
+    def _publish_mapping_restored(
+        self,
+        dataset_id: str,
+        mappings: dict[str, Any],
+    ) -> None:
         events = (
             getattr(self, "events", None)
             or getattr(self, "_events", None)
@@ -405,7 +613,6 @@ class DatasetManager:
 
         for semantic_key, column_name in mappings.items():
             column_name = self._normalise_mapping_column(column_name)
-
             if column_name is None:
                 continue
 
@@ -419,7 +626,6 @@ class DatasetManager:
 
         existing_mappings = dict(dataset_meta.get("column_mappings", {}) or {})
         existing_mappings.update(valid_mappings)
-
         dataset_meta["column_mappings"] = existing_mappings
 
         if invalid_mappings:
@@ -445,7 +651,6 @@ class DatasetManager:
         )
 
         self._publish_mapping_restored(dataset_id, valid_mappings)
-
         return True
 
     def _apply_pending_restore_to_dataset(self, dataset_id: str) -> None:
@@ -455,7 +660,6 @@ class DatasetManager:
             return
 
         remaining = []
-
         for item in self._pending_restore_items:
             if self._pending_item_matches_dataset(item, dataset_id):
                 self._apply_restore_item_to_dataset(dataset_id, item)
@@ -474,6 +678,10 @@ class DatasetManager:
                 pass
             self._pending_active_id = None
 
+    # ------------------------------------------------------------------
+    # Workspace snapshot / restore
+    # ------------------------------------------------------------------
+
     def snapshot(self) -> dict[str, Any]:
         items = []
 
@@ -482,8 +690,7 @@ class DatasetManager:
             mappings = dict(meta.pop("column_mappings", {}) or {})
 
             try:
-                df = self.get_df(dataset_id)
-                columns = [str(col) for col in df.columns]
+                columns = [str(col) for col in dataset.source.columns()]
             except Exception:
                 columns = []
 
@@ -577,9 +784,15 @@ class DatasetManager:
         dataset_debug_print(
             "restore_metadata_snapshot complete",
             {
-                "pending": summarize_pending_restore_items(self._pending_restore_items),
+                "pending": summarize_pending_restore_items(
+                    self._pending_restore_items
+                ),
             },
         )
+
+    # ------------------------------------------------------------------
+    # Column mappings
+    # ------------------------------------------------------------------
 
     def get_mappings(self, dataset_id: Optional[str] = None) -> Dict[str, str]:
         ds = self.get(dataset_id)
@@ -604,57 +817,10 @@ class DatasetManager:
         mappings = self.get_mappings(dataset_id)
         mappings[semantic_name] = column_name
 
-    def has_mapping(self, dataset_id: Optional[str], semantic_name: str) -> bool:
+    def has_mapping(
+        self,
+        dataset_id: Optional[str],
+        semantic_name: str,
+    ) -> bool:
         mappings = self.get_mappings(dataset_id)
         return semantic_name in mappings
-
-    def snapshot(self) -> dict[str, Any]:
-        items = []
-
-        for dataset_id, dataset in self._datasets.items():
-            meta = dict(dataset.meta or {})
-            mappings = dict(meta.pop("column_mappings", {}) or {})
-
-            items.append(
-                {
-                    "id": dataset_id,
-                    "name": dataset.name,
-                    "meta": _json_safe_metadata(meta),
-                    "mappings": _json_safe_metadata(mappings),
-                }
-            )
-
-        return {
-            "active_id": self._active_id,
-            "items": items,
-        }
-
-    def restore_metadata_snapshot(self, snapshot: dict[str, Any]) -> None:
-        if not snapshot:
-            return
-
-        for item in snapshot.get("items", []) or []:
-            if not isinstance(item, dict):
-                continue
-
-            dataset_id = item.get("id")
-            if not dataset_id:
-                continue
-
-            if dataset_id not in self._datasets:
-                continue
-
-            dataset = self._datasets[dataset_id]
-
-            if item.get("name") is not None:
-                dataset.name = item["name"]
-
-            meta = dict(item.get("meta") or {})
-            mappings = dict(item.get("mappings") or {})
-
-            dataset.meta.update(meta)
-            dataset.meta["column_mappings"] = mappings
-
-        active_id = snapshot.get("active_id")
-        if active_id and active_id in self._datasets:
-            self.set_active(active_id)

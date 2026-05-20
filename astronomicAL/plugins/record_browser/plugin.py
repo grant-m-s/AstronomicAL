@@ -1,3 +1,6 @@
+# BUG: Not updating record after scatter tap
+# BUG: Overwrites selected to index 0 on init
+
 from __future__ import annotations
 
 import html
@@ -8,6 +11,8 @@ import numpy as np
 import pandas as pd
 import panel as pn
 import param
+
+import time
 
 from astronomicAL.platform.plugins import PluginManifest
 
@@ -100,7 +105,11 @@ class RecordBrowserPanel(param.Parameterized):
         self.config = getattr(context, "config", None)
 
         self.panel_id = str(uuid.uuid4())
-        self.df = pd.DataFrame()
+
+        self.df = pd.DataFrame()  # compatibility preview only
+        self.source = None
+        self.columns: List[str] = []
+        self.row_count: int = 0
 
         self._event_subs: List[Any] = []
         self._watchers: List[Any] = []
@@ -141,6 +150,18 @@ class RecordBrowserPanel(param.Parameterized):
     # Dataset / mapping helpers
     # ---------------------------------------------------------------------
 
+    def _set_index_bounds(self, max_index: int) -> None:
+        max_index = max(0, int(max_index))
+
+        try:
+            self.param["index"].bounds = (0, max_index)
+        except Exception:
+            self.param.index.bounds = (0, max_index)
+
+        if hasattr(self, "index_input"):
+            self.index_input.start = 0
+            self.index_input.end = max_index
+
     def _dataset_id(self) -> Optional[str]:
         datasets = getattr(self.context, "datasets", None)
         if datasets is None:
@@ -159,6 +180,66 @@ class RecordBrowserPanel(param.Parameterized):
             return datasets.get_df(dataset_id)
         except Exception:
             return None
+
+    def _active_source(self):
+        datasets = getattr(self.context, "datasets", None)
+        dataset_id = self._dataset_id()
+
+        if datasets is None or dataset_id is None:
+            return None
+
+        get_source = getattr(datasets, "get_source", None)
+        if callable(get_source):
+            try:
+                return get_source(dataset_id)
+            except Exception:
+                return None
+
+        return None
+
+    def _active_columns(self) -> List[str]:
+        datasets = getattr(self.context, "datasets", None)
+        dataset_id = self._dataset_id()
+
+        if datasets is not None and dataset_id is not None:
+            list_columns = getattr(datasets, "list_columns", None)
+            if callable(list_columns):
+                try:
+                    return list(list_columns(dataset_id))
+                except Exception:
+                    pass
+
+        if self.source is not None:
+            try:
+                return list(self.source.columns())
+            except Exception:
+                pass
+
+        return []
+
+    def _active_row_count(self) -> int:
+        datasets = getattr(self.context, "datasets", None)
+        dataset_id = self._dataset_id()
+
+        if datasets is not None and dataset_id is not None:
+            row_count = getattr(datasets, "row_count", None)
+            if callable(row_count):
+                try:
+                    return int(row_count(dataset_id))
+                except Exception:
+                    pass
+
+        if self.source is not None:
+            try:
+                return int(self.source.row_count())
+            except Exception:
+                pass
+
+        return 0
+
+    def _column_exists(self, column: Optional[str]) -> bool:
+        return column is not None and column in set(self.columns)
+
 
     def _get_mapping(self, semantic_name: str) -> Optional[str]:
         datasets = getattr(self.context, "datasets", None)
@@ -194,15 +275,17 @@ class RecordBrowserPanel(param.Parameterized):
         if self._is_index_mapping(mapped):
             return "Use Index"
 
-        if mapped and mapped in self.df.columns:
+        if mapped and mapped in self.columns:
             return mapped
 
         # Backward-compatible bridge only. The plugin does not depend on this.
         settings = getattr(self.config, "settings", {}) if self.config is not None else {}
         legacy = settings.get("id_col")
+
         if self._is_index_mapping(legacy):
             return "Use Index"
-        if legacy and legacy in self.df.columns:
+
+        if legacy and legacy in self.columns:
             return legacy
 
         return None
@@ -210,15 +293,16 @@ class RecordBrowserPanel(param.Parameterized):
     def _resolve_label_col(self) -> str:
         mapped = self._get_mapping("target_label")
 
-        if mapped and mapped in self.df.columns:
+        if mapped and mapped in self.columns:
             return mapped
 
-        if self.label_col and self.label_col in self.df.columns:
+        if self.label_col and self.label_col in self.columns:
             return self.label_col
 
         settings = getattr(self.config, "settings", {}) if self.config is not None else {}
         legacy = settings.get("label_col")
-        if legacy and legacy in self.df.columns:
+
+        if legacy and legacy in self.columns:
             return legacy
 
         return "No Labels"
@@ -232,7 +316,6 @@ class RecordBrowserPanel(param.Parameterized):
 
     def _sync_legacy_settings(self) -> None:
         """Write small compatibility hints for old panels without owning config."""
-
         if self.config is None:
             return
 
@@ -246,10 +329,137 @@ class RecordBrowserPanel(param.Parameterized):
         settings["label_col"] = self.label_col
         settings["extra_info_cols"] = list(self.extra_info_cols)
 
+        # Compatibility only: schema frame, not the full dataset.
         try:
-            self.config.main_df = self.df
+            self.config.main_df = pd.DataFrame(columns=self.columns)
         except Exception:
             pass
+
+    def _get_unique_label_values(
+        self,
+        column: str,
+        *,
+        max_values: int = 21,
+    ) -> tuple[list[Any], str, bool]:
+        """
+        Return unique non-null values for a label column.
+
+        The boolean says whether the column exceeded max_values.
+        This must not use self.df, because self.df is schema-only for
+        Parquet-backed datasets.
+        """
+        if not column or column not in self.columns:
+            return [], "string", False
+
+        datasets = getattr(self.context, "datasets", None)
+        dataset_id = self._dataset_id()
+
+        # Preferred dataset-level API.
+        if datasets is not None and dataset_id is not None:
+            for method_name in (
+                "unique_values",
+                "get_unique_values",
+                "column_unique_values",
+            ):
+                method = getattr(datasets, method_name, None)
+                if callable(method):
+                    try:
+                        values = method(
+                            dataset_id,
+                            column,
+                            max_values=max_values,
+                            dropna=True,
+                        )
+                        values = list(values)
+                        exceeded = len(values) > max_values - 1
+                        return values[: max_values - 1], self._infer_label_type(values), exceeded
+                    except TypeError:
+                        try:
+                            values = method(dataset_id, column)
+                            values = list(values)
+                            exceeded = len(values) > max_values - 1
+                            return values[: max_values - 1], self._infer_label_type(values), exceeded
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
+
+        # Preferred source-level API.
+        if self.source is not None:
+            for method_name in (
+                "unique_values",
+                "get_unique_values",
+                "column_unique_values",
+            ):
+                method = getattr(self.source, method_name, None)
+                if callable(method):
+                    try:
+                        values = method(
+                            column,
+                            max_values=max_values,
+                            dropna=True,
+                        )
+                        values = list(values)
+                        exceeded = len(values) > max_values - 1
+                        return values[: max_values - 1], self._infer_label_type(values), exceeded
+                    except TypeError:
+                        try:
+                            values = method(column)
+                            values = list(values)
+                            exceeded = len(values) > max_values - 1
+                            return values[: max_values - 1], self._infer_label_type(values), exceeded
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
+
+        # Fallback: read one column only. This is not ideal for huge columns, but
+        # still avoids materialising the whole 274-column dataset.
+        try:
+            df = self.source.to_pandas(columns=[column])
+        except Exception as exc:
+            print(
+                "[AstronomicAL record_browser] Could not read label column "
+                f"{column!r}: {exc}",
+                flush=True,
+            )
+            return [], "string", False
+
+        if df.empty or column not in df.columns:
+            return [], "string", False
+
+        series = df[column]
+
+        label_type = get_series_type(series)
+
+        if label_type == "mixed":
+            series = series.astype(str)
+            label_type = "string"
+        elif label_type == "bool":
+            series = series.astype("Int64")
+            label_type = "int"
+
+        unique_values = list(series.dropna().unique())
+        exceeded = len(unique_values) > max_values - 1
+
+        return unique_values[: max_values - 1], label_type, exceeded
+
+
+    def _infer_label_type(self, values: list[Any]) -> str:
+        if not values:
+            return "string"
+
+        series = pd.Series(values)
+
+        label_type = get_series_type(series)
+
+        if label_type == "mixed":
+            return "string"
+
+        if label_type == "bool":
+            return "int"
+
+        return label_type
 
     # ---------------------------------------------------------------------
     # Events
@@ -319,40 +529,70 @@ class RecordBrowserPanel(param.Parameterized):
         if self._disposed:
             return
 
-        active_df = self._active_df()
+        t0 = time.perf_counter()
 
-        if active_df is None:
+        print(
+            "[AstronomicAL record_browser] refresh_from_active_dataset start "
+            f"reset_history={reset_history}",
+            flush=True,
+        )
+
+        self.source = self._active_source()
+
+        if self.source is None:
             self.df = pd.DataFrame()
+            self.columns = []
+            self.row_count = 0
             self.record_id_col = None
             self._built = False
             self._render_no_dataset()
             return
 
-        self.df = active_df.copy()
+        t_schema = time.perf_counter()
+
+        self.columns = self._active_columns()
+        self.row_count = self._active_row_count()
+
+        # Schema-only compatibility frame. Do not materialise the dataset here.
+        self.df = pd.DataFrame(columns=self.columns)
+
+        print(
+            "[AstronomicAL record_browser] schema loaded "
+            f"columns={len(self.columns):,} rows={self.row_count:,} "
+            f"duration={time.perf_counter() - t_schema:.3f}s",
+            flush=True,
+        )
+
         self.record_id_col = self._resolve_record_id_col()
 
         if self.record_id_col is None:
             self._built = False
             self._render_no_record_id_mapping()
+            print(
+                "[AstronomicAL record_browser] missing record_id mapping "
+                f"total={time.perf_counter() - t0:.3f}s",
+                flush=True,
+            )
             return
 
         self.label_col = self._resolve_label_col()
 
         self.extra_info_cols = [
-            col for col in self.extra_info_cols if col in self.df.columns
+            col for col in self.extra_info_cols
+            if col in self.columns
         ]
 
         self._sync_legacy_settings()
 
-        if len(self.df) == 0:
-            self.param.index.bounds = (0, 0)
+        if self.row_count == 0:
+            self._set_index_bounds(0)
             self.index = 0
             self._built = False
             self._render_empty_dataset()
             return
 
-        max_index = max(0, len(self.df) - 1)
-        self.param.index.bounds = (0, max_index)
+        max_index = max(0, self.row_count - 1)
+        self._set_index_bounds(max_index)
         self.index = min(max(self.index, 0), max_index)
 
         if reset_history:
@@ -363,8 +603,15 @@ class RecordBrowserPanel(param.Parameterized):
             self._build_dashboard_ui()
             self._root[:] = [self.main_layout]
             self._built = True
+
             if not self._sync_index_from_current_focus():
                 self._publish_focus_for_current_index()
+
+            print(
+                "[AstronomicAL record_browser] refresh built ui "
+                f"total={time.perf_counter() - t0:.3f}s",
+                flush=True,
+            )
             return
 
         self._update_widget_ranges()
@@ -382,6 +629,12 @@ class RecordBrowserPanel(param.Parameterized):
 
         if not self._sync_index_from_current_focus():
             self._publish_focus_for_current_index()
+
+        print(
+            "[AstronomicAL record_browser] refresh end "
+            f"total={time.perf_counter() - t0:.3f}s",
+            flush=True,
+        )
 
     def _render_no_dataset(self) -> None:
         load_button = pn.widgets.Button(
@@ -450,7 +703,8 @@ class RecordBrowserPanel(param.Parameterized):
         if not hasattr(self, "index_input"):
             return
 
-        max_index = max(0, len(self.df) - 1)
+        max_index = max(0, self.row_count - 1)
+
         self.index_input.start = 0
         self.index_input.end = max_index
         self.index_input.value = self.index
@@ -589,8 +843,8 @@ class RecordBrowserPanel(param.Parameterized):
     # ---------------------------------------------------------------------
 
     def _build_dashboard_ui(self) -> None:
-        max_index = max(0, len(self.df) - 1)
-        self.param.index.bounds = (0, max_index)
+        max_index = max(0, self.row_count - 1)
+        self._set_index_bounds(max_index)
         self.index = min(max(self.index, 0), max_index)
 
         self._sync_index_from_current_focus()
@@ -817,15 +1071,20 @@ class RecordBrowserPanel(param.Parameterized):
         self._update_navigation_flags()
 
     def _go_next(self, _event):
-        if self.df is None or len(self.df) == 0:
+        if self.row_count <= 1:
+            self.index = 0
+            self._update_navigation_flags()
             return
+
+        max_index = self.row_count - 1
+        self._set_index_bounds(max_index)
 
         if self.current_position < len(self.visited_indices) - 1:
             self.current_position += 1
-            self.index = self.visited_indices[self.current_position]
+            self.index = min(self.visited_indices[self.current_position], max_index)
         else:
             new_index = self.index + 1
-            if new_index <= len(self.df) - 1:
+            if new_index <= max_index:
                 self.index = new_index
             else:
                 self.index = 0
@@ -838,31 +1097,83 @@ class RecordBrowserPanel(param.Parameterized):
             self._find_from_id(sourceid)
 
     def _get_id(self):
+        selected = self._get_current_row_df()
+
+        if selected.empty:
+            return pd.Series(dtype="object")
+
         if self.record_id_col == "Use Index":
-            return pd.Series(self.df.index, index=self.df.index)
+            return pd.Series(selected.index, index=selected.index)
 
-        if self.record_id_col in self.df.columns:
-            return self.df[self.record_id_col]
+        if self.record_id_col in selected.columns:
+            return selected[self.record_id_col]
 
-        return pd.Series(self.df.index, index=self.df.index)
+        return pd.Series(selected.index, index=selected.index)
 
     def _get_current_row_df(self):
-        if self.df is None or len(self.df) == 0:
-            return pd.DataFrame(columns=getattr(self.df, "columns", []))
+        if self.source is None or self.row_count <= 0:
+            return pd.DataFrame(columns=self.columns)
 
-        if self.index < 0 or self.index >= len(self.df):
-            return pd.DataFrame(columns=self.df.columns)
+        if self.index < 0 or self.index >= self.row_count:
+            return pd.DataFrame(columns=self.columns)
 
-        return self.df.iloc[[self.index]].copy()
+        wanted: List[str] = []
+
+        if (
+            self.record_id_col
+            and self.record_id_col != "Use Index"
+            and self.record_id_col in self.columns
+        ):
+            wanted.append(self.record_id_col)
+
+        if (
+            self.label_col
+            and self.label_col != "No Labels"
+            and self.label_col in self.columns
+        ):
+            wanted.append(self.label_col)
+
+        for col in self.extra_info_cols:
+            if col in self.columns and col not in wanted:
+                wanted.append(col)
+
+        # If there are no real columns to fetch, return a non-empty dummy row so
+        # _get_extra_info_df still displays the index-based Record ID.
+        if not wanted:
+            return pd.DataFrame({"__record_index__": [self.index]})
+
+        try:
+            return self.source.get_row_by_position(
+                self.index,
+                columns=wanted,
+            )
+        except Exception:
+            pass
+
+        datasets = getattr(self.context, "datasets", None)
+        dataset_id = self._dataset_id()
+
+        if datasets is not None and dataset_id is not None:
+            method = getattr(datasets, "get_row_by_position", None)
+            if callable(method):
+                try:
+                    return method(dataset_id, self.index, columns=wanted)
+                except Exception:
+                    pass
+
+        return pd.DataFrame(columns=wanted)
 
     def _get_selected_id(self):
+        if self.row_count <= 0:
+            return None
+
+        if self.record_id_col == "Use Index":
+            return str(self.index)
+
         selected = self._get_current_row_df()
 
         if selected.empty:
             return None
-
-        if self.record_id_col == "Use Index":
-            return str(selected.index[0])
 
         if self.record_id_col in selected.columns:
             return str(selected[self.record_id_col].iloc[0])
@@ -870,50 +1181,113 @@ class RecordBrowserPanel(param.Parameterized):
         return None
 
     def _find_index_for_row_id(self, row_id):
-        if row_id is None or self.df is None or len(self.df) == 0:
+        if row_id is None or self.row_count <= 0:
             return None
 
-        try:
-            id_series = self._get_id().astype(str)
-            matches = id_series == str(row_id)
-            positions = np.flatnonzero(matches.to_numpy())
-            if len(positions) > 0:
-                return int(positions[0])
-        except Exception:
-            pass
+        if self.record_id_col == "Use Index":
+            try:
+                position = int(row_id)
+            except Exception:
+                return None
+
+            if 0 <= position < self.row_count:
+                return position
+
+            return None
+
+        if not self.record_id_col or self.record_id_col not in self.columns:
+            return None
+
+        datasets = getattr(self.context, "datasets", None)
+        dataset_id = self._dataset_id()
+
+        if datasets is not None and dataset_id is not None:
+            method = getattr(datasets, "find_position_by_id", None)
+            if callable(method):
+                try:
+                    position = method(
+                        dataset_id,
+                        row_id,
+                        self.record_id_col,
+                    )
+                    if position is not None:
+                        return int(position)
+                except Exception:
+                    pass
+
+        if self.source is not None:
+            method = getattr(self.source, "find_position_by_id", None)
+            if callable(method):
+                try:
+                    position = method(row_id, self.record_id_col)
+                    if position is not None:
+                        return int(position)
+                except Exception:
+                    pass
 
         return None
 
     def _find_from_id(self, sourceid):
         sourceid = sourceid.strip()
 
-        if not sourceid or self.df is None or len(self.df) == 0:
+        if not sourceid or self.row_count <= 0:
             return
 
-        id_series = self._get_id().astype(str)
+        exact_position = self._find_index_for_row_id(sourceid)
+
+        if exact_position is not None:
+            self.index = exact_position
+            return
+
+        if self.record_id_col == "Use Index":
+            print("No matches found")
+            return
+
+        if not self.record_id_col or self.record_id_col not in self.columns:
+            print("No record ID column is mapped")
+            return
+
+        # Partial search fallback. This reads only the ID column, not the full table.
+        try:
+            id_df = self.source.to_pandas(
+                columns=[self.record_id_col],
+            )
+        except Exception:
+            print("Could not search record IDs")
+            return
+
+        if id_df.empty or self.record_id_col not in id_df.columns:
+            print("No matches found")
+            return
+
+        id_series = id_df[self.record_id_col].astype(str)
+
         matches = id_series.str.contains(sourceid, case=True, na=False)
         n_matches = int(matches.sum())
 
         if n_matches == 1:
             self.index = int(np.flatnonzero(matches.to_numpy())[0])
-        elif n_matches == 0:
-            print("No matches found")
-        else:
-            exact_matches = id_series == sourceid
-            n_exact = int(exact_matches.sum())
+            return
 
-            if n_exact == 1:
-                self.index = int(np.flatnonzero(exact_matches.to_numpy())[0])
-            elif n_exact > 1:
-                print(
-                    f"There are {n_exact} records which exactly match the "
-                    "provided record ID."
-                )
-            else:
-                print(
-                    f"There are {n_matches} records containing the provided "
-                    "record ID; be more specific."
-                )
+        if n_matches == 0:
+            print("No matches found")
+            return
+
+        exact_matches = id_series == sourceid
+        n_exact = int(exact_matches.sum())
+
+        if n_exact == 1:
+            self.index = int(np.flatnonzero(exact_matches.to_numpy())[0])
+        elif n_exact > 1:
+            print(
+                f"There are {n_exact} records which exactly match the "
+                "provided record ID."
+            )
+        else:
+            print(
+                f"There are {n_matches} records containing the provided "
+                "record ID; be more specific."
+            )
 
     def _update_navigation_flags(self):
         if not hasattr(self, "prev_button") or not hasattr(self, "next_button"):
@@ -1151,7 +1525,7 @@ class RecordBrowserPanel(param.Parameterized):
         reserved = {"ra_dec"}
 
         options = [
-            col for col in self.df.columns
+            col for col in self.columns
             if col not in already and col not in reserved
         ]
 
@@ -1216,7 +1590,7 @@ class RecordBrowserPanel(param.Parameterized):
     # ---------------------------------------------------------------------
 
     def _initialise_label_selector(self):
-        label_column_options = ["No Labels"] + list(self.df.columns)
+        label_column_options = ["No Labels"] + list(self.columns)
 
         if self.label_col not in label_column_options:
             self.label_col = "No Labels"
@@ -1257,7 +1631,7 @@ class RecordBrowserPanel(param.Parameterized):
         if not hasattr(self, "label_selector"):
             return
 
-        options = ["No Labels"] + list(self.df.columns)
+        options = ["No Labels"] + list(self.columns)
         self.label_selector.options = options
 
         if self.label_col not in options:
@@ -1418,7 +1792,7 @@ class RecordBrowserPanel(param.Parameterized):
 
     def _sync_label_editor_state(self, selected_label_column, keep_button_visible=True):
         if (
-            selected_label_column not in self.df.columns
+            selected_label_column not in self.columns
             or selected_label_column == "No Labels"
         ):
             self.labels = []
@@ -1426,31 +1800,35 @@ class RecordBrowserPanel(param.Parameterized):
             self.confirm_label_button.visible = False
             return
 
-        label_type = get_series_type(self.df[selected_label_column])
+        unique_values, label_type, exceeded = self._get_unique_label_values(
+            selected_label_column,
+            max_values=21,
+        )
 
-        if label_type == "mixed":
-            self.df[selected_label_column] = self.df[selected_label_column].astype(str)
-            label_type = "string"
-        elif label_type == "bool":
-            self.df[selected_label_column] = self.df[selected_label_column].astype(int)
-            label_type = "int"
-
-        unique_values = self.df[selected_label_column].dropna().unique()
-
-        if len(unique_values) > 20:
+        if exceeded:
             print(
                 "You have chosen a column with too many unique values "
                 "(possibly continuous); please choose a column with a smaller "
-                "set of labels (<=20)."
+                "set of labels (<=20).",
+                flush=True,
             )
             self.labels = []
             self.label_editor_layout[:] = []
             self.confirm_label_button.visible = False
             return
 
-        self.labels = sorted(unique_values)
+        if label_type == "mixed":
+            unique_values = [str(value) for value in unique_values]
+        elif label_type == "bool":
+            unique_values = [int(value) for value in unique_values]
+
+        try:
+            self.labels = sorted(unique_values)
+        except TypeError:
+            self.labels = sorted(unique_values, key=lambda value: str(value))
+
         self._build_label_editor_rows()
-        self.confirm_label_button.visible = keep_button_visible
+        self.confirm_label_button.visible = keep_button_visible and bool(self.labels)
 
     def _build_label_editor_rows(self):
         self.label_to_strings_param = {}

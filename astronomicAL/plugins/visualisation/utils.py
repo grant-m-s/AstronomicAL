@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
+import time
+
 import numpy as np
 import pandas as pd
 from bokeh.models import HoverTool, WheelZoomTool
@@ -213,13 +215,217 @@ def _active_dataset_id(context) -> Optional[str]:
     except Exception:
         return None
 
-
 def _active_df(context) -> Optional[pd.DataFrame]:
+
     try:
-        return context.datasets.get_df()
+        datasets = getattr(context, "datasets", None)
+        if datasets is None:
+            return None
+
+        dataset_id = _active_dataset_id(context)
+        if dataset_id is None:
+            return None
+
+        if hasattr(datasets, "head"):
+            return datasets.head(dataset_id, n=0)
+
+        try:
+            return datasets.get_df(dataset_id, limit=0)
+        except TypeError:
+            return datasets.get_df(dataset_id)
+
     except Exception:
         return None
 
+def _dataset_columns(context, dataset_id: Optional[str]) -> List[str]:
+    datasets = getattr(context, "datasets", None)
+
+    if datasets is None or dataset_id is None:
+        return []
+
+    if hasattr(datasets, "list_columns"):
+        try:
+            return [str(col) for col in datasets.list_columns(dataset_id)]
+        except Exception:
+            pass
+
+    # Legacy fallback. This may materialise, so only use if needed.
+    df = _active_df(context)
+    if df is None:
+        return []
+
+    return [str(col) for col in df.columns]
+
+
+def _dataset_row_count(context, dataset_id: Optional[str]) -> int:
+    datasets = getattr(context, "datasets", None)
+
+    if datasets is None or dataset_id is None:
+        return 0
+
+    if hasattr(datasets, "row_count"):
+        try:
+            count = datasets.row_count(dataset_id)
+            return int(count or 0)
+        except Exception:
+            pass
+
+    # Legacy fallback.
+    try:
+        df = datasets.get_df(dataset_id)
+        return int(len(df))
+    except Exception:
+        return 0
+
+
+def _dataset_fingerprint(context, dataset_id: Optional[str]) -> Tuple[Any, ...]:
+    """
+    Lightweight cache identity for the active dataset.
+
+    Do not use id(df), because that forces a materialised DataFrame and changes
+    every time a Parquet-backed view is read.
+    """
+    datasets = getattr(context, "datasets", None)
+
+    if datasets is None or dataset_id is None:
+        return (dataset_id, None)
+
+    try:
+        meta = datasets.get_meta(dataset_id)
+    except Exception:
+        meta = {}
+
+    backend = meta.get("backend")
+    source_path = meta.get("source_path") or meta.get("cache_path") or meta.get("parquet_path")
+    row_count = meta.get("row_count") or meta.get("rows") or _dataset_row_count(context, dataset_id)
+
+    # Include a lightweight version-ish marker if present. Later you can update
+    # this when derived columns, labels, or table mutations occur.
+    version = (
+        meta.get("version")
+        or meta.get("updated_at")
+        or meta.get("cache_mtime")
+        or meta.get("dataset_version")
+    )
+
+    return (
+        dataset_id,
+        backend,
+        str(source_path) if source_path is not None else None,
+        int(row_count or 0),
+        version,
+    )
+
+
+def _unique_existing_columns(
+    columns: Sequence[Any],
+    available_columns: Sequence[str],
+) -> List[Any]:
+    available = set(str(col) for col in available_columns)
+    wanted: List[Any] = []
+    seen = set()
+
+    for col in columns:
+        if col is None:
+            continue
+
+        if col in {"Use Index", "No Labels"}:
+            continue
+
+        col_str = str(col)
+        if col_str not in available:
+            continue
+
+        if col_str in seen:
+            continue
+
+        wanted.append(col)
+        seen.add(col_str)
+
+    return wanted
+
+
+def _plot_required_columns(context, dataset_id: Optional[str], state, *, require_y: bool) -> List[Any]:
+    """
+    Determine the minimum columns required to prepare a scatter/density/histogram
+    frame.
+
+    This is the key replacement for loading the entire dataset and then taking
+    x/y/label/id columns from it.
+    """
+    available_columns = _dataset_columns(context, dataset_id)
+
+    candidates: List[Any] = [
+        state.x,
+        state.y if require_y else None,
+        getattr(state, "record_id_col", None),
+        getattr(state, "label_col", None),
+    ]
+
+    # If future state objects add hover columns, this will include them without
+    # breaking older state objects.
+    hover_cols = getattr(state, "hover_cols", None) or getattr(state, "hover_columns", None) or []
+    candidates.extend(list(hover_cols))
+
+    return _unique_existing_columns(candidates, available_columns)
+
+def _get_dataset_view_for_columns(
+    context,
+    dataset_id: Optional[str],
+    columns: Sequence[Any],
+    *,
+    limit: Optional[int] = None,
+) -> pd.DataFrame:
+
+    datasets = getattr(context, "datasets", None)
+
+    if datasets is None or dataset_id is None:
+        return pd.DataFrame(columns=[str(col) for col in columns if col is not None])
+
+    wanted: list[Any] = []
+    seen: set[str] = set()
+
+    for col in columns:
+        if col is None:
+            continue
+
+        col_str = str(col)
+
+        if col_str in {"Use Index", "No Labels"}:
+            continue
+
+        if col_str in seen:
+            continue
+
+        wanted.append(col)
+        seen.add(col_str)
+
+    if not wanted:
+        return pd.DataFrame()
+
+    get_df = getattr(datasets, "get_df", None)
+
+    if callable(get_df):
+        try:
+            return get_df(dataset_id, columns=wanted, limit=limit)
+        except TypeError:
+            # Compatibility with the old DatasetManager.get_df(dataset_id)
+            # signature. This may materialise the full dataset, but only on
+            # old managers that do not support column-limited access.
+            try:
+                df = get_df(dataset_id)
+                existing = [col for col in wanted if col in df.columns]
+                return df.loc[:, existing].copy()
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    try:
+        source = datasets.get_source(dataset_id)
+        return source.to_pandas(columns=wanted, limit=limit)
+    except Exception:
+        return pd.DataFrame(columns=wanted)
 
 def _mapped_column(
     context,
@@ -228,37 +434,43 @@ def _mapped_column(
     *,
     allow_index: bool,
 ) -> Optional[Any]:
+    columns = _dataset_columns(context, dataset_id)
+    column_set = set(columns)
+
     datasets = getattr(context, "datasets", None)
 
     if datasets is not None and dataset_id is not None:
         try:
             value = datasets.get_mapping(dataset_id, semantic)
+
             if value == "Use Index" and allow_index:
                 return value
 
-            df = datasets.get_df(dataset_id)
-            if value in df.columns:
+            if value in column_set:
                 return value
         except Exception:
             pass
 
     cfg = getattr(context, "config", None)
     settings = getattr(cfg, "settings", {}) if cfg is not None else {}
-    df = _active_df(context)
 
     if semantic == "record_id":
         value = settings.get("id_col")
+
         if value == "Use Index" and allow_index:
             return value
-        if df is not None and value in df.columns:
+
+        if value in column_set:
             return value
 
     if semantic == "target_label":
         value = settings.get("label_col")
-        if df is not None and value in df.columns:
+
+        if value in column_set:
             return value
 
     return None
+
 
 
 def _default_colour_map(raw_labels: Iterable[Any]) -> Dict[Any, str]:
@@ -281,20 +493,131 @@ def _safe_series(df: pd.DataFrame, column: Any) -> pd.Series:
 
 
 def _numeric_array(df: pd.DataFrame, column: Any) -> np.ndarray:
-    series = _safe_series(df, column)
-    return pd.to_numeric(series, errors="coerce").to_numpy(dtype="float64", copy=False)
+    """
+    Return a numeric NumPy array suitable for plotting.
 
+    Uses float32 only when safe. Very large scientific values, such as
+    luminosities, must remain float64 or they overflow to inf and disappear
+    during np.isfinite masking.
+    """
+    series = df[column]
 
-def _row_id_array(df: pd.DataFrame, record_id_col: Optional[Any], mask: np.ndarray) -> np.ndarray:
-    if record_id_col == "Use Index" or not record_id_col or record_id_col not in df.columns:
+    if pd.api.types.is_bool_dtype(series.dtype):
+        return series.to_numpy(dtype=np.float32, copy=False, na_value=np.nan)
+
+    if pd.api.types.is_numeric_dtype(series.dtype):
         try:
-            return df.index[mask].astype(str).to_numpy()
-        except AttributeError:
-            return np.asarray(df.index[mask], dtype=str)
+            values = series.to_numpy(copy=False)
+        except Exception:
+            values = series.to_numpy(dtype=np.float64, copy=False, na_value=np.nan)
+    else:
+        values = pd.to_numeric(series, errors="coerce").to_numpy(copy=False)
 
-    values = _safe_series(df, record_id_col)
-    return values.loc[mask].astype(str).to_numpy()
+    values = np.asarray(values)
 
+    if values.dtype == np.float32:
+        return values
+
+    # Convert nullable/object/numeric arrays to float64 first. This avoids the
+    # overflow warning that happens when pandas casts huge values directly to
+    # float32.
+    if not np.issubdtype(values.dtype, np.number):
+        values64 = values.astype(np.float64, copy=False)
+    else:
+        values64 = values.astype(np.float64, copy=False)
+
+    finite = np.isfinite(values64)
+
+    if not finite.any():
+        return values64
+
+    max_abs = np.nanmax(np.abs(values64[finite]))
+
+    # Only downcast when it cannot overflow.
+    if max_abs <= 1.0e20:
+        return values64.astype(np.float32, copy=False)
+
+    return values64
+
+def _row_id_array(
+    df: pd.DataFrame,
+    record_id_col: Optional[Any],
+    mask: np.ndarray,
+) -> np.ndarray:
+    """
+    Return row IDs for the prepared frame.
+
+    Do not stringify every ID here. Keep the original dtype and only stringify
+    small selected/forced ID sets later when needed.
+    """
+    if record_id_col == "Use Index" or record_id_col is None:
+        values = df.index.to_numpy(copy=False)
+    elif record_id_col in df.columns:
+        values = df[record_id_col].to_numpy(copy=False)
+    else:
+        values = df.index.to_numpy(copy=False)
+
+    return values[mask]
+
+
+def _dataset_dtypes(context, dataset_id: Optional[str]) -> Dict[str, str]:
+    datasets = getattr(context, "datasets", None)
+
+    if datasets is None or dataset_id is None:
+        return {}
+
+    if hasattr(datasets, "dtypes"):
+        try:
+            return {
+                str(col): str(dtype)
+                for col, dtype in datasets.dtypes(dataset_id).items()
+            }
+        except Exception:
+            pass
+
+    df = _active_df(context)
+    if df is None:
+        return {}
+
+    return {str(col): str(dtype) for col, dtype in df.dtypes.items()}
+
+
+def _is_numeric_dtype_name(dtype_name: str) -> bool:
+    dtype_name = str(dtype_name).lower()
+
+    numeric_markers = [
+        "int",
+        "integer",
+        "bigint",
+        "smallint",
+        "tinyint",
+        "hugeint",
+        "uint",
+        "float",
+        "double",
+        "real",
+        "decimal",
+        "numeric",
+        "bool",
+        "boolean",
+    ]
+
+    return any(marker in dtype_name for marker in numeric_markers)
+
+
+def _numeric_columns_from_dataset(context, dataset_id: Optional[str]) -> List[str]:
+    columns = _dataset_columns(context, dataset_id)
+    dtypes = _dataset_dtypes(context, dataset_id)
+
+    if not dtypes:
+        return columns
+
+    numeric_columns = [
+        column for column in columns
+        if _is_numeric_dtype_name(dtypes.get(column, ""))
+    ]
+
+    return numeric_columns
 
 def _label_arrays(
     df: pd.DataFrame,
@@ -320,19 +643,107 @@ def _label_arrays(
 
     return raw_filtered, display, colours
 
-
 def prepare_plot_frame(context, state, *, require_y: bool) -> PreparedFrame:
-    dataset_id = _active_dataset_id(context)
-    df = _active_df(context)
+    t_total = time.perf_counter()
 
-    if df is None or df.empty or not state.x:
+    print(
+        "[AstronomicAL visualisation] prepare_plot_frame called: "
+        f"x={state.x!r}, y={state.y!r}, require_y={require_y}",
+        flush=True,
+    )
+
+    dataset_id = _active_dataset_id(context)
+    total_rows = _dataset_row_count(context, dataset_id)
+
+    if not state.x:
         return PreparedFrame(
             dataset_id=dataset_id,
             frame=pd.DataFrame(),
             x_name=state.x,
             y_name=state.y if require_y else None,
             require_y=require_y,
-            row_count_before_filter=0,
+            row_count_before_filter=total_rows,
+            row_count_after_filter=0,
+        )
+
+    available_columns = _dataset_columns(context, dataset_id)
+    available_set = set(available_columns)
+
+    if state.x not in available_set:
+        return PreparedFrame(
+            dataset_id=dataset_id,
+            frame=pd.DataFrame(),
+            x_name=state.x,
+            y_name=state.y if require_y else None,
+            require_y=require_y,
+            row_count_before_filter=total_rows,
+            row_count_after_filter=0,
+        )
+
+    if require_y and (not state.y or state.y not in available_set):
+        return PreparedFrame(
+            dataset_id=dataset_id,
+            frame=pd.DataFrame(),
+            x_name=state.x,
+            y_name=state.y,
+            require_y=require_y,
+            row_count_before_filter=total_rows,
+            row_count_after_filter=0,
+        )
+
+    required_columns = _plot_required_columns(
+        context,
+        dataset_id,
+        state,
+        require_y=require_y,
+    )
+
+    # ------------------------------------------------------------------
+    # 1. Data load timing
+    # ------------------------------------------------------------------
+    t_load = time.perf_counter()
+
+    df = _get_dataset_view_for_columns(
+        context,
+        dataset_id,
+        required_columns,
+    )
+
+    load_seconds = time.perf_counter() - t_load
+
+    if df is None:
+        print(
+            "[AstronomicAL visualisation] Loaded plot view: df=None "
+            f"in {load_seconds:.3f}s",
+            flush=True,
+        )
+
+        return PreparedFrame(
+            dataset_id=dataset_id,
+            frame=pd.DataFrame(),
+            x_name=state.x,
+            y_name=state.y if require_y else None,
+            require_y=require_y,
+            row_count_before_filter=total_rows,
+            row_count_after_filter=0,
+        )
+
+    print(
+        "[AstronomicAL visualisation] Loaded plot view: "
+        f"{len(df):,} rows × {len(df.columns):,} columns "
+        f"in {load_seconds:.3f}s. "
+        f"Columns: {list(df.columns)}",
+        flush=True,
+    )
+
+    if df.empty:
+        return PreparedFrame(
+            dataset_id=dataset_id,
+            frame=pd.DataFrame(),
+            x_name=state.x,
+            y_name=state.y if require_y else None,
+            require_y=require_y,
+            row_count_before_filter=total_rows,
             row_count_after_filter=0,
         )
 
@@ -343,7 +754,7 @@ def prepare_plot_frame(context, state, *, require_y: bool) -> PreparedFrame:
             x_name=state.x,
             y_name=state.y if require_y else None,
             require_y=require_y,
-            row_count_before_filter=len(df),
+            row_count_before_filter=total_rows,
             row_count_after_filter=0,
         )
 
@@ -354,9 +765,14 @@ def prepare_plot_frame(context, state, *, require_y: bool) -> PreparedFrame:
             x_name=state.x,
             y_name=state.y,
             require_y=require_y,
-            row_count_before_filter=len(df),
+            row_count_before_filter=total_rows,
             row_count_after_filter=0,
         )
+
+    # ------------------------------------------------------------------
+    # 2. Numeric arrays + mask timing
+    # ------------------------------------------------------------------
+    t_arrays = time.perf_counter()
 
     x = _numeric_array(df, state.x)
     mask = np.isfinite(x)
@@ -372,9 +788,24 @@ def prepare_plot_frame(context, state, *, require_y: bool) -> PreparedFrame:
     if require_y and state.log_y and y is not None:
         mask &= y > 0
 
+    arrays_seconds = time.perf_counter() - t_arrays
+
+    print(
+        "[AstronomicAL visualisation] prepare arrays/mask "
+        f"{arrays_seconds:.3f}s "
+        f"finite_rows={int(mask.sum()):,}/{len(mask):,}",
+        flush=True,
+    )
+
+    # ------------------------------------------------------------------
+    # 3. Label arrays timing
+    # ------------------------------------------------------------------
+    t_labels = time.perf_counter()
+
     label_raw = None
     label_display = None
     label_colours = None
+
     if state.label_col and state.label_col in df.columns:
         label_raw, label_display, label_colours = _label_arrays(
             df,
@@ -383,18 +814,39 @@ def prepare_plot_frame(context, state, *, require_y: bool) -> PreparedFrame:
             state,
         )
 
+    labels_seconds = time.perf_counter() - t_labels
+
+    print(
+        "[AstronomicAL visualisation] prepare labels "
+        f"{labels_seconds:.3f}s "
+        f"label_col={state.label_col!r}",
+        flush=True,
+    )
+
+    # ------------------------------------------------------------------
+    # 4. Row ID timing
+    # ------------------------------------------------------------------
+    t_row_ids = time.perf_counter()
+
     row_ids = _row_id_array(df, state.record_id_col, mask)
 
-    if label_display is None:
-        hover_labels = np.full(len(row_ids), "—", dtype=object)
-    else:
-        hover_labels = np.asarray(label_display, dtype=object)
+    row_ids_seconds = time.perf_counter() - t_row_ids
+
+    print(
+        "[AstronomicAL visualisation] prepare row_ids "
+        f"{row_ids_seconds:.3f}s "
+        f"record_id_col={state.record_id_col!r}",
+        flush=True,
+    )
+
+    # ------------------------------------------------------------------
+    # 6. Masked array extraction + dict construction timing
+    # ------------------------------------------------------------------
+    t_data = time.perf_counter()
 
     data: Dict[str, Any] = {
         INTERNAL_X: x[mask],
         INTERNAL_ROW_ID: row_ids,
-        HOVER_ROW_ID: row_ids,
-        HOVER_LABEL: hover_labels,
     }
 
     if require_y and y is not None:
@@ -405,7 +857,43 @@ def prepare_plot_frame(context, state, *, require_y: bool) -> PreparedFrame:
         data[INTERNAL_LABEL_DISPLAY] = label_display
         data[INTERNAL_LABEL_COLOUR] = label_colours
 
-    frame = pd.DataFrame(data)
+    data_seconds = time.perf_counter() - t_data
+
+    print(
+        "[AstronomicAL visualisation] prepare data dict "
+        f"{data_seconds:.3f}s",
+        flush=True,
+    )
+
+    # ------------------------------------------------------------------
+    # 7. PreparedFrame DataFrame construction timing
+    # ------------------------------------------------------------------
+    t_frame = time.perf_counter()
+
+    frame = pd.DataFrame(data, copy=False)
+
+    frame_seconds = time.perf_counter() - t_frame
+
+    print(
+        "[AstronomicAL visualisation] prepare dataframe "
+        f"{frame_seconds:.3f}s "
+        f"frame_rows={len(frame):,} frame_cols={len(frame.columns):,}",
+        flush=True,
+    )
+
+    total_seconds = time.perf_counter() - t_total
+
+    print(
+        "[AstronomicAL visualisation] prepare_plot_frame total "
+        f"{total_seconds:.3f}s "
+        f"(load={load_seconds:.3f}s, "
+        f"arrays={arrays_seconds:.3f}s, "
+        f"labels={labels_seconds:.3f}s, "
+        f"row_ids={row_ids_seconds:.3f}s, "
+        f"data={data_seconds:.3f}s, "
+        f"frame={frame_seconds:.3f}s)",
+        flush=True,
+    )
 
     return PreparedFrame(
         dataset_id=dataset_id,
@@ -413,19 +901,15 @@ def prepare_plot_frame(context, state, *, require_y: bool) -> PreparedFrame:
         x_name=state.x,
         y_name=state.y if require_y else None,
         require_y=require_y,
-        row_count_before_filter=len(df),
+        row_count_before_filter=total_rows or len(df),
         row_count_after_filter=len(frame),
     )
 
-
 def prepared_cache_key(context, state, *, require_y: bool) -> Tuple[Any, ...]:
-    df = _active_df(context)
     dataset_id = _active_dataset_id(context)
 
     return (
-        dataset_id,
-        id(df),
-        len(df) if df is not None else 0,
+        _dataset_fingerprint(context, dataset_id),
         state.x,
         state.y if require_y else None,
         require_y,
@@ -437,61 +921,96 @@ def prepared_cache_key(context, state, *, require_y: bool) -> Tuple[Any, ...]:
         state.label_col,
     )
 
-
 def sample_prepared_frame(
     data: PreparedFrame,
     limit: int,
     *,
     seed: int = 0,
-    force_row_ids: Optional[Sequence[str]] = None,
+    force_row_ids: Optional[Sequence[Any]] = None,
 ) -> PreparedFrame:
-    
     frame = data.frame
     n_rows = len(frame)
-    limit = int(limit)
-
-    if n_rows == 0:
-        return data
 
     if limit <= 0 or n_rows <= limit:
         return data
 
-    force_row_ids = [str(value) for value in (force_row_ids or [])]
-    forced_indices = np.asarray([], dtype=int)
+    limit = int(limit)
+    force_row_ids = list(force_row_ids or [])
 
+    # ------------------------------------------------------------------
+    # Fast deterministic display sample.
+    # ------------------------------------------------------------------
+    sample_count = min(limit, n_rows)
+
+    indices = np.linspace(
+        0,
+        n_rows - 1,
+        num=sample_count,
+        dtype=np.int64,
+    )
+
+    # ------------------------------------------------------------------
+    # Add forced IDs without stringifying/scanning everything unless needed.
+    # ------------------------------------------------------------------
     if force_row_ids and INTERNAL_ROW_ID in frame.columns:
-        row_ids = frame[INTERNAL_ROW_ID].astype(str).to_numpy(copy=False)
-        forced_mask = np.isin(row_ids, np.asarray(force_row_ids, dtype=str))
-        forced_indices = np.flatnonzero(forced_mask)
+        id_series = frame[INTERNAL_ROW_ID]
+        forced_indices: list[int] = []
 
-    # If the forced set is itself larger than the limit, keep the first forced
-    # rows. The selection overlay still draws selected points separately, so the
-    # main sampled renderer does not need to exceed the configured limit.
-    if len(forced_indices) >= limit:
-        indices = np.sort(forced_indices[:limit])
-    else:
-        remaining_limit = limit - len(forced_indices)
+        # Try direct dtype-compatible matching first. This is much faster than
+        # converting the full ID column to strings.
+        for forced_id in force_row_ids:
+            found = None
 
-        if len(forced_indices):
-            all_indices = np.arange(n_rows)
-            remaining_pool = np.setdiff1d(all_indices, forced_indices, assume_unique=False)
-        else:
-            remaining_pool = np.arange(n_rows)
+            try:
+                matches = np.flatnonzero(id_series.to_numpy(copy=False) == forced_id)
+                if len(matches):
+                    found = int(matches[0])
+            except Exception:
+                found = None
 
-        rng = np.random.default_rng(seed)
+            # If direct matching failed, try numeric coercion for numeric IDs.
+            if found is None:
+                try:
+                    numeric_id = pd.to_numeric(forced_id)
+                    matches = np.flatnonzero(id_series.to_numpy(copy=False) == numeric_id)
+                    if len(matches):
+                        found = int(matches[0])
+                except Exception:
+                    found = None
 
-        if len(remaining_pool) > remaining_limit:
-            sampled_remaining = rng.choice(
-                remaining_pool,
-                size=remaining_limit,
-                replace=False,
+            # Last-resort fallback: only now do string comparison.
+            # This is expensive, but should only happen for genuinely mismatched
+            # ID types.
+            if found is None:
+                try:
+                    values_as_str = id_series.astype(str).to_numpy(copy=False)
+                    matches = np.flatnonzero(values_as_str == str(forced_id))
+                    if len(matches):
+                        found = int(matches[0])
+                except Exception:
+                    found = None
+
+            if found is not None:
+                forced_indices.append(found)
+
+        if forced_indices:
+            indices = np.concatenate(
+                [
+                    indices,
+                    np.asarray(forced_indices, dtype=np.int64),
+                ]
             )
-        else:
-            sampled_remaining = remaining_pool
 
-        indices = np.sort(np.concatenate([forced_indices, sampled_remaining]))
+    indices = np.unique(indices)
+    indices.sort()
 
-    sampled = frame.iloc[indices].copy()
+    # If forced rows pushed us above the limit, keep all forced rows and trim
+    # regular sample rows from the end. Usually forced_indices is tiny, so this
+    # rarely matters.
+    if len(indices) > limit and force_row_ids:
+        indices = indices[:limit]
+
+    sampled = frame.take(indices).copy()
 
     return PreparedFrame(
         dataset_id=data.dataset_id,
@@ -503,7 +1022,6 @@ def sample_prepared_frame(
         row_count_after_filter=len(sampled),
         sampled_from=n_rows,
     )
-
 
 def frame_in_ranges(
     data: PreparedFrame,

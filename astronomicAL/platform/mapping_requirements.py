@@ -187,41 +187,63 @@ def dataset_exists(context: Any, dataset_id: Optional[str]) -> bool:
         return False
 
     datasets = getattr(context, "datasets", None)
+
     if datasets is None:
         return False
 
     try:
-        if hasattr(datasets, "has_dataset"):
-            return bool(datasets.has_dataset(dataset_id))
+        has_dataset = getattr(datasets, "has_dataset", None)
+        if callable(has_dataset):
+            return bool(has_dataset(dataset_id))
+    except Exception:
+        pass
 
+    try:
         if hasattr(datasets, "_datasets"):
             return str(dataset_id) in datasets._datasets
-
-        datasets.get_df(dataset_id)
-        return True
     except Exception:
-        return False
+        pass
 
+    try:
+        list_columns = getattr(datasets, "list_columns", None)
+        if callable(list_columns):
+            list_columns(dataset_id)
+            return True
+    except Exception:
+        pass
+
+    # Last resort only. Avoid this path for the new source-backed datasets.
+    try:
+        get_source = getattr(datasets, "get_source", None)
+        if callable(get_source):
+            get_source(dataset_id)
+            return True
+    except Exception:
+        pass
+
+    return False
 
 def _mapping_column_is_valid(
     *,
     context: Any,
     dataset_id: str,
     column_name: Optional[str],
+    allow_index: bool = False,
 ) -> bool:
     if column_name is None:
         return False
 
-    datasets = getattr(context, "datasets", None)
-    if datasets is None:
+    column_name = str(column_name)
+
+    if allow_index and column_name == "Use Index":
+        return True
+
+    columns = list_dataset_columns(context, dataset_id)
+
+    if not columns:
         return False
 
-    try:
-        df = datasets.get_df(dataset_id)
-    except Exception:
-        return False
-
-    return str(column_name) in {str(col) for col in df.columns}
+    return column_name in {str(col) for col in columns}
 
 
 def resolve_mapping_requirements(
@@ -274,6 +296,7 @@ def resolve_mapping_requirements(
             context=context,
             dataset_id=resolved_dataset_id,
             column_name=column_name,
+            allow_index=req.allow_index,
         ):
             missing_required.append(req)
 
@@ -289,8 +312,9 @@ def resolve_mapping_requirements(
             context=context,
             dataset_id=resolved_dataset_id,
             column_name=column_name,
+            allow_index=req.allow_index,
         ):
-            missing_optional.append(req)
+            missing_required.append(req)
 
     mapping_debug_print(
         "resolve requirements",

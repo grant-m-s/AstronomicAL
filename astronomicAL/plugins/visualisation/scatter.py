@@ -38,19 +38,256 @@ from .utils import (
 class ScatterPanel(BaseVisualisationPanel):
     title = "Scatter Plot"
 
+    def _forced_positions_in_frame(self, frame: pd.DataFrame, forced_ids) -> list[int]:
+        """
+        Find forced row-id positions without stringifying the full row-id column.
+
+        This avoids the expensive path:
+            frame[INTERNAL_ROW_ID].astype(str)
+
+        for every range update.
+        """
+        if not forced_ids or frame is None or frame.empty:
+            return []
+
+        if INTERNAL_ROW_ID not in frame.columns:
+            return []
+
+        values = frame[INTERNAL_ROW_ID].to_numpy(copy=False)
+        positions: list[int] = []
+
+        for forced_id in forced_ids:
+            found = None
+
+            # Fast path for numeric row IDs.
+            try:
+                if np.issubdtype(values.dtype, np.integer):
+                    lookup_value = np.int64(forced_id)
+                elif np.issubdtype(values.dtype, np.floating):
+                    lookup_value = float(forced_id)
+                else:
+                    lookup_value = forced_id
+
+                matches = np.flatnonzero(values == lookup_value)
+                if len(matches):
+                    found = int(matches[0])
+            except Exception:
+                found = None
+
+            # Fallback for object/string ID columns only.
+            if found is None:
+                try:
+                    matches = np.flatnonzero(values == forced_id)
+                    if len(matches):
+                        found = int(matches[0])
+                except Exception:
+                    found = None
+
+            # Last-resort fallback. This should rarely run.
+            if found is None and values.dtype == object:
+                try:
+                    matches = np.flatnonzero(values.astype(str) == str(forced_id))
+                    if len(matches):
+                        found = int(matches[0])
+                except Exception:
+                    found = None
+
+            if found is not None:
+                positions.append(found)
+
+        return positions
+
+    def _row_id_lookup_for_frame(self, data):
+        """
+        Build a raw row-id -> integer position lookup for the current prepared frame.
+
+        This is only used when forced IDs need to be included in an interactive
+        sample.
+        """
+        if not hasattr(self, "_row_id_lookup_cache"):
+            self._row_id_lookup_cache = {}
+
+        cache_key = (id(data.frame), len(data.frame))
+
+        cached = self._row_id_lookup_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        frame = data.frame
+
+        if INTERNAL_ROW_ID not in frame.columns:
+            lookup = {}
+        else:
+            values = frame[INTERNAL_ROW_ID].to_numpy(copy=False)
+
+            lookup = {}
+            for idx, value in enumerate(values):
+                lookup[value] = idx
+                lookup[str(value)] = idx
+
+        self._row_id_lookup_cache[cache_key] = lookup
+
+        if len(self._row_id_lookup_cache) > 4:
+            try:
+                first_key = next(iter(self._row_id_lookup_cache))
+                self._row_id_lookup_cache.pop(first_key, None)
+            except Exception:
+                self._row_id_lookup_cache.clear()
+
+        return lookup
+
+    def _bokeh_safe_frame(self, frame: pd.DataFrame) -> pd.DataFrame:
+        """
+        Return a display-only frame safe to send to Bokeh/JavaScript.
+
+        The full server-side PreparedFrame should stay lean. Hover-only fields are
+        added here after sampling, not during 1M-row preparation.
+        """
+        if frame is None or frame.empty:
+            return frame
+
+        out = frame.copy(deep=False)
+
+        if HOVER_ROW_ID not in out.columns and INTERNAL_ROW_ID in out.columns:
+            out[HOVER_ROW_ID] = out[INTERNAL_ROW_ID].astype(str)
+
+        if HOVER_LABEL not in out.columns:
+            if INTERNAL_LABEL_DISPLAY in out.columns:
+                out[HOVER_LABEL] = out[INTERNAL_LABEL_DISPLAY].astype(str)
+            else:
+                out[HOVER_LABEL] = "—"
+
+        # Avoid Bokeh/JavaScript integer precision warnings.
+        id_columns = [
+            INTERNAL_ROW_ID,
+            HOVER_ROW_ID,
+        ]
+
+        for col in id_columns:
+            if col in out.columns:
+                out[col] = out[col].astype(str)
+
+        js_safe_max = 2**53 - 1
+        js_safe_min = -(2**53 - 1)
+
+        for col in out.columns:
+            if col in id_columns:
+                continue
+
+            try:
+                if pd.api.types.is_integer_dtype(out[col].dtype):
+                    col_min = out[col].min()
+                    col_max = out[col].max()
+
+                    if col_min < js_safe_min or col_max > js_safe_max:
+                        out[col] = out[col].astype(str)
+            except Exception:
+                pass
+
+        return out
+
+
+    def _sample_visible_frame(self, data, visible, effective_limit: int, forced_ids):
+
+        if not hasattr(self, "_interactive_sample_cache"):
+            self._interactive_sample_cache = {}
+
+        forced_ids = list(forced_ids or [])
+        forced_key = tuple(str(value) for value in forced_ids)
+
+        is_full = visible is data
+
+        cache_key = None
+        if is_full:
+            cache_key = (
+                id(data.frame),
+                len(data.frame),
+                int(effective_limit),
+                forced_key,
+            )
+
+            cached = self._interactive_sample_cache.get(cache_key)
+            if cached is not None:
+                return cached
+
+        # Always use the fast no-forced-ID sampling path first.
+        plot_data = sample_prepared_frame(
+            visible,
+            int(effective_limit),
+            seed=0,
+            force_row_ids=[],
+        )
+
+        # Add forced rows afterward, without forcing sample_prepared_frame into its
+        # slow ID-scanning branch.
+        if forced_ids:
+            forced_positions = self._forced_positions_in_frame(
+                visible.frame,
+                forced_ids,
+            )
+
+            if forced_positions:
+                extra = visible.frame.take(
+                    np.asarray(forced_positions, dtype=np.int64)
+                )
+
+                combined = pd.concat(
+                    [plot_data.frame, extra],
+                    ignore_index=True,
+                )
+
+                if INTERNAL_ROW_ID in combined.columns:
+                    combined = combined.drop_duplicates(
+                        subset=[INTERNAL_ROW_ID],
+                        keep="first",
+                    )
+
+                plot_data = PreparedFrame(
+                    dataset_id=plot_data.dataset_id,
+                    frame=combined,
+                    x_name=plot_data.x_name,
+                    y_name=plot_data.y_name,
+                    require_y=plot_data.require_y,
+                    row_count_before_filter=plot_data.row_count_before_filter,
+                    row_count_after_filter=len(combined),
+                    sampled_from=plot_data.sampled_from,
+                )
+
+        if cache_key is not None:
+            self._interactive_sample_cache[cache_key] = plot_data
+
+            if len(self._interactive_sample_cache) > 12:
+                try:
+                    first_key = next(iter(self._interactive_sample_cache))
+                    self._interactive_sample_cache.pop(first_key, None)
+                except Exception:
+                    self._interactive_sample_cache.clear()
+
+        return plot_data
+
+
     def _render(self) -> None:
+        t0 = time.perf_counter()
+
         self._clear_stream_watchers()
 
         data = self._plot_data(require_y=True)
 
-        self._interactive_current_frame = data.frame
+        t1 = time.perf_counter()
 
         if data.empty:
             self.plot_pane.object = self._empty("No finite X/Y data")
             self.status_pane.object = "0 plotted rows"
+            print(
+                "[AstronomicAL scatter] empty render "
+                f"prepare={t1 - t0:.2f}s",
+                flush=True,
+            )
             return
 
         use_raster = self._should_rasterize(data)
+
+        t2 = time.perf_counter()
 
         if use_raster:
             base = self._scatter_rasterized(data)
@@ -67,13 +304,15 @@ class ScatterPanel(BaseVisualisationPanel):
                 else ""
             )
 
+        t3 = time.perf_counter()
+
         overlays = [
             base,
             self._selection_points(data),
             self._focus_overlay(data, size=max(float(self.state.point_size) + 8, 12)),
         ]
 
-        self.plot_pane.object = hv.Overlay([item for item in overlays if item is not None]).collate().opts(
+        overlay = hv.Overlay([item for item in overlays if item is not None]).collate().opts(
             responsive=True,
             min_height=PLOT_MIN_HEIGHT,
             xlabel=str(self.state.x),
@@ -89,10 +328,50 @@ class ScatterPanel(BaseVisualisationPanel):
             framewise=True,
         )
 
+        t4 = time.perf_counter()
+
+        self.plot_pane.object = overlay
+
+        t5 = time.perf_counter()
+
         self.status_pane.object = (
             f"{len(data.frame):,} eligible rows · "
             f"{plotted_count:,} shown · {render_label}{sampled_note}"
         )
+
+        print(
+            "[AstronomicAL scatter] render timing "
+            f"mode={render_label} "
+            f"rows={len(data.frame):,} "
+            f"prepare={t1 - t0:.2f}s "
+            f"mode_check={t2 - t1:.2f}s "
+            f"build_base={t3 - t2:.2f}s "
+            f"build_overlay={t4 - t3:.2f}s "
+            f"assign_pane={t5 - t4:.2f}s "
+            f"total={t5 - t0:.2f}s",
+            flush=True,
+        )
+
+    def _range_cache_key(self, value):
+        if value is None:
+            return None
+
+        try:
+            if len(value) != 2:
+                return None
+
+            result = []
+            for item in value:
+                if item is None:
+                    result.append(None)
+                else:
+                    # Round to avoid tiny floating-point range changes causing
+                    # unnecessary cache misses.
+                    result.append(round(float(item), 8))
+
+            return tuple(result)
+        except Exception:
+            return None
 
     def _should_rasterize(self, data: PreparedFrame) -> bool:
         if self.state.render_mode == "datashader":
@@ -125,6 +404,65 @@ class ScatterPanel(BaseVisualisationPanel):
 
         return [str(row_id)]
 
+    def _range_is_full_extent(self, data, x_range, y_range) -> bool:
+        if x_range is None and y_range is None:
+            return True
+
+        frame = data.frame
+
+        try:
+            x_min = float(frame[INTERNAL_X].min())
+            x_max = float(frame[INTERNAL_X].max())
+        except Exception:
+            x_min = x_max = None
+
+        try:
+            y_min = float(frame[INTERNAL_Y].min())
+            y_max = float(frame[INTERNAL_Y].max())
+        except Exception:
+            y_min = y_max = None
+
+        def covers(bounds, data_min, data_max):
+            if bounds is None:
+                return True
+
+            if data_min is None or data_max is None:
+                return False
+
+            try:
+                low, high = bounds
+                low = float(low)
+                high = float(high)
+            except Exception:
+                return False
+
+            span = max(abs(data_max - data_min), 1e-12)
+            tolerance = span * 0.01
+
+            return low <= data_min + tolerance and high >= data_max - tolerance
+
+        return covers(x_range, x_min, x_max) and covers(y_range, y_min, y_max)
+
+    def _effective_interactive_sample_limit(self, visible_count: int) -> int:
+        """
+        Return the actual number of points to send to Bokeh in interactive mode.
+
+        The full prepared frame is still retained server-side. This only controls
+        the frontend Bokeh/HoloViews display size.
+        """
+        user_limit = int(getattr(self.state, "interactive_sample_limit", 50_000))
+
+        if visible_count >= 500_000:
+            return min(user_limit, 10_000)
+
+        if visible_count >= 100_000:
+            return min(user_limit, 15_000)
+
+        if visible_count >= 25_000:
+            return min(user_limit, 20_000)
+
+        return min(user_limit, visible_count)
+
     def _scatter_interactive_dynamic(self, data: PreparedFrame):
         range_stream = streams.RangeXY(
             x_range=self._last_x_range,
@@ -134,20 +472,79 @@ class ScatterPanel(BaseVisualisationPanel):
         self._selection_event_seq = getattr(self, "_selection_event_seq", 0)
         self._latest_selection_payload = None
 
+        point_cache = {}
+
         def make_points(x_range=None, y_range=None):
+            t0 = time.perf_counter()
+
             effective_x_range = x_range or self._last_x_range
             effective_y_range = y_range or self._last_y_range
 
+            x_key = self._range_cache_key(effective_x_range)
+            y_key = self._range_cache_key(effective_y_range)
+
+            forced_ids = tuple(self._forced_row_ids())
+            limit = int(self.state.interactive_sample_limit)
+
+            cache_key = (
+                id(data.frame),
+                len(data.frame),
+                x_key,
+                y_key,
+                limit,
+                forced_ids,
+            )
+
+            cached = point_cache.get(cache_key)
+            if cached is not None:
+                element, status_text = cached
+                self.status_pane.object = status_text
+
+                print(
+                    "[AstronomicAL scatter] interactive make_points cache hit "
+                    f"eligible={len(data.frame):,} "
+                    f"x_range={x_key} y_range={y_key}",
+                    flush=True,
+                )
+
+                return element
+
             self._remember_ranges(effective_x_range, effective_y_range)
 
-            visible = frame_in_ranges(data, effective_x_range, effective_y_range)
+            t1 = time.perf_counter()
 
-            plot_data = sample_prepared_frame(
+            if self._range_is_full_extent(data, effective_x_range, effective_y_range):
+                visible = data
+            else:
+                visible = frame_in_ranges(
+                    data,
+                    effective_x_range,
+                    effective_y_range,
+                )
+
+            # If the Bokeh-reported range excludes only a tiny edge fraction, treat it as
+            # full extent. This avoids repeated almost-full filtering/sampling after pane
+            # assignment.
+            if visible is not data and len(data.frame) > 0:
+                visible_fraction = len(visible.frame) / len(data.frame)
+
+                if visible_fraction >= 0.995:
+                    visible = data
+
+            t2 = time.perf_counter()
+
+            effective_limit = self._effective_interactive_sample_limit(len(visible.frame))
+
+            forced_ids = self._forced_row_ids()
+
+            plot_data = self._sample_visible_frame(
+                data,
                 visible,
-                int(self.state.interactive_sample_limit),
-                seed=0,
-                force_row_ids=self._forced_row_ids(),
+                effective_limit,
+                forced_ids,
             )
+
+            t3 = time.perf_counter()
 
             self._interactive_current_frame = plot_data.frame
 
@@ -156,13 +553,51 @@ class ScatterPanel(BaseVisualisationPanel):
                 if plot_data.sampled_from
                 else ""
             )
-            self.status_pane.object = (
-                f"{len(data.frame):,} eligible rows · "
-                f"{len(visible.frame):,} visible · "
-                f"{len(plot_data.frame):,} shown · interactive{sampled_note}"
+
+            limit_note = (
+                f" · display cap {effective_limit:,}"
+                if len(visible.frame) > effective_limit
+                else ""
             )
 
-            return self._scatter_points_element(plot_data)
+            status_text = (
+                f"{len(data.frame):,} eligible rows · "
+                f"{len(visible.frame):,} visible · "
+                f"{len(plot_data.frame):,} shown · interactive"
+                f"{sampled_note}{limit_note}"
+            )
+
+            self.status_pane.object = status_text
+
+            element = self._scatter_points_element(plot_data)
+
+            t4 = time.perf_counter()
+
+            point_cache[cache_key] = (element, status_text)
+
+            # Keep this small. Range interactions can generate many slightly different
+            # ranges.
+            if len(point_cache) > 20:
+                try:
+                    first_key = next(iter(point_cache))
+                    point_cache.pop(first_key, None)
+                except Exception:
+                    point_cache.clear()
+
+            print(
+                "[AstronomicAL scatter] interactive make_points "
+                f"eligible={len(data.frame):,} "
+                f"visible={len(visible.frame):,} "
+                f"shown={len(plot_data.frame):,} "
+                f"ranges={t1 - t0:.3f}s "
+                f"filter={t2 - t1:.3f}s "
+                f"sample={t3 - t2:.3f}s "
+                f"element={t4 - t3:.3f}s "
+                f"total={t4 - t0:.3f}s",
+                flush=True,
+            )
+
+            return element
 
         dmap = hv.DynamicMap(make_points, streams=[range_stream])
 
@@ -323,7 +758,7 @@ class ScatterPanel(BaseVisualisationPanel):
         return dmap
 
     def _scatter_points_element(self, data: PreparedFrame):
-        frame = data.frame
+        frame = self._bokeh_safe_frame(data.frame)
 
         vdims = [HOVER_ROW_ID, HOVER_LABEL, INTERNAL_ROW_ID]
 
@@ -434,7 +869,7 @@ class ScatterPanel(BaseVisualisationPanel):
         return points.opts(**opts)
 
     def _scatter_rasterized(self, data: PreparedFrame):
-        frame = data.frame[[INTERNAL_X, INTERNAL_Y]]
+        frame = self._bokeh_safe_frame(data.frame[[INTERNAL_X, INTERNAL_Y]])
 
         points = hv.Points(
             frame,
@@ -495,7 +930,8 @@ class ScatterPanel(BaseVisualisationPanel):
         return raster * bounds_source
 
     def _raster_bounds_source(self, data: PreparedFrame):
-        frame = data.frame
+
+        frame = self._bokeh_safe_frame(data.frame)
 
         try:
             x_min = float(np.nanmin(frame[INTERNAL_X].to_numpy(copy=False)))

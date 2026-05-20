@@ -4,6 +4,7 @@ from typing import Any, Dict, List, Optional
 
 import pandas as pd
 import param
+import time
 
 from .constants import (
     DEFAULT_DATASHADE_THRESHOLD,
@@ -12,9 +13,11 @@ from .constants import (
 )
 from .utils import (
     _active_dataset_id,
-    _active_df,
+    _dataset_columns,
     _default_colour_map,
     _mapped_column,
+    _numeric_columns_from_dataset,
+    _get_dataset_view_for_columns,
 )
 
 
@@ -82,11 +85,18 @@ class VisualisationState(param.Parameterized):
         self.refresh_from_context()
 
     def refresh_from_context(self) -> None:
+        t0 = time.perf_counter()
+
+        print(
+            "[AstronomicAL visualisation] state.refresh_from_context start",
+            flush=True,
+        ) 
         dataset_id = _active_dataset_id(self.context)
         self.dataset_id = dataset_id
 
-        df = _active_df(self.context)
-        if df is None or df.empty:
+        columns = _dataset_columns(self.context, dataset_id)
+
+        if dataset_id is None or not columns:
             self.numeric_columns = []
             self.param.x.objects = []
             self.param.y.objects = []
@@ -103,6 +113,7 @@ class VisualisationState(param.Parameterized):
             "record_id",
             allow_index=True,
         )
+
         self.label_col = _mapped_column(
             self.context,
             dataset_id,
@@ -110,27 +121,45 @@ class VisualisationState(param.Parameterized):
             allow_index=False,
         )
 
-        try:
-            numeric_df = df.select_dtypes(include=["number", "bool"])
-            self.numeric_columns = list(numeric_df.columns)
-        except Exception:
-            self.numeric_columns = [
-                column for column in df.columns if pd.api.types.is_numeric_dtype(_safe_series(df, column))
+        numeric_columns: List[Any] = []
+
+        t_numeric = time.perf_counter()
+
+        numeric_columns = _numeric_columns_from_dataset(self.context, dataset_id)
+
+        print(
+            "[AstronomicAL visualisation] numeric column discovery "
+            f"columns={len(columns):,} "
+            f"numeric={len(numeric_columns):,} "
+            f"duration={time.perf_counter() - t_numeric:.2f}s",
+            flush=True,
+        )
+
+        # Last-resort fallback. This avoids a blank UI if dtype inference fails.
+        # It lets the user choose columns manually; prepare_plot_frame() will still
+        # filter non-finite/non-numeric values later.
+        if not numeric_columns:
+            numeric_columns = [
+                column for column in columns
+                if column != self.record_id_col
             ]
+
+        self.numeric_columns = list(numeric_columns)
 
         if not self.numeric_columns:
             self.param.x.objects = []
             self.param.y.objects = []
             self.x = None
             self.y = None
-            self._refresh_label_state(df)
+            self._refresh_label_state_for_dataset(dataset_id)
             return
 
         self.param.x.objects = list(self.numeric_columns)
         self.param.y.objects = list(self.numeric_columns)
 
         preferred = [
-            column for column in self.numeric_columns if column != self.record_id_col
+            column for column in self.numeric_columns
+            if column != self.record_id_col
         ] or list(self.numeric_columns)
 
         if self.x not in self.numeric_columns:
@@ -142,7 +171,14 @@ class VisualisationState(param.Parameterized):
         if len(preferred) > 1 and self.x == self.y:
             self.y = next((column for column in preferred if column != self.x), self.y)
 
-        self._refresh_label_state(df)
+        self._refresh_label_state_for_dataset(dataset_id)
+
+        print(
+            "[AstronomicAL visualisation] state.refresh_from_context end "
+            f"duration={time.perf_counter() - t0:.2f}s "
+            f"x={self.x!r} y={self.y!r}",
+            flush=True,
+        )
 
     def _reset_labels(self) -> None:
         self.labels_to_strings = {}
@@ -207,11 +243,29 @@ class VisualisationState(param.Parameterized):
         if self.color_by not in colour_options:
             self.color_by = "Labels" if "Labels" in colour_options else "None"
 
+    def _refresh_label_state_for_dataset(self, dataset_id: Optional[str]) -> None:
+        if not self.label_col or dataset_id is None:
+            self._reset_labels()
+            return
+
+        try:
+            label_df = _get_dataset_view_for_columns(
+                self.context,
+                dataset_id,
+                [self.label_col],
+                limit=100_000,
+            )
+        except Exception:
+            label_df = pd.DataFrame(columns=[self.label_col])
+
+        self._refresh_label_state(label_df)
+
     def apply_label_settings(self, payload: Optional[Dict[str, Any]]) -> None:
         if not isinstance(payload, dict):
             return
 
-        df = _active_df(self.context)
+        dataset_id = _active_dataset_id(self.context)
+        columns = _dataset_columns(self.context, dataset_id)
 
         label_col = (
             payload.get("label_col")
@@ -221,7 +275,7 @@ class VisualisationState(param.Parameterized):
             or payload.get("target_label")
         )
 
-        if label_col and df is not None and label_col in df.columns:
+        if label_col and label_col in columns:
             self.label_col = label_col
 
         labels_to_strings = (

@@ -3,6 +3,7 @@ from __future__ import annotations
 import uuid
 
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+from collections import OrderedDict
 
 import holoviews as hv
 import numpy as np
@@ -36,6 +37,8 @@ from .widgets import (
     settings_select,
 )
 
+import time
+
 
 class BaseVisualisationPanel(param.Parameterized):
     """Lifecycle-aware base class for visualisation plugin panels."""
@@ -65,15 +68,23 @@ class BaseVisualisationPanel(param.Parameterized):
         self._stream_watchers: List[Tuple[Any, Any]] = []
         self._disposed = False
         self._refresh_scheduled = False
+        self._refresh_request_count = 0
+        self._last_refresh_requested_at = None
+        self._last_refresh_reason = None
+
 
         self.settings_visible = False
         self._layout: Optional[pn.Column] = None
         self._settings_built = False
 
-        self._prepared_cache: Dict[Tuple[Any, ...], PreparedFrame] = {}
+        self._prepared_cache: OrderedDict[Tuple[Any, ...], PreparedFrame] = OrderedDict()
+        self._prepared_cache_limit = 6
+        self._suppress_state_refresh = False
         
         self._row_index_cache_key = None
         self._row_index_cache = None
+        
+        self._interactive_sample_cache = {}
 
         self._last_x_range = None
         self._last_y_range = None
@@ -175,26 +186,57 @@ class BaseVisualisationPanel(param.Parameterized):
         self.settings_visible = not self.settings_visible
         self._apply_settings_visibility()
 
-    def _schedule_refresh(self) -> None:
-        """Defer selection-driven redraws until HoloViews callbacks complete."""
-        if self._disposed or self._refresh_scheduled:
+    def _schedule_refresh(self, reason: str = "unknown") -> None:
+        self._refresh_request_count += 1
+
+        now = time.perf_counter()
+
+        if self._refresh_scheduled:
+            print(
+                "[AstronomicAL visualisation] refresh already scheduled; "
+                f"skipping duplicate request reason={reason!r}",
+                flush=True,
+            )
             return
 
         self._refresh_scheduled = True
+        self._last_refresh_requested_at = now
+        self._last_refresh_reason = reason
 
-        def _run():
-            self._refresh_scheduled = False
-            if not self._disposed:
-                self.refresh()
+        print(
+            "[AstronomicAL visualisation] scheduling refresh "
+            f"reason={reason!r}",
+            flush=True,
+        )
 
         try:
-            doc = pn.state.curdoc
-            if doc is not None:
-                doc.add_next_tick_callback(_run)
-            else:
-                _run()
+            import panel as pn
+
+            pn.state.curdoc.add_next_tick_callback(self._run_scheduled_refresh)
         except Exception:
-            _run()
+            self._run_scheduled_refresh()
+
+    def _run_scheduled_refresh(self) -> None:
+        queued_for = None
+
+        if self._last_refresh_requested_at is not None:
+            queued_for = time.perf_counter() - self._last_refresh_requested_at
+
+        reason = self._last_refresh_reason
+
+        self._refresh_scheduled = False
+        self._last_refresh_requested_at = None
+        self._last_refresh_reason = None
+
+        print(
+            "[AstronomicAL visualisation] running scheduled refresh "
+            f"reason={reason!r} "
+            f"queued_for={queued_for:.2f}s" if queued_for is not None
+            else "[AstronomicAL visualisation] running scheduled refresh",
+            flush=True,
+        )
+
+        self.refresh()
 
     def _subscribe(self, topic: str, callback) -> None:
         events = getattr(self.context, "events", None)
@@ -241,7 +283,11 @@ class BaseVisualisationPanel(param.Parameterized):
         self._stream_watchers.clear()
 
     def _clear_prepared_cache(self) -> None:
-        self._prepared_cache.clear()
+        try:
+            self._prepared_cache.clear()
+        except Exception:
+            self._prepared_cache = OrderedDict()
+
         self._row_index_cache_key = None
         self._row_index_cache = None
 
@@ -292,14 +338,30 @@ class BaseVisualisationPanel(param.Parameterized):
 
     def _plot_data(self, *, require_y: bool) -> PreparedFrame:
         key = prepared_cache_key(self.context, self.state, require_y=require_y)
+
         cached = self._prepared_cache.get(key)
         if cached is not None:
+            try:
+                self._prepared_cache.move_to_end(key)
+            except Exception:
+                pass
             return cached
 
         data = prepare_plot_frame(self.context, self.state, require_y=require_y)
 
-        self._prepared_cache.clear()
         self._prepared_cache[key] = data
+
+        try:
+            self._prepared_cache.move_to_end(key)
+        except Exception:
+            pass
+
+        while len(self._prepared_cache) > int(self._prepared_cache_limit):
+            try:
+                self._prepared_cache.popitem(last=False)
+            except TypeError:
+                first_key = next(iter(self._prepared_cache))
+                self._prepared_cache.pop(first_key, None)
 
         return data
 
@@ -493,13 +555,35 @@ class BaseVisualisationPanel(param.Parameterized):
         )
 
     def _on_dataset_event(self, topic, payload) -> None:
-        if topic == "labels.settings.updated":
-            self.state.apply_label_settings(payload)
-        else:
-            self.state.refresh_from_context()
+        t0 = time.perf_counter()
+
+        print(
+            f"[AstronomicAL visualisation] dataset event received: {topic}",
+            flush=True,
+        )
+
+        self._suppress_state_refresh = True
+
+        try:
+            if topic == "labels.settings.updated":
+                self.state.apply_label_settings(payload)
+            else:
+                self.state.refresh_from_context()
+        finally:
+            self._suppress_state_refresh = False
+
+        t1 = time.perf_counter()
 
         self._clear_prepared_cache()
-        self.refresh()
+
+        print(
+            "[AstronomicAL visualisation] dataset event state refresh complete "
+            f"topic={topic} "
+            f"duration={t1 - t0:.2f}s",
+            flush=True,
+        )
+
+        self._schedule_refresh(reason=f"dataset_event.{topic}")
 
     def _payload_value(self, payload, key: str, default=None):
         """Read a value from dict-like or object-like event payloads."""
@@ -583,18 +667,62 @@ class BaseVisualisationPanel(param.Parameterized):
         self._schedule_refresh()
 
     def _on_state_changed(self, event) -> None:
-        self._clear_prepared_cache()
-        self.refresh()
+        if getattr(self, "_suppress_state_refresh", False):
+            print(
+                "[AstronomicAL visualisation] suppressed state refresh "
+                f"param={getattr(event, 'name', None)!r}",
+                flush=True,
+            )
+            return
+
+        name = getattr(event, "name", None)
+
+        if name in {"x", "y", "log_x", "log_y"}:
+            try:
+                self._last_x_range = None
+                self._last_y_range = None
+            except Exception:
+                pass
+
+            try:
+                self._interactive_sample_cache.clear()
+            except Exception:
+                pass
+
+            try:
+                self._row_id_lookup_cache.clear()
+            except Exception:
+                pass
+
+            try:
+                self._interactive_current_frame = None
+            except Exception:
+                pass
+
+            print(
+                "[AstronomicAL visualisation] reset plot ranges after axis change "
+                f"param={name!r}",
+                flush=True,
+            )
+
+        self._schedule_refresh(reason=f"state.{name or 'unknown'}")
 
     def refresh(self) -> None:
-        if self._disposed:
-            return
+        t0 = time.perf_counter()
+
+        print(
+            f"[AstronomicAL visualisation] refresh start panel={type(self).__name__}",
+            flush=True,
+        )
 
         try:
             self._render()
-        except Exception as exc:
-            self.status_pane.object = f"Plot error: {exc}"
-            self.plot_pane.object = self._empty("Plot error")
+        finally:
+            print(
+                f"[AstronomicAL visualisation] refresh end panel={type(self).__name__} "
+                f"duration={time.perf_counter() - t0:.2f}s",
+                flush=True,
+            )
 
     def _render(self) -> None:
         raise NotImplementedError

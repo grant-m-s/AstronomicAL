@@ -186,10 +186,13 @@ class EventBus:
                 self._subs.pop(sub.topic, None)
 
     def publish(self, topic: str, payload: Any = None) -> None:
-        """
-        Publish synchronously to subscribers. If a subscriber raises, log it and continue.
+        """Publish synchronously to subscribers.
+
+        If a subscriber raises, log it and continue.
         Also delivers to wildcard '*' subscribers.
         """
+        publish_start = time.perf_counter()
+
         if self._trace_enabled:
             with self._lock:
                 self._trace_buf.append((time.time(), topic, payload))
@@ -198,11 +201,40 @@ class EventBus:
             callbacks = list(self._subs.get(topic, []))
             wildcard_callbacks = list(self._subs.get("*", []))
 
-        for _sid, cb, _meta in callbacks + wildcard_callbacks:
+        for _sid, cb, meta in callbacks + wildcard_callbacks:
+            info = self._normalise_meta(cb, meta)
+
+            cb_start = time.perf_counter()
             try:
                 cb(topic, payload)
             except Exception:
                 traceback.print_exc()
+            finally:
+                duration = time.perf_counter() - cb_start
+
+                if duration >= 0.05:
+                    print(
+                        "[AstronomicAL events] slow subscriber "
+                        f"topic={topic!r} "
+                        f"duration={duration:.3f}s "
+                        f"owner={info.get('owner_label')!r} "
+                        f"kind={info.get('owner_kind')!r} "
+                        f"callback={info.get('callback_name')!r} "
+                        f"module={info.get('module')!r}",
+                        flush=True,
+                    )
+
+        total = time.perf_counter() - publish_start
+
+        if total >= 0.05:
+            print(
+                "[AstronomicAL events] publish complete "
+                f"topic={topic!r} "
+                f"subscribers={len(callbacks)} "
+                f"wildcards={len(wildcard_callbacks)} "
+                f"duration={total:.3f}s",
+                flush=True,
+            )
 
     def clear(self) -> None:
         with self._lock:
