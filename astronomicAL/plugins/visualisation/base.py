@@ -39,7 +39,6 @@ from .widgets import (
 
 import time
 
-
 class BaseVisualisationPanel(param.Parameterized):
     """Lifecycle-aware base class for visualisation plugin panels."""
 
@@ -71,7 +70,20 @@ class BaseVisualisationPanel(param.Parameterized):
         self._refresh_request_count = 0
         self._last_refresh_requested_at = None
         self._last_refresh_reason = None
+        self._last_focus_payload = None
 
+        self._interactive_sample_cache = {}
+        self._interactive_sample_cache_max = 30
+        self._last_interactive_frame_id = None
+
+        self._prepared_extent_cache_key = None
+        self._prepared_extent_cache = None
+
+        self._base_sample_cache = {}
+        self._base_sample_cache_max = 16
+
+        self._near_full_range_keys = set()
+        self._near_full_range_keys_max = 64
 
         self.settings_visible = False
         self._layout: Optional[pn.Column] = None
@@ -79,13 +91,12 @@ class BaseVisualisationPanel(param.Parameterized):
 
         self._prepared_cache: OrderedDict[Tuple[Any, ...], PreparedFrame] = OrderedDict()
         self._prepared_cache_limit = 6
+        self._shared_prepared_cache = self._get_shared_prepared_cache()
         self._suppress_state_refresh = False
         
         self._row_index_cache_key = None
         self._row_index_cache = None
         
-        self._interactive_sample_cache = {}
-
         self._last_x_range = None
         self._last_y_range = None
 
@@ -170,6 +181,78 @@ class BaseVisualisationPanel(param.Parameterized):
             ]
         )
 
+    def _get_shared_prepared_cache(self):
+        services = getattr(self.context, "services", None)
+        if services is None:
+            return None
+
+        for key in (
+            "core.visualisation.prepared_cache",
+            "core.visualisation.cache",
+            "visualisation.prepared_cache",
+        ):
+            try:
+                service = services.get(key)
+                if service is not None:
+                    return service
+            except Exception:
+                pass
+
+        return None
+
+    def _prepared_cache_get(self, key):
+        cache = getattr(self, "_shared_prepared_cache", None)
+
+        if cache is not None and hasattr(cache, "get"):
+            try:
+                value = cache.get(key)
+                print(
+                    "[AstronomicAL visualisation prepared-cache] "
+                    f"{'HIT' if value is not None else 'MISS'} shared key={key!r}",
+                    flush=True,
+                )
+                return value
+            except Exception as exc:
+                print(
+                    "[AstronomicAL visualisation prepared-cache] shared lookup failed "
+                    f"{type(exc).__name__}: {exc}",
+                    flush=True,
+                )
+
+        value = self._prepared_cache.get(key)
+        print(
+            "[AstronomicAL visualisation prepared-cache] "
+            f"{'HIT' if value is not None else 'MISS'} local key={key!r}",
+            flush=True,
+        )
+        return value
+
+
+    def _prepared_cache_set(self, key, data):
+        cache = getattr(self, "_shared_prepared_cache", None)
+
+        if cache is not None and hasattr(cache, "set"):
+            try:
+                print(
+                    f"[AstronomicAL visualisation prepared-cache] SET shared key={key!r}",
+                    flush=True,
+                )
+                cache.set(key, data)
+                return
+            except Exception as exc:
+                print(
+                    "[AstronomicAL visualisation prepared-cache] shared set failed "
+                    f"{type(exc).__name__}: {exc}",
+                    flush=True,
+                )
+
+        print(
+            f"[AstronomicAL visualisation prepared-cache] SET local key={key!r}",
+            flush=True,
+        )
+        self._prepared_cache.clear()
+        self._prepared_cache[key] = data
+
     def _ensure_settings_built(self) -> None:
         if self._settings_built:
             return
@@ -186,7 +269,26 @@ class BaseVisualisationPanel(param.Parameterized):
         self.settings_visible = not self.settings_visible
         self._apply_settings_visibility()
 
-    def _schedule_refresh(self, reason: str = "unknown") -> None:
+    def _visual_state_signature(self):
+        return (
+            getattr(self.state, "dataset_id", None),
+            getattr(self.state, "x", None),
+            getattr(self.state, "y", None),
+            getattr(self.state, "record_id_col", None),
+            getattr(self.state, "label_col", None),
+            getattr(self.state, "color_by", None),
+            getattr(self.state, "log_x", None),
+            getattr(self.state, "log_y", None),
+            tuple(getattr(self.state, "label_filter", []) or []),
+        )
+
+    def _schedule_refresh(self, *, reason: str = "unknown", delay_ms: Optional[int] = None):
+        if delay_ms is None:
+            if reason in {"state.x", "state.y", "state.color_by", "state.label_col"}:
+                delay_ms = 300
+            else:
+                delay_ms = 0
+
         self._refresh_request_count += 1
 
         now = time.perf_counter()
@@ -283,10 +385,7 @@ class BaseVisualisationPanel(param.Parameterized):
         self._stream_watchers.clear()
 
     def _clear_prepared_cache(self) -> None:
-        try:
-            self._prepared_cache.clear()
-        except Exception:
-            self._prepared_cache = OrderedDict()
+        self._prepared_cache.clear()
 
         self._row_index_cache_key = None
         self._row_index_cache = None
@@ -338,32 +437,35 @@ class BaseVisualisationPanel(param.Parameterized):
 
     def _plot_data(self, *, require_y: bool) -> PreparedFrame:
         key = prepared_cache_key(self.context, self.state, require_y=require_y)
+        self._last_prepared_cache_key = key
+        print(
+            "[AstronomicAL visualisation cache] lookup "
+            f"panel={type(self).__name__} "
+            f"key={key!r}",
+            flush=True,
+        )
 
-        cached = self._prepared_cache.get(key)
+        cached = self._prepared_cache_get(key)
         if cached is not None:
-            try:
-                self._prepared_cache.move_to_end(key)
-            except Exception:
-                pass
+            print(
+                "[AstronomicAL visualisation cache] HIT "
+                f"panel={type(self).__name__} rows={len(cached.frame):,}",
+                flush=True,
+            )
             return cached
 
+        print(
+            "[AstronomicAL visualisation cache] MISS "
+            f"panel={type(self).__name__}",
+            flush=True,
+        )
+
         data = prepare_plot_frame(self.context, self.state, require_y=require_y)
-
-        self._prepared_cache[key] = data
-
-        try:
-            self._prepared_cache.move_to_end(key)
-        except Exception:
-            pass
-
-        while len(self._prepared_cache) > int(self._prepared_cache_limit):
-            try:
-                self._prepared_cache.popitem(last=False)
-            except TypeError:
-                first_key = next(iter(self._prepared_cache))
-                self._prepared_cache.pop(first_key, None)
-
+        self._prepared_cache_set(key, data)
         return data
+
+    def _same_underlying_frame(self, left, right) -> bool:
+        return self._frame_for_cache(left) is self._frame_for_cache(right)
 
     def _row_index_for(self, data: PreparedFrame):
         """Return a cached pandas Index for fast row-id lookup.
@@ -444,6 +546,50 @@ class BaseVisualisationPanel(param.Parameterized):
 
         return sub
 
+    def _focus_point_from_metadata(
+        self,
+        focus,
+    ) -> Optional[Tuple[float, Optional[float]]]:
+        """Fast path for focus events emitted by a scatter with matching axes.
+
+        focus_x/focus_y are only valid for the panel that produced them, or for
+        another panel with the exact same x/y variables.
+        """
+        meta_x_variable = self._payload_value(focus, "x_variable")
+        meta_y_variable = self._payload_value(focus, "y_variable")
+
+        if meta_x_variable is None or meta_y_variable is None:
+            return None
+
+        if str(meta_x_variable) != str(self.state.x):
+            return None
+
+        if str(meta_y_variable) != str(self.state.y):
+            return None
+
+        x = self._payload_value(focus, "focus_x")
+        y = self._payload_value(focus, "focus_y")
+
+        if x is None or y is None:
+            return None
+
+        try:
+            x = float(x)
+            y = float(y)
+        except Exception:
+            return None
+
+        if not np.isfinite(x) or not np.isfinite(y):
+            return None
+
+        if getattr(self.state, "log_x", False) and x <= 0:
+            return None
+
+        if getattr(self.state, "log_y", False) and y <= 0:
+            return None
+
+        return x, y
+
     def _focus_point(self, data: PreparedFrame) -> Optional[Tuple[float, Optional[float]]]:
         selection = getattr(self.context, "selection", None)
         if selection is None or data.empty:
@@ -461,6 +607,12 @@ class BaseVisualisationPanel(param.Parameterized):
         if not row_id:
             return None
 
+        # Fast path only when the metadata coordinates are for this panel's axes.
+        point = self._focus_point_from_metadata(focus)
+        if point is not None:
+            return point
+
+        # Fallback: resolve the focused row in this panel's own prepared frame.
         row = self._rows_for_row_ids(
             data,
             [row_id],
@@ -473,6 +625,7 @@ class BaseVisualisationPanel(param.Parameterized):
 
         x = float(row.iloc[0][INTERNAL_X])
         y = None
+
         if INTERNAL_Y in row.columns:
             y = float(row.iloc[0][INTERNAL_Y])
 
@@ -517,8 +670,15 @@ class BaseVisualisationPanel(param.Parameterized):
             fill_alpha=0.0,
             line_color="orange",
             line_width=2,
+
+            # Add these:
+            tools=[],
             active_tools=[],
-            hooks=[force_wheel_zoom_hook],
+            toolbar=None,
+
+            # Remove this unless you specifically need it here:
+            # hooks=[force_wheel_zoom_hook],
+
             logx=self.state.log_x,
             logy=self.state.log_y,
             shared_axes=False,
@@ -528,7 +688,19 @@ class BaseVisualisationPanel(param.Parameterized):
         )
 
     def _focus_overlay(self, data: PreparedFrame, *, size: float = 14):
+        
         point = self._focus_point(data)
+
+        print(
+            "[AstronomicAL visualisation] focus_overlay "
+            f"panel={type(self).__name__} "
+            f"x={getattr(self.state, 'x', None)!r} "
+            f"y={getattr(self.state, 'y', None)!r} "
+            f"point={point!r}",
+            flush=True,
+        )
+
+
         if point is None:
             return None
 
@@ -545,14 +717,22 @@ class BaseVisualisationPanel(param.Parameterized):
             fill_alpha=0.0,
             line_color="black",
             line_width=3,
+
+            # Add these:
+            tools=[],
             active_tools=[],
-            hooks=[force_wheel_zoom_hook],
+            toolbar=None,
+
+            # Remove this unless you specifically need it here:
+            # hooks=[force_wheel_zoom_hook],
+
             logx=self.state.log_x,
             logy=self.state.log_y,
             shared_axes=False,
             axiswise=True,
             framewise=True,
         )
+
 
     def _on_dataset_event(self, topic, payload) -> None:
         t0 = time.perf_counter()
@@ -562,8 +742,14 @@ class BaseVisualisationPanel(param.Parameterized):
             flush=True,
         )
 
-        self._suppress_state_refresh = True
+        if isinstance(payload, dict):
+            dataset_id = payload.get("dataset_id")
+            if dataset_id is not None and dataset_id != self._dataset_id():
+                return
 
+        before = self._visual_state_signature()
+
+        self._suppress_state_refresh = True
         try:
             if topic == "labels.settings.updated":
                 self.state.apply_label_settings(payload)
@@ -572,18 +758,27 @@ class BaseVisualisationPanel(param.Parameterized):
         finally:
             self._suppress_state_refresh = False
 
-        t1 = time.perf_counter()
+        after = self._visual_state_signature()
+
+        if topic == "dataset.mapping_updated" and before == after:
+            print(
+                "[AstronomicAL visualisation] mapping update did not change visual state; "
+                "skipping refresh",
+                flush=True,
+            )
+            return
 
         self._clear_prepared_cache()
 
         print(
             "[AstronomicAL visualisation] dataset event state refresh complete "
             f"topic={topic} "
-            f"duration={t1 - t0:.2f}s",
+            f"duration={time.perf_counter() - t0:.2f}s",
             flush=True,
         )
 
         self._schedule_refresh(reason=f"dataset_event.{topic}")
+
 
     def _payload_value(self, payload, key: str, default=None):
         """Read a value from dict-like or object-like event payloads."""
@@ -742,6 +937,7 @@ class BaseVisualisationPanel(param.Parameterized):
             framewise=True,
         )
 
+
     def _base_opts(
         self,
         *,
@@ -750,13 +946,19 @@ class BaseVisualisationPanel(param.Parameterized):
         tools: Optional[List[str]] = None,
         active_tools: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
+        if tools is None:
+            tools = ["pan", "wheel_zoom", "box_zoom", "reset"]
+
+        if active_tools is None:
+            active_tools = ["wheel_zoom"]
+
         opts = dict(
             xlabel=str(xlabel if xlabel is not None else self.state.x),
             ylabel=str(ylabel if ylabel is not None else self.state.y),
             logx=self.state.log_x,
             logy=self.state.log_y,
-            tools=tools or ["pan", "wheel_zoom", "box_zoom", "reset"],
-            active_tools=active_tools or ["wheel_zoom"],
+            tools=tools,
+            active_tools=active_tools,
             hooks=[force_wheel_zoom_hook],
             responsive=True,
             min_height=PLOT_MIN_HEIGHT,
@@ -766,9 +968,9 @@ class BaseVisualisationPanel(param.Parameterized):
             shared_axes=False,
             toolbar="right",
         )
-
         opts.update(self._current_range_opts(include_y=True))
         return opts
+
 
     def _settings_controls(self):
         return settings_box(

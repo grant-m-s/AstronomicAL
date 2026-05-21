@@ -1,14 +1,26 @@
+# BUG: Prepare labels very slow (nearly a minute)
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import time
 
 import numpy as np
 import pandas as pd
-from bokeh.models import HoverTool, WheelZoomTool
 from bokeh.palettes import Category10, Category20
+
+from bokeh.models import (
+    BoxSelectTool,
+    BoxZoomTool,
+    HoverTool,
+    LassoSelectTool,
+    PanTool,
+    ResetTool,
+    SaveTool,
+    TapTool,
+    WheelZoomTool,
+)
 
 from .constants import (
     INTERNAL_LABEL_COLOUR,
@@ -85,7 +97,6 @@ def ensure_hv_extension() -> None:
 
     _HV_EXTENSION_LOADED = True
 
-
 def force_wheel_zoom_hook(plot, element) -> None:
     """Make wheel zoom active and limit hover rows where supported."""
     try:
@@ -97,6 +108,40 @@ def force_wheel_zoom_hook(plot, element) -> None:
     except Exception:
         pass
 
+
+def deduplicate_toolbar_tools_hook(plot, element) -> None:
+    try:
+        dedupe_classes = (
+            PanTool,
+            WheelZoomTool,
+            BoxZoomTool,
+            ResetTool,
+            SaveTool,
+            TapTool,
+            BoxSelectTool,
+            LassoSelectTool,
+            HoverTool,
+        )
+
+        seen = set()
+        kept = []
+
+        for tool in list(plot.state.tools):
+            key = type(tool)
+
+            if isinstance(tool, dedupe_classes):
+                if key in seen:
+                    continue
+                seen.add(key)
+
+            kept.append(tool)
+
+        plot.state.tools = kept
+
+    except Exception:
+        pass
+
+    force_wheel_zoom_hook(plot, element)
 
 def renderer_name_hook(name: str):
     """Name and target the main glyph renderer.
@@ -491,6 +536,45 @@ def _safe_series(df: pd.DataFrame, column: Any) -> pd.Series:
         return values.iloc[:, 0]
     return values
 
+def _numeric_array_from_array(values: Any) -> np.ndarray:
+    """Return a numeric NumPy array suitable for plotting.
+
+    This is the array-based equivalent of _numeric_array(df, column).
+    """
+    series = pd.Series(values)
+
+    if pd.api.types.is_bool_dtype(series.dtype):
+        return series.to_numpy(dtype=np.float32, copy=False, na_value=np.nan)
+
+    if pd.api.types.is_numeric_dtype(series.dtype):
+        try:
+            arr = series.to_numpy(copy=False)
+        except Exception:
+            arr = series.to_numpy(dtype=np.float64, copy=False, na_value=np.nan)
+    else:
+        arr = pd.to_numeric(series, errors="coerce").to_numpy(copy=False)
+
+    arr = np.asarray(arr)
+
+    if arr.dtype == np.float32:
+        return arr
+
+    if not np.issubdtype(arr.dtype, np.number):
+        values64 = arr.astype(np.float64, copy=False)
+    else:
+        values64 = arr.astype(np.float64, copy=False)
+
+    finite = np.isfinite(values64)
+
+    if not finite.any():
+        return values64
+
+    max_abs = np.nanmax(np.abs(values64[finite]))
+
+    if max_abs <= 1.0e20:
+        return values64.astype(np.float32, copy=False)
+
+    return values64
 
 def _numeric_array(df: pd.DataFrame, column: Any) -> np.ndarray:
     """
@@ -643,6 +727,161 @@ def _label_arrays(
 
     return raw_filtered, display, colours
 
+def _visualisation_data_cache(context):
+    services = getattr(context, "services", None)
+    if services is None:
+        return None
+
+    for key in (
+        "core.visualisation.data_cache",
+        "visualisation.data_cache",
+        "data_cache",
+    ):
+        try:
+            cache = services.get(key)
+            if cache is not None:
+                return cache
+        except Exception:
+            pass
+
+    return None
+
+def _dataset_cache_prefix(context, state):
+    datasets = getattr(context, "datasets", None)
+
+    dataset_id = getattr(state, "dataset_id", None)
+    if dataset_id is None and datasets is not None:
+        try:
+            dataset_id = datasets.active_id()
+        except Exception:
+            dataset_id = None
+
+    fingerprint = None
+    if datasets is not None and dataset_id is not None:
+        for method_name in ("fingerprint", "dataset_fingerprint", "source_fingerprint"):
+            method = getattr(datasets, method_name, None)
+            if callable(method):
+                try:
+                    fingerprint = method(dataset_id)
+                    break
+                except Exception:
+                    pass
+
+    return dataset_id, fingerprint
+
+
+def _load_column_array(context, state, column):
+    cache = _visualisation_data_cache(context)
+    dataset_id, fingerprint = _dataset_cache_prefix(context, state)
+    key = ("column", dataset_id, fingerprint, str(column))
+
+    if cache is not None:
+        cached = cache.get_column(key)
+        if cached is not None:
+            print(
+                f"[AstronomicAL visualisation column-cache] HIT column={column!r}",
+                flush=True,
+            )
+            return cached
+
+    print(
+        f"[AstronomicAL visualisation column-cache] MISS column={column!r}",
+        flush=True,
+    )
+
+    source = context.datasets.get_source(dataset_id)
+    df = source.to_pandas(columns=[column])
+    arr = df[column].to_numpy()
+
+    if cache is not None:
+        cache.set_column(key, arr)
+
+    return arr
+
+def _load_row_ids_array(context, state):
+    cache = _visualisation_data_cache(context)
+    dataset_id, fingerprint = _dataset_cache_prefix(context, state)
+    record_id_col = getattr(state, "record_id_col", None)
+
+    key = ("row_ids", dataset_id, fingerprint, str(record_id_col))
+
+    if cache is not None:
+        cached = cache.get_row_ids(key)
+        if cached is not None:
+            print("[AstronomicAL visualisation row-id-cache] HIT", flush=True)
+            return cached
+
+    print("[AstronomicAL visualisation row-id-cache] MISS", flush=True)
+
+    if not record_id_col or record_id_col == "Use Index":
+        row_count = context.datasets.row_count(dataset_id)
+        row_ids = np.arange(row_count).astype(str)
+    else:
+        source = context.datasets.get_source(dataset_id)
+        df = source.to_pandas(columns=[record_id_col])
+        row_ids = df[record_id_col].astype(str).to_numpy()
+
+    if cache is not None:
+        cache.set_row_ids(key, row_ids)
+
+    return row_ids
+
+def _load_label_arrays(context, state):
+    label_col = getattr(state, "label_col", None)
+
+    if not label_col:
+        return None, None, None
+
+    cache = _visualisation_data_cache(context)
+    dataset_id, fingerprint = _dataset_cache_prefix(context, state)
+
+    aliases = getattr(state, "label_to_strings", None)
+    colours = getattr(state, "colours", None)
+
+    key = (
+        "labels",
+        dataset_id,
+        fingerprint,
+        str(label_col),
+        repr(aliases),
+        repr(colours),
+    )
+
+    if cache is not None:
+        cached = cache.get_label(key)
+        if cached is not None:
+            print(
+                f"[AstronomicAL visualisation label-cache] HIT "
+                f"label_col={label_col!r}",
+                flush=True,
+            )
+            return cached
+
+    print(
+        f"[AstronomicAL visualisation label-cache] MISS "
+        f"label_col={label_col!r}",
+        flush=True,
+    )
+
+    raw = _load_column_array(context, state, label_col)
+
+    display = np.asarray(
+        [state.label_display(value) for value in raw],
+        dtype=object,
+    )
+
+    label_colours = np.asarray(
+        [state.label_colour(value) for value in raw],
+        dtype=object,
+    )
+
+    result = (raw, display, label_colours)
+
+    if cache is not None:
+        cache.set_label(key, result)
+
+    return result
+
 def prepare_plot_frame(context, state, *, require_y: bool) -> PreparedFrame:
     t_total = time.perf_counter()
 
@@ -655,7 +894,7 @@ def prepare_plot_frame(context, state, *, require_y: bool) -> PreparedFrame:
     dataset_id = _active_dataset_id(context)
     total_rows = _dataset_row_count(context, dataset_id)
 
-    if not state.x:
+    def _empty_frame() -> PreparedFrame:
         return PreparedFrame(
             dataset_id=dataset_id,
             frame=pd.DataFrame(),
@@ -665,121 +904,86 @@ def prepare_plot_frame(context, state, *, require_y: bool) -> PreparedFrame:
             row_count_before_filter=total_rows,
             row_count_after_filter=0,
         )
+
+    if dataset_id is None or not state.x:
+        return _empty_frame()
 
     available_columns = _dataset_columns(context, dataset_id)
     available_set = set(available_columns)
 
     if state.x not in available_set:
-        return PreparedFrame(
-            dataset_id=dataset_id,
-            frame=pd.DataFrame(),
-            x_name=state.x,
-            y_name=state.y if require_y else None,
-            require_y=require_y,
-            row_count_before_filter=total_rows,
-            row_count_after_filter=0,
-        )
+        return _empty_frame()
 
     if require_y and (not state.y or state.y not in available_set):
-        return PreparedFrame(
-            dataset_id=dataset_id,
-            frame=pd.DataFrame(),
-            x_name=state.x,
-            y_name=state.y,
-            require_y=require_y,
-            row_count_before_filter=total_rows,
-            row_count_after_filter=0,
-        )
-
-    required_columns = _plot_required_columns(
-        context,
-        dataset_id,
-        state,
-        require_y=require_y,
-    )
+        return _empty_frame()
 
     # ------------------------------------------------------------------
-    # 1. Data load timing
+    # 1. Load/reuse raw column arrays
     # ------------------------------------------------------------------
     t_load = time.perf_counter()
 
-    df = _get_dataset_view_for_columns(
-        context,
-        dataset_id,
-        required_columns,
-    )
+    try:
+        x_raw = _load_column_array(context, state, state.x)
+    except Exception as exc:
+        print(
+            "[AstronomicAL visualisation] failed to load x column "
+            f"{state.x!r}: {type(exc).__name__}: {exc}",
+            flush=True,
+        )
+        return _empty_frame()
+
+    y_raw = None
+    if require_y:
+        try:
+            y_raw = _load_column_array(context, state, state.y)
+        except Exception as exc:
+            print(
+                "[AstronomicAL visualisation] failed to load y column "
+                f"{state.y!r}: {type(exc).__name__}: {exc}",
+                flush=True,
+            )
+            return _empty_frame()
 
     load_seconds = time.perf_counter() - t_load
 
-    if df is None:
+    n_rows = len(x_raw)
+    if total_rows <= 0:
+        total_rows = n_rows
+
+    if require_y and y_raw is not None and len(y_raw) != n_rows:
         print(
-            "[AstronomicAL visualisation] Loaded plot view: df=None "
-            f"in {load_seconds:.3f}s",
+            "[AstronomicAL visualisation] x/y length mismatch "
+            f"x={n_rows:,} y={len(y_raw):,}",
             flush=True,
         )
+        return _empty_frame()
 
-        return PreparedFrame(
-            dataset_id=dataset_id,
-            frame=pd.DataFrame(),
-            x_name=state.x,
-            y_name=state.y if require_y else None,
-            require_y=require_y,
-            row_count_before_filter=total_rows,
-            row_count_after_filter=0,
-        )
+    y_name = state.y if require_y else None
 
     print(
-        "[AstronomicAL visualisation] Loaded plot view: "
-        f"{len(df):,} rows × {len(df.columns):,} columns "
-        f"in {load_seconds:.3f}s. "
-        f"Columns: {list(df.columns)}",
+        "[AstronomicAL visualisation] Loaded plot arrays: "
+        f"rows={n_rows:,} "
+        f"x={state.x!r} "
+        f"y={y_name!r} "
+        f"in {load_seconds:.3f}s",
         flush=True,
     )
 
-    if df.empty:
-        return PreparedFrame(
-            dataset_id=dataset_id,
-            frame=pd.DataFrame(),
-            x_name=state.x,
-            y_name=state.y if require_y else None,
-            require_y=require_y,
-            row_count_before_filter=total_rows,
-            row_count_after_filter=0,
-        )
-
-    if state.x not in df.columns:
-        return PreparedFrame(
-            dataset_id=dataset_id,
-            frame=pd.DataFrame(),
-            x_name=state.x,
-            y_name=state.y if require_y else None,
-            require_y=require_y,
-            row_count_before_filter=total_rows,
-            row_count_after_filter=0,
-        )
-
-    if require_y and (not state.y or state.y not in df.columns):
-        return PreparedFrame(
-            dataset_id=dataset_id,
-            frame=pd.DataFrame(),
-            x_name=state.x,
-            y_name=state.y,
-            require_y=require_y,
-            row_count_before_filter=total_rows,
-            row_count_after_filter=0,
-        )
+    if n_rows == 0:
+        return _empty_frame()
 
     # ------------------------------------------------------------------
-    # 2. Numeric arrays + mask timing
+    # 2. Numeric arrays + finite/log mask
     # ------------------------------------------------------------------
     t_arrays = time.perf_counter()
 
-    x = _numeric_array(df, state.x)
+    x = _numeric_array_from_array(x_raw)
+
     mask = np.isfinite(x)
 
     y = None
     if require_y:
-        y = _numeric_array(df, state.y)
+        y = _numeric_array_from_array(y_raw)
         mask &= np.isfinite(y)
 
     if state.log_x:
@@ -798,21 +1002,57 @@ def prepare_plot_frame(context, state, *, require_y: bool) -> PreparedFrame:
     )
 
     # ------------------------------------------------------------------
-    # 3. Label arrays timing
+    # 3. Labels: load cached full arrays, then apply label filter to mask
     # ------------------------------------------------------------------
     t_labels = time.perf_counter()
+
+    label_raw_all = None
+    label_display_all = None
+    label_colours_all = None
 
     label_raw = None
     label_display = None
     label_colours = None
 
-    if state.label_col and state.label_col in df.columns:
-        label_raw, label_display, label_colours = _label_arrays(
-            df,
-            state.label_col,
-            mask,
-            state,
-        )
+    if state.label_col:
+        try:
+            (
+                label_raw_all,
+                label_display_all,
+                label_colours_all,
+            ) = _load_label_arrays(context, state)
+        except Exception as exc:
+            print(
+                "[AstronomicAL visualisation] failed to load label arrays "
+                f"label_col={state.label_col!r}: "
+                f"{type(exc).__name__}: {exc}",
+                flush=True,
+            )
+            label_raw_all = None
+            label_display_all = None
+            label_colours_all = None
+
+    if label_raw_all is not None:
+        if len(label_raw_all) != len(mask):
+            print(
+                "[AstronomicAL visualisation] label length mismatch "
+                f"labels={len(label_raw_all):,} rows={len(mask):,}; "
+                "ignoring labels for this frame",
+                flush=True,
+            )
+        else:
+            if state.label_filter and "All" not in state.label_filter:
+                selected = state.selected_raw_labels()
+                label_mask = pd.Series(label_raw_all).isin(selected).to_numpy()
+                mask &= label_mask
+
+            label_raw = label_raw_all[mask]
+
+            if label_display_all is not None and len(label_display_all) == len(mask):
+                label_display = label_display_all[mask]
+
+            if label_colours_all is not None and len(label_colours_all) == len(mask):
+                label_colours = label_colours_all[mask]
 
     labels_seconds = time.perf_counter() - t_labels
 
@@ -824,11 +1064,30 @@ def prepare_plot_frame(context, state, *, require_y: bool) -> PreparedFrame:
     )
 
     # ------------------------------------------------------------------
-    # 4. Row ID timing
+    # 4. Row IDs
     # ------------------------------------------------------------------
     t_row_ids = time.perf_counter()
 
-    row_ids = _row_id_array(df, state.record_id_col, mask)
+    try:
+        row_ids_all = _load_row_ids_array(context, state)
+    except Exception as exc:
+        print(
+            "[AstronomicAL visualisation] failed to load row ids: "
+            f"{type(exc).__name__}: {exc}",
+            flush=True,
+        )
+        row_ids_all = np.arange(len(mask))
+
+    if len(row_ids_all) != len(mask):
+        print(
+            "[AstronomicAL visualisation] row-id length mismatch "
+            f"row_ids={len(row_ids_all):,} rows={len(mask):,}; "
+            "falling back to index row ids",
+            flush=True,
+        )
+        row_ids_all = np.arange(len(mask))
+
+    row_ids = row_ids_all[mask]
 
     row_ids_seconds = time.perf_counter() - t_row_ids
 
@@ -840,7 +1099,7 @@ def prepare_plot_frame(context, state, *, require_y: bool) -> PreparedFrame:
     )
 
     # ------------------------------------------------------------------
-    # 6. Masked array extraction + dict construction timing
+    # 5. Data dict
     # ------------------------------------------------------------------
     t_data = time.perf_counter()
 
@@ -854,8 +1113,19 @@ def prepare_plot_frame(context, state, *, require_y: bool) -> PreparedFrame:
 
     if label_raw is not None:
         data[INTERNAL_LABEL_RAW] = label_raw
-        data[INTERNAL_LABEL_DISPLAY] = label_display
-        data[INTERNAL_LABEL_COLOUR] = label_colours
+
+        if label_display is not None:
+            data[INTERNAL_LABEL_DISPLAY] = label_display
+        else:
+            data[INTERNAL_LABEL_DISPLAY] = label_raw.astype(object, copy=False)
+
+        if label_colours is not None:
+            data[INTERNAL_LABEL_COLOUR] = label_colours
+        else:
+            data[INTERNAL_LABEL_COLOUR] = np.asarray(
+                [state.label_colour(value) for value in label_raw],
+                dtype=object,
+            )
 
     data_seconds = time.perf_counter() - t_data
 
@@ -866,7 +1136,7 @@ def prepare_plot_frame(context, state, *, require_y: bool) -> PreparedFrame:
     )
 
     # ------------------------------------------------------------------
-    # 7. PreparedFrame DataFrame construction timing
+    # 6. PreparedFrame DataFrame construction
     # ------------------------------------------------------------------
     t_frame = time.perf_counter()
 
@@ -901,9 +1171,10 @@ def prepare_plot_frame(context, state, *, require_y: bool) -> PreparedFrame:
         x_name=state.x,
         y_name=state.y if require_y else None,
         require_y=require_y,
-        row_count_before_filter=total_rows or len(df),
+        row_count_before_filter=total_rows,
         row_count_after_filter=len(frame),
     )
+
 
 def prepared_cache_key(context, state, *, require_y: bool) -> Tuple[Any, ...]:
     dataset_id = _active_dataset_id(context)
@@ -1023,49 +1294,55 @@ def sample_prepared_frame(
         sampled_from=n_rows,
     )
 
-def frame_in_ranges(
-    data: PreparedFrame,
-    x_range: Optional[Sequence[float]],
-    y_range: Optional[Sequence[float]],
-) -> PreparedFrame:
-    frame = data.frame
-    if frame.empty:
+def frame_in_ranges(data, x_range=None, y_range=None):
+    frame = data.frame if hasattr(data, "frame") else data
+
+    if frame is None or frame.empty:
         return data
 
     mask = np.ones(len(frame), dtype=bool)
 
-    if x_range and len(x_range) == 2 and all(v is not None for v in x_range):
-        x0, x1 = float(x_range[0]), float(x_range[1])
-        lo, hi = min(x0, x1), max(x0, x1)
-        x = frame[INTERNAL_X].to_numpy(copy=False)
-        mask &= (x >= lo) & (x <= hi)
+    if x_range is not None:
+        try:
+            x0, x1 = x_range
+        except Exception:
+            x0, x1 = None, None
 
-    if (
-        y_range
-        and len(y_range) == 2
-        and all(v is not None for v in y_range)
-        and INTERNAL_Y in frame.columns
-    ):
-        y0, y1 = float(y_range[0]), float(y_range[1])
-        lo, hi = min(y0, y1), max(y0, y1)
-        y = frame[INTERNAL_Y].to_numpy(copy=False)
-        mask &= (y >= lo) & (y <= hi)
+        if x0 is not None and x1 is not None and INTERNAL_X in frame.columns:
+            lo = min(float(x0), float(x1))
+            hi = max(float(x0), float(x1))
+            x = frame[INTERNAL_X].to_numpy(copy=False)
+            mask &= np.isfinite(x)
+            mask &= x >= lo
+            mask &= x <= hi
 
-    if mask.all():
-        return data
+    before_y = int(mask.sum())
 
-    restricted = frame.loc[mask].copy()
+    if y_range is not None:
+        try:
+            y0, y1 = y_range
+        except Exception:
+            y0, y1 = None, None
 
-    return PreparedFrame(
-        dataset_id=data.dataset_id,
-        frame=restricted,
-        x_name=data.x_name,
-        y_name=data.y_name,
-        require_y=data.require_y,
-        row_count_before_filter=data.row_count_before_filter,
-        row_count_after_filter=len(restricted),
-        sampled_from=None,
-    )
+        if y0 is not None and y1 is not None and INTERNAL_Y in frame.columns:
+            lo = min(float(y0), float(y1))
+            hi = max(float(y0), float(y1))
+            y = frame[INTERNAL_Y].to_numpy(copy=False)
+
+            y_mask = np.isfinite(y) & (y >= lo) & (y <= hi)
+            mask &= y_mask
+
+    filtered = frame.loc[mask]
+
+    if hasattr(data, "frame"):
+        return replace(
+            data,
+            frame=filtered,
+            row_count_after_filter=len(filtered),
+        )
+
+    return filtered
+
 
 def row_ids_in_bounds(
     data: PreparedFrame,

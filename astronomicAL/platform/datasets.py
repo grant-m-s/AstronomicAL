@@ -813,9 +813,20 @@ class DatasetManager:
         dataset_id: Optional[str],
         semantic_name: str,
         column_name: str,
-    ) -> None:
+    ) -> bool:
         mappings = self.get_mappings(dataset_id)
+
+        old_value = mappings.get(semantic_name)
+
+        # Normalise to string for UI-provided values.
+        old_norm = None if old_value is None else str(old_value)
+        new_norm = None if column_name is None else str(column_name)
+
+        if old_norm == new_norm:
+            return False
+
         mappings[semantic_name] = column_name
+        return True
 
     def has_mapping(
         self,

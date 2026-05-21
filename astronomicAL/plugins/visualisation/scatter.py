@@ -1,3 +1,7 @@
+# BUG: Assign Label col slow
+# BUG: Individual legend "on off" colour turns all colours off - works correctly in hist
+# BUG: When no focus, tap doesn't appear
+
 from __future__ import annotations
 
 import time
@@ -32,11 +36,318 @@ from .utils import (
     renderer_name_hook,
     row_ids_in_bounds,
     sample_prepared_frame,
+    deduplicate_toolbar_tools_hook
 )
 
 
 class ScatterPanel(BaseVisualisationPanel):
     title = "Scatter Plot"
+
+    def _range_coverage_fraction(self, range_value, data_min, data_max) -> float:
+        if not range_value:
+            return 1.0
+
+        try:
+            lo, hi = range_value
+            lo = float(lo)
+            hi = float(hi)
+            data_min = float(data_min)
+            data_max = float(data_max)
+        except Exception:
+            return 0.0
+
+        if hi < lo:
+            lo, hi = hi, lo
+
+        data_span = max(abs(data_max - data_min), 1.0e-12)
+
+        overlap_lo = max(lo, data_min)
+        overlap_hi = min(hi, data_max)
+
+        overlap = max(0.0, overlap_hi - overlap_lo)
+
+        return overlap / data_span
+
+    def _base_sample_cache_key(self, effective_limit: int):
+        return (
+            getattr(self, "_last_prepared_cache_key", None),
+            int(effective_limit),
+        )
+
+
+    def _base_sample_cache_get(self, key):
+        value = self._base_sample_cache.get(key)
+
+        print(
+            "[AstronomicAL scatter base-sample-cache] "
+            f"{'HIT' if value is not None else 'MISS'} "
+            f"size={len(self._base_sample_cache)} "
+            f"key={key!r}",
+            flush=True,
+        )
+
+        return value
+
+
+    def _base_sample_cache_set(self, key, plot_data):
+        size_before = len(self._base_sample_cache)
+
+        if key in self._base_sample_cache:
+            self._base_sample_cache.pop(key, None)
+
+        self._base_sample_cache[key] = plot_data
+
+        while len(self._base_sample_cache) > self._base_sample_cache_max:
+            try:
+                first_key = next(iter(self._base_sample_cache))
+                self._base_sample_cache.pop(first_key, None)
+            except Exception:
+                self._base_sample_cache.clear()
+                break
+
+        print(
+            "[AstronomicAL scatter base-sample-cache] SET "
+            f"size_before={size_before} "
+            f"size_after={len(self._base_sample_cache)} "
+            f"key={key!r}",
+            flush=True,
+        )
+
+    def _current_focus_row_id(self):
+        selection = getattr(self.context, "selection", None)
+        if selection is None:
+            return None
+
+        try:
+            focus = selection.get_focus()
+        except Exception:
+            return None
+
+        if focus is None:
+            return None
+
+        if getattr(focus, "dataset_id", None) != self._dataset_id():
+            return None
+
+        row_id = getattr(focus, "row_id", None)
+        return None if row_id is None else str(row_id)
+
+
+    def _forced_row_ids_for_sampling(self):
+        """Rows that must be injected into the sampled cloud.
+
+        The current focus is excluded because it is drawn by the focus overlay.
+        """
+        forced = list(self._forced_row_ids() or [])
+        focus_row_id = self._current_focus_row_id()
+
+        if focus_row_id is None:
+            return tuple(str(value) for value in forced)
+
+        return tuple(
+            str(value)
+            for value in forced
+            if str(value) != focus_row_id
+        )
+
+    def _near_full_range_key(self, x_range, y_range):
+        return (
+            getattr(self, "_last_prepared_cache_key", None),
+            self._range_cache_key(x_range),
+            self._range_cache_key(y_range),
+        )
+
+
+    def _is_known_near_full_range(self, x_range, y_range) -> bool:
+        return self._near_full_range_key(x_range, y_range) in self._near_full_range_keys
+
+
+    def _remember_near_full_range(self, x_range, y_range) -> None:
+        key = self._near_full_range_key(x_range, y_range)
+
+        self._near_full_range_keys.add(key)
+
+        while len(self._near_full_range_keys) > self._near_full_range_keys_max:
+            try:
+                self._near_full_range_keys.pop()
+            except Exception:
+                self._near_full_range_keys.clear()
+                break
+
+    def _prepared_data_extent(self, data):
+        """Return cached x/y min/max for the current prepared frame."""
+        prepared_key = getattr(self, "_last_prepared_cache_key", None)
+
+        if (
+            self._prepared_extent_cache_key == prepared_key
+            and self._prepared_extent_cache is not None
+        ):
+            return self._prepared_extent_cache
+
+        frame = self._frame_for_cache(data)
+
+        try:
+            x = frame[INTERNAL_X].to_numpy(copy=False)
+            y = frame[INTERNAL_Y].to_numpy(copy=False)
+
+            extent = (
+                float(np.nanmin(x)),
+                float(np.nanmax(x)),
+                float(np.nanmin(y)),
+                float(np.nanmax(y)),
+            )
+        except Exception:
+            extent = None
+
+        self._prepared_extent_cache_key = prepared_key
+        self._prepared_extent_cache = extent
+
+        return extent
+
+
+    def _range_contains_extent(self, range_value, data_min, data_max) -> bool:
+        """Return True when a Bokeh range already covers the full data extent."""
+        if not range_value:
+            return True
+
+        try:
+            lo, hi = range_value
+        except Exception:
+            return True
+
+        if lo is None or hi is None:
+            return True
+
+        try:
+            lo = float(lo)
+            hi = float(hi)
+            data_min = float(data_min)
+            data_max = float(data_max)
+        except Exception:
+            return False
+
+        if not (
+            np.isfinite(lo)
+            and np.isfinite(hi)
+            and np.isfinite(data_min)
+            and np.isfinite(data_max)
+        ):
+            return True
+
+        if hi < lo:
+            lo, hi = hi, lo
+
+        data_span = max(abs(data_max - data_min), 1.0e-12)
+
+        # Bokeh/HoloViews often emits padded ranges. Allow small numerical mismatch.
+        tol = max(data_span * 5.0e-2, 1.0e-6)
+
+        return lo <= data_min + tol and hi >= data_max - tol
+
+    def _range_is_near_full_extent(self, data, x_range, y_range) -> bool:
+        extent = self._prepared_data_extent(data)
+
+        if extent is None:
+            return False
+
+        x_min, x_max, y_min, y_max = extent
+
+        x_fraction = self._range_coverage_fraction(x_range, x_min, x_max)
+        y_fraction = self._range_coverage_fraction(y_range, y_min, y_max)
+
+        return x_fraction >= 0.95 and y_fraction >= 0.70
+
+    def _range_is_full_extent(self, data, x_range, y_range) -> bool:
+        extent = self._prepared_data_extent(data)
+
+        if extent is None:
+            return False
+
+        x_min, x_max, y_min, y_max = extent
+
+        x_full = self._range_contains_extent(x_range, x_min, x_max)
+        y_full = self._range_contains_extent(y_range, y_min, y_max)
+
+        return x_full and y_full
+
+    def _range_cache_value(self, value):
+        if value is None:
+            return None
+        try:
+            return round(float(value), 8)
+        except Exception:
+            return str(value)
+
+
+    def _frame_for_cache(self, data_or_frame):
+        if hasattr(data_or_frame, "frame"):
+            return data_or_frame.frame
+        return data_or_frame
+
+
+    def _frame_len(self, data_or_frame):
+        frame = self._frame_for_cache(data_or_frame)
+        try:
+            return len(frame)
+        except Exception:
+            return 0
+
+    def _interactive_sample_cache_key(
+        self,
+        data,
+        x_range,
+        y_range,
+        *,
+        forced_ids,
+        limit,
+    ):
+        return (
+            getattr(self, "_last_prepared_cache_key", None),
+            self._range_cache_key(x_range),
+            self._range_cache_key(y_range),
+            int(limit),
+            tuple(str(row_id) for row_id in forced_ids),
+        )
+
+
+    def _interactive_sample_cache_get(self, key):
+        value = self._interactive_sample_cache.get(key)
+
+        print(
+            "[AstronomicAL scatter sample-cache] "
+            f"{'HIT' if value is not None else 'MISS'} "
+            f"size={len(self._interactive_sample_cache)} "
+            f"key={key!r}",
+            flush=True,
+        )
+
+        return value
+
+
+    def _interactive_sample_cache_set(self, key, element, status_text):
+        size_before = len(self._interactive_sample_cache)
+
+        if key in self._interactive_sample_cache:
+            self._interactive_sample_cache.pop(key, None)
+
+        self._interactive_sample_cache[key] = (element, status_text)
+
+        while len(self._interactive_sample_cache) > self._interactive_sample_cache_max:
+            try:
+                first_key = next(iter(self._interactive_sample_cache))
+                self._interactive_sample_cache.pop(first_key, None)
+            except Exception:
+                self._interactive_sample_cache.clear()
+                break
+
+        print(
+            "[AstronomicAL scatter sample-cache] SET "
+            f"panel_id={self.panel_id} "
+            f"size_before={size_before} "
+            f"size_after={len(self._interactive_sample_cache)} "
+            f"key={key!r}",
+            flush=True,
+        )
 
     def _forced_positions_in_frame(self, frame: pd.DataFrame, forced_ids) -> list[int]:
         """
@@ -97,6 +408,67 @@ class ScatterPanel(BaseVisualisationPanel):
 
         return positions
 
+    def _focus_point(self, data: PreparedFrame) -> Optional[tuple[float, Optional[float]]]:
+        """Return the focused point for scatter without building a huge row-id index.
+
+        First use metadata coordinates if they match this panel's axes.
+        Then use ScatterPanel's fast forced-position lookup.
+        Finally fall back to the base implementation.
+        """
+        selection = getattr(self.context, "selection", None)
+        if selection is None or data.empty:
+            return None
+
+        try:
+            focus = selection.get_focus()
+        except Exception:
+            return None
+
+        if focus is None or getattr(focus, "dataset_id", None) != self._dataset_id():
+            return None
+
+        row_id = getattr(focus, "row_id", None)
+        if row_id is None:
+            return None
+
+        # Fast path for the scatter that emitted the event, or identical-axis panels.
+        point = self._focus_point_from_metadata(focus)
+        if point is not None:
+            return point
+
+        # Scatter-specific fast row lookup. This avoids BaseVisualisationPanel's
+        # pd.Index(data.frame[INTERNAL_ROW_ID].astype(str)) path.
+        try:
+            positions = self._forced_positions_in_frame(
+                data.frame,
+                [str(row_id)],
+            )
+        except Exception:
+            positions = []
+
+        if positions:
+            try:
+                row = data.frame.iloc[int(positions[0])]
+
+                x = float(row[INTERNAL_X])
+                y = float(row[INTERNAL_Y])
+
+                if not np.isfinite(x) or not np.isfinite(y):
+                    return None
+
+                if getattr(self.state, "log_x", False) and x <= 0:
+                    return None
+
+                if getattr(self.state, "log_y", False) and y <= 0:
+                    return None
+
+                return x, y
+            except Exception:
+                pass
+
+        # Safe fallback for unusual ID dtypes/duplicates.
+        return super()._focus_point(data)
+
     def _row_id_lookup_for_frame(self, data):
         """
         Build a raw row-id -> integer position lookup for the current prepared frame.
@@ -107,7 +479,7 @@ class ScatterPanel(BaseVisualisationPanel):
         if not hasattr(self, "_row_id_lookup_cache"):
             self._row_id_lookup_cache = {}
 
-        cache_key = (id(data.frame), len(data.frame))
+        cache_key = (id(data.frame), self._frame_len(data))
 
         cached = self._row_id_lookup_cache.get(cache_key)
         if cached is not None:
@@ -188,25 +560,14 @@ class ScatterPanel(BaseVisualisationPanel):
 
 
     def _sample_visible_frame(self, data, visible, effective_limit: int, forced_ids):
-
-        if not hasattr(self, "_interactive_sample_cache"):
-            self._interactive_sample_cache = {}
-
         forced_ids = list(forced_ids or [])
-        forced_key = tuple(str(value) for value in forced_ids)
 
-        is_full = visible is data
+        base_sample_key = None
 
-        cache_key = None
-        if is_full:
-            cache_key = (
-                id(data.frame),
-                len(data.frame),
-                int(effective_limit),
-                forced_key,
-            )
+        if self._same_underlying_frame(visible, data) and not forced_ids:
+            base_sample_key = self._base_sample_cache_key(effective_limit)
 
-            cached = self._interactive_sample_cache.get(cache_key)
+            cached = self._base_sample_cache_get(base_sample_key)
             if cached is not None:
                 return cached
 
@@ -218,16 +579,21 @@ class ScatterPanel(BaseVisualisationPanel):
             force_row_ids=[],
         )
 
+        if base_sample_key is not None:
+            self._base_sample_cache_set(base_sample_key, plot_data)
+
         # Add forced rows afterward, without forcing sample_prepared_frame into its
         # slow ID-scanning branch.
         if forced_ids:
+            visible_frame = self._frame_for_cache(visible)
+
             forced_positions = self._forced_positions_in_frame(
-                visible.frame,
+                visible_frame,
                 forced_ids,
             )
 
             if forced_positions:
-                extra = visible.frame.take(
+                extra = visible_frame.take(
                     np.asarray(forced_positions, dtype=np.int64)
                 )
 
@@ -253,26 +619,35 @@ class ScatterPanel(BaseVisualisationPanel):
                     sampled_from=plot_data.sampled_from,
                 )
 
-        if cache_key is not None:
-            self._interactive_sample_cache[cache_key] = plot_data
-
-            if len(self._interactive_sample_cache) > 12:
-                try:
-                    first_key = next(iter(self._interactive_sample_cache))
-                    self._interactive_sample_cache.pop(first_key, None)
-                except Exception:
-                    self._interactive_sample_cache.clear()
-
         return plot_data
 
 
     def _render(self) -> None:
+
         t0 = time.perf_counter()
 
         self._clear_stream_watchers()
 
         data = self._plot_data(require_y=True)
+        
+        prepared_key = getattr(self, "_last_prepared_cache_key", None)
+        last_key = getattr(self, "_last_interactive_prepared_key", None)
 
+        if last_key != prepared_key:
+            print(
+                "[AstronomicAL scatter sample-cache] CLEAR prepared key changed "
+                f"old={last_key!r} "
+                f"new={prepared_key!r} "
+                f"size_before={len(self._interactive_sample_cache)}",
+                flush=True,
+            )
+
+            self._interactive_sample_cache.clear()
+            self._last_interactive_prepared_key = prepared_key
+            self._prepared_extent_cache_key = None
+            self._prepared_extent_cache = None
+            self._near_full_range_keys.clear()
+        
         t1 = time.perf_counter()
 
         if data.empty:
@@ -292,15 +667,15 @@ class ScatterPanel(BaseVisualisationPanel):
         if use_raster:
             base = self._scatter_rasterized(data)
             render_label = "rasterized"
-            plotted_count = len(data.frame)
+            plotted_count = self._frame_len(data)
             sampled_note = ""
         else:
             base = self._scatter_interactive_dynamic(data)
             render_label = "interactive"
-            plotted_count = min(len(data.frame), int(self.state.interactive_sample_limit))
+            plotted_count = min(self._frame_len(data), int(self.state.interactive_sample_limit))
             sampled_note = (
-                f" · range-aware sample from {len(data.frame):,}"
-                if len(data.frame) > int(self.state.interactive_sample_limit)
+                f" · range-aware sample from {self._frame_len(data):,}"
+                if self._frame_len(data) > int(self.state.interactive_sample_limit)
                 else ""
             )
 
@@ -320,9 +695,7 @@ class ScatterPanel(BaseVisualisationPanel):
             legend_position="right",
             show_grid=True,
             toolbar="right",
-            tools=["box_select", "pan", "wheel_zoom", "box_zoom", "reset"],
-            active_tools=["wheel_zoom"],
-            hooks=[force_wheel_zoom_hook],
+            hooks=[deduplicate_toolbar_tools_hook],
             shared_axes=False,
             axiswise=True,
             framewise=True,
@@ -335,14 +708,14 @@ class ScatterPanel(BaseVisualisationPanel):
         t5 = time.perf_counter()
 
         self.status_pane.object = (
-            f"{len(data.frame):,} eligible rows · "
+            f"{self._frame_len(data):,} eligible rows · "
             f"{plotted_count:,} shown · {render_label}{sampled_note}"
         )
 
         print(
             "[AstronomicAL scatter] render timing "
             f"mode={render_label} "
-            f"rows={len(data.frame):,} "
+            f"rows={self._frame_len(data):,} "
             f"prepare={t1 - t0:.2f}s "
             f"mode_check={t2 - t1:.2f}s "
             f"build_base={t3 - t2:.2f}s "
@@ -352,33 +725,47 @@ class ScatterPanel(BaseVisualisationPanel):
             flush=True,
         )
 
-    def _range_cache_key(self, value):
-        if value is None:
+    def _range_cache_key(self, range_value):
+        if not range_value:
             return None
 
         try:
-            if len(value) != 2:
-                return None
-
-            result = []
-            for item in value:
-                if item is None:
-                    result.append(None)
-                else:
-                    # Round to avoid tiny floating-point range changes causing
-                    # unnecessary cache misses.
-                    result.append(round(float(item), 8))
-
-            return tuple(result)
+            lo, hi = range_value
         except Exception:
             return None
+
+        if lo is None or hi is None:
+            return None
+
+        try:
+            lo = float(lo)
+            hi = float(hi)
+        except Exception:
+            return (str(lo), str(hi))
+
+        if not np.isfinite(lo) or not np.isfinite(hi):
+            return None
+
+        span = abs(hi - lo)
+
+        if span <= 0:
+            return (round(lo, 8), round(hi, 8))
+
+        # Quantize to about 1e-4 of the current span.
+        # This makes near-identical Bokeh range emissions reuse the same cache entry.
+        step = span * 1.0e-4
+
+        return (
+            round(lo / step) * step,
+            round(hi / step) * step,
+        )
 
     def _should_rasterize(self, data: PreparedFrame) -> bool:
         if self.state.render_mode == "datashader":
             return True
         if self.state.render_mode == "interactive":
             return False
-        return len(data.frame) > int(self.state.datashade_threshold)
+        return self._frame_len(data) > int(self.state.datashade_threshold)
 
     def _forced_row_ids(self) -> List[str]:
         """Rows that should always be included in interactive samples.
@@ -403,45 +790,6 @@ class ScatterPanel(BaseVisualisationPanel):
             return []
 
         return [str(row_id)]
-
-    def _range_is_full_extent(self, data, x_range, y_range) -> bool:
-        if x_range is None and y_range is None:
-            return True
-
-        frame = data.frame
-
-        try:
-            x_min = float(frame[INTERNAL_X].min())
-            x_max = float(frame[INTERNAL_X].max())
-        except Exception:
-            x_min = x_max = None
-
-        try:
-            y_min = float(frame[INTERNAL_Y].min())
-            y_max = float(frame[INTERNAL_Y].max())
-        except Exception:
-            y_min = y_max = None
-
-        def covers(bounds, data_min, data_max):
-            if bounds is None:
-                return True
-
-            if data_min is None or data_max is None:
-                return False
-
-            try:
-                low, high = bounds
-                low = float(low)
-                high = float(high)
-            except Exception:
-                return False
-
-            span = max(abs(data_max - data_min), 1e-12)
-            tolerance = span * 0.01
-
-            return low <= data_min + tolerance and high >= data_max - tolerance
-
-        return covers(x_range, x_min, x_max) and covers(y_range, y_min, y_max)
 
     def _effective_interactive_sample_limit(self, visible_count: int) -> int:
         """
@@ -472,7 +820,14 @@ class ScatterPanel(BaseVisualisationPanel):
         self._selection_event_seq = getattr(self, "_selection_event_seq", 0)
         self._latest_selection_payload = None
 
-        point_cache = {}
+        def _ranges_are_unbounded(x_range, y_range):
+            def unbounded(r):
+                if not r:
+                    return True
+                lo, hi = r
+                return lo is None or hi is None
+
+            return unbounded(x_range) and unbounded(y_range)
 
         def make_points(x_range=None, y_range=None):
             t0 = time.perf_counter()
@@ -480,22 +835,19 @@ class ScatterPanel(BaseVisualisationPanel):
             effective_x_range = x_range or self._last_x_range
             effective_y_range = y_range or self._last_y_range
 
-            x_key = self._range_cache_key(effective_x_range)
-            y_key = self._range_cache_key(effective_y_range)
-
-            forced_ids = tuple(self._forced_row_ids())
+            forced_ids = self._forced_row_ids_for_sampling()
             limit = int(self.state.interactive_sample_limit)
 
-            cache_key = (
-                id(data.frame),
-                len(data.frame),
-                x_key,
-                y_key,
-                limit,
-                forced_ids,
+            cache_key = self._interactive_sample_cache_key(
+                data,
+                effective_x_range,
+                effective_y_range,
+                forced_ids=forced_ids,
+                limit=limit,
             )
 
-            cached = point_cache.get(cache_key)
+            cached = self._interactive_sample_cache_get(cache_key)
+
             if cached is not None:
                 element, status_text = cached
                 self.status_pane.object = status_text
@@ -503,17 +855,37 @@ class ScatterPanel(BaseVisualisationPanel):
                 print(
                     "[AstronomicAL scatter] interactive make_points cache hit "
                     f"eligible={len(data.frame):,} "
-                    f"x_range={x_key} y_range={y_key}",
+                    f"x_range={self._range_cache_key(effective_x_range)} "
+                    f"y_range={self._range_cache_key(effective_y_range)}",
                     flush=True,
                 )
 
                 return element
+            else:
+                print(
+                    "[AstronomicAL scatter] interactive make_points cache miss "
+                    f"x_range={self._range_cache_key(effective_x_range)} "
+                    f"y_range={self._range_cache_key(effective_y_range)} "
+                    f"forced_ids={forced_ids}",
+                    flush=True,
+                )
 
             self._remember_ranges(effective_x_range, effective_y_range)
 
             t1 = time.perf_counter()
+            
+            if self._is_known_near_full_range(effective_x_range, effective_y_range):
+                print(
+                    "[AstronomicAL scatter] known near-full range; skipping filter "
+                    f"panel_id={self.panel_id}",
+                    flush=True,
+                )
 
-            if self._range_is_full_extent(data, effective_x_range, effective_y_range):
+            if (
+                self._range_is_full_extent(data, effective_x_range, effective_y_range)
+                or self._range_is_near_full_extent(data, effective_x_range, effective_y_range)
+                or self._is_known_near_full_range(effective_x_range, effective_y_range)
+            ):
                 visible = data
             else:
                 visible = frame_in_ranges(
@@ -522,20 +894,41 @@ class ScatterPanel(BaseVisualisationPanel):
                     effective_y_range,
                 )
 
-            # If the Bokeh-reported range excludes only a tiny edge fraction, treat it as
-            # full extent. This avoids repeated almost-full filtering/sampling after pane
-            # assignment.
-            if visible is not data and len(data.frame) > 0:
-                visible_fraction = len(visible.frame) / len(data.frame)
+            data_len = self._frame_len(data)
+            visible_len = self._frame_len(visible)
 
-                if visible_fraction >= 0.995:
+            if visible is not data:
+                visible_len = self._frame_len(visible)
+                data_len = self._frame_len(data)
+
+                if visible_len == data_len and not self._range_is_full_extent(
+                    data,
+                    effective_x_range,
+                    effective_y_range,
+                ):
+                    print(
+                        "[AstronomicAL scatter] WARNING range filter returned all rows "
+                        "despite non-full extent "
+                        f"panel_id={self.panel_id} "
+                        f"x_range={effective_x_range!r} "
+                        f"y_range={effective_y_range!r}",
+                        flush=True,
+                    )
+
+            if visible is not data and data_len > 0:
+                visible_fraction = visible_len / data_len
+
+                if visible_fraction >= 0.85:
+                    self._remember_near_full_range(
+                        effective_x_range,
+                        effective_y_range,
+                    )
                     visible = data
+                    visible_len = data_len
 
             t2 = time.perf_counter()
 
-            effective_limit = self._effective_interactive_sample_limit(len(visible.frame))
-
-            forced_ids = self._forced_row_ids()
+            effective_limit = self._effective_interactive_sample_limit(visible_len)
 
             plot_data = self._sample_visible_frame(
                 data,
@@ -544,26 +937,28 @@ class ScatterPanel(BaseVisualisationPanel):
                 forced_ids,
             )
 
+            plot_len = self._frame_len(plot_data)
+
             t3 = time.perf_counter()
 
-            self._interactive_current_frame = plot_data.frame
+            self._interactive_current_frame = self._frame_for_cache(plot_data)
 
             sampled_note = (
                 f" · sampled from {plot_data.sampled_from:,} visible"
-                if plot_data.sampled_from
+                if hasattr(plot_data, "sampled_from") and plot_data.sampled_from
                 else ""
             )
 
             limit_note = (
                 f" · display cap {effective_limit:,}"
-                if len(visible.frame) > effective_limit
+                if visible_len > effective_limit
                 else ""
             )
 
             status_text = (
-                f"{len(data.frame):,} eligible rows · "
-                f"{len(visible.frame):,} visible · "
-                f"{len(plot_data.frame):,} shown · interactive"
+                f"{data_len:,} eligible rows · "
+                f"{visible_len:,} visible · "
+                f"{plot_len:,} shown · interactive"
                 f"{sampled_note}{limit_note}"
             )
 
@@ -573,22 +968,17 @@ class ScatterPanel(BaseVisualisationPanel):
 
             t4 = time.perf_counter()
 
-            point_cache[cache_key] = (element, status_text)
-
-            # Keep this small. Range interactions can generate many slightly different
-            # ranges.
-            if len(point_cache) > 20:
-                try:
-                    first_key = next(iter(point_cache))
-                    point_cache.pop(first_key, None)
-                except Exception:
-                    point_cache.clear()
+            self._interactive_sample_cache_set(
+                cache_key,
+                element,
+                status_text,
+            )
 
             print(
                 "[AstronomicAL scatter] interactive make_points "
-                f"eligible={len(data.frame):,} "
-                f"visible={len(visible.frame):,} "
-                f"shown={len(plot_data.frame):,} "
+                f"eligible={self._frame_len(data):,} "
+                f"visible={self._frame_len(visible):,} "
+                f"shown={self._frame_len(plot_data):,} "
                 f"ranges={t1 - t0:.3f}s "
                 f"filter={t2 - t1:.3f}s "
                 f"sample={t3 - t2:.3f}s "
@@ -718,6 +1108,29 @@ class ScatterPanel(BaseVisualisationPanel):
                 seen.add(row_id)
                 deduped.append(row_id)
 
+            if self._is_single_focus_selection(
+                deduped,
+                bounds,
+                total_matches=len(deduped),
+                truncated=False,
+            ):
+                metadata = {}
+
+                if indices:
+                    try:
+                        metadata = self._focus_metadata_from_rendered_row(
+                            frame,
+                            int(indices[0]),
+                        )
+                    except Exception:
+                        metadata = {}
+
+                self._publish_focus(
+                    deduped[0],
+                    metadata=metadata,
+                )
+                return
+
             self._publish_selection(
                 deduped,
                 bounds=None,
@@ -789,17 +1202,8 @@ class ScatterPanel(BaseVisualisationPanel):
                 **self._base_opts(
                     xlabel=self.state.x,
                     ylabel=self.state.y,
-                    tools=[
-                        "tap",
-                        "box_select",
-                        "lasso_select",
-                        limited_point_hover_tool(),
-                        "pan",
-                        "wheel_zoom",
-                        "box_zoom",
-                        "reset",
-                    ],
-                    active_tools=["wheel_zoom"],
+                    tools=[],
+                    active_tools=[],
                 ),
                 color="#1f77b4",
                 size=self.state.point_size,
@@ -894,11 +1298,14 @@ class ScatterPanel(BaseVisualisationPanel):
             ylabel=str(self.state.y),
             logx=self.state.log_x,
             logy=self.state.log_y,
-            tools=["box_select", "pan", "wheel_zoom", "box_zoom", "reset"],
-            active_tools=["wheel_zoom"],
-            hooks=[force_wheel_zoom_hook, renderer_name_hook(DENSITY_RENDERER)],
+
+            # Raster is passive. Bounds source owns tools.
+            tools=[],
+            active_tools=[],
+            toolbar=None,
+
+            hooks=[renderer_name_hook(DENSITY_RENDERER)],
             show_grid=True,
-            toolbar="right",
             shared_axes=False,
             axiswise=True,
             framewise=True,
@@ -1024,22 +1431,28 @@ class ScatterPanel(BaseVisualisationPanel):
         row_id: str,
         *,
         origin: str = "core.visualisation.scatter.tap",
+        metadata: Optional[dict] = None,
     ) -> None:
         dataset_id = self._dataset_id()
         selection = getattr(self.context, "selection", None)
 
         if not row_id or not dataset_id or selection is None:
             return
+        
+        print("[Scatter] publishing focus", row_id, flush=True)
 
         selection.set_focus(
             dataset_id=dataset_id,
             row_id=str(row_id),
             origin=origin,
             panel_id=self.panel_id,
+            metadata=metadata or {},
         )
-
-        # This panel ignores its own selection events to avoid feedback loops,
-        # so schedule a local refresh to show the focus overlay.
+        print(
+            "[AstronomicAL scatter] scheduling origin focus refresh "
+            f"panel_id={self.panel_id}",
+            flush=True,
+        )
         self._schedule_post_selection_refresh(delay_ms=120)
 
     @staticmethod
@@ -1075,6 +1488,40 @@ class ScatterPanel(BaseVisualisationPanel):
             return int(total_matches) == 1
         except Exception:
             return False
+
+    def _focus_metadata_from_rendered_row(
+        self,
+        frame: pd.DataFrame,
+        rendered_index: int,
+    ) -> dict:
+        metadata = {
+            "panel_type": "scatter",
+            "x_variable": str(self.state.x),
+            "y_variable": str(self.state.y),
+            "id_column": self.state.record_id_col or "Use Index",
+        }
+
+        try:
+            idx = int(rendered_index)
+        except Exception:
+            return metadata
+
+        if idx < 0 or idx >= len(frame):
+            return metadata
+
+        row = frame.iloc[idx]
+
+        try:
+            metadata["focus_x"] = float(row[INTERNAL_X])
+        except Exception:
+            pass
+
+        try:
+            metadata["focus_y"] = float(row[INTERNAL_Y])
+        except Exception:
+            pass
+
+        return metadata
 
     def _publish_selection(
         self,

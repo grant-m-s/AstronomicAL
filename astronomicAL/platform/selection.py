@@ -16,6 +16,7 @@ class FocusState:
     origin: Optional[str] = None
     panel_id: Optional[str] = None
     timestamp: float = field(default_factory=time.time)
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -89,14 +90,17 @@ class SelectionManager:
         origin=None,
         panel_id=None,
         selection_set_id=None,
+        metadata=None,
     ):
         row_id = str(row_id)
+        metadata = dict(metadata or {})
 
         self._focus = FocusState(
             dataset_id=dataset_id,
             row_id=row_id,
             origin=origin,
             panel_id=panel_id,
+            metadata=metadata,
         )
 
         self.events.publish(
@@ -108,6 +112,7 @@ class SelectionManager:
                 "panel_id": panel_id,
                 "selection_set_id": selection_set_id,
                 "timestamp": self._focus.timestamp,
+                "metadata": metadata,
             },
         )
 
@@ -259,6 +264,7 @@ class SelectionManager:
                 "origin": focus.origin,
                 "panel_id": focus.panel_id,
                 "timestamp": focus.timestamp,
+                "metadata": dict(getattr(focus, "metadata", {}) or {}),
             }
 
         selection_set_snapshot = None
@@ -327,6 +333,7 @@ class SelectionManager:
                     row_id=focus["row_id"],
                     origin=focus.get("origin") or "workspace.restore",
                     panel_id=focus.get("panel_id"),
+                    metadata=dict(focus.get("metadata") or {}),
                 )
             else:
                 self._focus = FocusState(
@@ -334,4 +341,5 @@ class SelectionManager:
                     row_id=str(focus.get("row_id")),
                     origin=focus.get("origin"),
                     panel_id=focus.get("panel_id"),
+                    metadata=dict(focus.get("metadata") or {}),
                 )

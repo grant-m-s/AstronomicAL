@@ -1,3 +1,7 @@
+#BUG: Hide Y Var dropdown
+#BUG: Change X var slow
+#BUG: Assign Label col slow
+
 from __future__ import annotations
 
 import holoviews as hv
@@ -97,9 +101,6 @@ class HistogramPanel(BaseVisualisationPanel):
             legend_position="right",
             show_grid=True,
             toolbar="right",
-            tools=[limited_histogram_hover_tool(), "pan", "wheel_zoom", "box_zoom", "reset"],
-            active_tools=["wheel_zoom"],
-            hooks=[force_wheel_zoom_hook],
             shared_axes=False,
             axiswise=True,
             framewise=True,

@@ -10,7 +10,7 @@ from astronomicAL.platform.plugins import PluginManifest
 
 PLUGIN_ID = "core.visualisation"
 STATE_SERVICE_KEY = f"{PLUGIN_ID}.state"
-
+PREPARED_CACHE_SERVICE_KEY = f"{PLUGIN_ID}.prepared_cache"
 _SPLIT_PACKAGE = "astronomicAL.plugins.visualisation"
 
 
@@ -53,7 +53,6 @@ def _impl(module_name: str):
     _ensure_split_package()
     return importlib.import_module(f"{_SPLIT_PACKAGE}.{module_name}")
 
-
 manifest = PluginManifest(
     id=PLUGIN_ID,
     name="Visualisation",
@@ -81,6 +80,22 @@ def register(api) -> None:
         ),
     )
 
+    api.register_service(
+        key="prepared_cache",
+        factory=create_prepared_frame_cache,
+        lazy=True,
+        replace=True,
+        description="Shared prepared-frame cache for visualisation panels.",
+    )
+
+    api.register_service(
+        key="data_cache",
+        factory=create_visualisation_data_cache,
+        lazy=True,
+        replace=True,
+        description="Shared column, label, and row-id cache for visualisation panels.",
+    )
+
     api.register_panel(
         id="scatter",
         title="Scatter Plot",
@@ -92,7 +107,8 @@ def register(api) -> None:
         category="Visualisation",
         icon="scatter_plot",
         tags=["core", "visualisation", "scatter", "selection", "plot"],
-        optional_mappings=["record_id", "target_label"],
+        required_mappings=["record_id"],
+        optional_mappings=["target_label"],
         produces=["selection.focus.changed", "selection.set.changed"],
         default_layout={"x": 0, "y": 0, "w": 3, "h": 4},
     )
@@ -105,7 +121,8 @@ def register(api) -> None:
         category="Visualisation",
         icon="bar_chart",
         tags=["core", "visualisation", "histogram", "labels", "plot"],
-        optional_mappings=["record_id", "target_label"],
+        required_mappings=["record_id"],
+        optional_mappings=["target_label"],
         default_layout={"x": 0, "y": 0, "w": 3, "h": 4},
     )
 
@@ -120,7 +137,8 @@ def register(api) -> None:
         category="Visualisation",
         icon="grid_on",
         tags=["core", "visualisation", "density", "datashader", "rasterize", "plot"],
-        optional_mappings=["record_id", "target_label"],
+        required_mappings=["record_id"],
+        optional_mappings=["target_label"],
         default_layout={"x": 0, "y": 0, "w": 3, "h": 4},
     )
 
@@ -135,7 +153,8 @@ def register(api) -> None:
         category="Visualisation",
         icon="dashboard",
         tags=["core", "visualisation", "explorer", "linked", "dashboard", "plot"],
-        optional_mappings=["record_id", "target_label"],
+        required_mappings=["record_id"],
+        optional_mappings=["target_label"],
         produces=["selection.focus.changed", "selection.set.changed"],
         default_layout={"x": 0, "y": 0, "w": 4, "h": 5},
     )
@@ -206,3 +225,108 @@ def create_explorer_panel(context, **kwargs):
         state=state,
     )
     return controller.panel(), controller
+
+class PreparedFrameCache:
+    def __init__(self, max_items: int = 4):
+        self.max_items = int(max_items)
+        self._cache = {}
+
+    def get(self, key):
+        return self._cache.get(key)
+
+    def set(self, key, value):
+        if key in self._cache:
+            self._cache.pop(key, None)
+
+        self._cache[key] = value
+
+        while len(self._cache) > self.max_items:
+            oldest_key = next(iter(self._cache))
+            self._cache.pop(oldest_key, None)
+
+    def clear(self):
+        self._cache.clear()
+
+    def invalidate_dataset(self, dataset_id):
+        # Only works if dataset_id is included somewhere in your prepared_cache_key.
+        for key in list(self._cache):
+            if dataset_id in key:
+                self._cache.pop(key, None)
+
+
+def create_prepared_frame_cache(context, **kwargs):
+    return PreparedFrameCache(max_items=12)
+
+class VisualisationRuntimeState:
+    def __init__(self):
+        self.prepared_frame_cache = {}
+        self.max_prepared_frames = 4
+
+    def get_prepared_frame(self, key):
+        return self.prepared_frame_cache.get(key)
+
+    def set_prepared_frame(self, key, value):
+        self.prepared_frame_cache[key] = value
+
+        while len(self.prepared_frame_cache) > self.max_prepared_frames:
+            oldest_key = next(iter(self.prepared_frame_cache))
+            self.prepared_frame_cache.pop(oldest_key, None)
+
+    def clear_prepared_frame_cache(self, *, dataset_id=None):
+        if dataset_id is None:
+            self.prepared_frame_cache.clear()
+            return
+
+        for key in list(self.prepared_frame_cache):
+            # depending on your key structure
+            if dataset_id in key:
+                self.prepared_frame_cache.pop(key, None)
+
+class VisualisationDataCache:
+    def __init__(self, max_columns: int = 32, max_labels: int = 8):
+        self.max_columns = int(max_columns)
+        self.max_labels = int(max_labels)
+        self.columns = {}
+        self.labels = {}
+        self.row_ids = {}
+
+    def get_column(self, key):
+        return self.columns.get(key)
+
+    def set_column(self, key, value):
+        if key in self.columns:
+            self.columns.pop(key, None)
+        self.columns[key] = value
+        while len(self.columns) > self.max_columns:
+            self.columns.pop(next(iter(self.columns)), None)
+
+    def get_label(self, key):
+        return self.labels.get(key)
+
+    def set_label(self, key, value):
+        if key in self.labels:
+            self.labels.pop(key, None)
+        self.labels[key] = value
+        while len(self.labels) > self.max_labels:
+            self.labels.pop(next(iter(self.labels)), None)
+
+    def get_row_ids(self, key):
+        return self.row_ids.get(key)
+
+    def set_row_ids(self, key, value):
+        self.row_ids[key] = value
+
+    def clear_dataset(self, dataset_id):
+        for store in (self.columns, self.labels, self.row_ids):
+            for key in list(store):
+                if dataset_id in key:
+                    store.pop(key, None)
+
+    def clear(self):
+        self.columns.clear()
+        self.labels.clear()
+        self.row_ids.clear()
+
+
+def create_visualisation_data_cache(context, **kwargs):
+    return VisualisationDataCache()

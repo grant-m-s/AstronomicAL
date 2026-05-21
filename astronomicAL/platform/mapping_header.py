@@ -645,7 +645,10 @@ class MappingAlertController:
             dataset_id = item["dataset_id"]
             semantic_name = item["semantic_name"]
 
-            self.context.datasets.set_mapping(dataset_id, semantic_name, chosen)
+            # self.context.datasets.set_mapping(dataset_id, semantic_name, chosen)
+
+            old_value = self.context.datasets.get_mapping(dataset_id, semantic_name)
+            changed = self.context.datasets.set_mapping(dataset_id, semantic_name, chosen)
 
             for config_key in item.get("config_keys", []):
                 if config_key and getattr(self.context, "config", None) is not None:
@@ -653,27 +656,28 @@ class MappingAlertController:
 
             dataset_payload = {
                 "source": "mapping_header",
-                "sources": list(item.get("sources", [])),
                 "dataset_id": dataset_id,
                 "semantic_name": semantic_name,
-                "config_key": item.get("config_key"),
-                "config_keys": list(item.get("config_keys", [])),
                 "column_name": chosen,
+                "old_column_name": old_value,
                 "required": bool(item.get("required", True)),
+                "changed": True,
             }
 
-            # Publish one mapping.resolved per requester for compatibility with
-            # existing panel/plugin code that expects its own source in the
-            # payload.
+
+            # Always clear the pending mapping row.
+            resolved_keys.append(key)
+
+            # If unchanged, do not fan out a dataset-level update.
+            if not changed:
+                continue
+
             for source in item.get("sources", []) or ["unknown"]:
                 payload = dict(dataset_payload)
                 payload["source"] = source
                 self.context.events.publish("mapping.resolved", payload)
 
-            # Publish one dataset-level update for the semantic mapping.
             self.context.events.publish("dataset.mapping_updated", dataset_payload)
-
-            resolved_keys.append(key)
 
         for key in resolved_keys:
             self._pending.pop(key, None)

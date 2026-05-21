@@ -1,5 +1,4 @@
-# BUG: Not updating record after scatter tap
-# BUG: Overwrites selected to index 0 on init
+# BUG: If lots of labels button ends up above bottom label item (phz_classification_phz) 
 
 from __future__ import annotations
 
@@ -144,11 +143,61 @@ class RecordBrowserPanel(param.Parameterized):
 
         self._subscribe_to_dataset_events()
         self._subscribe_to_selection_events()
+
         self._refresh_from_active_dataset(reset_history=True)
+
+
+    def get_state(self):
+        return {
+            "extra_info_cols": list(self.extra_info_cols or []),
+        }
+
+
+    def restore_state(self, state):
+        if not isinstance(state, dict):
+            return
+
+        # Defensive: if this was saved while still mapping-gated, the real state
+        # may be nested inside the gate wrapper.
+        if "extra_info_cols" not in state and isinstance(state.get("restore_state"), dict):
+            state = state["restore_state"]
+
+        if "extra_info_cols" not in state:
+            return
+
+        cols = state.get("extra_info_cols") or []
+        if not isinstance(cols, (list, tuple)):
+            return
+
+        restored = [str(col) for col in cols if col]
+
+        # If the dataset schema is already known, remove stale columns.
+        # If not, keep them and let the next dataset refresh validate them.
+        if self.columns:
+            restored = [col for col in restored if col in self.columns]
+
+        self.extra_info_cols = restored
+        self._sync_legacy_settings()
+
+        if hasattr(self, "extra_info_html"):
+            self._refresh_extra_info_view()
+
+        if getattr(self, "_built", False):
+            self._rerender_main_layout()
 
     # ---------------------------------------------------------------------
     # Dataset / mapping helpers
     # ---------------------------------------------------------------------
+
+    def _has_focus_for_active_dataset(self) -> bool:
+        focus = self._get_focus_state()
+        if focus is None:
+            return False
+
+        dataset_id = self._focus_value(focus, "dataset_id")
+        row_id = self._focus_value(focus, "row_id")
+
+        return dataset_id == self._dataset_id() and row_id is not None
 
     def _set_index_bounds(self, max_index: int) -> None:
         max_index = max(0, int(max_index))
@@ -505,6 +554,7 @@ class RecordBrowserPanel(param.Parameterized):
             self._refresh_from_active_dataset(reset_history=False)
 
     def _on_selection_focus_changed(self, _topic, payload) -> None:
+        print("[RecordBrowser] focus event:", payload, flush=True)
         if not isinstance(payload, dict):
             return
 
@@ -605,7 +655,14 @@ class RecordBrowserPanel(param.Parameterized):
             self._built = True
 
             if not self._sync_index_from_current_focus():
-                self._publish_focus_for_current_index()
+                if not self._has_focus_for_active_dataset():
+                    self._publish_focus_for_current_index()
+                else:
+                    print(
+                        "[AstronomicAL record_browser] existing external focus could not be "
+                        "resolved yet; preserving it instead of overwriting focus",
+                        flush=True,
+                    )
 
             print(
                 "[AstronomicAL record_browser] refresh built ui "
@@ -628,7 +685,14 @@ class RecordBrowserPanel(param.Parameterized):
         self._rerender_main_layout()
 
         if not self._sync_index_from_current_focus():
-            self._publish_focus_for_current_index()
+            if not self._has_focus_for_active_dataset():
+                self._publish_focus_for_current_index()
+            else:
+                print(
+                    "[AstronomicAL record_browser] existing external focus could not be "
+                    "resolved yet; preserving it instead of overwriting focus",
+                    flush=True,
+                )
 
         print(
             "[AstronomicAL record_browser] refresh end "
@@ -1181,6 +1245,14 @@ class RecordBrowserPanel(param.Parameterized):
         return None
 
     def _find_index_for_row_id(self, row_id):
+        print(
+            "[RecordBrowser] _find_index_for_row_id start "
+            f"dataset_id={self._dataset_id()!r} "
+            f"row_id={row_id!r} "
+            f"row_id_type={type(row_id).__name__} "
+            f"record_id_col={self.record_id_col!r}",
+            flush=True,
+        )
         if row_id is None or self.row_count <= 0:
             return None
 
@@ -1208,18 +1280,30 @@ class RecordBrowserPanel(param.Parameterized):
                     position = method(
                         dataset_id,
                         row_id,
-                        self.record_id_col,
+                        id_column=self.record_id_col,
+                    )
+                    print(
+                        "[RecordBrowser] DatasetManager.find_position_by_id returned "
+                        f"{position!r}",
+                        flush=True,
                     )
                     if position is not None:
                         return int(position)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    print(
+                        "[RecordBrowser] DatasetManager.find_position_by_id failed "
+                        f"{type(exc).__name__}: {exc}",
+                        flush=True,
+                    )
 
         if self.source is not None:
             method = getattr(self.source, "find_position_by_id", None)
             if callable(method):
                 try:
-                    position = method(row_id, self.record_id_col)
+                    position = method(
+                        row_id,
+                        id_column=self.record_id_col,
+                    )
                     if position is not None:
                         return int(position)
                 except Exception:
@@ -1311,6 +1395,16 @@ class RecordBrowserPanel(param.Parameterized):
     # Platform selection focus
     # ---------------------------------------------------------------------
 
+    def _has_current_focus_for_active_dataset(self):
+        focus = self._get_focus_state()
+        if focus is None:
+            return False
+
+        return (
+            self._focus_value(focus, "dataset_id") == self._dataset_id()
+            and self._focus_value(focus, "row_id") is not None
+        )
+
     def _focus_value(self, focus, key: str):
         if focus is None:
             return None
@@ -1377,6 +1471,11 @@ class RecordBrowserPanel(param.Parameterized):
             row_id=str(row_id),
             origin="record_browser.index",
             panel_id=self.panel_id,
+            metadata={
+                "row_position": int(self.index),
+                "id_column": self.record_id_col or "Use Index",
+                "panel_type": "record_browser",
+            },
         )
 
     def _focus_row_from_selection(self, row_id):
