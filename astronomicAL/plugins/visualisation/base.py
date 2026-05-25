@@ -17,6 +17,11 @@ from .constants import (
     INTERNAL_Y,
     PLOT_MIN_HEIGHT,
     SETTINGS_HEIGHT,
+    SELECTION_SOURCE_LOOKUP_LIMIT,
+    SELECTION_SOURCE_LOOKUP_CHUNK_SIZE,
+    SELECTION_SOURCE_LOOKUP_FALLBACK_LIMIT,
+    SELECTION_OVERLAY_DEBUG_LIMIT,
+    STALE_ATTACH_REFRESH_SKIP_AFTER_SECONDS,
 )
 from .utils import (
     PreparedFrame,
@@ -88,6 +93,16 @@ class BaseVisualisationPanel(param.Parameterized):
         self._focus_point_cache = OrderedDict()
         self._focus_point_cache_max = 512
 
+        self._selection_source_cache = OrderedDict()
+        self._selection_source_cache_max = 12
+
+        self._extent_cache = {}
+
+        self._density_underlay_cache = OrderedDict()
+
+        self._selection_overlay_status_note = ""
+        self._selection_overlay_debug_rows = []
+
         self._async_focus_pending = set()
         self._async_focus_failed = set()
 
@@ -116,12 +131,23 @@ class BaseVisualisationPanel(param.Parameterized):
         self._last_x_range = None
         self._last_y_range = None
 
+        self._has_completed_refresh = False
+        self._last_completed_refresh_key = None
+
         self.plot_pane = pn.pane.HoloViews(
             sizing_mode="stretch_both",
             height_policy="max",
             min_height=PLOT_MIN_HEIGHT,
             margin=(0, 0, 0, 0),
-            styles={"min-height": "0"},
+            styles={
+                "width": "100%",
+                "max-width": "100%",
+                "min-width": "0",
+                "height": "100%",
+                "min-height": "0",
+                "box-sizing": "border-box",
+                "overflow": "hidden",
+            },
         )
 
         self.status_pane = pn.pane.HTML(
@@ -196,6 +222,19 @@ class BaseVisualisationPanel(param.Parameterized):
                 "log_density",
             ]
         )
+
+    def _current_refresh_identity(self):
+        try:
+            return (
+                self._dataset_id(),
+                str(getattr(self.state, "x", None)),
+                str(getattr(self.state, "y", None)),
+                str(getattr(self.state, "color_by", None)),
+                bool(getattr(self.state, "log_x", False)),
+                bool(getattr(self.state, "log_y", False)),
+            )
+        except Exception:
+            return None
 
 
     def _shared_visualisation_data_cache(self):
@@ -774,7 +813,6 @@ class BaseVisualisationPanel(param.Parameterized):
                 delay_ms = 0
 
         self._refresh_request_count += 1
-
         now = time.perf_counter()
 
         if self._refresh_scheduled:
@@ -791,24 +829,46 @@ class BaseVisualisationPanel(param.Parameterized):
 
         print(
             "[AstronomicAL visualisation] scheduling refresh "
-            f"reason={reason!r}",
+            f"reason={reason!r} delay_ms={delay_ms}",
             flush=True,
         )
 
         try:
-            import panel as pn
-
-            pn.state.curdoc.add_next_tick_callback(self._run_scheduled_refresh)
+            if delay_ms and delay_ms > 0:
+                pn.state.curdoc.add_timeout_callback(self._run_scheduled_refresh, int(delay_ms))
+            else:
+                pn.state.curdoc.add_next_tick_callback(self._run_scheduled_refresh)
         except Exception:
             self._run_scheduled_refresh()
 
     def _run_scheduled_refresh(self) -> None:
-        queued_for = None
 
-        if self._last_refresh_requested_at is not None:
-            queued_for = time.perf_counter() - self._last_refresh_requested_at
+        reason = getattr(self, "_last_refresh_reason", None)
+        queued_for = 0.0
 
-        reason = self._last_refresh_reason
+        try:
+            requested_at = float(getattr(self, "_last_refresh_requested_at", 0.0) or 0.0)
+            if requested_at:
+                queued_for = time.perf_counter() - requested_at
+        except Exception:
+            queued_for = 0.0
+
+        if (
+            reason == "panel.attach"
+            and queued_for > float(STALE_ATTACH_REFRESH_SKIP_AFTER_SECONDS)
+            and bool(getattr(self, "_has_completed_refresh", False))
+        ):
+            current_identity = self._current_refresh_identity()
+
+            if current_identity == getattr(self, "_last_completed_refresh_key", None):
+                print(
+                    "[AstronomicAL visualisation] skipping stale panel.attach refresh "
+                    f"panel={type(self).__name__} "
+                    f"queued_for={queued_for:.2f}s",
+                    flush=True,
+                )
+                self._refresh_scheduled = False
+                return
 
         self._refresh_scheduled = False
         self._last_refresh_requested_at = None
@@ -869,8 +929,8 @@ class BaseVisualisationPanel(param.Parameterized):
         self._stream_watchers.clear()
 
     def _clear_prepared_cache(self) -> None:
+        
         self._prepared_cache.clear()
-
         self._row_index_cache_key = None
         self._row_index_cache = None
 
@@ -891,6 +951,11 @@ class BaseVisualisationPanel(param.Parameterized):
 
         try:
             self._base_sample_cache.clear()
+        except Exception:
+            pass
+
+        try:
+            self._selection_source_cache.clear()
         except Exception:
             pass
 
@@ -1000,6 +1065,496 @@ class BaseVisualisationPanel(param.Parameterized):
         self._row_index_cache_key = key
         self._row_index_cache = index
         return index
+
+    def _raw_selection_row_ids(
+        self,
+        frame: pd.DataFrame,
+        *,
+        record_id_col: str,
+    ) -> pd.Series:
+        if frame is None or frame.empty:
+            return pd.Series([], dtype=str)
+
+        if record_id_col == "Use Index":
+            return pd.Series(frame.index.astype(str), index=frame.index, dtype=str)
+
+        if record_id_col not in frame.columns:
+            return pd.Series([], dtype=str)
+
+        return frame[record_id_col].astype(str)
+
+
+    def _classify_selection_overlay_drop(
+        self,
+        row: pd.Series,
+        *,
+        record_id_col: str,
+        x_col: str,
+        y_col: str,
+    ) -> dict:
+        if record_id_col == "Use Index":
+            row_id = str(row.name)
+        else:
+            row_id = str(row.get(record_id_col, ""))
+
+        x_raw = row.get(x_col, None)
+        y_raw = row.get(y_col, None)
+
+        try:
+            x = float(pd.to_numeric(pd.Series([x_raw]), errors="coerce").iloc[0])
+        except Exception:
+            x = np.nan
+
+        try:
+            y = float(pd.to_numeric(pd.Series([y_raw]), errors="coerce").iloc[0])
+        except Exception:
+            y = np.nan
+
+        reason = None
+
+        if not np.isfinite(x):
+            reason = "x_non_finite"
+        elif not np.isfinite(y):
+            reason = "y_non_finite"
+        elif bool(getattr(self.state, "log_x", False)) and x <= 0:
+            reason = "x_invalid_for_log_axis"
+        elif bool(getattr(self.state, "log_y", False)) and y <= 0:
+            reason = "y_invalid_for_log_axis"
+        else:
+            reason = "unknown_after_normalisation"
+
+        return {
+            "row_id": row_id,
+            "reason": reason,
+            "x_col": str(x_col),
+            "y_col": str(y_col),
+            "x_value": x_raw,
+            "y_value": y_raw,
+            "log_x": bool(getattr(self.state, "log_x", False)),
+            "log_y": bool(getattr(self.state, "log_y", False)),
+        }
+
+
+    def _record_selection_overlay_debug(
+        self,
+        *,
+        requested_ids: list[str],
+        raw: pd.DataFrame,
+        normalised: pd.DataFrame,
+        record_id_col: str,
+        x_col: str,
+        y_col: str,
+    ) -> None:
+        requested = [str(row_id) for row_id in requested_ids or []]
+        requested_set = set(requested)
+
+        self._selection_overlay_status_note = ""
+        self._selection_overlay_debug_rows = []
+
+        if not requested:
+            return
+
+        raw_ids_series = self._raw_selection_row_ids(raw, record_id_col=record_id_col)
+        raw_ids = set(raw_ids_series.astype(str).tolist())
+
+        if normalised is not None and not normalised.empty and INTERNAL_ROW_ID in normalised.columns:
+            visible_ids = set(normalised[INTERNAL_ROW_ID].astype(str).tolist())
+        else:
+            visible_ids = set()
+
+        not_fetched = requested_set - raw_ids
+        dropped = raw_ids - visible_ids
+
+        debug_rows: list[dict] = []
+
+        if raw is not None and not raw.empty and dropped:
+            raw_with_ids = raw.copy(deep=False)
+            raw_with_ids["_debug_row_id"] = raw_ids_series
+
+            for _, row in raw_with_ids.loc[
+                raw_with_ids["_debug_row_id"].astype(str).isin(dropped)
+            ].head(SELECTION_OVERLAY_DEBUG_LIMIT).iterrows():
+                debug_rows.append(
+                    self._classify_selection_overlay_drop(
+                        row,
+                        record_id_col=record_id_col,
+                        x_col=x_col,
+                        y_col=y_col,
+                    )
+                )
+
+        for row_id in list(not_fetched)[:SELECTION_OVERLAY_DEBUG_LIMIT]:
+            debug_rows.append(
+                {
+                    "row_id": str(row_id),
+                    "reason": "not_fetched_from_dataset_source",
+                    "x_col": str(x_col),
+                    "y_col": str(y_col),
+                    "x_value": None,
+                    "y_value": None,
+                    "log_x": bool(getattr(self.state, "log_x", False)),
+                    "log_y": bool(getattr(self.state, "log_y", False)),
+                }
+            )
+
+        visible_count = len(visible_ids)
+        requested_count = len(requested_set)
+        hidden_count = max(requested_count - visible_count, 0)
+
+        if hidden_count:
+            reason_counts: dict[str, int] = {}
+            for item in debug_rows:
+                reason = str(item.get("reason") or "unknown")
+                reason_counts[reason] = reason_counts.get(reason, 0) + 1
+
+            reason_text = ", ".join(
+                f"{reason}={count}" for reason, count in sorted(reason_counts.items())
+            )
+
+            if not reason_text:
+                reason_text = "not drawable on current axes"
+
+            self._selection_overlay_status_note = (
+                f"selection visible {visible_count}/{requested_count}; "
+                f"hidden {hidden_count} ({reason_text})"
+            )
+
+            self._selection_overlay_debug_rows = debug_rows
+
+            print(
+                "[AstronomicAL visualisation] selection overlay hidden rows "
+                f"panel={type(self).__name__} "
+                f"dataset_id={self._dataset_id()!r} "
+                f"x={x_col!r} y={y_col!r} "
+                f"log_x={bool(getattr(self.state, 'log_x', False))} "
+                f"log_y={bool(getattr(self.state, 'log_y', False))} "
+                f"visible={visible_count} requested={requested_count} "
+                f"hidden={hidden_count} "
+                f"examples={debug_rows}",
+                flush=True,
+            )
+
+    def _selection_source_cache_get(self, key):
+        cache = getattr(self, "_selection_source_cache", None)
+        if cache is None:
+            return None
+
+        value = cache.get(key)
+        if value is not None and hasattr(cache, "move_to_end"):
+            cache.move_to_end(key)
+
+        return value
+
+
+    def _selection_source_cache_set(self, key, value) -> None:
+        cache = getattr(self, "_selection_source_cache", None)
+        if cache is None:
+            return
+
+        if key in cache:
+            cache.pop(key, None)
+
+        cache[key] = value
+
+        max_items = int(getattr(self, "_selection_source_cache_max", 12))
+        while len(cache) > max_items:
+            try:
+                cache.popitem(last=False)
+            except Exception:
+                cache.clear()
+                break
+
+
+    def _selection_lookup_limit(self) -> int:
+        try:
+            state_limit = int(getattr(self.state, "max_selection_ids", SELECTION_SOURCE_LOOKUP_LIMIT))
+        except Exception:
+            state_limit = SELECTION_SOURCE_LOOKUP_LIMIT
+
+        return max(1, min(state_limit, SELECTION_SOURCE_LOOKUP_LIMIT))
+
+
+    def _selection_axes_columns(self) -> tuple[Optional[str], Optional[str], Optional[str]]:
+        record_id_col = getattr(self.state, "record_id_col", None)
+        x_col = getattr(self.state, "x", None)
+        y_col = getattr(self.state, "y", None)
+
+        if record_id_col is not None:
+            record_id_col = str(record_id_col)
+        if x_col is not None:
+            x_col = str(x_col)
+        if y_col is not None:
+            y_col = str(y_col)
+
+        return record_id_col, x_col, y_col
+
+
+    def _quote_identifier_for_source_query(self, name: str) -> str:
+        return '"' + str(name).replace('"', '""') + '"'
+
+
+    def _selection_rows_from_source_query(
+        self,
+        *,
+        source,
+        record_id_col: str,
+        row_ids: list[str],
+        columns: list[str],
+    ) -> Optional[pd.DataFrame]:
+        """
+        Batch-fetch selected rows from a DatasetSource using a bounded WHERE IN query.
+
+        This is the important Parquet-friendly path for cross-panel selection
+        overlays. It avoids scanning or materialising the prepared plotting frame.
+        """
+
+        to_pandas = getattr(source, "to_pandas", None)
+        if not callable(to_pandas):
+            return None
+
+        if not row_ids:
+            return pd.DataFrame(columns=columns)
+
+        quoted_id = self._quote_identifier_for_source_query(record_id_col)
+        frames: list[pd.DataFrame] = []
+
+        chunk_size = max(1, int(SELECTION_SOURCE_LOOKUP_CHUNK_SIZE))
+
+        for start in range(0, len(row_ids), chunk_size):
+            chunk = row_ids[start : start + chunk_size]
+            placeholders = ", ".join(["?"] * len(chunk))
+
+            where_sql = f"CAST({quoted_id} AS VARCHAR) IN ({placeholders})"
+
+            try:
+                frame = to_pandas(
+                    columns=columns,
+                    where_sql=where_sql,
+                    params=[str(value) for value in chunk],
+                    limit=len(chunk),
+                )
+            except TypeError:
+                return None
+            except Exception as exc:
+                print(
+                    "[AstronomicAL visualisation] selection source batch lookup failed "
+                    f"panel={type(self).__name__} "
+                    f"rows={len(chunk)} "
+                    f"{type(exc).__name__}: {exc}",
+                    flush=True,
+                )
+                return None
+
+            if frame is not None and not frame.empty:
+                frames.append(frame)
+
+        if not frames:
+            return pd.DataFrame(columns=columns)
+
+        return pd.concat(frames, ignore_index=True, sort=False)
+
+
+    def _selection_rows_from_source_fallback(
+        self,
+        *,
+        source,
+        record_id_col: str,
+        row_ids: list[str],
+        columns: list[str],
+    ) -> pd.DataFrame:
+        """
+        Slower compatibility fallback for sources without filtered to_pandas(...).
+
+        This is capped much lower because it may call get_row_by_id/get_row_by_position
+        once per selected source.
+        """
+
+        rows: list[pd.DataFrame] = []
+        fallback_limit = min(len(row_ids), int(SELECTION_SOURCE_LOOKUP_FALLBACK_LIMIT))
+
+        for row_id in row_ids[:fallback_limit]:
+            row = None
+
+            try:
+                if record_id_col == "Use Index":
+                    try:
+                        position = int(row_id)
+                    except Exception:
+                        continue
+
+                    get_row_by_position = getattr(source, "get_row_by_position", None)
+                    if callable(get_row_by_position):
+                        row = get_row_by_position(position, columns=columns)
+                else:
+                    get_row_by_id = getattr(source, "get_row_by_id", None)
+                    if callable(get_row_by_id):
+                        row = get_row_by_id(
+                            row_id,
+                            id_column=record_id_col,
+                            columns=columns,
+                        )
+            except TypeError:
+                try:
+                    if record_id_col != "Use Index":
+                        row = source.get_row_by_id(row_id, record_id_col, columns=columns)
+                except Exception:
+                    row = None
+            except Exception:
+                row = None
+
+            row = self._coerce_single_row_frame(row)
+            if row is not None and not row.empty:
+                rows.append(row)
+
+        if not rows:
+            return pd.DataFrame(columns=columns)
+
+        return pd.concat(rows, ignore_index=True, sort=False)
+
+
+    def _normalise_selection_overlay_rows(
+        self,
+        frame: pd.DataFrame,
+        *,
+        record_id_col: str,
+        x_col: str,
+        y_col: str,
+    ) -> pd.DataFrame:
+        if frame is None or frame.empty:
+            return pd.DataFrame(columns=[INTERNAL_ROW_ID, INTERNAL_X, INTERNAL_Y])
+
+        required = [x_col, y_col]
+        if record_id_col != "Use Index":
+            required.append(record_id_col)
+
+        for column in required:
+            if column not in frame.columns:
+                return pd.DataFrame(columns=[INTERNAL_ROW_ID, INTERNAL_X, INTERNAL_Y])
+
+        out = pd.DataFrame()
+
+        if record_id_col == "Use Index":
+            # Best effort. In practice, Use Index selections are handled better by
+            # position-aware sources, but keep a stable row id string here.
+            out[INTERNAL_ROW_ID] = frame.index.astype(str)
+        else:
+            out[INTERNAL_ROW_ID] = frame[record_id_col].astype(str)
+
+        try:
+            out[INTERNAL_X] = pd.to_numeric(frame[x_col], errors="coerce")
+            out[INTERNAL_Y] = pd.to_numeric(frame[y_col], errors="coerce")
+        except Exception:
+            return pd.DataFrame(columns=[INTERNAL_ROW_ID, INTERNAL_X, INTERNAL_Y])
+
+        finite = np.isfinite(out[INTERNAL_X].to_numpy(copy=False)) & np.isfinite(
+            out[INTERNAL_Y].to_numpy(copy=False)
+        )
+        out = out.loc[finite]
+
+        if bool(getattr(self.state, "log_x", False)):
+            out = out.loc[out[INTERNAL_X] > 0]
+
+        if bool(getattr(self.state, "log_y", False)):
+            out = out.loc[out[INTERNAL_Y] > 0]
+
+        return out.reset_index(drop=True)
+
+
+    def _selection_rows_from_dataset_source(
+        self,
+        row_ids: list[str],
+    ) -> pd.DataFrame:
+        """
+        Resolve active selected row IDs into this panel's current X/Y coordinates.
+
+        This is what lets scatter A publish a selection and scatter B draw yellow
+        rings using scatter B's own axes.
+        """
+
+        dataset_id = self._dataset_id()
+        datasets = getattr(self.context, "datasets", None)
+
+        if not dataset_id or datasets is None or not row_ids:
+            return pd.DataFrame(columns=[INTERNAL_ROW_ID, INTERNAL_X, INTERNAL_Y])
+
+        record_id_col, x_col, y_col = self._selection_axes_columns()
+
+        if not x_col or not y_col or not record_id_col:
+            return pd.DataFrame(columns=[INTERNAL_ROW_ID, INTERNAL_X, INTERNAL_Y])
+
+        lookup_limit = self._selection_lookup_limit()
+        limited_ids = [str(row_id) for row_id in row_ids[:lookup_limit]]
+
+        cache_key = (
+            str(dataset_id),
+            str(record_id_col),
+            str(x_col),
+            str(y_col),
+            bool(getattr(self.state, "log_x", False)),
+            bool(getattr(self.state, "log_y", False)),
+            tuple(limited_ids),
+        )
+
+        cached = self._selection_source_cache_get(cache_key)
+        if cached is not None:
+            return cached.copy(deep=False)
+
+        try:
+            source = datasets.get_source(dataset_id)
+        except Exception:
+            source = None
+
+        if source is None:
+            return pd.DataFrame(columns=[INTERNAL_ROW_ID, INTERNAL_X, INTERNAL_Y])
+
+        columns = [x_col, y_col]
+        if record_id_col != "Use Index":
+            columns.insert(0, record_id_col)
+
+        columns = list(dict.fromkeys(columns))
+
+        if record_id_col == "Use Index":
+            raw = self._selection_rows_from_source_fallback(
+                source=source,
+                record_id_col=record_id_col,
+                row_ids=limited_ids,
+                columns=columns,
+            )
+        else:
+            raw = self._selection_rows_from_source_query(
+                source=source,
+                record_id_col=record_id_col,
+                row_ids=limited_ids,
+                columns=columns,
+            )
+
+            if raw is None:
+                raw = self._selection_rows_from_source_fallback(
+                    source=source,
+                    record_id_col=record_id_col,
+                    row_ids=limited_ids,
+                    columns=columns,
+                )
+
+        normalised = self._normalise_selection_overlay_rows(
+            raw,
+            record_id_col=record_id_col,
+            x_col=x_col,
+            y_col=y_col,
+        )
+
+        self._record_selection_overlay_debug(
+            requested_ids=limited_ids,
+            raw=raw,
+            normalised=normalised,
+            record_id_col=record_id_col,
+            x_col=x_col,
+            y_col=y_col,
+        )
+
+        self._selection_source_cache_set(cache_key, normalised)
+
+        return normalised.copy(deep=False)
 
     def _rows_for_row_ids(
         self,
@@ -1510,7 +2065,12 @@ class BaseVisualisationPanel(param.Parameterized):
         return [str(row_id) for row_id in list(getattr(active, "row_ids", []) or [])]
 
     def _selection_points(self, data: PreparedFrame):
+
+        self._selection_overlay_status_note = ""
+        self._selection_overlay_debug_rows = []
+
         ids = self._active_selection_ids()
+
         if not ids or data.empty or INTERNAL_Y not in data.frame.columns:
             return None
 
@@ -1522,26 +2082,24 @@ class BaseVisualisationPanel(param.Parameterized):
         )
 
         if sub.empty:
+            sub = self._selection_rows_from_dataset_source(ids)
+
+        if sub.empty:
             return None
 
         return hv.Points(
             sub,
             kdims=[INTERNAL_X, INTERNAL_Y],
+            vdims=[INTERNAL_ROW_ID] if INTERNAL_ROW_ID in sub.columns else [],
         ).opts(
             marker="circle",
-            size=max(float(self.state.point_size) + 4, 8),
+            size=max(float(self.state.point_size) + 5, 9),
             fill_alpha=0.0,
-            line_color="orange",
-            line_width=2,
-
-            # Add these:
+            line_color="#ffd400",
+            line_width=2.5,
             tools=[],
             active_tools=[],
             toolbar=None,
-
-            # Remove this unless you specifically need it here:
-            # hooks=[force_wheel_zoom_hook],
-
             logx=self.state.log_x,
             logy=self.state.log_y,
             shared_axes=False,
@@ -1903,6 +2461,8 @@ class BaseVisualisationPanel(param.Parameterized):
 
         try:
             self._render()
+            self._has_completed_refresh = True
+            self._last_completed_refresh_key = self._current_refresh_identity()
         finally:
             print(
                 f"[AstronomicAL visualisation] refresh end panel={type(self).__name__} "
@@ -1967,20 +2527,28 @@ class BaseVisualisationPanel(param.Parameterized):
         return pn.Column(
         pn.Row(
             self.status_pane,
+            settings_checkbox(self.state.param.log_x, name="Log X"),
+            settings_checkbox(self.state.param.log_y, name="Log Y"),
+        ),
+        pn.Spacer(height=1),
+        pn.Row(
             settings_select(self.state.param.color_by, name="Colour", width=130),
             settings_multichoice(self.state.param.label_filter, name="Labels", width=210),
+        ),
+        pn.Spacer(height=1),
+        pn.Row(
             settings_select(self.state.param.render_mode, name="Render", width=130),
         ),
+        pn.Spacer(height=2),
         pn.Row(
             settings_int_input(self.state.param.datashade_threshold, name="Shade threshold", width=145),
             settings_int_input(self.state.param.interactive_sample_limit, name="Sample limit", width=130),
             settings_int_input(self.state.param.max_selection_ids, name="Max selected IDs", width=145),
+        ),
+        pn.Spacer(height=2),
+        pn.Row(
             settings_float_slider(self.state.param.point_size, name="Size", width=175),
             settings_float_slider(self.state.param.point_alpha, name="Alpha", width=175),
-        ),
-        pn.Row(
-            settings_checkbox(self.state.param.log_x, name="Log X"),
-            settings_checkbox(self.state.param.log_y, name="Log Y"),
         ),
         sizing_mode="stretch_width",
         height_policy="fit",
@@ -2009,9 +2577,14 @@ class BaseVisualisationPanel(param.Parameterized):
             margin=(0, 0, 0, 0),
             styles={
                 "display": "grid",
-                "grid-template-columns": "minmax(70px, 1fr) minmax(70px, 1fr) 34px",
+                "grid-template-columns": "minmax(0, 1fr) minmax(0, 1fr) 34px",
                 "gap": "4px",
                 "align-items": "start",
+                "width": "100%",
+                "max-width": "100%",
+                "min-width": "0",
+                "box-sizing": "border-box",
+                "overflow": "hidden",
             },
         )
 
@@ -2025,9 +2598,8 @@ class BaseVisualisationPanel(param.Parameterized):
         return children
 
     def panel(self):
-        self.refresh()
-
         if not self.show_header and not self.show_controls:
+            self._schedule_refresh(reason="panel.attach", delay_ms=50)
             return self.plot_pane
 
         self._ensure_settings_built()
@@ -2040,8 +2612,17 @@ class BaseVisualisationPanel(param.Parameterized):
             min_height=0,
             margin=(0, 0, 0, 0),
             styles={
+                "width": "100%",
+                "max-width": "100%",
+                "min-width": "0",
+                "height": "100%",
                 "min-height": "0",
+                "box-sizing": "border-box",
                 "overflow": "hidden",
             },
         )
+
+        self._schedule_refresh(reason="panel.attach", delay_ms=50)
+        self._schedule_refresh(reason="panel.attach.late", delay_ms=300)
+
         return self._layout

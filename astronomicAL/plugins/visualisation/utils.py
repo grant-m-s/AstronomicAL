@@ -97,6 +97,32 @@ def ensure_hv_extension() -> None:
 
     _HV_EXTENSION_LOADED = True
 
+def keep_pan_tool_active_hook(plot, element):
+    try:
+        from bokeh.models import PanTool, WheelZoomTool
+    except Exception:
+        return
+
+    try:
+        state = getattr(plot, "state", None)
+        toolbar = getattr(state, "toolbar", None)
+
+        if toolbar is None:
+            return
+
+        tools = list(getattr(state, "tools", []) or [])
+
+        pan_tool = next((tool for tool in tools if isinstance(tool, PanTool)), None)
+        wheel_tool = next((tool for tool in tools if isinstance(tool, WheelZoomTool)), None)
+
+        if pan_tool is not None and getattr(toolbar, "active_drag", None) is None:
+            toolbar.active_drag = pan_tool
+
+        if wheel_tool is not None and getattr(toolbar, "active_scroll", None) is None:
+            toolbar.active_scroll = wheel_tool
+    except Exception:
+        return
+
 def force_wheel_zoom_hook(plot, element) -> None:
     """Make wheel zoom active and limit hover rows where supported."""
     try:
@@ -1205,6 +1231,65 @@ def prepared_cache_key(context, state, *, require_y: bool) -> Tuple[Any, ...]:
         state.label_col,
     )
 
+def _stable_unique_int_positions(values: Any) -> np.ndarray:
+    """
+    Deduplicate integer row positions while preserving input order.
+
+    Do not use np.unique(...) here. np.unique sorts, and sorting by original
+    row position can create visually sharp artificial cutoffs when the source
+    table order is correlated with a plotted quantity.
+    """
+
+    arr = np.asarray(values, dtype=np.int64).ravel()
+
+    if arr.size == 0:
+        return arr
+
+    seen: set[int] = set()
+    out: list[int] = []
+
+    for value in arr:
+        item = int(value)
+        if item in seen:
+            continue
+        seen.add(item)
+        out.append(item)
+
+    return np.asarray(out, dtype=np.int64)
+
+def _append_unique_positions(
+    *,
+    selected: list[int],
+    selected_set: set[int],
+    candidates: Any,
+    max_new: int,
+) -> int:
+    """
+    Append at most max_new unique positions, preserving candidate order.
+
+    Returns the number of positions appended.
+    """
+
+    if max_new <= 0:
+        return 0
+
+    added = 0
+
+    for value in np.asarray(candidates, dtype=np.int64).ravel():
+        item = int(value)
+
+        if item in selected_set:
+            continue
+
+        selected.append(item)
+        selected_set.add(item)
+        added += 1
+
+        if added >= max_new:
+            break
+
+    return added
+
 def sample_prepared_frame(
     data: PreparedFrame,
     limit: int,
@@ -1306,6 +1391,284 @@ def sample_prepared_frame(
         row_count_after_filter=len(sampled),
         sampled_from=n_rows,
     )
+
+
+def coverage_sample_prepared_frame(
+    data: PreparedFrame,
+    limit: int,
+    *,
+    seed: int = 0,
+    force_row_ids: Optional[Sequence[Any]] = None,
+    x_bins: int = 96,
+    y_bins: int = 96,
+    coverage_fraction: float = 0.65,
+) -> PreparedFrame:
+    """
+    Spatially coverage-aware display sample.
+
+    This is designed for the interactive reduced-point scatter view. It tries
+    to make the visible sample more faithful in plot space without sending the
+    full dataset to Bokeh.
+
+    Important implementation detail:
+    never use np.unique(...), sort(), then [:limit] for final capping. That
+    creates row-order bias and can appear as clean artificial cutoffs when
+    catalogue order is correlated with x/y.
+    """
+
+    frame = data.frame
+    n_rows = len(frame)
+
+    if limit <= 0 or n_rows <= limit:
+        return data
+
+    if INTERNAL_X not in frame.columns or INTERNAL_Y not in frame.columns:
+        return sample_prepared_frame(
+            data,
+            limit,
+            seed=seed,
+            force_row_ids=force_row_ids,
+        )
+
+    limit = int(limit)
+    force_row_ids = list(force_row_ids or [])
+
+    try:
+        x = frame[INTERNAL_X].to_numpy(copy=False)
+        y = frame[INTERNAL_Y].to_numpy(copy=False)
+        finite = np.isfinite(x) & np.isfinite(y)
+    except Exception:
+        return sample_prepared_frame(
+            data,
+            limit,
+            seed=seed,
+            force_row_ids=force_row_ids,
+        )
+
+    valid_positions = np.flatnonzero(finite)
+
+    if len(valid_positions) <= limit:
+        sampled = frame.take(valid_positions).copy()
+        return PreparedFrame(
+            dataset_id=data.dataset_id,
+            frame=sampled,
+            x_name=data.x_name,
+            y_name=data.y_name,
+            require_y=data.require_y,
+            row_count_before_filter=data.row_count_before_filter,
+            row_count_after_filter=len(sampled),
+            sampled_from=n_rows,
+        )
+
+    try:
+        xv = x[valid_positions]
+        yv = y[valid_positions]
+
+        x_min = float(np.nanmin(xv))
+        x_max = float(np.nanmax(xv))
+        y_min = float(np.nanmin(yv))
+        y_max = float(np.nanmax(yv))
+    except Exception:
+        return sample_prepared_frame(
+            data,
+            limit,
+            seed=seed,
+            force_row_ids=force_row_ids,
+        )
+
+    if not all(np.isfinite(value) for value in (x_min, x_max, y_min, y_max)):
+        return sample_prepared_frame(
+            data,
+            limit,
+            seed=seed,
+            force_row_ids=force_row_ids,
+        )
+
+    if x_max <= x_min or y_max <= y_min:
+        return sample_prepared_frame(
+            data,
+            limit,
+            seed=seed,
+            force_row_ids=force_row_ids,
+        )
+
+    rng = np.random.default_rng(seed)
+
+    selected: list[int] = []
+    selected_set: set[int] = set()
+
+    # ------------------------------------------------------------------
+    # 1. Forced rows first: focus/selected points should never disappear
+    #    because of display sampling.
+    # ------------------------------------------------------------------
+    forced_indices: list[int] = []
+
+    if force_row_ids and INTERNAL_ROW_ID in frame.columns:
+        id_series = frame[INTERNAL_ROW_ID]
+        id_values = id_series.to_numpy(copy=False)
+
+        # Build string fallback lazily only if needed.
+        values_as_str = None
+
+        for forced_id in force_row_ids:
+            found = None
+
+            try:
+                matches = np.flatnonzero(id_values == forced_id)
+                if len(matches):
+                    found = int(matches[0])
+            except Exception:
+                found = None
+
+            if found is None:
+                try:
+                    numeric_id = pd.to_numeric(forced_id)
+                    matches = np.flatnonzero(id_values == numeric_id)
+                    if len(matches):
+                        found = int(matches[0])
+                except Exception:
+                    found = None
+
+            if found is None:
+                try:
+                    if values_as_str is None:
+                        values_as_str = id_series.astype(str).to_numpy(copy=False)
+                    matches = np.flatnonzero(values_as_str == str(forced_id))
+                    if len(matches):
+                        found = int(matches[0])
+                except Exception:
+                    found = None
+
+            if found is not None:
+                forced_indices.append(found)
+
+    _append_unique_positions(
+        selected=selected,
+        selected_set=selected_set,
+        candidates=forced_indices,
+        max_new=limit,
+    )
+
+    # ------------------------------------------------------------------
+    # 2. Coverage pass: one representative per occupied plot-space cell.
+    # ------------------------------------------------------------------
+    remaining_after_forced = max(0, limit - len(selected))
+    coverage_budget = int(
+        max(
+            1,
+            min(
+                remaining_after_forced,
+                round(limit * float(coverage_fraction)),
+            ),
+        )
+    )
+
+    if coverage_budget > 0:
+        try:
+            x_bins = max(8, int(x_bins))
+            y_bins = max(8, int(y_bins))
+
+            xi = np.floor((xv - x_min) / (x_max - x_min) * x_bins).astype(np.int32)
+            yi = np.floor((yv - y_min) / (y_max - y_min) * y_bins).astype(np.int32)
+
+            np.clip(xi, 0, x_bins - 1, out=xi)
+            np.clip(yi, 0, y_bins - 1, out=yi)
+
+            cell_ids = (yi * x_bins + xi).astype(np.int32, copy=False)
+
+            # Sort by cell only to recover occupied cells cheaply.
+            order = np.argsort(cell_ids, kind="mergesort")
+            sorted_cells = cell_ids[order]
+
+            first = np.empty(len(sorted_cells), dtype=bool)
+            first[0] = True
+            first[1:] = sorted_cells[1:] != sorted_cells[:-1]
+
+            coverage_positions = valid_positions[order[first]]
+
+            # If there are more occupied cells than the coverage budget, choose
+            # cells randomly. Do not sort/cap by row position afterward.
+            if len(coverage_positions) > coverage_budget:
+                keep = rng.choice(
+                    len(coverage_positions),
+                    size=coverage_budget,
+                    replace=False,
+                )
+                coverage_positions = coverage_positions[keep]
+
+            _append_unique_positions(
+                selected=selected,
+                selected_set=selected_set,
+                candidates=coverage_positions,
+                max_new=coverage_budget,
+            )
+        except Exception:
+            # Fall through to random fill. The panel should not fail because
+            # the coverage sampler hit an unexpected dtype/range edge case.
+            pass
+
+    # ------------------------------------------------------------------
+    # 3. Random fill: fill the remaining display budget without reintroducing
+    #    row-order bias.
+    # ------------------------------------------------------------------
+    remaining = max(0, limit - len(selected))
+
+    if remaining > 0:
+        attempts = 0
+
+        while remaining > 0 and attempts < 16:
+            attempts += 1
+
+            draw_size = min(
+                len(valid_positions),
+                max(remaining * 4, remaining + 256),
+            )
+
+            draw_idx = rng.integers(0, len(valid_positions), size=draw_size)
+            draw_positions = valid_positions[draw_idx]
+
+            added = _append_unique_positions(
+                selected=selected,
+                selected_set=selected_set,
+                candidates=draw_positions,
+                max_new=remaining,
+            )
+
+            remaining = max(0, limit - len(selected))
+
+            if added == 0 and draw_size >= len(valid_positions):
+                break
+
+    # ------------------------------------------------------------------
+    # 4. Final defensive cap. Preserve the intentional order:
+    #    forced rows, coverage rows, random fill.
+    # ------------------------------------------------------------------
+    if len(selected) > limit:
+        selected = selected[:limit]
+
+    if not selected:
+        return sample_prepared_frame(
+            data,
+            limit,
+            seed=seed,
+            force_row_ids=force_row_ids,
+        )
+
+    selected_positions = np.asarray(selected, dtype=np.int64)
+
+    sampled = frame.take(selected_positions).copy()
+
+    return PreparedFrame(
+        dataset_id=data.dataset_id,
+        frame=sampled,
+        x_name=data.x_name,
+        y_name=data.y_name,
+        require_y=data.require_y,
+        row_count_before_filter=data.row_count_before_filter,
+        row_count_after_filter=len(sampled),
+        sampled_from=n_rows,
+    )
+
 
 def frame_in_ranges(data, x_range=None, y_range=None):
     frame = data.frame if hasattr(data, "frame") else data
