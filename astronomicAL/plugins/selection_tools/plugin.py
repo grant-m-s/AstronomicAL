@@ -3,14 +3,18 @@ from __future__ import annotations
 import html
 import traceback
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 import pandas as pd
 import panel as pn
 
+from astronomicAL.platform.dataset_sources import DatasetSource
 from astronomicAL.platform.plugins import PluginManifest
 from astronomicAL.platform.plugins.specs import ActionResult, EventResult, InputSpec
 
+
+SELECTION_PREVIEW_LIMIT = 50
+SELECTION_PREVIEW_EXTRA_COLUMNS = 4
 
 manifest = PluginManifest(
     id="core.selection_tools",
@@ -193,15 +197,14 @@ def materialise_active_selection_as_dataset(
     if not base_dataset_id:
         raise RuntimeError("Could not resolve the source dataset.")
 
-    filtered_df = _selection_rows_to_dataframe(
-        context,
-        base_dataset_id=base_dataset_id,
-        row_ids=row_ids,
-    )
+    columns = _dataset_columns(datasets, base_dataset_id)
+    id_col = _resolve_id_column_from_columns(context, base_dataset_id, columns)
 
-    if filtered_df.empty:
+    if id_col is None:
         raise ValueError(
-            "The active selection did not match any rows in the source dataset."
+            "Could not create a derived dataset from this selection because no "
+            "record ID column is mapped. Map `record_id` for the source dataset "
+            "or use a selection whose row IDs are integer row positions."
         )
 
     new_dataset_id = f"{base_dataset_id}__selection__{uuid.uuid4().hex[:8]}"
@@ -210,35 +213,69 @@ def materialise_active_selection_as_dataset(
     base_mappings = _dataset_get_mappings(datasets, base_dataset_id)
 
     dataset_metadata = {
-        "name": dataset_name,
         "derived_from": base_dataset_id,
         "created_by": manifest.id,
         "derivation_type": "selection_set",
         "selection_set_id": selection_set_id,
-        "selection_row_ids": row_ids,
+        "selection_row_count": len(row_ids),
+        "selection_row_ids_preview": row_ids[:SELECTION_PREVIEW_LIMIT],
         "selection_metadata": metadata,
-        "rows": len(filtered_df),
+        "rows": len(row_ids),
     }
 
-    _register_dataset_compat(
-        datasets,
-        dataset_id=new_dataset_id,
-        df=filtered_df,
-        name=dataset_name,
-        metadata=dataset_metadata,
-        mappings=base_mappings,
-    )
+    source = _dataset_get_source(datasets, base_dataset_id)
+
+    if source is not None and hasattr(datasets, "register_source"):
+        subset_source = SelectionSubsetDatasetSource(
+            base_source=source,
+            row_ids=row_ids,
+            id_column=id_col,
+            columns=columns,
+        )
+        _register_dataset_source_compat(
+            datasets,
+            dataset_id=new_dataset_id,
+            source=subset_source,
+            name=dataset_name,
+            metadata=dataset_metadata,
+            mappings=base_mappings,
+        )
+        row_count = len(row_ids)
+    else:
+        # Last-resort compatibility path for very old DatasetManager-like
+        # objects. This materialises only the selected rows, never the whole
+        # source dataset.
+        filtered_df = _selection_rows_to_dataframe(
+            context,
+            base_dataset_id=base_dataset_id,
+            row_ids=row_ids,
+            columns=columns,
+            id_col=id_col,
+        )
+        if filtered_df.empty:
+            raise ValueError(
+                "The active selection did not match any rows in the source dataset."
+            )
+
+        _register_dataset_compat(
+            datasets,
+            dataset_id=new_dataset_id,
+            df=filtered_df,
+            name=dataset_name,
+            metadata=dataset_metadata,
+            mappings=base_mappings,
+        )
+        row_count = len(filtered_df)
 
     previous_dataset_id = base_dataset_id
 
     if set_active:
         _set_active_dataset_compat(datasets, new_dataset_id)
-        _sync_config_main_df(context, filtered_df)
 
     result = {
         "dataset_id": new_dataset_id,
         "name": dataset_name,
-        "rows": len(filtered_df),
+        "rows": row_count,
         "derived_from": base_dataset_id,
         "selection_set_id": selection_set_id,
         "set_active": set_active,
@@ -251,7 +288,7 @@ def materialise_active_selection_as_dataset(
             {
                 "dataset_id": new_dataset_id,
                 "name": dataset_name,
-                "rows": len(filtered_df),
+                "rows": row_count,
                 "derived_from": base_dataset_id,
                 "selection_set_id": selection_set_id,
                 "origin": manifest.id,
@@ -276,149 +313,12 @@ def materialise_active_selection_as_dataset(
                 "dataset_id": new_dataset_id,
                 "derived_from": base_dataset_id,
                 "selection_set_id": selection_set_id,
-                "rows": len(filtered_df),
+                "rows": row_count,
                 "origin": manifest.id,
             },
         )
 
     return result
-
-def _selection_rows_to_dataframe(
-    context,
-    *,
-    base_dataset_id: str,
-    base_df: Optional[pd.DataFrame] = None,
-    row_ids: List[str],
-) -> pd.DataFrame:
-    datasets = getattr(context, "datasets", None)
-
-    if datasets is None:
-        raise RuntimeError("DatasetManager is required.")
-
-    row_ids = [str(r) for r in row_ids]
-    row_id_set = set(row_ids)
-    order = {str(row_id): i for i, row_id in enumerate(row_ids)}
-
-    # Preferred Parquet/source-backed path.
-    source = _dataset_get_source(datasets, base_dataset_id)
-
-    if source is not None:
-        mappings = _dataset_get_mappings(datasets, base_dataset_id)
-
-        id_col = None
-        for semantic_name in ("record_id", "id", "id_col", "row_id"):
-            mapped = mappings.get(semantic_name)
-            if mapped and mapped != "Use Index":
-                id_col = str(mapped)
-                break
-
-        if id_col is not None:
-            placeholders = ", ".join(["?"] * len(row_ids))
-            where_sql = f'CAST("{id_col}" AS VARCHAR) IN ({placeholders})'
-
-            try:
-                filtered = source.to_pandas(
-                    where_sql=where_sql,
-                    params=row_ids,
-                )
-            except TypeError:
-                filtered = pd.DataFrame()
-
-            if not filtered.empty and id_col in filtered.columns:
-                filtered["_selection_row_id"] = filtered[id_col].astype(str)
-                filtered["_selection_order"] = filtered["_selection_row_id"].map(order)
-                filtered["_selection_order"] = filtered["_selection_order"].fillna(len(order))
-                filtered = filtered.sort_values("_selection_order", kind="stable")
-                filtered = filtered.drop(
-                    columns=["_selection_row_id", "_selection_order"],
-                    errors="ignore",
-                )
-                return filtered.copy()
-
-    # Legacy fallback.
-    if base_df is None:
-        base_df = _dataset_get_df(datasets, base_dataset_id)
-
-    if base_df is None or not isinstance(base_df, pd.DataFrame):
-        raise ValueError("The source dataset is not a pandas DataFrame.")
-
-    id_col = _resolve_id_column(context, base_dataset_id, base_df)
-
-    if id_col is None:
-        mask = pd.Series(
-            [str(idx) in row_id_set for idx in base_df.index],
-            index=base_df.index,
-        )
-        filtered = base_df.loc[mask].copy()
-        filtered["_selection_row_id"] = [str(idx) for idx in filtered.index]
-    else:
-        if id_col not in base_df.columns:
-            raise ValueError(
-                f"Mapped ID column `{id_col}` does not exist in the source dataset."
-            )
-
-        row_id_values = base_df[id_col].astype(str)
-        filtered = base_df.loc[row_id_values.isin(row_id_set)].copy()
-        filtered["_selection_row_id"] = filtered[id_col].astype(str)
-
-    filtered["_selection_order"] = filtered["_selection_row_id"].map(order)
-    filtered["_selection_order"] = filtered["_selection_order"].fillna(len(order))
-    filtered = filtered.sort_values("_selection_order", kind="stable")
-    filtered = filtered.drop(
-        columns=["_selection_row_id", "_selection_order"],
-        errors="ignore",
-    )
-
-    return filtered.copy()
-
-
-def _resolve_id_column(
-    context,
-    dataset_id: str,
-    df: pd.DataFrame,
-) -> Optional[str]:
-    datasets = getattr(context, "datasets", None)
-
-    if datasets is not None:
-        for semantic_name in ("record_id", "id", "id_col", "row_id"):
-            mapped = None
-
-            try:
-                get_mapping = getattr(datasets, "get_mapping", None)
-                if callable(get_mapping):
-                    mapped = get_mapping(dataset_id, semantic_name)
-            except Exception:
-                mapped = None
-
-            if not mapped:
-                try:
-                    mappings = _dataset_get_mappings(datasets, dataset_id)
-                    mapped = mappings.get(semantic_name)
-                except Exception:
-                    mapped = None
-
-            if mapped == "Use Index":
-                return None
-
-            if mapped and mapped in df.columns:
-                return str(mapped)
-
-    config = getattr(context, "config", None)
-    if config is not None:
-        try:
-            settings = getattr(config, "settings", None)
-            if isinstance(settings, dict):
-                configured = settings.get("id_col")
-                if configured and configured != "Use Index" and configured in df.columns:
-                    return str(configured)
-        except Exception:
-            pass
-
-    for candidate in ("source_id", "sourceid", "object_id", "objid", "id", "ID", "row_id"):
-        if candidate in df.columns:
-            return candidate
-
-    return None
 
 
 def _get_active_selection_state(selection):
@@ -480,30 +380,6 @@ def _dataset_get_source(datasets, dataset_id: str):
             return None
 
     return None
-
-
-def _dataset_get_df(datasets, dataset_id: str) -> pd.DataFrame:
-    get_df = getattr(datasets, "get_df", None)
-    if callable(get_df):
-        return get_df(dataset_id)
-
-    get = getattr(datasets, "get", None)
-    if callable(get):
-        record = get(dataset_id)
-
-        if isinstance(record, pd.DataFrame):
-            return record
-
-        df = getattr(record, "df", None)
-        if isinstance(df, pd.DataFrame):
-            return df
-
-        data = getattr(record, "data", None)
-        if isinstance(data, pd.DataFrame):
-            return data
-
-    raise RuntimeError(f"Could not read dataset `{dataset_id}`.")
-
 
 def _dataset_get_mappings(datasets, dataset_id: str) -> Dict[str, str]:
     try:
@@ -637,9 +513,16 @@ def _try_set_dataset_metadata(
         get = getattr(datasets, "get", None)
         if callable(get):
             record = get(dataset_id)
+
+            record_meta = getattr(record, "meta", None)
+            if isinstance(record_meta, dict):
+                record_meta.update(metadata)
+                return
+
             record_metadata = getattr(record, "metadata", None)
             if isinstance(record_metadata, dict):
                 record_metadata.update(metadata)
+                return
     except Exception:
         pass
 
@@ -680,24 +563,6 @@ def _set_active_dataset_compat(datasets, dataset_id: str) -> None:
         except Exception:
             pass
 
-
-def _sync_config_main_df(context, df: pd.DataFrame) -> None:
-    """Temporary compatibility bridge for legacy panels.
-
-    New code should read from context.datasets, but some legacy panels still use
-    context.config.main_df.
-    """
-
-    config = getattr(context, "config", None)
-    if config is None:
-        return
-
-    try:
-        setattr(config, "main_df", df)
-    except Exception:
-        pass
-
-
 def _publish_event(context, topic: str, payload: Dict[str, Any]) -> None:
     events = getattr(context, "events", None)
     if events is None:
@@ -718,6 +583,383 @@ def _publish_event(context, topic: str, payload: Dict[str, Any]) -> None:
             return
     except Exception:
         traceback.print_exc()
+
+
+class SelectionSubsetDatasetSource(DatasetSource):
+    """
+    Lazy source representing a selection-set subset of another dataset.
+
+    It does not materialise the base dataset. It fetches rows from the base
+    source by record ID or row position as needed.
+    """
+
+    backend_name = "selection_subset"
+
+    def __init__(
+        self,
+        *,
+        base_source: DatasetSource,
+        row_ids: Sequence[str],
+        id_column: str,
+        columns: Sequence[str],
+    ) -> None:
+        self.base_source = base_source
+        self.row_ids = [str(row_id) for row_id in row_ids]
+        self.id_column = id_column
+        self._columns = [str(column) for column in columns]
+
+    def columns(self) -> List[str]:
+        return list(self._columns)
+
+    def row_count(self) -> int:
+        return len(self.row_ids)
+
+    def dtypes(self) -> Dict[str, str]:
+        try:
+            base_dtypes = self.base_source.dtypes()
+            return {
+                str(column): str(base_dtypes.get(column, "object"))
+                for column in self._columns
+            }
+        except Exception:
+            return {str(column): "object" for column in self._columns}
+
+    def to_pandas(
+        self,
+        *,
+        columns: Optional[Sequence[str]] = None,
+        limit: Optional[int] = None,
+        where_sql: Optional[str] = None,
+        params: Optional[Sequence[Any]] = None,
+    ) -> pd.DataFrame:
+        if where_sql is not None:
+            raise NotImplementedError(
+                "SelectionSubsetDatasetSource does not support SQL filtering yet."
+            )
+
+        selected_ids = self.row_ids[: int(limit)] if limit is not None else self.row_ids
+        return _rows_from_source_by_selection_ids(
+            self.base_source,
+            row_ids=selected_ids,
+            id_col=self.id_column,
+            columns=columns or self._columns,
+        )
+
+    def head(
+        self,
+        n: int = 5,
+        *,
+        columns: Optional[Sequence[str]] = None,
+    ) -> pd.DataFrame:
+        return self.to_pandas(columns=columns, limit=n)
+
+    def get_row_by_position(
+        self,
+        position: int,
+        *,
+        columns: Optional[Sequence[str]] = None,
+    ) -> pd.DataFrame:
+        if position < 0 or position >= len(self.row_ids):
+            return pd.DataFrame(columns=list(columns or self._columns))
+
+        return _rows_from_source_by_selection_ids(
+            self.base_source,
+            row_ids=[self.row_ids[position]],
+            id_col=self.id_column,
+            columns=columns or self._columns,
+        )
+
+    def get_row_by_id(
+        self,
+        row_id: Any,
+        *,
+        id_column: str,
+        columns: Optional[Sequence[str]] = None,
+    ) -> pd.DataFrame:
+        row_id = str(row_id)
+
+        if row_id not in set(self.row_ids):
+            return pd.DataFrame(columns=list(columns or self._columns))
+
+        return _rows_from_source_by_selection_ids(
+            self.base_source,
+            row_ids=[row_id],
+            id_col=self.id_column,
+            columns=columns or self._columns,
+        )
+
+    def find_position_by_id(
+        self,
+        row_id: Any,
+        *,
+        id_column: str,
+    ) -> Optional[int]:
+        row_id = str(row_id)
+        try:
+            return self.row_ids.index(row_id)
+        except ValueError:
+            return None
+
+    def metadata(self) -> Dict[str, Any]:
+        return {
+            "backend": self.backend_name,
+            "base_backend": getattr(self.base_source, "backend_name", "unknown"),
+            "rows": len(self.row_ids),
+            "id_column": self.id_column,
+        }
+
+
+def _dataset_get_source(datasets, dataset_id: str):
+    try:
+        get_source = getattr(datasets, "get_source", None)
+        if callable(get_source):
+            return get_source(dataset_id)
+    except Exception:
+        traceback.print_exc()
+
+    try:
+        get = getattr(datasets, "get", None)
+        if callable(get):
+            record = get(dataset_id)
+            source = getattr(record, "source", None)
+            if source is not None:
+                return source
+    except Exception:
+        traceback.print_exc()
+
+    return None
+
+
+def _dataset_columns(datasets, dataset_id: str) -> List[str]:
+    try:
+        list_columns = getattr(datasets, "list_columns", None)
+        if callable(list_columns):
+            return [str(column) for column in list_columns(dataset_id)]
+    except Exception:
+        traceback.print_exc()
+
+    source = _dataset_get_source(datasets, dataset_id)
+    if source is not None:
+        try:
+            return [str(column) for column in source.columns()]
+        except Exception:
+            traceback.print_exc()
+
+    return []
+
+
+def _resolve_id_column_from_columns(
+    context,
+    dataset_id: str,
+    columns: Sequence[str],
+) -> Optional[str]:
+    column_set = {str(column) for column in columns}
+    original = {str(column): str(column) for column in columns}
+    mappings = _dataset_get_mappings(getattr(context, "datasets", None), dataset_id)
+
+    for semantic_name in ("record_id", "id", "id_col", "row_id"):
+        mapped = mappings.get(semantic_name)
+
+        if mapped in ("Use Index", "__index__", "index"):
+            return "Use Index"
+
+        if isinstance(mapped, str) and mapped in column_set:
+            return original[mapped]
+
+    config = getattr(context, "config", None)
+    if config is not None:
+        try:
+            settings = getattr(config, "settings", None)
+            if isinstance(settings, dict):
+                configured = settings.get("id_col")
+                if configured in ("Use Index", "__index__", "index"):
+                    return "Use Index"
+                if isinstance(configured, str) and configured in column_set:
+                    return original[configured]
+        except Exception:
+            pass
+
+    for candidate in (
+        "source_id",
+        "sourceid",
+        "object_id",
+        "objid",
+        "id",
+        "ID",
+        "row_id",
+    ):
+        if candidate in column_set:
+            return original[candidate]
+
+    # If all selection row IDs are integer-like, callers can still use
+    # row-position access with id_col="Use Index". We do not infer that here
+    # because this helper does not know the row IDs.
+    return None
+
+
+def _resolve_label_column_from_columns(
+    context,
+    dataset_id: str,
+    columns: Sequence[str],
+) -> Optional[str]:
+    column_set = {str(column) for column in columns}
+    mappings = _dataset_get_mappings(getattr(context, "datasets", None), dataset_id)
+
+    for semantic_name in ("target_label", "label", "label_col", "class"):
+        mapped = mappings.get(semantic_name)
+        if isinstance(mapped, str) and mapped in column_set:
+            return mapped
+
+    config = getattr(context, "config", None)
+    if config is not None:
+        try:
+            settings = getattr(config, "settings", None)
+            if isinstance(settings, dict):
+                configured = settings.get("label_col")
+                if isinstance(configured, str) and configured in column_set:
+                    return configured
+        except Exception:
+            pass
+
+    for candidate in ("label", "class", "target", "label_col"):
+        if candidate in column_set:
+            return candidate
+
+    return None
+
+
+def _safe_preview_columns(
+    *,
+    columns: Sequence[str],
+    id_col: Optional[str],
+    label_col: Optional[str],
+) -> List[str]:
+    wanted: List[str] = []
+
+    for column in (id_col, label_col):
+        if column and column != "Use Index" and column in columns and column not in wanted:
+            wanted.append(column)
+
+    for column in columns:
+        if column not in wanted:
+            wanted.append(column)
+        if len(wanted) >= SELECTION_PREVIEW_EXTRA_COLUMNS + 2:
+            break
+
+    return wanted
+
+
+def _rows_from_source_by_selection_ids(
+    source,
+    *,
+    row_ids: Sequence[str],
+    id_col: Optional[str],
+    columns: Optional[Sequence[str]] = None,
+) -> pd.DataFrame:
+    rows: List[pd.DataFrame] = []
+    selected_columns = None if columns is None else [str(column) for column in columns]
+
+    for row_id in row_ids:
+        row_id = str(row_id)
+
+        try:
+            if id_col == "Use Index":
+                try:
+                    position = int(row_id)
+                except Exception:
+                    continue
+
+                row = source.get_row_by_position(position, columns=selected_columns)
+            elif id_col:
+                row = source.get_row_by_id(
+                    row_id,
+                    id_column=id_col,
+                    columns=selected_columns,
+                )
+            else:
+                continue
+
+            if row is None or row.empty:
+                continue
+
+            row = row.head(1).copy()
+            row["_selection_row_id"] = row_id
+            rows.append(row)
+        except Exception:
+            traceback.print_exc()
+            continue
+
+    if not rows:
+        return pd.DataFrame(columns=list(selected_columns or []))
+
+    return pd.concat(rows, ignore_index=True, sort=False)
+
+
+def _selection_rows_to_dataframe(
+    context,
+    *,
+    base_dataset_id: str,
+    row_ids: Sequence[str],
+    columns: Optional[Sequence[str]] = None,
+    id_col: Optional[str] = None,
+) -> pd.DataFrame:
+    datasets = getattr(context, "datasets", None)
+    if datasets is None:
+        raise RuntimeError("DatasetManager is required.")
+
+    source = _dataset_get_source(datasets, base_dataset_id)
+    if source is None:
+        raise RuntimeError(f"Could not read source for dataset `{base_dataset_id}`.")
+
+    if columns is None:
+        columns = _dataset_columns(datasets, base_dataset_id)
+
+    if id_col is None:
+        id_col = _resolve_id_column_from_columns(context, base_dataset_id, columns)
+
+    if id_col is None:
+        raise ValueError(
+            "Could not resolve an ID column for the selected rows. "
+            "Map `record_id` for the source dataset."
+        )
+
+    return _rows_from_source_by_selection_ids(
+        source,
+        row_ids=row_ids,
+        id_col=id_col,
+        columns=columns,
+    )
+
+
+def _register_dataset_source_compat(
+    datasets,
+    *,
+    dataset_id: str,
+    source,
+    name: str,
+    metadata: Dict[str, Any],
+    mappings: Dict[str, str],
+) -> None:
+    register_source = getattr(datasets, "register_source", None)
+    if not callable(register_source):
+        raise RuntimeError("DatasetManager does not expose register_source(...).")
+
+    meta = dict(metadata or {})
+    meta.pop("name", None)
+
+    meta["column_mappings"] = dict(mappings or {})
+
+    meta.setdefault("mappings", dict(mappings or {}))
+
+    register_source(
+        dataset_id,
+        source,
+        name=name,
+        **meta,
+    )
+
+    _try_set_dataset_metadata(datasets, dataset_id, meta)
+    _try_set_dataset_mappings(datasets, dataset_id, mappings)
 
 
 class SelectionSetPanel:
@@ -959,14 +1201,22 @@ class SelectionSetPanel:
         return "default"
 
     def _get_dataset_df(self, dataset_id: Optional[str] = None) -> Optional[pd.DataFrame]:
+
+        dataset_id = dataset_id or self._active_dataset_id()
+
         if self.datasets is not None:
             try:
-                return _dataset_get_df(self.datasets, dataset_id or self._active_dataset_id())
+                columns = _dataset_columns(self.datasets, dataset_id)
+                return self.datasets.get_df(
+                    dataset_id,
+                    columns=columns[: min(len(columns), 8)],
+                    limit=SELECTION_PREVIEW_LIMIT,
+                )
             except Exception:
                 pass
 
-        if self.data is not None:
-            return self.data
+        if self.data is not None and isinstance(self.data, pd.DataFrame):
+            return self.data.head(SELECTION_PREVIEW_LIMIT).copy()
 
         return None
 
@@ -1000,35 +1250,47 @@ class SelectionSetPanel:
         dataset_id: Optional[str] = None,
         allow_direct: bool = True,
     ) -> Optional[str]:
-        df = df if df is not None else self._get_dataset_df(dataset_id)
-        if df is None:
+        dataset_id = dataset_id or self._active_dataset_id()
+
+        if df is not None:
+            columns = [str(column) for column in getattr(df, "columns", [])]
+        elif self.datasets is not None:
+            columns = _dataset_columns(self.datasets, dataset_id)
+        else:
+            columns = []
+
+        if not columns:
             return None
 
-        cols = set(str(c) for c in getattr(df, "columns", []))
-        original_cols = {str(c): c for c in getattr(df, "columns", [])}
+        column_set = set(columns)
         mappings = self._get_dataset_mappings(dataset_id)
 
-        if allow_direct and requirement in cols:
-            return str(original_cols.get(requirement, requirement))
+        if allow_direct and requirement in column_set:
+            return requirement
 
         mapped = mappings.get(requirement)
-        if isinstance(mapped, str) and mapped in cols:
-            return str(original_cols.get(mapped, mapped))
+        if mapped in ("Use Index", "__index__", "index"):
+            return "Use Index"
+        if isinstance(mapped, str) and mapped in column_set:
+            return mapped
 
         aliases = {
-            "id": ["id", "ids", "source_id", "object_id", "id_col"],
-            "id_col": ["id_col", "id", "ids", "source_id", "object_id"],
-            "label": ["label", "class", "target", "label_col"],
-            "label_col": ["label_col", "label", "class", "target"],
+            "id": ["record_id", "id", "ids", "source_id", "object_id", "id_col", "row_id"],
+            "id_col": ["record_id", "id_col", "id", "ids", "source_id", "object_id", "row_id"],
+            "record_id": ["record_id", "id", "ids", "source_id", "object_id", "id_col", "row_id"],
+            "label": ["target_label", "label", "class", "target", "label_col"],
+            "label_col": ["target_label", "label_col", "label", "class", "target"],
+            "target_label": ["target_label", "label", "class", "target", "label_col"],
         }
 
         for alias in aliases.get(requirement, []):
             mapped = mappings.get(alias)
-            if isinstance(mapped, str) and mapped in cols:
-                return str(original_cols.get(mapped, mapped))
-
-            if alias in cols:
-                return str(original_cols.get(alias, alias))
+            if mapped in ("Use Index", "__index__", "index"):
+                return "Use Index"
+            if isinstance(mapped, str) and mapped in column_set:
+                return mapped
+            if alias in column_set:
+                return alias
 
         return None
 
@@ -1181,7 +1443,6 @@ class SelectionSetPanel:
 
     def _get_preview_df(self) -> pd.DataFrame:
         state = self._get_active_selection_set_state()
-
         if state is None:
             return pd.DataFrame(columns=["focus", "row_id"])
 
@@ -1192,72 +1453,62 @@ class SelectionSetPanel:
         if not row_ids:
             return pd.DataFrame(columns=["focus", "row_id"])
 
-        df = self._get_dataset_df(dataset_id)
-
-        if df is None or not isinstance(df, pd.DataFrame):
+        if self.datasets is None:
             return self._fallback_preview(row_ids, focus_row_id)
 
         try:
-            work_df = df.copy()
-        except Exception:
-            return self._fallback_preview(row_ids, focus_row_id)
+            columns = _dataset_columns(self.datasets, dataset_id)
+            id_col = _resolve_id_column_from_columns(self.context, dataset_id, columns)
+            label_col = _resolve_label_column_from_columns(self.context, dataset_id, columns)
 
-        id_col = self._resolve_column_name("id_col", df=work_df, dataset_id=dataset_id)
-        label_col = self._resolve_column_name(
-            "label_col",
-            df=work_df,
-            dataset_id=dataset_id,
-        )
+            preview_columns = _safe_preview_columns(
+                columns=columns,
+                id_col=id_col,
+                label_col=label_col,
+            )
 
-        if id_col is None:
-            id_col = self._config_setting("id_col", "Use Index")
+            source = _dataset_get_source(self.datasets, dataset_id)
+            if source is None:
+                return self._fallback_preview(row_ids, focus_row_id)
 
-        if label_col is None:
-            label_col = self._config_setting("label_col", "No Labels")
+            preview_row_ids = row_ids[:SELECTION_PREVIEW_LIMIT]
 
-        row_id_set = set(row_ids)
-        order = {row_id: i for i, row_id in enumerate(row_ids)}
+            preview = _rows_from_source_by_selection_ids(
+                source,
+                row_ids=preview_row_ids,
+                id_col=id_col,
+                columns=preview_columns,
+            )
 
-        try:
-            if id_col in (None, "", "Use Index"):
-                mask = pd.Series(
-                    [str(idx) in row_id_set for idx in work_df.index],
-                    index=work_df.index,
-                )
-                subset = work_df.loc[mask].copy()
-                subset.insert(0, "row_id", [str(idx) for idx in subset.index])
-            else:
-                if id_col not in work_df.columns:
-                    return self._fallback_preview(row_ids, focus_row_id)
+            if preview.empty:
+                return self._fallback_preview(row_ids, focus_row_id)
 
-                mask = work_df[id_col].astype(str).isin(row_id_set)
-                subset = work_df.loc[mask].copy()
-                subset.insert(0, "row_id", subset[id_col].astype(str))
+            preview["row_id"] = preview["_selection_row_id"].astype(str)
+            preview = preview.drop(columns=["_selection_row_id"], errors="ignore")
 
-            subset["_selection_order"] = subset["row_id"].map(order)
-            subset["_selection_order"] = subset["_selection_order"].fillna(len(order))
-            subset = subset.sort_values("_selection_order", kind="stable")
-
-            subset.insert(
+            preview.insert(
                 0,
                 "focus",
                 [
                     "◀" if str(row_id) == str(focus_row_id) else ""
-                    for row_id in subset["row_id"]
+                    for row_id in preview["row_id"]
                 ],
             )
 
-            cols = ["focus", "row_id"]
+            preferred_cols = ["focus", "row_id"]
 
             if (
-                label_col not in (None, "", "No Labels")
-                and label_col in subset.columns
-                and label_col not in cols
+                label_col not in (None, "", "No Labels", "Use Index")
+                and label_col in preview.columns
+                and label_col not in preferred_cols
             ):
-                cols.append(label_col)
+                preferred_cols.append(label_col)
 
-            return subset[cols].head(50).reset_index(drop=True)
+            for column in preview.columns:
+                if column not in preferred_cols:
+                    preferred_cols.append(column)
 
+            return preview[preferred_cols].head(SELECTION_PREVIEW_LIMIT).reset_index(drop=True)
         except Exception:
             traceback.print_exc()
             return self._fallback_preview(row_ids, focus_row_id)
