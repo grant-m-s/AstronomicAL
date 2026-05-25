@@ -1,6 +1,6 @@
-#BUG: Hide Y Var dropdown
-#BUG: Change X var slow
-#BUG: Assign Label col slow
+# BUG: Hide Y Var dropdown
+# BUG: Change X var slow
+# BUG: Assign Label col slow
 
 from __future__ import annotations
 

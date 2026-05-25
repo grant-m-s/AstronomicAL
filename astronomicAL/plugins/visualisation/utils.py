@@ -768,35 +768,73 @@ def _dataset_cache_prefix(context, state):
                     pass
 
     return dataset_id, fingerprint
+def _load_column_arrays(context, state, columns: Sequence[Any]) -> Dict[Any, np.ndarray]:
+    """
+    Load multiple source columns in one backend call, while still using the
+    visualisation data cache per column.
+
+    This avoids repeated Parquet/DuckDB scans during first render.
+    """
+    cache = _visualisation_data_cache(context)
+    dataset_id, fingerprint = _dataset_cache_prefix(context, state)
+
+    wanted: List[Any] = []
+    seen: set[str] = set()
+
+    for column in columns:
+        if column is None:
+            continue
+        if column in {"Use Index", "No Labels"}:
+            continue
+
+        column_key = str(column)
+        if column_key in seen:
+            continue
+
+        wanted.append(column)
+        seen.add(column_key)
+
+    if not wanted:
+        return {}
+
+    result: Dict[Any, np.ndarray] = {}
+    missing: List[Any] = []
+
+    for column in wanted:
+        key = ("column", dataset_id, fingerprint, str(column))
+        cached = cache.get_column(key) if cache is not None else None
+
+        if cached is not None:
+            result[column] = cached
+        else:
+            missing.append(column)
+
+    if missing:
+        source = context.datasets.get_source(dataset_id)
+        df = source.to_pandas(columns=missing)
+
+        for column in missing:
+            if column not in df.columns:
+                continue
+
+            arr = df[column].to_numpy(copy=False)
+            key = ("column", dataset_id, fingerprint, str(column))
+
+            if cache is not None:
+                cache.set_column(key, arr)
+
+            result[column] = arr
+
+    return result
 
 
 def _load_column_array(context, state, column):
-    cache = _visualisation_data_cache(context)
-    dataset_id, fingerprint = _dataset_cache_prefix(context, state)
-    key = ("column", dataset_id, fingerprint, str(column))
-
-    if cache is not None:
-        cached = cache.get_column(key)
-        if cached is not None:
-            print(
-                f"[AstronomicAL visualisation column-cache] HIT column={column!r}",
-                flush=True,
-            )
-            return cached
-
-    print(
-        f"[AstronomicAL visualisation column-cache] MISS column={column!r}",
-        flush=True,
-    )
-
-    source = context.datasets.get_source(dataset_id)
-    df = source.to_pandas(columns=[column])
-    arr = df[column].to_numpy()
-
-    if cache is not None:
-        cache.set_column(key, arr)
-
-    return arr
+    """
+    Compatibility wrapper for callers that still ask for a single column.
+    Prefer _load_column_arrays(...) inside new visualisation code.
+    """
+    arrays = _load_column_arrays(context, state, [column])
+    return arrays[column]
 
 def _load_row_ids_array(context, state):
     cache = _visualisation_data_cache(context)
@@ -815,81 +853,120 @@ def _load_row_ids_array(context, state):
 
     if not record_id_col or record_id_col == "Use Index":
         row_count = context.datasets.row_count(dataset_id)
-        row_ids = np.arange(row_count).astype(str)
+        # Keep native integer IDs. Do not astype(str) for millions of rows.
+        row_ids = np.arange(row_count)
     else:
         source = context.datasets.get_source(dataset_id)
         df = source.to_pandas(columns=[record_id_col])
-        row_ids = df[record_id_col].astype(str).to_numpy()
+        # Keep native dtype. String conversion should happen only for tiny
+        # selected/forced ID sets.
+        row_ids = df[record_id_col].to_numpy(copy=False)
 
     if cache is not None:
         cache.set_row_ids(key, row_ids)
 
     return row_ids
 
-def _load_label_arrays(context, state):
+def _load_label_raw_array(context, state):
+    """
+    Load only the raw label column.
+
+    Display labels and colours should be derived only after filtering, and only
+    when the current render path actually needs them.
+    """
     label_col = getattr(state, "label_col", None)
 
     if not label_col:
-        return None, None, None
+        return None
 
     cache = _visualisation_data_cache(context)
     dataset_id, fingerprint = _dataset_cache_prefix(context, state)
 
-    aliases = getattr(state, "label_to_strings", None)
-    colours = getattr(state, "colours", None)
-
     key = (
-        "labels",
+        "label_raw",
         dataset_id,
         fingerprint,
         str(label_col),
-        repr(aliases),
-        repr(colours),
     )
 
     if cache is not None:
         cached = cache.get_label(key)
         if cached is not None:
-            print(
-                f"[AstronomicAL visualisation label-cache] HIT "
-                f"label_col={label_col!r}",
-                flush=True,
-            )
             return cached
-
-    print(
-        f"[AstronomicAL visualisation label-cache] MISS "
-        f"label_col={label_col!r}",
-        flush=True,
-    )
 
     raw = _load_column_array(context, state, label_col)
 
-    display = np.asarray(
-        [state.label_display(value) for value in raw],
-        dtype=object,
-    )
-
-    label_colours = np.asarray(
-        [state.label_colour(value) for value in raw],
-        dtype=object,
-    )
-
-    result = (raw, display, label_colours)
-
     if cache is not None:
-        cache.set_label(key, result)
+        cache.set_label(key, raw)
 
-    return result
+    return raw
+
+
+def _label_display_colour_arrays(values: np.ndarray, state):
+    """
+    Convert already-filtered label values to display strings and colours.
+
+    This intentionally runs after masks/filters so we do not map millions of
+    labels when only a subset is needed.
+    """
+    if values is None:
+        return None, None
+
+    values = np.asarray(values)
+
+    unique_values = pd.unique(pd.Series(values))
+    display_map = {value: state.label_display(value) for value in unique_values}
+    colour_map = {value: state.label_colour(value) for value in unique_values}
+
+    display = pd.Series(values).map(display_map).to_numpy(dtype=object)
+    colours = pd.Series(values).map(colour_map).to_numpy(dtype=object)
+
+    return display, colours
+
+
+def _labels_needed_for_frame(state) -> bool:
+    """
+    Decide whether prepare_plot_frame needs the label column at all.
+
+    Loading raw labels is needed for label filtering and label colouring.
+    Display/colour arrays are only needed when rendering by labels or when a
+    label-filtered frame carries labels forward.
+    """
+    label_col = getattr(state, "label_col", None)
+
+    if not label_col or label_col == "No Labels":
+        return False
+
+    label_filter = getattr(state, "label_filter", None) or []
+    if label_filter and "All" not in label_filter:
+        return True
+
+    color_by = str(getattr(state, "color_by", "") or "").strip().lower()
+    if color_by == "labels":
+        return True
+
+    return False
+
+
+def _load_label_arrays(context, state):
+    """
+    Backward-compatible wrapper.
+
+    Existing callers expecting (raw, display, colours) still work, but new
+    prepare_plot_frame code should prefer _load_label_raw_array and only call
+    _label_display_colour_arrays after filtering.
+    """
+    raw = _load_label_raw_array(context, state)
+
+    if raw is None:
+        return None, None, None
+
+    display, colours = _label_display_colour_arrays(raw, state)
+    return raw, display, colours
+
 
 def prepare_plot_frame(context, state, *, require_y: bool) -> PreparedFrame:
     t_total = time.perf_counter()
-
-    print(
-        "[AstronomicAL visualisation] prepare_plot_frame called: "
-        f"x={state.x!r}, y={state.y!r}, require_y={require_y}",
-        flush=True,
-    )
 
     dataset_id = _active_dataset_id(context)
     total_rows = _dataset_row_count(context, dataset_id)
@@ -918,31 +995,35 @@ def prepare_plot_frame(context, state, *, require_y: bool) -> PreparedFrame:
         return _empty_frame()
 
     # ------------------------------------------------------------------
-    # 1. Load/reuse raw column arrays
+    # 1. Load raw columns in one backend call where possible.
     # ------------------------------------------------------------------
     t_load = time.perf_counter()
 
+    columns_to_load: List[Any] = [state.x]
+
+    if require_y:
+        columns_to_load.append(state.y)
+
+    labels_needed = (
+        _labels_needed_for_frame(state)
+        and getattr(state, "label_col", None) in available_set
+    )
+
+    if labels_needed:
+        columns_to_load.append(state.label_col)
+
     try:
-        x_raw = _load_column_array(context, state, state.x)
+        arrays = _load_column_arrays(context, state, columns_to_load)
+        x_raw = arrays[state.x]
+        y_raw = arrays[state.y] if require_y else None
+        label_raw_all = arrays.get(state.label_col) if labels_needed else None
     except Exception as exc:
         print(
-            "[AstronomicAL visualisation] failed to load x column "
-            f"{state.x!r}: {type(exc).__name__}: {exc}",
+            "[AstronomicAL visualisation] failed to load required plot columns "
+            f"{columns_to_load!r}: {type(exc).__name__}: {exc}",
             flush=True,
         )
         return _empty_frame()
-
-    y_raw = None
-    if require_y:
-        try:
-            y_raw = _load_column_array(context, state, state.y)
-        except Exception as exc:
-            print(
-                "[AstronomicAL visualisation] failed to load y column "
-                f"{state.y!r}: {type(exc).__name__}: {exc}",
-                flush=True,
-            )
-            return _empty_frame()
 
     load_seconds = time.perf_counter() - t_load
 
@@ -958,27 +1039,23 @@ def prepare_plot_frame(context, state, *, require_y: bool) -> PreparedFrame:
         )
         return _empty_frame()
 
-    y_name = state.y if require_y else None
-
-    print(
-        "[AstronomicAL visualisation] Loaded plot arrays: "
-        f"rows={n_rows:,} "
-        f"x={state.x!r} "
-        f"y={y_name!r} "
-        f"in {load_seconds:.3f}s",
-        flush=True,
-    )
+    if label_raw_all is not None and len(label_raw_all) != n_rows:
+        print(
+            "[AstronomicAL visualisation] label length mismatch "
+            f"labels={len(label_raw_all):,} rows={n_rows:,}; ignoring labels",
+            flush=True,
+        )
+        label_raw_all = None
 
     if n_rows == 0:
         return _empty_frame()
 
     # ------------------------------------------------------------------
-    # 2. Numeric arrays + finite/log mask
+    # 2. Numeric arrays + finite/log mask.
     # ------------------------------------------------------------------
     t_arrays = time.perf_counter()
 
     x = _numeric_array_from_array(x_raw)
-
     mask = np.isfinite(x)
 
     y = None
@@ -994,77 +1071,39 @@ def prepare_plot_frame(context, state, *, require_y: bool) -> PreparedFrame:
 
     arrays_seconds = time.perf_counter() - t_arrays
 
-    print(
-        "[AstronomicAL visualisation] prepare arrays/mask "
-        f"{arrays_seconds:.3f}s "
-        f"finite_rows={int(mask.sum()):,}/{len(mask):,}",
-        flush=True,
-    )
-
     # ------------------------------------------------------------------
-    # 3. Labels: load cached full arrays, then apply label filter to mask
+    # 3. Labels: use raw labels only if filtering/colouring requires them.
     # ------------------------------------------------------------------
     t_labels = time.perf_counter()
-
-    label_raw_all = None
-    label_display_all = None
-    label_colours_all = None
 
     label_raw = None
     label_display = None
     label_colours = None
 
-    if state.label_col:
-        try:
-            (
-                label_raw_all,
-                label_display_all,
-                label_colours_all,
-            ) = _load_label_arrays(context, state)
-        except Exception as exc:
-            print(
-                "[AstronomicAL visualisation] failed to load label arrays "
-                f"label_col={state.label_col!r}: "
-                f"{type(exc).__name__}: {exc}",
-                flush=True,
-            )
-            label_raw_all = None
-            label_display_all = None
-            label_colours_all = None
-
     if label_raw_all is not None:
-        if len(label_raw_all) != len(mask):
-            print(
-                "[AstronomicAL visualisation] label length mismatch "
-                f"labels={len(label_raw_all):,} rows={len(mask):,}; "
-                "ignoring labels for this frame",
-                flush=True,
+        if state.label_filter and "All" not in state.label_filter:
+            selected = state.selected_raw_labels()
+            label_mask = pd.Series(label_raw_all).isin(selected).to_numpy()
+            mask &= label_mask
+
+        label_raw = label_raw_all[mask]
+
+        color_by = str(getattr(state, "color_by", "") or "").strip().lower()
+        should_build_label_display = (
+            color_by == "labels"
+            or bool(state.label_filter and "All" not in state.label_filter)
+        )
+
+        if should_build_label_display:
+            label_display, label_colours = _label_display_colour_arrays(
+                label_raw,
+                state,
             )
-        else:
-            if state.label_filter and "All" not in state.label_filter:
-                selected = state.selected_raw_labels()
-                label_mask = pd.Series(label_raw_all).isin(selected).to_numpy()
-                mask &= label_mask
-
-            label_raw = label_raw_all[mask]
-
-            if label_display_all is not None and len(label_display_all) == len(mask):
-                label_display = label_display_all[mask]
-
-            if label_colours_all is not None and len(label_colours_all) == len(mask):
-                label_colours = label_colours_all[mask]
 
     labels_seconds = time.perf_counter() - t_labels
 
-    print(
-        "[AstronomicAL visualisation] prepare labels "
-        f"{labels_seconds:.3f}s "
-        f"label_col={state.label_col!r}",
-        flush=True,
-    )
-
     # ------------------------------------------------------------------
-    # 4. Row IDs
+    # 4. Row IDs.
     # ------------------------------------------------------------------
     t_row_ids = time.perf_counter()
 
@@ -1082,7 +1121,7 @@ def prepare_plot_frame(context, state, *, require_y: bool) -> PreparedFrame:
         print(
             "[AstronomicAL visualisation] row-id length mismatch "
             f"row_ids={len(row_ids_all):,} rows={len(mask):,}; "
-            "falling back to index row ids",
+            "falling back to positional row ids",
             flush=True,
         )
         row_ids_all = np.arange(len(mask))
@@ -1091,15 +1130,8 @@ def prepare_plot_frame(context, state, *, require_y: bool) -> PreparedFrame:
 
     row_ids_seconds = time.perf_counter() - t_row_ids
 
-    print(
-        "[AstronomicAL visualisation] prepare row_ids "
-        f"{row_ids_seconds:.3f}s "
-        f"record_id_col={state.record_id_col!r}",
-        flush=True,
-    )
-
     # ------------------------------------------------------------------
-    # 5. Data dict
+    # 5. Build compact frame.
     # ------------------------------------------------------------------
     t_data = time.perf_counter()
 
@@ -1121,35 +1153,12 @@ def prepare_plot_frame(context, state, *, require_y: bool) -> PreparedFrame:
 
         if label_colours is not None:
             data[INTERNAL_LABEL_COLOUR] = label_colours
-        else:
-            data[INTERNAL_LABEL_COLOUR] = np.asarray(
-                [state.label_colour(value) for value in label_raw],
-                dtype=object,
-            )
 
     data_seconds = time.perf_counter() - t_data
 
-    print(
-        "[AstronomicAL visualisation] prepare data dict "
-        f"{data_seconds:.3f}s",
-        flush=True,
-    )
-
-    # ------------------------------------------------------------------
-    # 6. PreparedFrame DataFrame construction
-    # ------------------------------------------------------------------
     t_frame = time.perf_counter()
-
     frame = pd.DataFrame(data, copy=False)
-
     frame_seconds = time.perf_counter() - t_frame
-
-    print(
-        "[AstronomicAL visualisation] prepare dataframe "
-        f"{frame_seconds:.3f}s "
-        f"frame_rows={len(frame):,} frame_cols={len(frame.columns):,}",
-        flush=True,
-    )
 
     total_seconds = time.perf_counter() - t_total
 
@@ -1161,7 +1170,8 @@ def prepare_plot_frame(context, state, *, require_y: bool) -> PreparedFrame:
         f"labels={labels_seconds:.3f}s, "
         f"row_ids={row_ids_seconds:.3f}s, "
         f"data={data_seconds:.3f}s, "
-        f"frame={frame_seconds:.3f}s)",
+        f"frame={frame_seconds:.3f}s, "
+        f"rows={len(frame):,})",
         flush=True,
     )
 
@@ -1176,11 +1186,14 @@ def prepare_plot_frame(context, state, *, require_y: bool) -> PreparedFrame:
     )
 
 
+
 def prepared_cache_key(context, state, *, require_y: bool) -> Tuple[Any, ...]:
     dataset_id = _active_dataset_id(context)
+    fingerprint = _dataset_fingerprint(context, dataset_id)
 
     return (
-        _dataset_fingerprint(context, dataset_id),
+        dataset_id,  # keep top-level for reliable invalidation
+        fingerprint,
         state.x,
         state.y if require_y else None,
         require_y,

@@ -20,7 +20,7 @@ def settings_select(parameter, *, name: str, width: int = 145):
         width=width,
         height=40,
         sizing_mode="fixed",
-        margin=(0, 6, 2, 0),
+        margin=(0, 6, 2, 6),
     )
 
 
@@ -29,9 +29,9 @@ def settings_multichoice(parameter, *, name: str, width: int = 200):
         parameter,
         name=name,
         width=width,
-        height=40,
+        height=60,
         sizing_mode="fixed",
-        margin=(0, 6, 2, 0),
+        margin=(0, 6, 2, 6),
     )
 
     if "allow_html" in widget.param:
@@ -48,9 +48,9 @@ def settings_int_input(parameter, *, name: str, width: int = 140):
         parameter,
         name=name,
         width=width,
-        height=40,
+        height=50,
         sizing_mode="fixed",
-        margin=(0, 6, 2, 0),
+        margin=(0, 6, 2, 6),
     )
 
 
@@ -61,7 +61,7 @@ def settings_float_slider(parameter, *, name: str, width: int = 180):
         width=width,
         height=40,
         sizing_mode="fixed",
-        margin=(0, 8, 2, 0),
+        margin=(0, 8, 2, 6),
     )
 
 
@@ -72,7 +72,7 @@ def settings_int_slider(parameter, *, name: str, width: int = 180):
         width=width,
         height=40,
         sizing_mode="fixed",
-        margin=(0, 8, 2, 0),
+        margin=(0, 8, 2, 6),
     )
 
 
@@ -83,7 +83,7 @@ def settings_checkbox(parameter, *, name: str):
         width=120,
         height=28,
         sizing_mode="fixed",
-        margin=(10, 8, 0, 0),
+        margin=(10, 8, 0, 6),
     )
 
 
@@ -94,6 +94,7 @@ def settings_box(*controls):
     should fit its content naturally and should not try to stretch with the
     outer plot panel.
     """
+
     return pn.FlexBox(
         *controls,
         sizing_mode="stretch_width",

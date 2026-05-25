@@ -9,7 +9,7 @@ from .constants import SETTINGS_HEIGHT
 from .density import DensityPanel
 from .histogram import HistogramPanel
 from .scatter import ScatterPanel
-from .utils import _active_df, ensure_hv_extension
+from .utils import _active_dataset_id, _dataset_row_count, ensure_hv_extension
 from .widgets import (
     header_select,
     settings_box,
@@ -129,8 +129,8 @@ class LinkedExplorerPanel(param.Parameterized):
         self._apply_settings_visibility()
 
     def _update_status(self, _event=None) -> None:
-        df = _active_df(self.context)
-        rows = 0 if df is None else len(df)
+        dataset_id = _active_dataset_id(self.context)
+        rows = _dataset_row_count(self.context, dataset_id)
 
         self.status_pane.object = (
             f"{rows:,} rows · "

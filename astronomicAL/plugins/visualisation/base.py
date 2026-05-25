@@ -26,10 +26,10 @@ from .utils import (
     force_wheel_zoom_hook,
     prepare_plot_frame,
     prepared_cache_key,
+    _load_row_ids_array,
 )
 from .widgets import (
     header_select,
-    settings_box,
     settings_checkbox,
     settings_float_slider,
     settings_int_input,
@@ -85,6 +85,16 @@ class BaseVisualisationPanel(param.Parameterized):
         self._near_full_range_keys = set()
         self._near_full_range_keys_max = 64
 
+        self._focus_point_cache = OrderedDict()
+        self._focus_point_cache_max = 512
+
+        self._async_focus_pending = set()
+        self._async_focus_failed = set()
+
+        # Never do synchronous source-backed focus lookup for large prepared frames.
+        self._focus_source_lookup_row_limit = 500_000
+        self._focus_frame_scan_limit = 500_000
+
         self.settings_visible = False
         self._layout: Optional[pn.Column] = None
         self._settings_built = False
@@ -93,7 +103,13 @@ class BaseVisualisationPanel(param.Parameterized):
         self._prepared_cache_limit = 6
         self._shared_prepared_cache = self._get_shared_prepared_cache()
         self._suppress_state_refresh = False
+
+        self._focus_point_cache = OrderedDict()
+        self._focus_point_cache_max = 256
+        self._focus_frame_scan_limit = 500_000
         
+        self._allow_one_full_range_skip = False
+
         self._row_index_cache_key = None
         self._row_index_cache = None
         
@@ -111,7 +127,7 @@ class BaseVisualisationPanel(param.Parameterized):
         self.status_pane = pn.pane.HTML(
             "",
             width=230,
-            height=30,
+            height=75,
             margin=(2, 8, 0, 0),
         )
 
@@ -180,6 +196,474 @@ class BaseVisualisationPanel(param.Parameterized):
                 "log_density",
             ]
         )
+
+
+    def _shared_visualisation_data_cache(self):
+        services = getattr(self.context, "services", None)
+
+        if services is None:
+            return None
+
+        for key in (
+            "core.visualisation.data_cache",
+            "visualisation.data_cache",
+            "data_cache",
+        ):
+            try:
+                cache = services.get(key)
+                if cache is not None:
+                    return cache
+            except Exception:
+                pass
+
+        return None
+
+
+    def _shared_focus_rows(self):
+        cache = self._shared_visualisation_data_cache()
+
+        if cache is None:
+            return None
+
+        store = getattr(cache, "focus_rows", None)
+
+        if store is None:
+            store = OrderedDict()
+            try:
+                cache.focus_rows = store
+            except Exception:
+                return None
+
+        return store
+
+
+    def _shared_focus_row_get(self, key):
+        store = self._shared_focus_rows()
+
+        if store is None:
+            return None
+
+        value = store.get(key)
+
+        if value is not None and hasattr(store, "move_to_end"):
+            store.move_to_end(key)
+
+        return value
+
+
+    def _shared_focus_row_set(self, key, value, *, max_items: int = 256):
+        store = self._shared_focus_rows()
+
+        if store is None:
+            return
+
+        if key in store:
+            store.pop(key, None)
+
+        store[key] = value
+
+        while len(store) > max_items:
+            store.popitem(last=False)
+
+
+    def _focus_point_cache_get(self, key):
+        value = self._focus_point_cache.get(key)
+
+        if value is not None:
+            self._focus_point_cache.move_to_end(key)
+
+        return value
+
+
+    def _focus_point_cache_set(self, key, value):
+        if key in self._focus_point_cache:
+            self._focus_point_cache.pop(key, None)
+
+        self._focus_point_cache[key] = value
+
+        while len(self._focus_point_cache) > self._focus_point_cache_max:
+            self._focus_point_cache.popitem(last=False)
+
+    def _focus_axis_value_from_row(
+        self,
+        row_df,
+        column: str,
+        *,
+        log_enabled: bool,
+        axis_name: str,
+        row_id: str,
+    ):
+        try:
+            value = float(row_df.iloc[0][column])
+        except Exception as exc:
+            print(
+                "[AstronomicAL visualisation] focus axis value unreadable "
+                f"row_id={row_id!r} axis={axis_name} column={column!r} "
+                f"{type(exc).__name__}: {exc}",
+                flush=True,
+            )
+            return None
+
+        if not np.isfinite(value):
+            print(
+                "[AstronomicAL visualisation] focus row not drawable on this panel "
+                f"row_id={row_id!r} "
+                f"axis={axis_name} "
+                f"column={column!r} "
+                f"reason=non_finite "
+                f"value={value!r}",
+                flush=True,
+            )
+            return None
+
+        if log_enabled and value <= 0:
+            print(
+                "[AstronomicAL visualisation] focus row not drawable on this panel "
+                f"row_id={row_id!r} "
+                f"axis={axis_name} "
+                f"column={column!r} "
+                f"reason=invalid_for_log_axis "
+                f"value={value!r}",
+                flush=True,
+            )
+            return None
+
+        # Important:
+        # Return raw data-space value. HoloViews/Bokeh log axes transform display,
+        # but glyph coordinates are still raw data values.
+        return value
+
+    def _focus_point_from_cached_focus_row(self, focus):
+        dataset_id = self._dataset_id()
+
+        if focus is None or getattr(focus, "dataset_id", None) != dataset_id:
+            return None
+
+        row_id = str(getattr(focus, "row_id", "") or "")
+        record_id_col = getattr(self.state, "record_id_col", None)
+        x_col = getattr(self.state, "x", None)
+        y_col = getattr(self.state, "y", None)
+
+        if not row_id or not record_id_col or record_id_col == "Use Index":
+            return None
+
+        if not x_col or not y_col:
+            return None
+
+        point_key = (
+            str(dataset_id),
+            str(record_id_col),
+            str(row_id),
+            str(x_col),
+            str(y_col),
+            bool(getattr(self.state, "log_x", False)),
+            bool(getattr(self.state, "log_y", False)),
+        )
+
+        cached_point = self._focus_point_cache_get(point_key)
+        if cached_point is not None:
+            return cached_point
+
+        row_key = (
+            "focus_row",
+            str(dataset_id),
+            str(record_id_col),
+            str(row_id),
+        )
+
+        row_df = self._shared_focus_row_get(row_key)
+
+        if row_df is None or getattr(row_df, "empty", True):
+            print(
+                "[AstronomicAL visualisation] focus row cache miss "
+                f"row_id={row_id!r} x={x_col!r} y={y_col!r}",
+                flush=True,
+            )
+            return None
+
+        if x_col not in row_df.columns or y_col not in row_df.columns:
+            print(
+                "[AstronomicAL visualisation] focus row missing axis columns "
+                f"row_id={row_id!r} x={x_col!r} x_present={x_col in row_df.columns} "
+                f"y={y_col!r} y_present={y_col in row_df.columns}",
+                flush=True,
+            )
+            return None
+
+        x = self._focus_axis_value_from_row(
+            row_df,
+            x_col,
+            log_enabled=bool(getattr(self.state, "log_x", False)),
+            axis_name="x",
+            row_id=row_id,
+        )
+
+        y = self._focus_axis_value_from_row(
+            row_df,
+            y_col,
+            log_enabled=bool(getattr(self.state, "log_y", False)),
+            axis_name="y",
+            row_id=row_id,
+        )
+
+        if x is None or y is None:
+            return None
+
+        point = (x, y)
+        self._focus_point_cache_set(point_key, point)
+        return point
+
+    def _schedule_async_focus_lookup(self, focus, data: PreparedFrame) -> None:
+        """
+        Schedule a shared focused-row lookup without blocking the UI.
+
+        Multiple panels requesting the same focused row dedupe through JobManager's
+        key. Late joiners attach their own on_done callback.
+        """
+        jobs = getattr(self.context, "jobs", None)
+
+        if jobs is None:
+            return
+
+        dataset_id = self._dataset_id()
+        row_id = str(getattr(focus, "row_id", "") or "")
+        record_id_col = getattr(self.state, "record_id_col", None)
+
+        if not dataset_id or not row_id:
+            return
+
+        if not record_id_col or record_id_col == "Use Index":
+            return
+
+        row_key = (
+            "focus_row",
+            str(dataset_id),
+            str(record_id_col),
+            str(row_id),
+        )
+
+        failed_key = (
+            "focus_row_failed",
+            str(dataset_id),
+            str(record_id_col),
+            str(row_id),
+        )
+
+        if self._shared_focus_row_get(row_key) is not None:
+            return
+
+        if self._shared_focus_row_get(failed_key) is True:
+            return
+
+        if row_key in self._async_focus_pending:
+            return
+
+        self._async_focus_pending.add(row_key)
+
+        # Capture the current visual state so stale async results do not refresh
+        # the wrong panel after axes or dataset have changed.
+        request_signature = self._visual_state_signature()
+        panel_id = self.panel_id
+
+        job_key = (
+            f"visualisation:focus-row:"
+            f"{dataset_id}:{record_id_col}:{row_id}"
+        )
+
+        def _on_done(row_df):
+            self._async_focus_pending.discard(row_key)
+
+            if self._disposed:
+                return
+
+            if self.panel_id != panel_id:
+                return
+
+            if self._dataset_id() != dataset_id:
+                return
+
+            if self._visual_state_signature() != request_signature:
+                # Axes/state changed while the job was running. Cache the row for
+                # later use, but do not force this stale panel refresh.
+                if row_df is not None and not getattr(row_df, "empty", True):
+                    self._shared_focus_row_set(row_key, row_df)
+                return
+
+            if row_df is None or getattr(row_df, "empty", True):
+                self._shared_focus_row_set(failed_key, True)
+                return
+
+            self._shared_focus_row_set(row_key, row_df)
+
+            print(
+                "[AstronomicAL visualisation] async focus row ready "
+                f"panel={type(self).__name__} "
+                f"row_id={row_id!r}",
+                flush=True,
+            )
+
+            try:
+                self._interactive_sample_cache.clear()
+            except Exception:
+                pass
+
+            try:
+                self._base_sample_cache.clear()
+            except Exception:
+                pass
+
+            # Re-render now that the focus point can be resolved from cache.
+            self._schedule_refresh(reason="focus.async_resolved")
+
+        def _on_error(exc):
+            self._async_focus_pending.discard(row_key)
+            self._shared_focus_row_set(failed_key, True)
+
+            print(
+                "[AstronomicAL visualisation] async focus row failed "
+                f"panel={type(self).__name__} "
+                f"row_id={row_id!r} "
+                f"{type(exc).__name__}: {exc}",
+                flush=True,
+            )
+
+        try:
+            jobs.submit(
+                self._fetch_focus_row_for_async_job,
+                title="Resolve visualisation focus row",
+                key=job_key,
+                on_done=_on_done,
+                on_error=_on_error,
+                dataset_id=str(dataset_id),
+                row_id=str(row_id),
+                record_id_col=str(record_id_col),
+            )
+        except Exception as exc:
+            self._async_focus_pending.discard(row_key)
+            print(
+                "[AstronomicAL visualisation] async focus submit failed "
+                f"{type(exc).__name__}: {exc}",
+                flush=True,
+            )
+
+    def _fetch_focus_row_for_async_job(
+        self,
+        *,
+        dataset_id: str,
+        row_id: str,
+        record_id_col: str,
+        cancel_token=None,
+    ):
+        """
+        Worker-thread function.
+
+        Important:
+        - Do not touch Panel/Bokeh objects here.
+        - Do not mutate panel state here.
+        - Only use DatasetManager/DatasetSource.
+        """
+        if cancel_token is not None and cancel_token.cancelled():
+            return None
+
+        datasets = getattr(self.context, "datasets", None)
+
+        if datasets is None:
+            return None
+
+        try:
+            source = datasets.get_source(dataset_id)
+        except Exception:
+            return None
+
+        if source is None:
+            return None
+
+        row_id_str = str(row_id)
+
+        # Prefer DatasetManager-level APIs if available.
+        for method_name in ("get_row_by_id", "row_by_id", "find_row_by_id"):
+            method = getattr(datasets, method_name, None)
+
+            if not callable(method):
+                continue
+
+            for args, kwargs in (
+                ((dataset_id, row_id_str, record_id_col), {}),
+                ((dataset_id, row_id_str), {"id_column": record_id_col}),
+                ((dataset_id, row_id_str), {}),
+            ):
+                if cancel_token is not None and cancel_token.cancelled():
+                    return None
+
+                try:
+                    value = method(*args, **kwargs)
+                except TypeError:
+                    continue
+                except Exception:
+                    continue
+
+                row_df = self._coerce_single_row_frame(value)
+                if row_df is not None and not row_df.empty:
+                    return row_df
+
+        # Source-level APIs.
+        for method_name in ("get_row_by_id", "row_by_id", "find_row_by_id"):
+            method = getattr(source, method_name, None)
+
+            if not callable(method):
+                continue
+
+            for args, kwargs in (
+                ((row_id_str, record_id_col), {}),
+                ((row_id_str,), {"id_column": record_id_col}),
+                ((record_id_col, row_id_str), {}),
+                ((row_id_str,), {}),
+            ):
+                if cancel_token is not None and cancel_token.cancelled():
+                    return None
+
+                try:
+                    value = method(*args, **kwargs)
+                except TypeError:
+                    continue
+                except Exception:
+                    continue
+
+                row_df = self._coerce_single_row_frame(value)
+                if row_df is not None and not row_df.empty:
+                    return row_df
+
+        # Generic Parquet/DuckDB-backed filtered read.
+        to_pandas = getattr(source, "to_pandas", None)
+
+        if callable(to_pandas):
+            quoted_id_col = '"' + str(record_id_col).replace('"', '""') + '"'
+
+            for where_sql in (
+                f"CAST({quoted_id_col} AS VARCHAR) = ?",
+                f"{quoted_id_col} = ?",
+            ):
+                if cancel_token is not None and cancel_token.cancelled():
+                    return None
+
+                try:
+                    # Do not pass columns here. We want one shared full row so all
+                    # scatter panels can resolve their own x/y from the same result.
+                    value = to_pandas(
+                        where_sql=where_sql,
+                        params=[row_id_str],
+                        limit=1,
+                    )
+                except TypeError:
+                    continue
+                except Exception:
+                    continue
+
+                row_df = self._coerce_single_row_frame(value)
+                if row_df is not None and not row_df.empty:
+                    return row_df
+
+        return None
 
     def _get_shared_prepared_cache(self):
         services = getattr(self.context, "services", None)
@@ -390,6 +874,26 @@ class BaseVisualisationPanel(param.Parameterized):
         self._row_index_cache_key = None
         self._row_index_cache = None
 
+        try:
+            self._focus_point_cache.clear()
+        except Exception:
+            pass
+
+        try:
+            self._focus_point_cache.clear()
+        except Exception:
+            pass
+
+        try:
+            self._interactive_sample_cache.clear()
+        except Exception:
+            pass
+
+        try:
+            self._base_sample_cache.clear()
+        except Exception:
+            pass
+
     def dispose(self) -> None:
         if self._disposed:
             return
@@ -413,6 +917,12 @@ class BaseVisualisationPanel(param.Parameterized):
             except Exception:
                 pass
         self._watchers.clear()
+
+        try:
+            self._async_focus_pending.clear()
+            self._async_focus_failed.clear()
+        except Exception:
+            pass
 
         self._clear_prepared_cache()
 
@@ -508,7 +1018,19 @@ class BaseVisualisationPanel(param.Parameterized):
             return data.frame.iloc[0:0]
 
         row_ids = [str(row_id) for row_id in row_ids if row_id is not None]
-        if not row_ids:
+        if not row_ids or data.empty:
+            return data.frame.iloc[0:0]
+
+        scan_limit = int(getattr(self, "_focus_frame_scan_limit", 500_000))
+
+        if not visible_only and len(data.frame) > scan_limit:
+            print(
+                "[AstronomicAL visualisation] blocked full-frame row-id lookup "
+                f"panel={type(self).__name__} "
+                f"rows={len(data.frame):,} "
+                f"row_ids={len(row_ids)}",
+                flush=True,
+            )
             return data.frame.iloc[0:0]
 
         if limit is not None and len(row_ids) > int(limit):
@@ -546,36 +1068,300 @@ class BaseVisualisationPanel(param.Parameterized):
 
         return sub
 
-    def _focus_point_from_metadata(
-        self,
-        focus,
-    ) -> Optional[Tuple[float, Optional[float]]]:
-        """Fast path for focus events emitted by a scatter with matching axes.
+    def _coerce_single_row_frame(self, value):
+        if value is None:
+            return None
 
-        focus_x/focus_y are only valid for the panel that produced them, or for
-        another panel with the exact same x/y variables.
+        if isinstance(value, pd.DataFrame):
+            if value.empty:
+                return None
+            return value.head(1)
+
+        if isinstance(value, pd.Series):
+            return value.to_frame().T
+
+        if isinstance(value, dict):
+            return pd.DataFrame([value])
+
+        return None
+
+
+    def _call_first_working(self, obj, method_names, call_variants):
+        for method_name in method_names:
+            method = getattr(obj, method_name, None)
+
+            if not callable(method):
+                continue
+
+            for args, kwargs in call_variants:
+                try:
+                    return method(*args, **kwargs)
+                except TypeError:
+                    continue
+                except Exception:
+                    continue
+
+        return None
+
+
+    def _focus_row_from_dataset_source(self, dataset_id, row_id, columns):
         """
-        meta_x_variable = self._payload_value(focus, "x_variable")
-        meta_y_variable = self._payload_value(focus, "y_variable")
+        Fetch one focused row through DatasetManager/DatasetSource.
 
-        if meta_x_variable is None or meta_y_variable is None:
+        This avoids scanning the full prepared plotting frame on every focus event.
+        """
+        if columns is not None:
+            columns = list(dict.fromkeys(columns))
+
+        datasets = getattr(self.context, "datasets", None)
+
+        if datasets is None:
             return None
 
-        if str(meta_x_variable) != str(self.state.x):
+        record_id_col = getattr(self.state, "record_id_col", None)
+
+        if not record_id_col or record_id_col == "Use Index":
             return None
 
-        if str(meta_y_variable) != str(self.state.y):
+        row_id_str = str(row_id)
+
+        # 1. Try DatasetManager-level row lookup APIs if they exist.
+        manager_value = self._call_first_working(
+            datasets,
+            (
+                "get_row_by_id",
+                "row_by_id",
+                "find_row_by_id",
+            ),
+            (
+                ((dataset_id, row_id_str, record_id_col), {"columns": columns}),
+                ((dataset_id, row_id_str), {"id_column": record_id_col, "columns": columns}),
+                ((dataset_id, row_id_str), {"columns": columns}),
+                ((dataset_id, row_id_str, record_id_col), {}),
+                ((dataset_id, row_id_str), {}),
+            ),
+        )
+
+        manager_df = self._coerce_single_row_frame(manager_value)
+        if manager_df is not None:
+            return manager_df
+
+        # 2. Try DatasetSource-level row lookup APIs.
+        try:
+            source = datasets.get_source(dataset_id)
+        except Exception:
+            source = None
+
+        if source is None:
             return None
 
-        x = self._payload_value(focus, "focus_x")
-        y = self._payload_value(focus, "focus_y")
+        source_value = self._call_first_working(
+            source,
+            (
+                "get_row_by_id",
+                "row_by_id",
+                "find_row_by_id",
+            ),
+            (
+                ((row_id_str, record_id_col), {"columns": columns}),
+                ((row_id_str,), {"id_column": record_id_col, "columns": columns}),
+                ((row_id_str,), {"columns": columns}),
+                ((record_id_col, row_id_str), {"columns": columns}),
+                ((record_id_col, row_id_str), {}),
+                ((row_id_str,), {}),
+            ),
+        )
 
-        if x is None or y is None:
+        source_df = self._coerce_single_row_frame(source_value)
+        if source_df is not None:
+            return source_df
+
+        # 3. Try a source-backed filtered to_pandas call.
+        to_pandas = getattr(source, "to_pandas", None)
+
+        if callable(to_pandas):
+            for where_sql in (
+                f'CAST("{record_id_col}" AS VARCHAR) = ?',
+                f'"{record_id_col}" = ?',
+            ):
+                try:
+
+                    kwargs = {
+                        "where_sql": where_sql,
+                        "params": [row_id_str],
+                        "limit": 1,
+                    }
+
+                    if columns is not None:
+                        kwargs["columns"] = columns
+
+                    df = to_pandas(**kwargs)
+
+                except TypeError:
+                    continue
+                except Exception:
+                    continue
+
+                df = self._coerce_single_row_frame(df)
+                if df is not None:
+                    return df
+
+        # 4. Try position lookup + source row-by-position APIs.
+        position = None
+        find_position = getattr(datasets, "find_position_by_id", None)
+
+        if callable(find_position):
+            for args, kwargs in (
+                ((dataset_id, row_id_str, record_id_col), {}),
+                ((dataset_id, row_id_str), {"id_column": record_id_col}),
+                ((dataset_id, row_id_str), {}),
+            ):
+                try:
+                    position = find_position(*args, **kwargs)
+                    break
+                except TypeError:
+                    continue
+                except Exception:
+                    continue
+
+        if position is None:
+            return None
+
+        position_value = self._call_first_working(
+            source,
+            (
+                "get_row_by_position",
+                "row_by_position",
+                "get_row",
+                "row",
+            ),
+            (
+                ((position,), {"columns": columns}),
+                ((position,), {}),
+            ),
+        )
+
+        position_df = self._coerce_single_row_frame(position_value)
+        if position_df is not None:
+            return position_df
+
+        rows_value = self._call_first_working(
+            source,
+            (
+                "rows_by_positions",
+                "get_rows_by_positions",
+                "take_rows",
+            ),
+            (
+                (([position],), {"columns": columns}),
+                (([position],), {}),
+            ),
+        )
+
+        rows_df = self._coerce_single_row_frame(rows_value)
+        if rows_df is not None:
+            return rows_df
+
+        return None
+
+
+    def _focus_point_from_dataset_source(self, focus):
+        """
+        Resolve the focused point for this panel's current axes by fetching one
+        source row, not by scanning the full prepared frame.
+
+        Order:
+        1. per-panel point cache
+        2. shared one-row dataframe cache
+        3. source lookup for a full focused row
+        4. source lookup for just this panel's x/y columns
+        """
+        dataset_id = self._dataset_id()
+
+        if focus is None or getattr(focus, "dataset_id", None) != dataset_id:
+            return None
+
+        row_id = getattr(focus, "row_id", None)
+        if row_id is None:
+            return None
+
+        x_col = getattr(self.state, "x", None)
+        y_col = getattr(self.state, "y", None)
+
+        if not x_col or not y_col:
+            return None
+
+        record_id_col = getattr(self.state, "record_id_col", None)
+
+        if not record_id_col or record_id_col == "Use Index":
+            return None
+
+        cache_key = (
+            dataset_id,
+            str(row_id),
+            str(record_id_col),
+            str(x_col),
+            str(y_col),
+            bool(getattr(self.state, "log_x", False)),
+            bool(getattr(self.state, "log_y", False)),
+        )
+
+        cached = self._focus_point_cache_get(cache_key)
+        if cached is not None:
+            return cached
+
+        shared_key = (
+            "focus_row",
+            dataset_id,
+            str(record_id_col),
+            str(row_id),
+        )
+
+        failed_shared_key = (
+            "focus_row_failed",
+            dataset_id,
+            str(record_id_col),
+            str(row_id),
+        )
+
+        row_df = self._shared_focus_row_get(shared_key)
+
+        # Avoid every open panel repeating a failed "fetch full row" attempt.
+        shared_fetch_failed = self._shared_focus_row_get(failed_shared_key) is True
+
+        if row_df is None and not shared_fetch_failed:
+            row_df = self._focus_row_from_dataset_source(
+                dataset_id,
+                row_id,
+                None,  # fetch full row if DatasetSource supports it
+            )
+
+            if row_df is not None and not row_df.empty:
+                self._shared_focus_row_set(shared_key, row_df)
+            else:
+                self._shared_focus_row_set(failed_shared_key, True)
+
+        if (
+            row_df is None
+            or row_df.empty
+            or x_col not in row_df.columns
+            or y_col not in row_df.columns
+        ):
+            row_df = self._focus_row_from_dataset_source(
+                dataset_id,
+                row_id,
+                [record_id_col, x_col, y_col],
+            )
+
+        if row_df is None or row_df.empty:
+            return None
+
+        if x_col not in row_df.columns or y_col not in row_df.columns:
             return None
 
         try:
-            x = float(x)
-            y = float(y)
+            x = float(row_df.iloc[0][x_col])
+            y = float(row_df.iloc[0][y_col])
         except Exception:
             return None
 
@@ -588,10 +1374,64 @@ class BaseVisualisationPanel(param.Parameterized):
         if getattr(self.state, "log_y", False) and y <= 0:
             return None
 
+        point = (x, y)
+        self._focus_point_cache_set(cache_key, point)
+        return point
+
+
+    def _focus_point_from_metadata(self, focus):
+        metadata = getattr(focus, "metadata", None) or {}
+
+        def _meta(*names, default=None):
+            for name in names:
+                if isinstance(metadata, dict) and name in metadata:
+                    return metadata.get(name)
+                if hasattr(focus, name):
+                    return getattr(focus, name)
+            return default
+
+        focus_x_col = _meta("x_col", "x_variable")
+        focus_y_col = _meta("y_col", "y_variable")
+        focus_log_x = bool(_meta("log_x", "x_log", default=False))
+        focus_log_y = bool(_meta("log_y", "y_log", default=False))
+
+        current_x_col = str(getattr(self.state, "x", "") or "")
+        current_y_col = str(getattr(self.state, "y", "") or "")
+        current_log_x = bool(getattr(self.state, "log_x", False))
+        current_log_y = bool(getattr(self.state, "log_y", False))
+
+        if str(focus_x_col or "") != current_x_col:
+            return None
+
+        if str(focus_y_col or "") != current_y_col:
+            return None
+
+        if focus_log_x != current_log_x:
+            return None
+
+        if focus_log_y != current_log_y:
+            return None
+
+        try:
+            x = float(_meta("x", "focus_x"))
+            y = float(_meta("y", "focus_y"))
+        except Exception:
+            return None
+
+        if not np.isfinite(x) or not np.isfinite(y):
+            return None
+
+        if current_log_x and x <= 0:
+            return None
+
+        if current_log_y and y <= 0:
+            return None
+
         return x, y
 
     def _focus_point(self, data: PreparedFrame) -> Optional[Tuple[float, Optional[float]]]:
         selection = getattr(self.context, "selection", None)
+
         if selection is None or data.empty:
             return None
 
@@ -603,16 +1443,38 @@ class BaseVisualisationPanel(param.Parameterized):
         if focus is None or getattr(focus, "dataset_id", None) != self._dataset_id():
             return None
 
-        row_id = str(getattr(focus, "row_id", ""))
+        row_id = str(getattr(focus, "row_id", "") or "")
+
         if not row_id:
             return None
 
-        # Fast path only when the metadata coordinates are for this panel's axes.
+        # 1. Immediate fast path: focus event came from a panel with same axes.
         point = self._focus_point_from_metadata(focus)
         if point is not None:
             return point
 
-        # Fallback: resolve the focused row in this panel's own prepared frame.
+        # 2. Immediate cache path: async job may already have fetched this row.
+        point = self._focus_point_from_cached_focus_row(focus)
+        if point is not None:
+            return point
+
+        # 3. For large datasets, schedule async lookup and return immediately.
+        if len(data.frame) > int(getattr(self, "_focus_source_lookup_row_limit", 500_000)):
+            self._schedule_async_focus_lookup(focus, data)
+            return None
+
+        # 4. Small/medium datasets can still do a direct source lookup.
+        point_from_source = getattr(self, "_focus_point_from_dataset_source", None)
+
+        if callable(point_from_source):
+            point = point_from_source(focus)
+            if point is not None:
+                return point
+
+        # 5. Small-frame fallback only.
+        if len(data.frame) > int(getattr(self, "_focus_frame_scan_limit", 500_000)):
+            return None
+
         row = self._rows_for_row_ids(
             data,
             [row_id],
@@ -630,6 +1492,7 @@ class BaseVisualisationPanel(param.Parameterized):
             y = float(row.iloc[0][INTERNAL_Y])
 
         return x, y
+
 
     def _active_selection_ids(self) -> List[str]:
         selection = getattr(self.context, "selection", None)
@@ -689,24 +1552,37 @@ class BaseVisualisationPanel(param.Parameterized):
 
     def _focus_overlay(self, data: PreparedFrame, *, size: float = 14):
         
+        t0 = time.perf_counter()
         point = self._focus_point(data)
+        dt = time.perf_counter() - t0
 
-        print(
-            "[AstronomicAL visualisation] focus_overlay "
-            f"panel={type(self).__name__} "
-            f"x={getattr(self.state, 'x', None)!r} "
-            f"y={getattr(self.state, 'y', None)!r} "
-            f"point={point!r}",
-            flush=True,
-        )
+        if dt > 0.25:
+            print(
+                "[AstronomicAL visualisation] slow focus_point "
+                f"panel={type(self).__name__} "
+                f"duration={dt:.3f}s "
+                f"rows={len(data.frame):,} "
+                f"x={getattr(self.state, 'x', None)!r} "
+                f"y={getattr(self.state, 'y', None)!r}",
+                flush=True,
+            )
 
+        if getattr(self, "_debug_visualisation", False):
+            print(
+                "[AstronomicAL visualisation] focus_overlay "
+                f"panel={type(self).__name__} "
+                f"x={getattr(self.state, 'x', None)!r} "
+                f"y={getattr(self.state, 'y', None)!r} "
+                f"point={point!r}",
+                flush=True,
+            )
 
         if point is None:
-            return None
+            return hv.Overlay([])
 
         x, y = point
         if y is None:
-            return None
+            return hv.Overlay([])
 
         return hv.Points(
             [(x, y)],
@@ -733,9 +1609,84 @@ class BaseVisualisationPanel(param.Parameterized):
             framewise=True,
         )
 
+    def _event_topic(self, topic):
+        return str(topic or "")
+
+
+    def _uses_label_rendering(self) -> bool:
+        color_by = str(getattr(self.state, "color_by", "") or "").strip().lower()
+        label_filter = getattr(self.state, "label_filter", None) or []
+        label_col = getattr(self.state, "label_col", None)
+
+        if color_by == "labels":
+            return True
+
+        if label_col and label_col != "No Labels":
+            if label_filter and "All" not in label_filter:
+                return True
+
+        return False
+
+    def _maybe_prewarm_row_ids(self, *, topic: str, payload=None) -> None:
+        """
+        Warm the visualisation row-id cache after dataset or mapping changes.
+
+        Do not run this for label settings or ordinary visual state changes.
+        The goal is only to avoid the first expensive row-id-cache MISS after a
+        dataset becomes active or the record-id mapping changes.
+        """
+        topic = str(topic or "")
+
+        if topic not in {
+            "dataset.loaded",
+            "dataset.updated",
+            "dataset.active.changed",
+            "dataset.mapping_updated",
+        }:
+            return
+
+        dataset_id = self._dataset_id()
+
+        if dataset_id is None:
+            return
+
+        record_id_col = getattr(self.state, "record_id_col", None)
+
+        if not record_id_col or record_id_col == "Use Index":
+            return
+
+        jobs = getattr(self.context, "jobs", None)
+
+        if jobs is None:
+            return
+
+        key = f"visualisation:row_ids:{dataset_id}:{record_id_col}"
+
+        def _work(*, cancel_token=None):
+            if cancel_token is not None and cancel_token.cancelled():
+                return None
+
+            return _load_row_ids_array(self.context, self.state)
+
+        try:
+            jobs.submit(
+                _work,
+                title="Prewarm visualisation row IDs",
+                key=key,
+            )
+        except TypeError:
+            # Compatibility with simpler JobManager signatures.
+            try:
+                jobs.submit(_work, key=key)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
 
     def _on_dataset_event(self, topic, payload) -> None:
         t0 = time.perf_counter()
+        topic = self._event_topic(topic)
 
         print(
             f"[AstronomicAL visualisation] dataset event received: {topic}",
@@ -749,9 +1700,14 @@ class BaseVisualisationPanel(param.Parameterized):
 
         before = self._visual_state_signature()
 
+        was_using_labels = self._uses_label_rendering()
+
         self._suppress_state_refresh = True
         try:
             if topic == "labels.settings.updated":
+                # Important:
+                # Always apply label settings first. This event may be what changes
+                # the panel from color_by="None" to color_by="Labels".
                 self.state.apply_label_settings(payload)
             else:
                 self.state.refresh_from_context()
@@ -759,6 +1715,7 @@ class BaseVisualisationPanel(param.Parameterized):
             self._suppress_state_refresh = False
 
         after = self._visual_state_signature()
+        now_using_labels = self._uses_label_rendering()
 
         if topic == "dataset.mapping_updated" and before == after:
             print(
@@ -768,7 +1725,22 @@ class BaseVisualisationPanel(param.Parameterized):
             )
             return
 
+        if topic == "labels.settings.updated":
+            # Skip only if the event genuinely has no visual effect.
+            # Do not skip before apply_label_settings(), because that prevents
+            # newly applied labels from enabling label colouring.
+            if before == after and not was_using_labels and not now_using_labels:
+                print(
+                    "[AstronomicAL visualisation] label settings did not affect this panel; "
+                    "skipping refresh",
+                    flush=True,
+                )
+                return
+
         self._clear_prepared_cache()
+
+        # Only prewarm row ids for dataset/mapping changes, not label changes.
+        self._maybe_prewarm_row_ids(topic=topic, payload=payload)
 
         print(
             "[AstronomicAL visualisation] dataset event state refresh complete "
@@ -778,7 +1750,6 @@ class BaseVisualisationPanel(param.Parameterized):
         )
 
         self._schedule_refresh(reason=f"dataset_event.{topic}")
-
 
     def _payload_value(self, payload, key: str, default=None):
         """Read a value from dict-like or object-like event payloads."""
@@ -856,10 +1827,30 @@ class BaseVisualisationPanel(param.Parameterized):
 
     def _on_selection_event(self, topic, payload) -> None:
         event_panel_id = self._payload_value(payload, "panel_id")
+
         if event_panel_id is not None and str(event_panel_id) == str(self.panel_id):
             return
 
-        self._schedule_refresh()
+        event_dataset_id = self._payload_value(payload, "dataset_id")
+        active_dataset_id = self._dataset_id()
+
+        if (
+            event_dataset_id is not None
+            and active_dataset_id is not None
+            and str(event_dataset_id) != str(active_dataset_id)
+        ):
+            return
+
+        # Selection focus updates should never block the tap interaction.
+        # Schedule slightly later so the click/record-browser feedback can settle.
+        def _run():
+            self._schedule_refresh(reason=f"selection.{topic}")
+
+        try:
+            import panel as pn
+            pn.state.curdoc.add_timeout_callback(_run, 50)
+        except Exception:
+            _run()
 
     def _on_state_changed(self, event) -> None:
         if getattr(self, "_suppress_state_refresh", False):
@@ -973,19 +1964,39 @@ class BaseVisualisationPanel(param.Parameterized):
 
 
     def _settings_controls(self):
-        return settings_box(
+        return pn.Column(
+        pn.Row(
             self.status_pane,
             settings_select(self.state.param.color_by, name="Colour", width=130),
             settings_multichoice(self.state.param.label_filter, name="Labels", width=210),
             settings_select(self.state.param.render_mode, name="Render", width=130),
+        ),
+        pn.Row(
             settings_int_input(self.state.param.datashade_threshold, name="Shade threshold", width=145),
             settings_int_input(self.state.param.interactive_sample_limit, name="Sample limit", width=130),
             settings_int_input(self.state.param.max_selection_ids, name="Max selected IDs", width=145),
             settings_float_slider(self.state.param.point_size, name="Size", width=175),
             settings_float_slider(self.state.param.point_alpha, name="Alpha", width=175),
+        ),
+        pn.Row(
             settings_checkbox(self.state.param.log_x, name="Log X"),
             settings_checkbox(self.state.param.log_y, name="Log Y"),
-        )
+        ),
+        sizing_mode="stretch_width",
+        height_policy="fit",
+        margin=(5, 0, 0, 0),
+        styles={
+            "overflow": "visible",
+            "align-content": "flex-start",
+            "align-items": "flex-start",
+            "gap": "2px 6px",
+            "padding": "4px 6px 4px 6px",
+            "border-top": "1px solid #ddd",
+            "border-bottom": "1px solid #eee",
+            "background": "#fafafa",
+            "box-sizing": "border-box",
+        },
+    )
 
     def _header(self):
         return pn.GridBox(

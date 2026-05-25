@@ -193,11 +193,9 @@ def materialise_active_selection_as_dataset(
     if not base_dataset_id:
         raise RuntimeError("Could not resolve the source dataset.")
 
-    base_df = _dataset_get_df(datasets, base_dataset_id)
     filtered_df = _selection_rows_to_dataframe(
         context,
         base_dataset_id=base_dataset_id,
-        base_df=base_df,
         row_ids=row_ids,
     )
 
@@ -285,19 +283,64 @@ def materialise_active_selection_as_dataset(
 
     return result
 
-
 def _selection_rows_to_dataframe(
     context,
     *,
     base_dataset_id: str,
-    base_df: pd.DataFrame,
+    base_df: Optional[pd.DataFrame] = None,
     row_ids: List[str],
 ) -> pd.DataFrame:
+    datasets = getattr(context, "datasets", None)
+
+    if datasets is None:
+        raise RuntimeError("DatasetManager is required.")
+
+    row_ids = [str(r) for r in row_ids]
+    row_id_set = set(row_ids)
+    order = {str(row_id): i for i, row_id in enumerate(row_ids)}
+
+    # Preferred Parquet/source-backed path.
+    source = _dataset_get_source(datasets, base_dataset_id)
+
+    if source is not None:
+        mappings = _dataset_get_mappings(datasets, base_dataset_id)
+
+        id_col = None
+        for semantic_name in ("record_id", "id", "id_col", "row_id"):
+            mapped = mappings.get(semantic_name)
+            if mapped and mapped != "Use Index":
+                id_col = str(mapped)
+                break
+
+        if id_col is not None:
+            placeholders = ", ".join(["?"] * len(row_ids))
+            where_sql = f'CAST("{id_col}" AS VARCHAR) IN ({placeholders})'
+
+            try:
+                filtered = source.to_pandas(
+                    where_sql=where_sql,
+                    params=row_ids,
+                )
+            except TypeError:
+                filtered = pd.DataFrame()
+
+            if not filtered.empty and id_col in filtered.columns:
+                filtered["_selection_row_id"] = filtered[id_col].astype(str)
+                filtered["_selection_order"] = filtered["_selection_row_id"].map(order)
+                filtered["_selection_order"] = filtered["_selection_order"].fillna(len(order))
+                filtered = filtered.sort_values("_selection_order", kind="stable")
+                filtered = filtered.drop(
+                    columns=["_selection_row_id", "_selection_order"],
+                    errors="ignore",
+                )
+                return filtered.copy()
+
+    # Legacy fallback.
+    if base_df is None:
+        base_df = _dataset_get_df(datasets, base_dataset_id)
+
     if base_df is None or not isinstance(base_df, pd.DataFrame):
         raise ValueError("The source dataset is not a pandas DataFrame.")
-
-    row_id_set = set(str(r) for r in row_ids)
-    order = {str(row_id): i for i, row_id in enumerate(row_ids)}
 
     id_col = _resolve_id_column(context, base_dataset_id, base_df)
 
@@ -321,7 +364,6 @@ def _selection_rows_to_dataframe(
     filtered["_selection_order"] = filtered["_selection_row_id"].map(order)
     filtered["_selection_order"] = filtered["_selection_order"].fillna(len(order))
     filtered = filtered.sort_values("_selection_order", kind="stable")
-
     filtered = filtered.drop(
         columns=["_selection_row_id", "_selection_order"],
         errors="ignore",
@@ -409,6 +451,33 @@ def _active_dataset_id(datasets) -> Optional[str]:
             return str(active_dataset_id)
     except Exception:
         pass
+
+    return None
+
+
+def _dataset_get_source(datasets, dataset_id: str):
+    get_source = getattr(datasets, "get_source", None)
+    if callable(get_source):
+        try:
+            return get_source(dataset_id)
+        except Exception:
+            pass
+
+    get = getattr(datasets, "get", None)
+    if callable(get):
+        record = get(dataset_id)
+
+        source = getattr(record, "source", None)
+        if source is not None:
+            return source
+
+        df = getattr(record, "df", None)
+        if isinstance(df, pd.DataFrame):
+            return None
+
+        data = getattr(record, "data", None)
+        if isinstance(data, pd.DataFrame):
+            return None
 
     return None
 
@@ -898,14 +967,6 @@ class SelectionSetPanel:
 
         if self.data is not None:
             return self.data
-
-        if self.config is not None:
-            try:
-                df = getattr(self.config, "main_df", None)
-                if df is not None:
-                    return df
-            except Exception:
-                pass
 
         return None
 

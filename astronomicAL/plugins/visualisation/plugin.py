@@ -248,14 +248,15 @@ class PreparedFrameCache:
         self._cache.clear()
 
     def invalidate_dataset(self, dataset_id):
-        # Only works if dataset_id is included somewhere in your prepared_cache_key.
         for key in list(self._cache):
-            if dataset_id in key:
+            key_dataset_id = key[0] if isinstance(key, tuple) and key else None
+            if key_dataset_id == dataset_id:
                 self._cache.pop(key, None)
 
 
 def create_prepared_frame_cache(context, **kwargs):
     return PreparedFrameCache(max_items=12)
+
 
 class VisualisationRuntimeState:
     def __init__(self):
@@ -266,6 +267,9 @@ class VisualisationRuntimeState:
         return self.prepared_frame_cache.get(key)
 
     def set_prepared_frame(self, key, value):
+        if key in self.prepared_frame_cache:
+            self.prepared_frame_cache.pop(key, None)
+
         self.prepared_frame_cache[key] = value
 
         while len(self.prepared_frame_cache) > self.max_prepared_frames:
@@ -278,17 +282,29 @@ class VisualisationRuntimeState:
             return
 
         for key in list(self.prepared_frame_cache):
-            # depending on your key structure
-            if dataset_id in key:
+            key_dataset_id = key[0] if isinstance(key, tuple) and key else None
+            if key_dataset_id == dataset_id:
                 self.prepared_frame_cache.pop(key, None)
 
+
 class VisualisationDataCache:
-    def __init__(self, max_columns: int = 32, max_labels: int = 8):
+    def __init__(
+        self,
+        max_columns: int = 32,
+        max_labels: int = 8,
+        max_row_id_arrays: int = 4,
+    ):
         self.max_columns = int(max_columns)
         self.max_labels = int(max_labels)
+        self.max_row_id_arrays = int(max_row_id_arrays)
+
         self.columns = {}
         self.labels = {}
         self.row_ids = {}
+
+    def _evict_oldest(self, store, max_items: int):
+        while len(store) > max_items:
+            store.pop(next(iter(store)), None)
 
     def get_column(self, key):
         return self.columns.get(key)
@@ -296,9 +312,9 @@ class VisualisationDataCache:
     def set_column(self, key, value):
         if key in self.columns:
             self.columns.pop(key, None)
+
         self.columns[key] = value
-        while len(self.columns) > self.max_columns:
-            self.columns.pop(next(iter(self.columns)), None)
+        self._evict_oldest(self.columns, self.max_columns)
 
     def get_label(self, key):
         return self.labels.get(key)
@@ -306,27 +322,40 @@ class VisualisationDataCache:
     def set_label(self, key, value):
         if key in self.labels:
             self.labels.pop(key, None)
+
         self.labels[key] = value
-        while len(self.labels) > self.max_labels:
-            self.labels.pop(next(iter(self.labels)), None)
+        self._evict_oldest(self.labels, self.max_labels)
 
     def get_row_ids(self, key):
         return self.row_ids.get(key)
 
     def set_row_ids(self, key, value):
+        if key in self.row_ids:
+            self.row_ids.pop(key, None)
+
         self.row_ids[key] = value
+        self._evict_oldest(self.row_ids, self.max_row_id_arrays)
 
     def clear_dataset(self, dataset_id):
         for store in (self.columns, self.labels, self.row_ids):
             for key in list(store):
-                if dataset_id in key:
+                key_dataset_id = None
+
+                if isinstance(key, tuple):
+                    if len(key) >= 2:
+                        # Current visualisation data-cache keys look like:
+                        # ("column", dataset_id, fingerprint, column_name)
+                        key_dataset_id = key[1]
+                    elif len(key) == 1:
+                        key_dataset_id = key[0]
+
+                if key_dataset_id == dataset_id:
                     store.pop(key, None)
 
     def clear(self):
         self.columns.clear()
         self.labels.clear()
         self.row_ids.clear()
-
 
 def create_visualisation_data_cache(context, **kwargs):
     return VisualisationDataCache()
