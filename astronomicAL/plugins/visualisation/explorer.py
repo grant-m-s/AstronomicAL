@@ -34,6 +34,8 @@ class LinkedExplorerPanel(param.Parameterized):
         self.settings_visible = False
         self._layout: Optional[pn.Column] = None
         self._settings_built = False
+        self._disposed = False
+
 
         self.scatter = ScatterPanel(
             context=context,
@@ -232,19 +234,24 @@ class LinkedExplorerPanel(param.Parameterized):
             self._apply_settings_visibility()
 
     def dispose(self) -> None:
-        if self._disposed:
+        if getattr(self, "_disposed", False):
             return
-
         self._disposed = True
-        
-        for owner, watcher in list(self._watchers):
+
+        for owner, watcher in list(getattr(self, "_watchers", [])):
             try:
                 owner.param.unwatch(watcher)
             except Exception:
                 pass
         self._watchers.clear()
 
-        for child in (self.scatter, self.histogram, self.density):
+        for child in (
+            getattr(self, "scatter", None),
+            getattr(self, "histogram", None),
+            getattr(self, "density", None),
+        ):
+            if child is None:
+                continue
             try:
                 child.dispose()
             except Exception:
