@@ -1,3 +1,5 @@
+# BUG: Annotation panel reloads labels but summary doesnt
+
 from __future__ import annotations
 
 import html
@@ -684,6 +686,8 @@ class AnnotationsPanel:
         self.row_id: Optional[str] = None
         self.row: Optional[pd.Series] = None
 
+        self._columns_cache: Dict[str, List[str]] = {}
+
         # Fallback/local cache keyed by "dataset_id::row_id".
         # Artifacts are the canonical shared store; this helps persistence and
         # protects notes during transitional states.
@@ -992,25 +996,34 @@ class AnnotationsPanel:
     def _active_dataset_id(self) -> Optional[str]:
         return _active_dataset_id(self.context)
 
-    def _active_df(self) -> Optional[pd.DataFrame]:
+    def _active_columns(self) -> List[str]:
         datasets = getattr(self.context, "datasets", None)
         dataset_id = self._active_dataset_id()
+
         if datasets is None or dataset_id is None:
-            return None
+            return []
 
         try:
-            return datasets.get_df(dataset_id)
-        except TypeError:
-            try:
-                return datasets.get_df()
-            except Exception:
-                return None
+            return [str(col) for col in datasets.list_columns(dataset_id)]
         except Exception:
-            return None
+            return []
+
+
+    def _column_exists(self, column: Optional[str]) -> bool:
+        if not column:
+            return False
+        return str(column) in set(self._active_columns())
+    
+    def _active_df(self) -> Optional[pd.DataFrame]:
+        raise RuntimeError(
+            "AnnotationsPanel must not materialise the full active dataset. "
+            "Use list_columns(), get_row_by_id(), or get_row_by_position()."
+        )
 
     def _get_mapping(self, semantic_name: str) -> Optional[str]:
         datasets = getattr(self.context, "datasets", None)
         dataset_id = self._active_dataset_id()
+
         if datasets is None or dataset_id is None:
             return None
 
@@ -1029,7 +1042,7 @@ class AnnotationsPanel:
             except Exception:
                 value = None
 
-            if value:
+            if value is not None and str(value).strip():
                 return str(value)
 
         return None
@@ -1046,39 +1059,76 @@ class AnnotationsPanel:
 
     def _resolve_record_id_col(self) -> Optional[str]:
         mapped = self._get_mapping("record_id")
+
         if self._is_index_mapping(mapped):
             return "Use Index"
 
-        df = self._active_df()
-        if df is not None and mapped in df.columns:
+        columns = set(self._active_columns())
+
+        if mapped and mapped in columns:
             return mapped
 
         config = getattr(self.context, "config", None)
         settings = getattr(config, "settings", {}) if config is not None else {}
-        legacy = settings.get("id_col")
-
-        if self._is_index_mapping(legacy):
-            return "Use Index"
-
-        if df is not None and legacy in df.columns:
-            return legacy
 
         return None
 
     def _resolve_label_col(self) -> Optional[str]:
         mapped = self._get_mapping("target_label")
-        df = self._active_df()
-        if df is not None and mapped in df.columns:
+        columns = set(self._active_columns())
+
+        if mapped and mapped in columns:
             return mapped
 
         config = getattr(self.context, "config", None)
         settings = getattr(config, "settings", {}) if config is not None else {}
-        legacy = settings.get("label_col")
-
-        if df is not None and legacy in df.columns:
-            return legacy
 
         return None
+    
+    def _record_preview_columns(self) -> Optional[List[str]]:
+        columns = self._active_columns()
+        if not columns:
+            return None
+
+        record_id_col = self._resolve_record_id_col()
+        label_col = self._resolve_label_col()
+
+        selected: List[str] = []
+
+        if record_id_col and record_id_col != "Use Index":
+            selected.append(record_id_col)
+
+        if label_col:
+            selected.append(label_col)
+
+        config = getattr(self.context, "config", None)
+        settings = getattr(config, "settings", {}) if config is not None else {}
+
+        extra_cols = settings.get("extra_info_cols") or []
+
+        if isinstance(extra_cols, str):
+            extra_cols = [extra_cols]
+
+        for col in extra_cols:
+            if col and col in columns and col not in selected:
+                selected.append(str(col))
+
+        for col in columns:
+            if col not in selected:
+                selected.append(str(col))
+            if len(selected) >= 10:
+                break
+
+        return selected or None
+
+    def _row_df_to_series(self, row_df: Optional[pd.DataFrame]) -> Optional[pd.Series]:
+        if row_df is None or row_df.empty:
+            return None
+
+        try:
+            return row_df.iloc[0]
+        except Exception:
+            return None
 
     def _current_focus(self) -> Optional[Dict[str, Any]]:
         selection = getattr(self.context, "selection", None)
@@ -1234,35 +1284,61 @@ class AnnotationsPanel:
         if dataset_id is None or row_id is None:
             return None
 
-        df = self._active_df()
-        if df is None or len(df) == 0:
+        datasets = getattr(self.context, "datasets", None)
+        if datasets is None:
             return None
 
+        columns = self._record_preview_columns()
         record_id_col = self._resolve_record_id_col()
 
         try:
+            if record_id_col and record_id_col != "Use Index":
+                row_df = datasets.get_row_by_id(
+                    dataset_id,
+                    row_id,
+                    id_column=record_id_col,
+                    columns=columns,
+                )
+                return self._row_df_to_series(row_df)
+
+            # Index-based mapping: treat row_id as a position.
             if record_id_col == "Use Index":
-                matches = df.index.astype(str) == str(row_id)
-                if matches.any():
-                    position = list(matches).index(True)
-                    return df.iloc[position]
+                try:
+                    position = int(row_id)
+                except Exception:
+                    return None
 
-            if record_id_col and record_id_col in df.columns:
-                matches = df[record_id_col].astype(str) == str(row_id)
-                if matches.any():
-                    return df.loc[matches].iloc[0]
+                row_df = datasets.get_row_by_position(
+                    dataset_id,
+                    position,
+                    columns=columns,
+                )
+                return self._row_df_to_series(row_df)
 
+            # Last-resort compatibility fallback: numeric row_id as position.
             try:
-                idx = int(row_id)
-                if 0 <= idx < len(df):
-                    return df.iloc[idx]
+                position = int(row_id)
+            except Exception:
+                return None
+
+            row_count = None
+            try:
+                row_count = datasets.row_count(dataset_id)
             except Exception:
                 pass
 
+            if row_count is not None and not (0 <= position < row_count):
+                return None
+
+            row_df = datasets.get_row_by_position(
+                dataset_id,
+                position,
+                columns=columns,
+            )
+            return self._row_df_to_series(row_df)
+
         except Exception:
             return None
-
-        return None
 
     def _record_key(self) -> Optional[str]:
         return _record_key(self.dataset_id, self.row_id)
@@ -1621,18 +1697,21 @@ class AnnotationsPanel:
             rows.append(("Current label", self.row[label_col]))
 
         preview_count = 0
+
         for col in self.row.index:
             if label_col and col == label_col:
                 continue
-            if preview_count >= 8:
-                break
 
             value = self.row[col]
+
             if pd.isna(value):
                 continue
 
             rows.append((str(col), value))
             preview_count += 1
+
+            if preview_count >= 8:
+                break
 
         self.record_pane.object = self._table_html(rows)
 
@@ -1846,10 +1925,23 @@ class AnnotationSummaryPanel:
         self._build_root()
         self._subscribe_events()
 
+        self._restored_summary_from_state = False
+
+        self._build_widgets()
+        self._build_root()
+        self._subscribe_events()
+
         if restore_state:
             self.restore_state(restore_state)
 
-        self.refresh()
+        if self._restored_summary_from_state:
+            self._render()
+            self._show_message(
+                f"Restored cached summary with {len(self.summary_df)} rows.",
+                "info",
+            )
+        else:
+            self.refresh()
 
     def panel(self):
         return self.root
@@ -1867,9 +1959,27 @@ class AnnotationSummaryPanel:
         self._subscriptions.clear()
 
     def get_state(self) -> Dict[str, Any]:
+        summary_records: List[Dict[str, Any]] = []
+
+        if isinstance(self.summary_df, pd.DataFrame) and not self.summary_df.empty:
+            try:
+                summary_records = self.summary_df.to_dict(orient="records")
+            except Exception:
+                summary_records = []
+
         return {
-            "version": 1,
+            "version": 2,
             "dataset_id": self.dataset_id,
+            "summary_records": summary_records,
+            "summary_columns": (
+                list(self.summary_df.columns)
+                if isinstance(self.summary_df, pd.DataFrame)
+                else []
+            ),
+            "summary_row_count": int(len(self.summary_df))
+            if isinstance(self.summary_df, pd.DataFrame)
+            else 0,
+            "cached_at": _now(),
         }
 
     def snapshot_state(self) -> Dict[str, Any]:
@@ -1878,8 +1988,29 @@ class AnnotationSummaryPanel:
     def restore_state(self, state: Dict[str, Any]) -> None:
         if not isinstance(state, dict):
             return
+
         if state.get("dataset_id"):
             self.dataset_id = str(state.get("dataset_id"))
+
+        records = state.get("summary_records")
+        columns = state.get("summary_columns") or []
+
+        if isinstance(records, list):
+            try:
+                restored_df = pd.DataFrame(records)
+
+                if columns:
+                    # Preserve saved column order and include missing columns as empty.
+                    for col in columns:
+                        if col not in restored_df.columns:
+                            restored_df[col] = ""
+                    restored_df = restored_df[[col for col in columns]]
+
+                self.summary_df = restored_df
+                self._restored_summary_from_state = True
+            except Exception:
+                self.summary_df = pd.DataFrame()
+                self._restored_summary_from_state = False
 
     def _build_widgets(self) -> None:
         self.refresh_button = pn.widgets.Button(
@@ -1982,10 +2113,13 @@ class AnnotationSummaryPanel:
 
     def refresh(self, show_message: bool = True) -> None:
         self.dataset_id = self.dataset_id or _active_dataset_id(self.context)
+
         self.summary_df = build_annotation_summary_dataframe(
             self.context,
             dataset_id=self.dataset_id,
         )
+        self._restored_summary_from_state = False
+
         self._render()
 
         if show_message:
@@ -2033,7 +2167,7 @@ class AnnotationSummaryPanel:
                 self.summary_df.copy(),
                 name="Annotation Summary",
                 derived_from=self.dataset_id,
-                source="core.annotations",
+                provenance="core.annotations",
                 created_at=_now(),
             )
         except Exception as exc:
