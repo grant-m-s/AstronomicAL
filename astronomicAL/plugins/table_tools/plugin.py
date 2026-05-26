@@ -1,4 +1,5 @@
-# BUG: Subset dataset too much memory
+# BUG: On reload: Auto defaults to subset filter dataset (ignores the original dataset direct from file)
+# BUG: On reload: Failed to create panel core.table_tools.transform_panel: 'Unknown dataset_id: default'
 
 from __future__ import annotations
 
@@ -114,23 +115,25 @@ def create_table_transform_panel(context, data=None, **kwargs):
 
 def add_column_action(context, request: ActionRequest, **_kwargs) -> ActionResult:
     dataset_id = _request_dataset_id(context, request)
-    params = request.params or {}
 
+    params = request.params or {}
     new_column = str(params.get("new_column", "")).strip()
     expression = str(params.get("expression", "")).strip()
 
     if not new_column:
         raise ValueError("Please provide a new column name.")
+
     if not expression:
         raise ValueError("Please provide a column expression.")
 
     columns = _dataset_columns(context, dataset_id)
+
     if new_column in columns:
         raise ValueError(f"Column `{new_column}` already exists.")
 
     source = _active_source(context, dataset_id)
 
-    if _is_duckdb_parquet_source(source):
+    if _is_duckdb_relation_source(source):
         row_count = _add_column_duckdb_parquet(
             context,
             dataset_id=dataset_id,
@@ -138,6 +141,8 @@ def add_column_action(context, request: ActionRequest, **_kwargs) -> ActionResul
             new_column=new_column,
             expression=expression,
         )
+        materialized = False
+        backend = getattr(_active_source(context, dataset_id), "backend_name", None)
     else:
         row_count = _add_column_pandas_fallback(
             context,
@@ -145,12 +150,16 @@ def add_column_action(context, request: ActionRequest, **_kwargs) -> ActionResul
             new_column=new_column,
             expression=expression,
         )
+        materialized = True
+        backend = getattr(_active_source(context, dataset_id), "backend_name", None)
 
     return ActionResult(
         value={
             "dataset_id": dataset_id,
             "column": new_column,
             "rows": row_count,
+            "materialized": materialized,
+            "backend": backend,
         },
         events=[
             EventResult(
@@ -160,6 +169,8 @@ def add_column_action(context, request: ActionRequest, **_kwargs) -> ActionResul
                     "change": "column.added",
                     "column": new_column,
                     "origin": manifest.id,
+                    "materialized": materialized,
+                    "backend": backend,
                 },
             )
         ],
@@ -168,14 +179,15 @@ def add_column_action(context, request: ActionRequest, **_kwargs) -> ActionResul
 
 def create_subset_action(context, request: ActionRequest, **_kwargs) -> ActionResult:
     base_dataset_id = _request_dataset_id(context, request)
-    params = request.params or {}
 
+    params = request.params or {}
     subset_name = str(params.get("subset_name", "")).strip()
     expression = str(params.get("expression", "")).strip()
     set_active = bool(params.get("set_active", True))
 
     if not subset_name:
         raise ValueError("Please provide a subset dataset name.")
+
     if not expression:
         raise ValueError("Please provide a subset expression.")
 
@@ -195,6 +207,7 @@ def create_subset_action(context, request: ActionRequest, **_kwargs) -> ActionRe
             subset_name=subset_name,
             expression=expression,
         )
+        materialized = False
     else:
         row_count = _create_subset_pandas_fallback(
             context,
@@ -203,6 +216,7 @@ def create_subset_action(context, request: ActionRequest, **_kwargs) -> ActionRe
             subset_name=subset_name,
             expression=expression,
         )
+        materialized = True
 
     _copy_dataset_mappings(
         datasets,
@@ -219,6 +233,7 @@ def create_subset_action(context, request: ActionRequest, **_kwargs) -> ActionRe
                 "dataset_id": new_dataset_id,
                 "derived_from": base_dataset_id,
                 "origin": manifest.id,
+                "materialized": materialized,
             },
         )
     ]
@@ -243,9 +258,14 @@ def create_subset_action(context, request: ActionRequest, **_kwargs) -> ActionRe
             "rows": row_count,
             "derived_from": base_dataset_id,
             "set_active": set_active,
+            "materialized": materialized,
+            "backend": getattr(_active_source(context, new_dataset_id), "backend_name", None),
         },
         events=events,
     )
+
+
+
 
 # ---------------------------------------------------------------------
 # Panel
@@ -570,32 +590,41 @@ class TableTransformPanel:
         return _active_dataset_id(self.context)
 
     def _active_df(
-        self,
+        context,
+        dataset_id: Optional[str] = None,
         *,
         limit: Optional[int] = None,
         columns: Optional[Sequence[str]] = None,
     ) -> pd.DataFrame:
-        try:
-            return _active_df(
-                self.context,
-                self._active_dataset_id(),
-                limit=limit,
-                columns=columns,
-            )
-        except Exception:
-            if self.data is not None:
-                if columns is not None:
-                    existing = [col for col in columns if col in self.data.columns]
-                    df = self.data.loc[:, existing]
-                else:
-                    df = self.data
 
-                if limit is not None:
-                    df = df.head(int(limit))
+        source = _active_source(context, dataset_id)
 
-                return df.copy()
+        if source is not None:
+            backend = getattr(source, "backend_name", "unknown")
 
-            return pd.DataFrame()
+            if backend != "pandas" and limit is None:
+                raise RuntimeError(
+                    "Refusing to materialise the full non-pandas dataset. "
+                    "Use DatasetSource/DuckDB paths or pass a small limit."
+                )
+
+            return source.to_pandas(columns=columns, limit=limit)
+
+        config = getattr(context, "config", None)
+
+        if config is not None and getattr(config, "main_df", None) is not None:
+            df = config.main_df
+
+            if columns is not None:
+                existing = [col for col in columns if col in df.columns]
+                df = df.loc[:, existing]
+
+            if limit is not None:
+                df = df.head(int(limit))
+
+            return df.copy()
+
+        return pd.DataFrame()
 
     def _active_dataset_name(self) -> str:
         return _active_dataset_name(self.context, self._active_dataset_id())
@@ -684,28 +713,48 @@ class TableTransformPanel:
                 "expression": self.new_column_expr.value,
             }
 
+            new_col = str(params["new_column"]).strip()
+
+            if not new_col:
+                self.status.object = "Add column failed: please provide a new column name."
+                return
+
+            if not str(params["expression"]).strip():
+                self.status.object = "Add column failed: please provide a column formula."
+                return
+
+            self.add_column_button.disabled = True
+            self.status.object = f"Adding lazy derived column `{new_col}`..."
+            self._set_preview_df(pd.DataFrame())
+
+            request = ActionRequest(
+                dataset_id=dataset_id,
+                params=params,
+                origin="core.table_tools.transform_panel",
+            )
+
             if manager is not None:
                 result = manager.run_action(
                     "core.table_tools.add_column",
                     self.context,
-                    ActionRequest(
-                        dataset_id=dataset_id,
-                        params=params,
-                        origin="core.table_tools.transform_panel",
-                    ),
+                    request,
                     return_processed=True,
                 )
                 value = getattr(result, "value", None) or {}
             else:
-                request = ActionRequest(
-                    dataset_id=dataset_id,
-                    params=params,
-                    origin="core.table_tools.transform_panel",
-                )
                 action_result = add_column_action(self.context, request)
                 value = action_result.value or {}
 
-            new_col = value.get("column", params["new_column"])
+            new_col = value.get("column", new_col)
+            row_count = value.get("rows")
+            materialized = bool(value.get("materialized", False))
+            backend = value.get("backend") or getattr(
+                _active_source(self.context, dataset_id),
+                "backend_name",
+                "unknown",
+            )
+
+            self.status.object = f"Column `{new_col}` registered. Loading preview..."
 
             preview_df = _dataset_head(
                 self.context,
@@ -713,12 +762,23 @@ class TableTransformPanel:
                 n=20,
                 columns=[new_col],
             )
-            self._set_preview_df(preview_df)
 
+            self._set_preview_df(preview_df)
             self._refresh_metadata_panes()
-            self.status.object = f"Added new column `{new_col}` to the active dataset."
+
+            row_text = "unknown" if row_count is None else f"{int(row_count):,}"
+            mode_text = "materialised" if materialized else "lazy"
+
+            self.status.object = (
+                f"Added `{new_col}` as a **{mode_text}** derived column "
+                f"over **{row_text}** rows (`{backend}`)."
+            )
+
         except Exception as exc:
             self.status.object = f"Add column failed: `{exc}`"
+
+        finally:
+            self.add_column_button.disabled = False
 
     # ------------------------------------------------------------------
     # Actions: subsets
@@ -742,10 +802,10 @@ class TableTransformPanel:
         except Exception as exc:
             self.status.object = f"Subset preview failed: `{exc}`"
 
-
     def _create_subset_dataset(self, _event=None) -> None:
         try:
             manager = getattr(self.context, "plugins", None)
+            dataset_id = self._active_dataset_id()
 
             params = {
                 "subset_name": self.subset_name.value,
@@ -753,32 +813,42 @@ class TableTransformPanel:
                 "set_active": bool(self.set_active_checkbox.value),
             }
 
+            self.create_subset_button.disabled = True
+            self.status.object = (
+                f"Creating lazy subset dataset `{params['subset_name']}`..."
+            )
+            self._set_preview_df(pd.DataFrame())
+
+            request = ActionRequest(
+                dataset_id=dataset_id,
+                params=params,
+                origin="core.table_tools.transform_panel",
+            )
+
             if manager is not None:
                 result = manager.run_action(
                     "core.table_tools.create_subset",
                     self.context,
-                    ActionRequest(
-                        dataset_id=self._active_dataset_id(),
-                        params=params,
-                        origin="core.table_tools.transform_panel",
-                    ),
+                    request,
                     return_processed=True,
                 )
                 value = getattr(result, "value", None) or {}
             else:
-                request = ActionRequest(
-                    dataset_id=self._active_dataset_id(),
-                    params=params,
-                    origin="core.table_tools.transform_panel",
-                )
                 action_result = create_subset_action(self.context, request)
                 value = action_result.value or {}
 
             new_dataset_id = value.get("dataset_id")
             subset_name = value.get("name", params["subset_name"])
             row_count = value.get("rows")
+            materialized = bool(value.get("materialized", False))
+            backend = value.get("backend") or "unknown"
 
             if new_dataset_id:
+                self.status.object = (
+                    f"Subset dataset `{subset_name}` registered as `{new_dataset_id}`. "
+                    f"Loading preview..."
+                )
+
                 self._set_preview_df(
                     _dataset_head(
                         self.context,
@@ -792,11 +862,18 @@ class TableTransformPanel:
             self._refresh_metadata_panes()
 
             row_text = "unknown" if row_count is None else f"{int(row_count):,}"
+            mode_text = "materialised Parquet file" if materialized else "lazy filtered Parquet view"
+
             self.status.object = (
-                f"Created subset dataset `{subset_name}` with **{row_text}** rows."
+                f"Created subset dataset `{subset_name}` with **{row_text}** rows "
+                f"as a **{mode_text}** (`{backend}`)."
             )
+
         except Exception as exc:
             self.status.object = f"Create subset dataset failed: `{exc}`"
+
+        finally:
+            self.create_subset_button.disabled = False
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -1099,6 +1176,42 @@ def _expression_to_sql(expr: str, columns: Sequence[str]) -> str:
 
     return sql
 
+def _is_duckdb_relation_source(source: Any) -> bool:
+    """
+    True for any source that can expose a DuckDB relation over Parquet-backed
+    data.
+
+    This includes:
+    - plain DuckDBParquetDatasetSource
+    - lazy filtered Parquet views
+    - lazy derived-column Parquet views
+    """
+    if source is None:
+        return False
+
+    return (
+        callable(getattr(source, "_connect", None))
+        and callable(getattr(source, "_relation_sql", None))
+        and callable(getattr(source, "_path_argument", None))
+    )
+
+
+def _duckdb_relation_params(source: Any) -> list[Any]:
+    """
+    Parameters required by source._relation_sql().
+
+    Plain DuckDBParquetDatasetSource usually needs only [path_arg].
+    Filtered/derived lazy sources may need [path_arg, ...filter_params].
+    """
+    relation_params = getattr(source, "_relation_params", None)
+    if callable(relation_params):
+        return list(relation_params())
+
+    params_method = getattr(source, "_params", None)
+    if callable(params_method):
+        return list(params_method())
+
+    return [source._path_argument()]
 
 def _is_duckdb_parquet_source(source: Any) -> bool:
     if source is None:
@@ -1113,6 +1226,576 @@ def _is_duckdb_parquet_source(source: Any) -> bool:
         and callable(getattr(source, "_path_argument", None))
     )
 
+class LazyDerivedColumnDuckDBSource:
+    """
+    Lazy derived-column view over a DuckDB/Parquet-compatible source.
+
+    This adds a computed column without physically rewriting the underlying
+    Parquet file. Panels see the new column through the DatasetSource API.
+    """
+
+    backend_name = "duckdb_parquet_derived_column"
+
+    def __init__(
+        self,
+        *,
+        base_source: Any,
+        new_column: str,
+        expression_sql: str,
+        expression_original: str,
+        dataset_name: Optional[str] = None,
+        columns_hint: Optional[Sequence[str]] = None,
+        row_count_hint: Optional[int] = None,
+    ) -> None:
+        self.base_source = base_source
+        self.new_column = str(new_column)
+        self.expression_sql = str(expression_sql)
+        self.expression_original = str(expression_original)
+        self.dataset_name = dataset_name
+
+        base_columns = [str(col) for col in (columns_hint or [])]
+
+        if self.new_column not in base_columns:
+            base_columns.append(self.new_column)
+
+        self._column_cache = base_columns
+        self._row_count_cache = (
+            int(row_count_hint)
+            if row_count_hint is not None
+            else None
+        )
+
+    def _connect(self):
+        return self.base_source._connect()
+
+    def _path_argument(self):
+        return self.base_source._path_argument()
+
+    def _relation_params(self) -> list[Any]:
+        return _duckdb_relation_params(self.base_source)
+
+    def _base_relation_sql(self) -> str:
+        return self.base_source._relation_sql()
+
+    def _relation_sql(self) -> str:
+        return (
+            "SELECT base.*, "
+            f"{self.expression_sql} AS {_quote_identifier(self.new_column)} "
+            f"FROM {self._base_relation_sql()} AS base"
+        )
+
+    def _select_sql(
+        self,
+        *,
+        columns: Optional[Sequence[str]] = None,
+    ) -> str:
+        if columns is None:
+            return "*"
+
+        selected = [str(col) for col in columns]
+
+        if not selected:
+            return "*"
+
+        return ", ".join(_quote_identifier(col) for col in selected)
+
+    def columns(self) -> list[str]:
+        return list(self._column_cache)
+
+    def dtypes(self) -> dict[str, str]:
+        con = self._connect()
+        try:
+            df = con.execute(
+                f"DESCRIBE SELECT * FROM ({self._relation_sql()}) LIMIT 0",
+                self._relation_params(),
+            ).df()
+        finally:
+            con.close()
+
+        return {
+            str(row["column_name"]): str(row["column_type"])
+            for _, row in df.iterrows()
+        }
+
+    def row_count(self) -> Optional[int]:
+        if self._row_count_cache is not None:
+            return int(self._row_count_cache)
+
+        con = self._connect()
+        try:
+            result = con.execute(
+                f"SELECT COUNT(*) FROM ({self._relation_sql()})",
+                self._relation_params(),
+            ).fetchone()
+        finally:
+            con.close()
+
+        self._row_count_cache = int(result[0]) if result is not None else 0
+        return self._row_count_cache
+
+    def to_pandas(
+        self,
+        *,
+        columns: Optional[Sequence[str]] = None,
+        limit: Optional[int] = None,
+        where_sql: Optional[str] = None,
+        params: Optional[Sequence[Any]] = None,
+    ) -> pd.DataFrame:
+        sql = (
+            f"SELECT {self._select_sql(columns=columns)} "
+            f"FROM ({self._relation_sql()})"
+        )
+        sql_params = self._relation_params()
+
+        if where_sql:
+            sql += f" WHERE ({where_sql})"
+            if params:
+                sql_params.extend(list(params))
+
+        if limit is not None:
+            sql += " LIMIT ?"
+            sql_params.append(int(limit))
+
+        con = self._connect()
+        try:
+            return con.execute(sql, sql_params).df()
+        finally:
+            con.close()
+
+    def head(
+        self,
+        n: int = 5,
+        *,
+        columns: Optional[Sequence[str]] = None,
+    ) -> pd.DataFrame:
+        return self.to_pandas(columns=columns, limit=n)
+
+    def get_row_by_position(
+        self,
+        position: int,
+        *,
+        columns: Optional[Sequence[str]] = None,
+    ) -> pd.DataFrame:
+        if position < 0:
+            return pd.DataFrame(columns=self.columns() if columns is None else columns)
+
+        sql = (
+            f"SELECT {self._select_sql(columns=columns)} "
+            f"FROM ({self._relation_sql()}) "
+            "LIMIT 1 OFFSET ?"
+        )
+
+        con = self._connect()
+        try:
+            return con.execute(
+                sql,
+                [*self._relation_params(), int(position)],
+            ).df()
+        finally:
+            con.close()
+
+    def get_row_by_id(
+        self,
+        row_id: Any,
+        *,
+        id_column: str,
+        columns: Optional[Sequence[str]] = None,
+    ) -> pd.DataFrame:
+        if id_column == "Use Index" or id_column not in self.columns():
+            return pd.DataFrame(columns=self.columns() if columns is None else columns)
+
+        return self.to_pandas(
+            columns=columns,
+            limit=1,
+            where_sql=f"CAST({_quote_identifier(id_column)} AS VARCHAR) = ?",
+            params=[str(row_id)],
+        )
+
+    def find_position_by_id(
+        self,
+        row_id: Any,
+        *,
+        id_column: str,
+    ) -> Optional[int]:
+        if id_column == "Use Index" or id_column not in self.columns():
+            return None
+
+        sql = (
+            "SELECT rn FROM ("
+            " SELECT "
+            f" ROW_NUMBER() OVER () - 1 AS rn, {_quote_identifier(id_column)} AS rid "
+            f" FROM ({self._relation_sql()})"
+            ") "
+            "WHERE CAST(rid AS VARCHAR) = ? "
+            "LIMIT 1"
+        )
+
+        con = self._connect()
+        try:
+            result = con.execute(
+                sql,
+                [*self._relation_params(), str(row_id)],
+            ).fetchone()
+        finally:
+            con.close()
+
+        if result is None:
+            return None
+
+        return int(result[0])
+
+    def metadata(self) -> dict[str, Any]:
+        return {
+            "backend": self.backend_name,
+            "base_backend": getattr(self.base_source, "backend_name", "unknown"),
+            "dataset_name": self.dataset_name,
+            "new_column": self.new_column,
+            "expression": self.expression_original,
+            "materialized": False,
+        }
+
+class FilteredDuckDBParquetDatasetSource:
+    """
+    Lazy filtered view over a DuckDB/Parquet source.
+
+    This represents a subset dataset without physically copying rows to a new
+    Parquet file. Queries are pushed down to DuckDB and only materialised when a
+    panel asks for a preview, row lookup, selected columns, etc.
+    """
+
+    backend_name = "duckdb_parquet_filtered"
+
+    def __init__(
+        self,
+        *,
+        base_source: Any,
+        where_sql: str,
+        where_params: Optional[Sequence[Any]] = None,
+        dataset_name: Optional[str] = None,
+        columns_hint: Optional[Sequence[str]] = None,
+        row_count_hint: Optional[int] = None,
+    ) -> None:
+        self.base_source = base_source
+        self.where_sql = str(where_sql)
+        self.where_params = list(where_params or [])
+        self.dataset_name = dataset_name
+
+        self._column_cache = (
+            [str(col) for col in columns_hint]
+            if columns_hint is not None
+            else None
+        )
+        self._row_count_cache = (
+            int(row_count_hint)
+            if row_count_hint is not None
+            else None
+        )
+
+    def _connect(self):
+        return self.base_source._connect()
+
+    def _path_argument(self):
+        return self.base_source._path_argument()
+
+    def _base_relation_sql(self) -> str:
+        return self.base_source._relation_sql()
+
+    def _relation_sql(self) -> str:
+        return (
+            f"(SELECT * FROM {self._base_relation_sql()} "
+            f"WHERE ({self.where_sql}))"
+        )
+
+    def _select_sql(
+        self,
+        *,
+        columns: Optional[Sequence[str]] = None,
+    ) -> str:
+        selected_columns = None if columns is None else [str(col) for col in columns]
+
+        if selected_columns is None or not selected_columns:
+            return "*"
+
+        return ", ".join(_quote_identifier(col) for col in selected_columns)
+
+    def _params(self, extra: Optional[Sequence[Any]] = None) -> list[Any]:
+        params = [self._path_argument()]
+        params.extend(self.where_params)
+        if extra:
+            params.extend(list(extra))
+        return params
+
+    def columns(self) -> list[str]:
+        if self._column_cache is not None:
+            return list(self._column_cache)
+
+        try:
+            self._column_cache = [str(col) for col in self.base_source.columns()]
+            return list(self._column_cache)
+        except Exception:
+            pass
+
+        con = self._connect()
+        try:
+            df = con.execute(
+                f"DESCRIBE SELECT * FROM {self._relation_sql()} LIMIT 0",
+                self._params(),
+            ).df()
+        finally:
+            con.close()
+
+        self._column_cache = [str(col) for col in df["column_name"].tolist()]
+        return list(self._column_cache)
+
+    def dtypes(self) -> dict[str, str]:
+        con = self._connect()
+        try:
+            df = con.execute(
+                f"DESCRIBE SELECT * FROM {self._relation_sql()} LIMIT 0",
+                self._params(),
+            ).df()
+        finally:
+            con.close()
+
+        return {
+            str(row["column_name"]): str(row["column_type"])
+            for _, row in df.iterrows()
+        }
+
+    def row_count(self) -> Optional[int]:
+        if self._row_count_cache is not None:
+            return int(self._row_count_cache)
+
+        con = self._connect()
+        try:
+            result = con.execute(
+                f"SELECT COUNT(*) FROM {self._relation_sql()}",
+                self._params(),
+            ).fetchone()
+        finally:
+            con.close()
+
+        self._row_count_cache = int(result[0]) if result is not None else 0
+        return self._row_count_cache
+
+    def to_pandas(
+        self,
+        *,
+        columns: Optional[Sequence[str]] = None,
+        limit: Optional[int] = None,
+        where_sql: Optional[str] = None,
+        params: Optional[Sequence[Any]] = None,
+    ) -> pd.DataFrame:
+        select_sql = self._select_sql(columns=columns)
+
+        sql = f"SELECT {select_sql} FROM {self._relation_sql()}"
+        sql_params = self._params()
+
+        if where_sql:
+            sql += f" WHERE ({where_sql})"
+            if params:
+                sql_params.extend(list(params))
+
+        if limit is not None:
+            sql += " LIMIT ?"
+            sql_params.append(int(limit))
+
+        con = self._connect()
+        try:
+            return con.execute(sql, sql_params).df()
+        finally:
+            con.close()
+
+    def head(
+        self,
+        n: int = 5,
+        *,
+        columns: Optional[Sequence[str]] = None,
+    ) -> pd.DataFrame:
+        return self.to_pandas(columns=columns, limit=n)
+
+    def get_row_by_position(
+        self,
+        position: int,
+        *,
+        columns: Optional[Sequence[str]] = None,
+    ) -> pd.DataFrame:
+        if position < 0:
+            return pd.DataFrame(columns=self.columns() if columns is None else columns)
+
+        select_sql = self._select_sql(columns=columns)
+
+        sql = (
+            f"SELECT {select_sql} "
+            f"FROM {self._relation_sql()} "
+            "LIMIT 1 OFFSET ?"
+        )
+
+        con = self._connect()
+        try:
+            return con.execute(
+                sql,
+                self._params([int(position)]),
+            ).df()
+        finally:
+            con.close()
+
+    def get_row_by_id(
+        self,
+        row_id: Any,
+        *,
+        id_column: str,
+        columns: Optional[Sequence[str]] = None,
+    ) -> pd.DataFrame:
+        if id_column == "Use Index":
+            return pd.DataFrame(columns=self.columns() if columns is None else columns)
+
+        if id_column not in self.columns():
+            return pd.DataFrame(columns=self.columns() if columns is None else columns)
+
+        return self.to_pandas(
+            columns=columns,
+            limit=1,
+            where_sql=f"CAST({_quote_identifier(id_column)} AS VARCHAR) = ?",
+            params=[str(row_id)],
+        )
+
+    def find_position_by_id(
+        self,
+        row_id: Any,
+        *,
+        id_column: str,
+    ) -> Optional[int]:
+        if id_column == "Use Index" or id_column not in self.columns():
+            return None
+
+        sql = (
+            "SELECT rn FROM ("
+            " SELECT "
+            f" ROW_NUMBER() OVER () - 1 AS rn, {_quote_identifier(id_column)} AS rid "
+            f" FROM {self._relation_sql()}"
+            ") "
+            "WHERE CAST(rid AS VARCHAR) = ? "
+            "LIMIT 1"
+        )
+
+        con = self._connect()
+        try:
+            result = con.execute(
+                sql,
+                self._params([str(row_id)]),
+            ).fetchone()
+        finally:
+            con.close()
+
+        if result is None:
+            return None
+
+        return int(result[0])
+
+    def metadata(self) -> dict[str, Any]:
+        return {
+            "backend": self.backend_name,
+            "base_backend": getattr(self.base_source, "backend_name", "unknown"),
+            "dataset_name": self.dataset_name,
+            "filter_sql": self.where_sql,
+            "row_count": self._row_count_cache,
+        }
+
+def _is_selection_subset_source(source: Any) -> bool:
+    return (
+        source is not None
+        and getattr(source, "backend_name", None) == "selection_subset"
+        and getattr(source, "base_source", None) is not None
+        and getattr(source, "row_ids", None) is not None
+        and getattr(source, "id_column", None) is not None
+    )
+
+
+def _duckdb_base_source_for_subset(source: Any) -> Optional[Any]:
+    if _is_duckdb_parquet_source(source):
+        return source
+
+    if _is_selection_subset_source(source):
+        base_source = getattr(source, "base_source", None)
+        if _is_duckdb_parquet_source(base_source):
+            return base_source
+
+    return None
+
+
+def _can_create_subset_with_duckdb(source: Any) -> bool:
+    return _duckdb_base_source_for_subset(source) is not None
+
+
+def _selection_subset_info(source: Any) -> Optional[Dict[str, Any]]:
+    if not _is_selection_subset_source(source):
+        return None
+
+    row_ids = [str(row_id) for row_id in list(getattr(source, "row_ids", []) or [])]
+    id_column = getattr(source, "id_column", None)
+
+    if not row_ids or not id_column:
+        return None
+
+    return {
+        "row_ids": row_ids,
+        "id_column": str(id_column),
+    }
+
+
+def _configure_duckdb_for_large_copy(con: Any) -> None:
+    """
+    Keep DuckDB COPY/SELECT operations from building avoidable large in-memory
+    structures.
+
+    These pragmas are best-effort. Older DuckDB versions may not support all of
+    them, so failures are intentionally ignored.
+    """
+    for statement in (
+        "PRAGMA preserve_insertion_order=false",
+        "PRAGMA threads=4",
+    ):
+        try:
+            con.execute(statement)
+        except Exception:
+            pass
+
+
+def _insert_selection_ids_temp_table(
+    con: Any,
+    row_ids: Sequence[str],
+    *,
+    table_name: str = "__astronomical_selection_ids",
+    batch_size: int = 10_000,
+) -> None:
+    con.execute(f"DROP TABLE IF EXISTS {table_name}")
+    con.execute(f"CREATE TEMP TABLE {table_name} (__al_selection_id VARCHAR)")
+
+    values = [str(row_id) for row_id in row_ids]
+
+    for start in range(0, len(values), batch_size):
+        batch = [(row_id,) for row_id in values[start : start + batch_size]]
+        if batch:
+            con.executemany(
+                f"INSERT INTO {table_name} VALUES (?)",
+                batch,
+            )
+
+
+def _count_parquet_rows(path: Path) -> int:
+    import duckdb
+
+    con = duckdb.connect(database=":memory:", read_only=False)
+    try:
+        result = con.execute(
+            "SELECT COUNT(*) FROM read_parquet(?)",
+            [str(Path(path))],
+        ).fetchone()
+    finally:
+        con.close()
+
+    return int(result[0]) if result is not None else 0
 
 def _duckdb_query_df(
     source: Any,
@@ -1159,10 +1842,31 @@ def _duckdb_copy_query_to_parquet(
 
     con = source._connect()
     try:
+        _configure_duckdb_for_large_copy(con)
         con.execute(copy_sql, list(params))
     finally:
         con.close()
 
+def _duckdb_copy_query_to_parquet_on_connection(
+    con: Any,
+    *,
+    select_sql: str,
+    params: Sequence[Any],
+    output_path: Path,
+) -> None:
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if output_path.exists():
+        output_path.unlink()
+
+    copy_sql = (
+        f"COPY ({select_sql}) "
+        f"TO {_quote_sql_string(output_path)} "
+        "(FORMAT PARQUET, COMPRESSION ZSTD)"
+    )
+
+    con.execute(copy_sql, list(params))
 
 def _new_cache_path(context, dataset_id: str, suffix: str) -> Path:
     cache_dir = default_cache_dir_for_context(context)
@@ -1209,6 +1913,60 @@ def _register_parquet_dataset(
         **registration_meta,
     )
 
+def _register_lazy_filtered_subset(
+    context,
+    *,
+    source: Any,
+    base_dataset_id: str,
+    new_dataset_id: str,
+    subset_name: str,
+    expression: str,
+    where_sql: str,
+    row_count: Optional[int] = None,
+) -> int:
+    datasets = getattr(context, "datasets", None)
+    if datasets is None:
+        raise RuntimeError("DatasetManager is required.")
+
+    columns = _dataset_columns(context, base_dataset_id)
+    base_meta = _active_dataset_meta(context, base_dataset_id)
+
+    filtered_source = FilteredDuckDBParquetDatasetSource(
+        base_source=source,
+        where_sql=where_sql,
+        where_params=[],
+        dataset_name=subset_name,
+        columns_hint=columns,
+        row_count_hint=row_count,
+    )
+
+    meta = dict(base_meta)
+    meta.update(
+        {
+            "backend": "duckdb_parquet_filtered",
+            "source_format": "parquet_filtered_view",
+            "derived_from": base_dataset_id,
+            "filter": expression,
+            "filter_sql": where_sql,
+            "created_by": manifest.id,
+            "derivation_type": "table_subset",
+            "materialized": False,
+            "columns": columns,
+        }
+    )
+
+    if row_count is not None:
+        meta["row_count"] = int(row_count)
+        meta["rows"] = int(row_count)
+
+    datasets.register_source(
+        new_dataset_id,
+        filtered_source,
+        name=subset_name,
+        **meta,
+    )
+
+    return int(row_count) if row_count is not None else -1
 
 def _add_column_duckdb_parquet(
     context,
@@ -1218,61 +1976,79 @@ def _add_column_duckdb_parquet(
     new_column: str,
     expression: str,
 ) -> int:
+    """
+    Add a derived column lazily.
+
+    This does not physically rewrite the Parquet file. It replaces the active
+    dataset source with a derived-column DatasetSource that computes the column
+    through DuckDB when queried.
+    """
+    if not _is_duckdb_relation_source(source):
+        raise RuntimeError(
+            f"Dataset `{dataset_id}` is not a DuckDB-compatible source."
+        )
+
+    datasets = getattr(context, "datasets", None)
+    if datasets is None:
+        raise RuntimeError("DatasetManager is required.")
+
     columns = _dataset_columns(context, dataset_id)
     expr_sql = _expression_to_sql(expression, columns)
 
-    relation_sql = source._relation_sql()
-    path_arg = source._path_argument()
-
-    output_path = _new_cache_path(
-        context,
-        dataset_id,
-        f"add_column_{new_column}_{uuid.uuid4().hex[:8]}",
-    )
-
-    select_sql = (
-        f"SELECT *, {expr_sql} AS {_quote_identifier(new_column)} "
-        f"FROM {relation_sql}"
-    )
-
-    _duckdb_copy_query_to_parquet(
+    # Validate the expression over one row before registering the new source.
+    preview = _duckdb_query_df(
         source,
-        select_sql=select_sql,
-        params=[path_arg],
-        output_path=output_path,
+        (
+            f"SELECT {expr_sql} AS {_quote_identifier(new_column)} "
+            f"FROM ({source._relation_sql()}) "
+            "LIMIT 1"
+        ),
+        _duckdb_relation_params(source),
     )
+
+    if new_column not in preview.columns:
+        raise RuntimeError(f"Could not validate derived column `{new_column}`.")
 
     row_count = _dataset_row_count(context, dataset_id)
-    if row_count is None:
-        result = _duckdb_fetchone(
-            source,
-            f"SELECT COUNT(*) FROM {relation_sql}",
-            [path_arg],
-        )
-        row_count = int(result[0]) if result is not None else 0
 
     dataset_name = _active_dataset_name(context, dataset_id)
     meta = _active_dataset_meta(context, dataset_id)
+
+    new_columns = [*columns, new_column]
+
+    derived_source = LazyDerivedColumnDuckDBSource(
+        base_source=source,
+        new_column=new_column,
+        expression_sql=expr_sql,
+        expression_original=expression,
+        dataset_name=dataset_name,
+        columns_hint=new_columns,
+        row_count_hint=row_count,
+    )
+
     meta.update(
         {
+            "backend": derived_source.backend_name,
+            "source_format": "parquet_derived_column_view",
+            "columns": new_columns,
+            "row_count": row_count,
+            "rows": row_count,
             "last_transform_type": "add_column",
             "last_transform_column": new_column,
             "last_transform_expr": expression,
             "created_by": manifest.id,
+            "materialized": False,
         }
     )
 
-    _register_parquet_dataset(
-        context,
-        dataset_id=dataset_id,
-        parquet_path=output_path,
+    datasets.register_source(
+        dataset_id,
+        derived_source,
         name=dataset_name,
-        columns=[*columns, new_column],
-        row_count=row_count,
-        meta=meta,
+        **meta,
     )
 
-    return int(row_count)
+    return int(row_count) if row_count is not None else 0
 
 
 def _add_column_pandas_fallback(
@@ -1285,9 +2061,18 @@ def _add_column_pandas_fallback(
     """
     Compatibility path for datasets that are already pandas-backed.
 
-    This still uses pandas, but only when pandas is already the canonical source.
-    Large Parquet-backed datasets should take the DuckDB path above.
+    Non-pandas sources must not fall back here because that can materialise
+    millions of rows.
     """
+    source = _active_source(context, dataset_id)
+    backend = getattr(source, "backend_name", None)
+
+    if backend != "pandas":
+        raise RuntimeError(
+            "Refusing to add a column by materialising a non-pandas dataset. "
+            f"Dataset `{dataset_id}` has backend `{backend}`."
+        )
+
     df = _require_pandas_dataframe(context, dataset_id).copy()
 
     if new_column in df.columns:
@@ -1299,12 +2084,14 @@ def _add_column_pandas_fallback(
     cache_dir = default_cache_dir_for_context(context)
     dataset_name = _active_dataset_name(context, dataset_id)
     meta = _active_dataset_meta(context, dataset_id)
+
     meta.update(
         {
             "last_transform_type": "add_column",
             "last_transform_column": new_column,
             "last_transform_expr": expression,
             "created_by": manifest.id,
+            "materialized": True,
         }
     )
 
@@ -1319,7 +2106,6 @@ def _add_column_pandas_fallback(
 
     return int(len(df))
 
-
 def _create_subset_duckdb_parquet(
     context,
     *,
@@ -1329,9 +2115,13 @@ def _create_subset_duckdb_parquet(
     subset_name: str,
     expression: str,
 ) -> int:
+
     columns = _dataset_columns(context, base_dataset_id)
     where_sql = _expression_to_sql(expression, columns)
 
+    # Counting can still be expensive, but it is much cheaper than writing a new
+    # 12M-row parquet file. If the UI already has a cached preview count later,
+    # pass that through and avoid recounting.
     relation_sql = source._relation_sql()
     path_arg = source._path_argument()
 
@@ -1342,36 +2132,16 @@ def _create_subset_duckdb_parquet(
     )
     matched_count = int(count_result[0]) if count_result is not None else 0
 
-    output_path = _new_cache_path(
+    return _register_lazy_filtered_subset(
         context,
-        new_dataset_id,
-        f"subset_{uuid.uuid4().hex[:8]}",
-    )
-
-    select_sql = f"SELECT * FROM {relation_sql} WHERE ({where_sql})"
-
-    _duckdb_copy_query_to_parquet(
-        source,
-        select_sql=select_sql,
-        params=[path_arg],
-        output_path=output_path,
-    )
-
-    _register_parquet_dataset(
-        context,
-        dataset_id=new_dataset_id,
-        parquet_path=output_path,
-        name=subset_name,
-        columns=columns,
+        source=source,
+        base_dataset_id=base_dataset_id,
+        new_dataset_id=new_dataset_id,
+        subset_name=subset_name,
+        expression=expression,
+        where_sql=where_sql,
         row_count=matched_count,
-        meta={
-            "derived_from": base_dataset_id,
-            "filter": expression,
-            "created_by": manifest.id,
-        },
     )
-
-    return matched_count
 
 
 def _create_subset_pandas_fallback(
@@ -1383,8 +2153,22 @@ def _create_subset_pandas_fallback(
     expression: str,
 ) -> int:
     """
-    Compatibility path for datasets that are already pandas-backed.
+    Compatibility path only.
+
+    This is allowed for datasets whose canonical source is already pandas.
+    It must not be used as a fallback for source-backed large datasets.
     """
+    source = _active_source(context, base_dataset_id)
+    backend = getattr(source, "backend_name", None)
+
+    if backend != "pandas":
+        raise RuntimeError(
+            "Refusing to create a subset by materialising a non-pandas "
+            f"dataset through pandas fallback. Dataset `{base_dataset_id}` "
+            f"has backend `{backend}`. Convert/register it as a DuckDB/Parquet "
+            "source first, or add a backend-specific subset implementation."
+        )
+
     base_df = _require_pandas_dataframe(context, base_dataset_id)
     mask = _evaluate_boolean_expression(expression, base_df)
     filtered = base_df.loc[mask].copy()
@@ -1405,10 +2189,10 @@ def _create_subset_pandas_fallback(
         derived_from=base_dataset_id,
         filter=expression,
         created_by=manifest.id,
+        derivation_type="table_subset",
     )
 
     return int(len(filtered))
-
 
 def _preview_column_expression(
     context,
@@ -1419,25 +2203,24 @@ def _preview_column_expression(
 ) -> pd.DataFrame:
     source = _active_source(context, dataset_id)
 
-    if _is_duckdb_parquet_source(source):
+    if _is_duckdb_relation_source(source):
         columns = _dataset_columns(context, dataset_id)
         expr_sql = _expression_to_sql(expression, columns)
-
         relation_sql = source._relation_sql()
-        path_arg = source._path_argument()
 
         return _duckdb_query_df(
             source,
             (
-                f"SELECT {expr_sql} AS { _quote_identifier('__preview_result__') } "
-                f"FROM {relation_sql} "
+                f"SELECT {expr_sql} AS {_quote_identifier('__preview_result__')} "
+                f"FROM ({relation_sql}) "
                 "LIMIT ?"
             ),
-            [path_arg, int(limit)],
+            [*_duckdb_relation_params(source), int(limit)],
         )
 
     df = _active_df(context, dataset_id, limit=limit)
     result = _evaluate_expression(expression, df)
+
     return pd.DataFrame({"__preview_result__": result.head(limit).values})
 
 
@@ -1450,28 +2233,89 @@ def _preview_subset_expression(
 ) -> tuple[pd.DataFrame, int, Optional[int]]:
     source = _active_source(context, dataset_id)
 
-    if _is_duckdb_parquet_source(source):
+    if _can_create_subset_with_duckdb(source):
+        duckdb_source = _duckdb_base_source_for_subset(source)
+        if duckdb_source is None:
+            raise RuntimeError("Could not resolve DuckDB source for preview.")
+
         columns = _dataset_columns(context, dataset_id)
         where_sql = _expression_to_sql(expression, columns)
 
-        relation_sql = source._relation_sql()
-        path_arg = source._path_argument()
+        relation_sql = duckdb_source._relation_sql()
+        path_arg = duckdb_source._path_argument()
+        selection_info = _selection_subset_info(source)
 
-        count_result = _duckdb_fetchone(
-            source,
-            f"SELECT COUNT(*) FROM {relation_sql} WHERE ({where_sql})",
-            [path_arg],
-        )
-        matched_count = int(count_result[0]) if count_result is not None else 0
+        con = duckdb_source._connect()
+        try:
+            _configure_duckdb_for_large_copy(con)
 
-        preview_df = _duckdb_query_df(
-            source,
-            f"SELECT * FROM {relation_sql} WHERE ({where_sql}) LIMIT ?",
-            [path_arg, int(limit)],
-        )
+            if selection_info is not None:
+                id_column = selection_info["id_column"]
+                row_ids = selection_info["row_ids"]
+
+                if id_column == "Use Index":
+                    raise RuntimeError(
+                        "Cannot preview a large Parquet subset from a "
+                        "selection that uses `Use Index`. Map a stable "
+                        "`record_id` column first."
+                    )
+
+                _insert_selection_ids_temp_table(con, row_ids)
+
+                base_from_sql = (
+                    f"{relation_sql} AS base "
+                    "INNER JOIN __astronomical_selection_ids AS selected "
+                    f"ON CAST(base.{_quote_identifier(id_column)} AS VARCHAR) "
+                    "= selected.__al_selection_id"
+                )
+
+                count_sql = (
+                    f"SELECT COUNT(*) "
+                    f"FROM {base_from_sql} "
+                    f"WHERE ({where_sql})"
+                )
+
+                preview_sql = (
+                    f"SELECT base.* "
+                    f"FROM {base_from_sql} "
+                    f"WHERE ({where_sql}) "
+                    "LIMIT ?"
+                )
+            else:
+                count_sql = (
+                    f"SELECT COUNT(*) "
+                    f"FROM {relation_sql} "
+                    f"WHERE ({where_sql})"
+                )
+
+                preview_sql = (
+                    f"SELECT * "
+                    f"FROM {relation_sql} "
+                    f"WHERE ({where_sql}) "
+                    "LIMIT ?"
+                )
+
+            count_result = con.execute(count_sql, [path_arg]).fetchone()
+            matched_count = int(count_result[0]) if count_result is not None else 0
+
+            preview_df = con.execute(
+                preview_sql,
+                [path_arg, int(limit)],
+            ).df()
+
+        finally:
+            con.close()
 
         total_count = _dataset_row_count(context, dataset_id)
         return preview_df, matched_count, total_count
+
+    source_backend = getattr(source, "backend_name", None)
+
+    if source_backend != "pandas":
+        raise RuntimeError(
+            "Refusing to preview subset by materialising a non-pandas dataset. "
+            f"Dataset `{dataset_id}` has backend `{source_backend}`."
+        )
 
     df = _require_pandas_dataframe(context, dataset_id)
     mask = _evaluate_boolean_expression(expression, df)
@@ -1483,13 +2327,23 @@ def _preview_subset_expression(
 def _require_pandas_dataframe(context, dataset_id: Optional[str] = None) -> pd.DataFrame:
     source = _active_source(context, dataset_id)
 
-    if source is not None and getattr(source, "backend_name", None) == "pandas":
-        df = getattr(source, "df", None)
-        if isinstance(df, pd.DataFrame):
-            return df
+    if source is not None:
+        backend = getattr(source, "backend_name", None)
+
+        if backend == "pandas":
+            df = getattr(source, "df", None)
+            if isinstance(df, pd.DataFrame):
+                return df
+
+        raise RuntimeError(
+            "This operation requires an already in-memory pandas dataset. "
+            f"Dataset `{dataset_id or _active_dataset_id(context)}` has backend "
+            f"`{backend}`. Refusing to materialise it through pandas fallback."
+        )
 
     config = getattr(context, "config", None)
     df = getattr(config, "main_df", None) if config is not None else None
+
     if isinstance(df, pd.DataFrame):
         return df
 
