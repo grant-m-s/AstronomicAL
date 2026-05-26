@@ -669,3 +669,126 @@ def test_workspace_persistence_snapshot_round_trips_parquet_dataset_metadata(
     focus = restored_context.selection.get_focus()
     assert focus.dataset_id == "parquet_main"
     assert focus.row_id == "row-00200"
+
+def test_table_tools_create_subset_from_selection_subset_over_parquet_does_not_materialise(
+    make_app_context,
+    tmp_path,
+    parquet_dependencies,
+) -> None:
+    from astronomicAL.plugins.selection_tools.plugin import (
+        SelectionSubsetDatasetSource,
+    )
+    from astronomicAL.plugins.table_tools.plugin import create_subset_action
+    from astronomicAL.platform.plugins.specs import ActionRequest
+
+    context = make_app_context("table-tools-selection-subset-parquet")
+
+    df = _large_test_dataframe(rows=10_000)
+    path = _write_parquet(tmp_path, df)
+
+    _register_parquet_active_dataset(
+        context,
+        path,
+        columns=list(df.columns),
+        row_count=len(df),
+    )
+
+    base_source = context.datasets.get_source("parquet_main")
+
+    selected_ids = [f"row-{index:05d}" for index in range(0, 10_000, 2)]
+
+    subset_source = SelectionSubsetDatasetSource(
+        base_source=base_source,
+        row_ids=selected_ids,
+        id_column="id",
+        columns=list(df.columns),
+    )
+
+    context.datasets.register_source(
+        "selected_parquet",
+        subset_source,
+        name="Selected Parquet",
+        derived_from="parquet_main",
+        column_mappings={
+            "record_id": "id",
+            "target_label": "label",
+            "x": "value",
+            "y": "other",
+        },
+    )
+    context.datasets.set_active("selected_parquet")
+
+    result = create_subset_action(
+        context,
+        ActionRequest(
+            dataset_id="selected_parquet",
+            params={
+                "subset_name": "Selected high values",
+                "expression": "value >= 9000",
+                "set_active": True,
+            },
+        ),
+    )
+
+    new_dataset_id = result.value["dataset_id"]
+
+    assert context.datasets.get_source(new_dataset_id).backend_name == "duckdb_parquet"
+    assert context.datasets.row_count(new_dataset_id) == 500
+
+    preview = context.datasets.head(
+        new_dataset_id,
+        n=5,
+        columns=["id", "value"],
+    )
+
+    assert list(preview.columns) == ["id", "value"]
+    assert preview["value"].min() >= 9000
+
+def test_table_tools_add_column_to_parquet_dataset_registers_lazy_derived_source(
+    make_app_context,
+    tmp_path,
+    parquet_dependencies,
+) -> None:
+    from astronomicAL.plugins.table_tools.plugin import add_column_action
+    from astronomicAL.platform.plugins.specs import ActionRequest
+
+    context = make_app_context("table-tools-add-column-parquet")
+
+    df = _large_test_dataframe(rows=1_000)
+    path = _write_parquet(tmp_path, df)
+
+    _register_parquet_active_dataset(
+        context,
+        path,
+        columns=list(df.columns),
+        row_count=len(df),
+    )
+
+    result = add_column_action(
+        context,
+        ActionRequest(
+            dataset_id="parquet_main",
+            params={
+                "new_column": "sum_value",
+                "expression": "value + other",
+            },
+        ),
+    )
+
+    assert result.value["column"] == "sum_value"
+    assert result.value["rows"] == 1_000
+    assert result.value["materialized"] is False
+
+    source = context.datasets.get_source("parquet_main")
+    assert source.backend_name == "duckdb_parquet_derived_column"
+
+    assert "sum_value" in context.datasets.list_columns("parquet_main")
+
+    preview = context.datasets.head(
+        "parquet_main",
+        n=5,
+        columns=["id", "value", "other", "sum_value"],
+    )
+
+    assert list(preview.columns) == ["id", "value", "other", "sum_value"]
+    assert list(preview["sum_value"]) == [1000.0] * 5

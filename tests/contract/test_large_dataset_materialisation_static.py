@@ -15,7 +15,6 @@ PLUGIN_ROOT = PROJECT_ROOT / "astronomicAL" / "plugins"
 # Keep this list small and remove entries as plugins are converted to
 # DatasetSource / Parquet-friendly access patterns.
 KNOWN_TRANSITIONAL_FULL_MATERIALISATION = {
-    Path("astronomicAL/plugins/table_tools/plugin.py"),
 }
 
 
