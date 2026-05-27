@@ -372,6 +372,100 @@ class BaseVisualisationPanel(param.Parameterized):
         # but glyph coordinates are still raw data values.
         return value
 
+    def _active_selection_overlay_identity(self, data=None):
+        """Return a stable identity for the current active selection overlay.
+
+        This is intentionally independent of focus. A focus-only change should not
+        invalidate the selection overlay.
+        """
+        selection = getattr(self.context, "selection", None)
+        if selection is None:
+            return None
+
+        try:
+            active_set = selection.get_active_set()
+        except Exception:
+            active_set = None
+
+        if active_set is None:
+            return None
+
+        dataset_id = getattr(active_set, "dataset_id", None)
+        current_dataset_id = self._dataset_id()
+
+        if (
+            dataset_id is not None
+            and current_dataset_id is not None
+            and str(dataset_id) != str(current_dataset_id)
+        ):
+            return None
+
+        row_ids = list(getattr(active_set, "row_ids", []) or [])
+        if not row_ids:
+            return None
+
+        selection_id = (
+            getattr(active_set, "selection_id", None)
+            or getattr(active_set, "id", None)
+            or getattr(active_set, "artifact_id", None)
+        )
+
+        if selection_id is None:
+            # Fallback identity. Keep it deterministic but avoid storing huge tuples
+            # when selections are large.
+            selection_id = (
+                len(row_ids),
+                str(row_ids[0]) if row_ids else "",
+                str(row_ids[-1]) if row_ids else "",
+                hash(tuple(str(row_id) for row_id in row_ids[:256])),
+            )
+
+        data_key = getattr(self, "_last_prepared_cache_key", None)
+
+        return (
+            str(current_dataset_id),
+            str(selection_id),
+            len(row_ids),
+            str(getattr(self.state, "x", "") or ""),
+            str(getattr(self.state, "y", "") or ""),
+            bool(getattr(self.state, "log_x", False)),
+            bool(getattr(self.state, "log_y", False)),
+            data_key,
+        )
+
+
+    def _selection_overlay_element_cache_get(self, key):
+        cache = getattr(self, "_selection_overlay_element_cache", None)
+        if not cache:
+            return None
+
+        return cache.get(key)
+
+
+    def _selection_overlay_element_cache_set(self, key, element) -> None:
+        if key is None:
+            return
+
+        cache = getattr(self, "_selection_overlay_element_cache", None)
+        if cache is None:
+            cache = {}
+            self._selection_overlay_element_cache = cache
+
+        cache[key] = element
+
+        # Keep this tiny. There is usually only one active selection, but this avoids
+        # unbounded growth if users make many selections.
+        max_items = 8
+        if len(cache) > max_items:
+            for old_key in list(cache.keys())[: len(cache) - max_items]:
+                cache.pop(old_key, None)
+
+
+    def _selection_overlay_element_cache_clear(self) -> None:
+        cache = getattr(self, "_selection_overlay_element_cache", None)
+        if cache is not None:
+            cache.clear()
+
     def _focus_point_from_cached_focus_row(self, focus):
         dataset_id = self._dataset_id()
 
@@ -402,6 +496,11 @@ class BaseVisualisationPanel(param.Parameterized):
         cached_point = self._focus_point_cache_get(point_key)
         if cached_point is not None:
             return cached_point
+        
+        cache = getattr(self, "_focus_coordinate_cache", {})
+        cached = cache.get((str(row_id), str(x_col), str(y_col)))
+        if cached is not None:
+            return pd.DataFrame([cached])
 
         row_key = (
             "focus_row",
@@ -1460,17 +1559,17 @@ class BaseVisualisationPanel(param.Parameterized):
         return out.reset_index(drop=True)
 
 
+
+
     def _selection_rows_from_dataset_source(
         self,
         row_ids: list[str],
     ) -> pd.DataFrame:
-        """
-        Resolve active selected row IDs into this panel's current X/Y coordinates.
+        """Resolve selected row IDs into this panel's current X/Y coordinates.
 
-        This is what lets scatter A publish a selection and scatter B draw yellow
-        rings using scatter B's own axes.
+        This method must stay cheap for small selections. It should never scan
+        a 10M+ row prepared frame just to draw a few yellow selection rings.
         """
-
         dataset_id = self._dataset_id()
         datasets = getattr(self.context, "datasets", None)
 
@@ -1478,7 +1577,6 @@ class BaseVisualisationPanel(param.Parameterized):
             return pd.DataFrame(columns=[INTERNAL_ROW_ID, INTERNAL_X, INTERNAL_Y])
 
         record_id_col, x_col, y_col = self._selection_axes_columns()
-
         if not x_col or not y_col or not record_id_col:
             return pd.DataFrame(columns=[INTERNAL_ROW_ID, INTERNAL_X, INTERNAL_Y])
 
@@ -1499,42 +1597,169 @@ class BaseVisualisationPanel(param.Parameterized):
         if cached is not None:
             return cached.copy(deep=False)
 
-        try:
-            source = datasets.get_source(dataset_id)
-        except Exception:
-            source = None
-
-        if source is None:
-            return pd.DataFrame(columns=[INTERNAL_ROW_ID, INTERNAL_X, INTERNAL_Y])
-
         columns = [x_col, y_col]
         if record_id_col != "Use Index":
             columns.insert(0, record_id_col)
-
         columns = list(dict.fromkeys(columns))
 
-        if record_id_col == "Use Index":
-            raw = self._selection_rows_from_source_fallback(
-                source=source,
-                record_id_col=record_id_col,
-                row_ids=limited_ids,
-                columns=columns,
-            )
-        else:
-            raw = self._selection_rows_from_source_query(
-                source=source,
-                record_id_col=record_id_col,
-                row_ids=limited_ids,
-                columns=columns,
-            )
+        raw = None
 
-            if raw is None:
-                raw = self._selection_rows_from_source_fallback(
-                    source=source,
-                    record_id_col=record_id_col,
-                    row_ids=limited_ids,
+        # Preferred platform-level batch API.
+        batch_lookup = getattr(datasets, "get_rows_by_ids", None)
+        if callable(batch_lookup) and record_id_col != "Use Index":
+            try:
+                raw = batch_lookup(
+                    dataset_id,
+                    limited_ids,
+                    id_column=record_id_col,
                     columns=columns,
                 )
+                if raw is not None:
+                    print(
+                        "[AstronomicAL visualisation] platform batch selection lookup returned "
+                        f"panel={type(self).__name__} "
+                        f"dataset_id={dataset_id!r} "
+                        f"ids={len(limited_ids):,} "
+                        f"rows={len(raw):,} "
+                        f"columns={list(raw.columns)}",
+                        flush=True,
+                    )
+            except TypeError:
+                # Tolerate alternate signature while the API is settling.
+                try:
+                    raw = batch_lookup(
+                        limited_ids,
+                        dataset_id=dataset_id,
+                        id_column=record_id_col,
+                        columns=columns,
+                    )
+                    if raw is not None:
+                        print(
+                            "[AstronomicAL visualisation] platform batch selection lookup returned After TypeError exception "
+                            f"panel={type(self).__name__} "
+                            f"dataset_id={dataset_id!r} "
+                            f"ids={len(limited_ids):,} "
+                            f"rows={len(raw):,} "
+                            f"columns={list(raw.columns)}",
+                            flush=True,
+                        )
+                except Exception:
+                    raw = None
+            except Exception as exc:
+                print(
+                    "[AstronomicAL visualisation] batch selection lookup failed "
+                    f"panel={type(self).__name__} "
+                    f"dataset_id={dataset_id!r} "
+                    f"ids={len(limited_ids):,} "
+                    f"{type(exc).__name__}: {exc}",
+                    flush=True,
+                )
+                raw = None
+
+        # Preferred source-level batch API.
+        if raw is None:
+            try:
+                source = datasets.get_source(dataset_id)
+            except Exception:
+                source = None
+
+            if source is not None and record_id_col != "Use Index":
+                source_batch_lookup = getattr(source, "get_rows_by_ids", None)
+                if callable(source_batch_lookup):
+                    try:
+                        raw = source_batch_lookup(
+                            limited_ids,
+                            id_column=record_id_col,
+                            columns=columns,
+                        )
+                        if raw is not None:
+                            print(
+                                "[AstronomicAL visualisation] source batch selection lookup returned "
+                                f"panel={type(self).__name__} "
+                                f"dataset_id={dataset_id!r} "
+                                f"source_type={type(source).__name__} "
+                                f"backend={getattr(source, 'backend_name', None)!r} "
+                                f"ids={len(limited_ids):,} "
+                                f"rows={len(raw):,} "
+                                f"columns={list(raw.columns)}",
+                                flush=True,
+                            )
+                    except Exception as exc:
+                        print(
+                            "[AstronomicAL visualisation] source batch selection lookup failed "
+                            f"panel={type(self).__name__} "
+                            f"dataset_id={dataset_id!r} "
+                            f"ids={len(limited_ids):,} "
+                            f"{type(exc).__name__}: {exc}",
+                            flush=True,
+                        )
+                        raw = None
+
+        # Existing compatibility fallbacks.
+        #
+        # Important:
+        # For large source-backed datasets, never fall back to row-by-row or
+        # full-frame lookup. That path caused 47s–230s UI freezes for selection
+        # overlays. Large non-pandas datasets must use batch lookup only.
+        if raw is None:
+            try:
+                source = datasets.get_source(dataset_id)
+            except Exception:
+                source = None
+
+            if source is None:
+                raw = pd.DataFrame(columns=columns)
+            else:
+                backend = getattr(source, "backend_name", "")
+                try:
+                    row_count = source.row_count()
+                except Exception:
+                    row_count = None
+
+                is_large_source_backed = (
+                    backend != "pandas"
+                    and row_count is not None
+                    and int(row_count) > 250_000
+                )
+
+                if is_large_source_backed:
+                    print(
+                        "[AstronomicAL visualisation] selection overlay skipped for large "
+                        "non-pandas dataset because batch lookup failed "
+                        f"panel={type(self).__name__} "
+                        f"dataset_id={dataset_id!r} "
+                        f"backend={backend!r} "
+                        f"rows={int(row_count):,} "
+                        f"row_ids={len(limited_ids):,}",
+                        flush=True,
+                    )
+                    raw = pd.DataFrame(columns=columns)
+                else:
+                    if record_id_col == "Use Index":
+                        raw = self._selection_rows_from_source_fallback(
+                            source=source,
+                            record_id_col=record_id_col,
+                            row_ids=limited_ids,
+                            columns=columns,
+                        )
+                    else:
+                        raw = self._selection_rows_from_source_query(
+                            source=source,
+                            record_id_col=record_id_col,
+                            row_ids=limited_ids,
+                            columns=columns,
+                        )
+
+                    if raw is None:
+                        raw = self._selection_rows_from_source_fallback(
+                            source=source,
+                            record_id_col=record_id_col,
+                            row_ids=limited_ids,
+                            columns=columns,
+                        )
+
+                    if raw is None:
+                        raw = pd.DataFrame(columns=columns)
 
         normalised = self._normalise_selection_overlay_rows(
             raw,
@@ -1542,6 +1767,28 @@ class BaseVisualisationPanel(param.Parameterized):
             x_col=x_col,
             y_col=y_col,
         )
+
+        if normalised is not None and not normalised.empty:
+            cache = getattr(self, "_focus_coordinate_cache", None)
+            if cache is None:
+                cache = {}
+                self._focus_coordinate_cache = cache
+
+            for _, row in normalised.iterrows():
+                try:
+                    cache[
+                        (
+                            str(row[INTERNAL_ROW_ID]),
+                            str(x_col),
+                            str(y_col),
+                        )
+                    ] = {
+                        INTERNAL_ROW_ID: str(row[INTERNAL_ROW_ID]),
+                        INTERNAL_X: float(row[INTERNAL_X]),
+                        INTERNAL_Y: float(row[INTERNAL_Y]),
+                    }
+                except Exception:
+                    continue
 
         self._record_selection_overlay_debug(
             requested_ids=limited_ids,
@@ -1553,8 +1800,33 @@ class BaseVisualisationPanel(param.Parameterized):
         )
 
         self._selection_source_cache_set(cache_key, normalised)
-
         return normalised.copy(deep=False)
+
+    def _seed_focus_coordinate_cache(
+        self,
+        *,
+        row_id: str,
+        x_col: str,
+        y_col: str,
+        x_value: float,
+        y_value: float,
+    ) -> None:
+        """Seed focus coordinate lookup from event metadata.
+
+        Scatter-originated focus events already know the clicked X/Y value.
+        Avoid querying the dataset again for the same panel axes.
+        """
+        cache = getattr(self, "_focus_coordinate_cache", None)
+        if cache is None:
+            cache = {}
+            self._focus_coordinate_cache = cache
+
+        cache[(str(row_id), str(x_col), str(y_col))] = {
+            INTERNAL_ROW_ID: str(row_id),
+            INTERNAL_X: float(x_value),
+            INTERNAL_Y: float(y_value),
+        }
+
 
     def _rows_for_row_ids(
         self,
@@ -1580,10 +1852,10 @@ class BaseVisualisationPanel(param.Parameterized):
 
         if not visible_only and len(data.frame) > scan_limit:
             print(
-                "[AstronomicAL visualisation] blocked full-frame row-id lookup "
+                "[AstronomicAL visualisation] skipping prepared-frame row-id scan; "
+                "using dataset-source lookup "
                 f"panel={type(self).__name__} "
-                f"rows={len(data.frame):,} "
-                f"row_ids={len(row_ids)}",
+                f"row_ids={len(row_ids):,}",
                 flush=True,
             )
             return data.frame.iloc[0:0]
@@ -2064,7 +2336,33 @@ class BaseVisualisationPanel(param.Parameterized):
 
         return [str(row_id) for row_id in list(getattr(active, "row_ids", []) or [])]
 
-    def _selection_points(self, data: PreparedFrame):
+    def _selection_points(self, data):
+        """Cached selection overlay.
+
+        Selection overlays depend on the active selection set and plot axes, not on
+        the current focused row. Focus-only changes should reuse this element.
+        """
+        key = self._active_selection_overlay_identity(data)
+
+        if key is not None:
+            cached = self._selection_overlay_element_cache_get(key)
+            if cached is not None:
+                print(
+                    "[AstronomicAL visualisation] selection overlay element cache hit "
+                    f"panel={type(self).__name__} "
+                    f"key={key}",
+                    flush=True,
+                )
+                return cached
+
+        element = self._selection_points_uncached(data)
+
+        if key is not None:
+            self._selection_overlay_element_cache_set(key, element)
+
+        return element
+
+    def _selection_points_uncached(self, data):
 
         self._selection_overlay_status_note = ""
         self._selection_overlay_debug_rows = []
@@ -2241,6 +2539,79 @@ class BaseVisualisationPanel(param.Parameterized):
         except Exception:
             pass
 
+    def _payload_list_value(self, payload, *keys) -> list[str]:
+        for key in keys:
+            value = self._payload_value(payload, key, None)
+            if value is None:
+                continue
+            if isinstance(value, str):
+                return [value]
+            if isinstance(value, (list, tuple, set)):
+                return [str(item) for item in value if item is not None]
+        return []
+
+    def _dataset_update_affects_current_plot(self, payload) -> bool:
+        """Return False for schema-only updates irrelevant to this panel.
+
+        Example: adding a derived column should not redraw a scatter panel
+        currently showing two unrelated existing columns.
+        """
+        changed_columns = set(
+            self._payload_list_value(
+                payload,
+                "changed_columns",
+                "columns",
+                "column",
+                "added_columns",
+                "updated_columns",
+            )
+        )
+
+        # If the event does not give enough metadata, stay conservative.
+        if not changed_columns:
+            return True
+
+        used_columns = {
+            str(getattr(self.state, "x", "") or ""),
+            str(getattr(self.state, "y", "") or ""),
+            str(getattr(self.state, "record_id_col", "") or ""),
+        }
+
+        if self._uses_label_rendering():
+            used_columns.add(str(getattr(self.state, "label_col", "") or ""))
+
+        used_columns.discard("")
+        used_columns.discard("None")
+        used_columns.discard("No Labels")
+        used_columns.discard("Use Index")
+
+        if changed_columns & used_columns:
+            return True
+
+        # Row-mask/filter/count changes affect every plot even if columns did not.
+        for key in (
+            "row_filter_changed",
+            "filter_changed",
+            "row_count_changed",
+            "rows_changed",
+            "active_dataset_changed",
+            "data_changed",
+        ):
+            if bool(self._payload_value(payload, key, False)):
+                return True
+
+        change = str(self._payload_value(payload, "change", "") or "").lower()
+        if change in {
+            "dataset.replaced",
+            "dataset.filtered",
+            "rows.filtered",
+            "rows.changed",
+            "data.changed",
+        }:
+            return True
+
+        return False
+
 
     def _on_dataset_event(self, topic, payload) -> None:
         t0 = time.perf_counter()
@@ -2257,15 +2628,11 @@ class BaseVisualisationPanel(param.Parameterized):
                 return
 
         before = self._visual_state_signature()
-
         was_using_labels = self._uses_label_rendering()
 
         self._suppress_state_refresh = True
         try:
             if topic == "labels.settings.updated":
-                # Important:
-                # Always apply label settings first. This event may be what changes
-                # the panel from color_by="None" to color_by="Labels".
                 self.state.apply_label_settings(payload)
             else:
                 self.state.refresh_from_context()
@@ -2284,9 +2651,6 @@ class BaseVisualisationPanel(param.Parameterized):
             return
 
         if topic == "labels.settings.updated":
-            # Skip only if the event genuinely has no visual effect.
-            # Do not skip before apply_label_settings(), because that prevents
-            # newly applied labels from enabling label colouring.
             if before == after and not was_using_labels and not now_using_labels:
                 print(
                     "[AstronomicAL visualisation] label settings did not affect this panel; "
@@ -2295,9 +2659,16 @@ class BaseVisualisationPanel(param.Parameterized):
                 )
                 return
 
-        self._clear_prepared_cache()
+        if topic == "dataset.updated":
+            if not self._dataset_update_affects_current_plot(payload):
+                print(
+                    "[AstronomicAL visualisation] dataset.updated did not affect "
+                    "current plotted columns; refreshed controls only",
+                    flush=True,
+                )
+                return
 
-        # Only prewarm row ids for dataset/mapping changes, not label changes.
+        self._clear_prepared_cache()
         self._maybe_prewarm_row_ids(topic=topic, payload=payload)
 
         print(
@@ -2383,12 +2754,67 @@ class BaseVisualisationPanel(param.Parameterized):
 
         return opts
 
-    def _on_selection_event(self, topic, payload) -> None:
-        event_panel_id = self._payload_value(payload, "panel_id")
-
-        if event_panel_id is not None and str(event_panel_id) == str(self.panel_id):
+    def _seed_focus_cache_from_event_payload(self, payload) -> None:
+        if not isinstance(payload, dict):
             return
 
+        row_id = payload.get("row_id")
+        meta = (
+            payload.get("meta")
+            or payload.get("metadata")
+            or payload.get("source_metadata")
+            or {}
+        )
+
+        if row_id is None or not isinstance(meta, dict):
+            return
+
+        x_var = meta.get("x_variable")
+        y_var = meta.get("y_variable")
+        focus_x = meta.get("focus_x")
+        focus_y = meta.get("focus_y")
+
+        if (
+            x_var != getattr(self.state, "x", None)
+            or y_var != getattr(self.state, "y", None)
+            or focus_x is None
+            or focus_y is None
+        ):
+            return
+
+        value = {
+            INTERNAL_ROW_ID: str(row_id),
+            INTERNAL_X: float(focus_x),
+            INTERNAL_Y: float(focus_y),
+        }
+
+        setter = getattr(self, "_focus_row_cache_set", None)
+
+        if callable(setter):
+            try:
+                setter(
+                    str(row_id),
+                    str(x_var),
+                    str(y_var),
+                    value,
+                )
+                return
+            except Exception as exc:
+                print(
+                    "[AstronomicAL visualisation] focus cache setter failed; "
+                    "falling back to local cache "
+                    f"{type(exc).__name__}: {exc}",
+                    flush=True,
+                )
+
+        cache = getattr(self, "_focus_coordinate_cache", None)
+        if cache is None:
+            cache = {}
+            self._focus_coordinate_cache = cache
+
+        cache[(str(row_id), str(x_var), str(y_var))] = value
+
+    def _on_selection_event(self, topic, payload) -> None:
         event_dataset_id = self._payload_value(payload, "dataset_id")
         active_dataset_id = self._dataset_id()
 
@@ -2399,9 +2825,29 @@ class BaseVisualisationPanel(param.Parameterized):
         ):
             return
 
-        # Selection focus updates should never block the tap interaction.
-        # Schedule slightly later so the click/record-browser feedback can settle.
+        topic_str = str(topic)
+
+        if topic_str.endswith("selection.focus.changed"):
+            self._seed_focus_cache_from_event_payload(payload)
+
+        event_panel_id = self._payload_value(payload, "panel_id")
+
+        if event_panel_id is not None and str(event_panel_id) == str(self.panel_id):
+            return
+
         def _run():
+            if str(topic).endswith("selection.set.changed"):
+                clear_element_cache = getattr(self, "_selection_overlay_element_cache_clear", None)
+                if callable(clear_element_cache):
+                    clear_element_cache()
+
+                clear_source_cache = getattr(self, "_selection_source_cache_clear", None)
+                if callable(clear_source_cache):
+                    clear_source_cache()
+
+                self._last_selection_overlay_identity = None
+
+            # Focus updates should not clear the selection overlay cache.
             self._schedule_refresh(reason=f"selection.{topic}")
 
         try:

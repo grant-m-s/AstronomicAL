@@ -104,6 +104,34 @@ class DatasetSource(ABC):
             f"{type(self).__name__} does not implement get_row_by_id()"
         )
 
+    def get_rows_by_ids(
+        self,
+        row_ids: Sequence[Any],
+        *,
+        id_column: str,
+        columns: Optional[Sequence[str]] = None,
+    ) -> pd.DataFrame:
+
+        frames: list[pd.DataFrame] = []
+
+        for row_id in row_ids or []:
+            try:
+                row = self.get_row_by_id(
+                    row_id,
+                    id_column=id_column,
+                    columns=columns,
+                )
+            except Exception:
+                continue
+
+            if row is not None and not row.empty:
+                frames.append(row)
+
+        if not frames:
+            return pd.DataFrame(columns=self.columns() if columns is None else list(columns))
+
+        return pd.concat(frames, ignore_index=True)
+
     def find_position_by_id(
         self,
         row_id: Any,
@@ -221,6 +249,45 @@ class PandasDatasetSource(DatasetSource):
             matches = matches.loc[:, selected_columns]
 
         return matches.head(1).copy()
+
+    def get_rows_by_ids(
+        self,
+        row_ids: Sequence[Any],
+        *,
+        id_column: str,
+        columns: Optional[Sequence[str]] = None,
+    ) -> pd.DataFrame:
+        ids = [str(row_id) for row_id in (row_ids or [])]
+        if not ids:
+            return pd.DataFrame(columns=self.columns() if columns is None else list(columns))
+
+        requested_order = {row_id: i for i, row_id in enumerate(ids)}
+
+        if id_column == "Use Index":
+            values = self._df.index.astype(str)
+            matches = self._df.loc[values.isin(set(ids))].copy()
+            if matches.empty:
+                return pd.DataFrame(columns=self.columns() if columns is None else list(columns))
+            matches["__astronomical_lookup_id"] = matches.index.astype(str)
+            order_source = matches["__astronomical_lookup_id"]
+        else:
+            if id_column not in self._df.columns:
+                return pd.DataFrame(columns=self.columns() if columns is None else list(columns))
+            values = self._df[id_column].astype(str)
+            matches = self._df.loc[values.isin(set(ids))].copy()
+            if matches.empty:
+                return pd.DataFrame(columns=self.columns() if columns is None else list(columns))
+            order_source = matches[id_column].astype(str)
+
+        matches["__astronomical_lookup_order"] = order_source.map(requested_order)
+        matches = matches.sort_values("__astronomical_lookup_order", kind="stable")
+
+        selected_columns = _normalise_columns(columns)
+        if selected_columns is not None:
+            selected_columns = [col for col in selected_columns if col in matches.columns]
+            matches = matches.loc[:, selected_columns]
+
+        return matches.reset_index(drop=True).copy()
 
     def find_position_by_id(
         self,
@@ -421,6 +488,67 @@ class DuckDBParquetDatasetSource(DatasetSource):
             where_sql=f"CAST({_quote_identifier(id_column)} AS VARCHAR) = ?",
             params=[str(row_id)],
         )
+
+    def get_rows_by_ids(
+        self,
+        row_ids: Sequence[Any],
+        *,
+        id_column: str,
+        columns: Optional[Sequence[str]] = None,
+    ) -> pd.DataFrame:
+        ids = [str(row_id) for row_id in (row_ids or [])]
+        if not ids:
+            return pd.DataFrame(columns=self.columns() if columns is None else list(columns))
+
+        if id_column == "Use Index" or id_column not in self.columns():
+            return pd.DataFrame(columns=self.columns() if columns is None else list(columns))
+
+        seen: set[str] = set()
+        ordered_ids: list[str] = []
+        for row_id in ids:
+            if row_id in seen:
+                continue
+            seen.add(row_id)
+            ordered_ids.append(row_id)
+
+        available_columns = set(self.columns())
+        selected_columns = _normalise_columns(columns)
+
+        if selected_columns is None:
+            select_sql = "src.*"
+        else:
+            selected_columns = list(dict.fromkeys([id_column, *selected_columns]))
+            selected_columns = [col for col in selected_columns if col in available_columns]
+            if not selected_columns:
+                selected_columns = [id_column]
+
+            select_sql = ", ".join(
+                f"src.{_quote_identifier(col)}" for col in selected_columns
+            )
+
+        values_sql = ", ".join(["(?, ?)"] * len(ordered_ids))
+        values_params: list[Any] = []
+        for order, row_id in enumerate(ordered_ids):
+            values_params.extend([order, row_id])
+
+        sql = (
+            "WITH requested(__astronomical_lookup_order, __astronomical_lookup_id) AS "
+            f"(VALUES {values_sql}) "
+            f"SELECT {select_sql} "
+            f"FROM {self._relation_sql()} AS src "
+            "JOIN requested "
+            f"ON CAST(src.{_quote_identifier(id_column)} AS VARCHAR) = requested.__astronomical_lookup_id "
+            "ORDER BY requested.__astronomical_lookup_order"
+        )
+
+        con = self._connect()
+        try:
+            return con.execute(
+                sql,
+                [*values_params, self._path_argument()],
+            ).df()
+        finally:
+            con.close()
 
     def find_position_by_id(
         self,

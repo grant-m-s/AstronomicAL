@@ -1391,14 +1391,62 @@ class ScatterPanel(BaseVisualisationPanel):
         except Exception:
             return None
 
-    def _render(self) -> None:
+    def _scatter_render_identity(self, data: PreparedFrame, *, use_raster: bool):
+        selection = getattr(self.context, "selection", None)
 
+        focus_id = None
+        selection_signature = None
+
+        if selection is not None:
+            try:
+                focus = selection.get_focus()
+            except Exception:
+                focus = None
+
+            if focus is not None and getattr(focus, "dataset_id", None) == self._dataset_id():
+                focus_id = str(getattr(focus, "row_id", "") or "")
+
+            try:
+                active_set = selection.get_active_set()
+            except Exception:
+                active_set = None
+
+            if active_set is not None and getattr(active_set, "dataset_id", None) == self._dataset_id():
+                set_id = (
+                    getattr(active_set, "selection_id", None)
+                    or getattr(active_set, "id", None)
+                    or getattr(active_set, "artifact_id", None)
+                    or ""
+                )
+                row_ids = list(getattr(active_set, "row_ids", []) or [])
+                selection_signature = (str(set_id), len(row_ids))
+
+        return (
+            getattr(self, "_last_prepared_cache_key", None),
+            bool(use_raster),
+            str(getattr(self.state, "x", "") or ""),
+            str(getattr(self.state, "y", "") or ""),
+            str(getattr(self.state, "color_by", "") or ""),
+            tuple(getattr(self.state, "label_filter", []) or []),
+            bool(getattr(self.state, "log_x", False)),
+            bool(getattr(self.state, "log_y", False)),
+            int(getattr(self.state, "interactive_sample_limit", 0)),
+            float(getattr(self.state, "point_size", 0.0)),
+            float(getattr(self.state, "point_alpha", 0.0)),
+            focus_id,
+            selection_signature,
+            self._last_x_range,
+            self._last_y_range,
+        )
+
+
+    def _render(self) -> None:
         t0 = time.perf_counter()
 
         self._clear_stream_watchers()
 
         data = self._plot_data(require_y=True)
-        
+
         prepared_key = getattr(self, "_last_prepared_cache_key", None)
         last_key = getattr(self, "_last_interactive_prepared_key", None)
 
@@ -1408,12 +1456,17 @@ class ScatterPanel(BaseVisualisationPanel):
             self._prepared_extent_cache_key = None
             self._prepared_extent_cache = None
             self._near_full_range_keys.clear()
-        
+
         t1 = time.perf_counter()
 
         if data.empty:
-            self.plot_pane.object = self._empty("No finite X/Y data")
+            empty = self._empty("No finite X/Y data")
+            if getattr(self, "_last_scatter_assigned_object", None) is not empty:
+                self.plot_pane.object = empty
+                self._last_scatter_assigned_object = empty
+
             self.status_pane.object = "0 plotted rows"
+
             print(
                 "[AstronomicAL scatter] empty render "
                 f"prepare={t1 - t0:.2f}s",
@@ -1422,8 +1475,54 @@ class ScatterPanel(BaseVisualisationPanel):
             return
 
         use_raster = self._should_rasterize(data)
-
         t2 = time.perf_counter()
+
+        render_identity = self._scatter_render_identity(
+            data,
+            use_raster=use_raster,
+        )
+
+        if (
+            getattr(self, "_last_scatter_render_identity", None) == render_identity
+            and getattr(self, "_last_scatter_assigned_object", None) is not None
+            and self.plot_pane.object is getattr(self, "_last_scatter_assigned_object", None)
+        ):
+            plotted_count = (
+                self._frame_len(data)
+                if use_raster
+                else min(self._frame_len(data), int(self.state.interactive_sample_limit))
+            )
+
+            render_label = "rasterized" if use_raster else "interactive"
+            sampled_note = ""
+            if not use_raster:
+                sampled_note = (
+                    f" · coverage-aware sample from {self._frame_len(data):,}"
+                    if self._frame_len(data) > int(self.state.interactive_sample_limit)
+                    else ""
+                )
+                if self._use_interactive_density_underlay(data):
+                    sampled_note += " · density underlay"
+
+            selection_note = getattr(self, "_selection_overlay_status_note", "") or ""
+            status = (
+                f"{self._frame_len(data):,} eligible rows · "
+                f"{plotted_count:,} shown · {render_label}{sampled_note}"
+            )
+            if selection_note:
+                status += f" · {selection_note}"
+
+            self.status_pane.object = status
+
+            print(
+                "[AstronomicAL scatter] skipped duplicate pane assignment "
+                f"mode={render_label} "
+                f"rows={self._frame_len(data):,} "
+                f"prepare={t1 - t0:.2f}s "
+                f"total={time.perf_counter() - t0:.2f}s",
+                flush=True,
+            )
+            return
 
         if use_raster:
             base = self._scatter_rasterized(data)
@@ -1433,13 +1532,15 @@ class ScatterPanel(BaseVisualisationPanel):
         else:
             base = self._scatter_interactive_dynamic(data)
             render_label = "interactive"
-            plotted_count = min(self._frame_len(data), int(self.state.interactive_sample_limit))
+            plotted_count = min(
+                self._frame_len(data),
+                int(self.state.interactive_sample_limit),
+            )
             sampled_note = (
                 f" · coverage-aware sample from {self._frame_len(data):,}"
                 if self._frame_len(data) > int(self.state.interactive_sample_limit)
                 else ""
             )
-
             if self._use_interactive_density_underlay(data):
                 sampled_note += " · density underlay"
 
@@ -1447,38 +1548,22 @@ class ScatterPanel(BaseVisualisationPanel):
 
         t_sel0 = time.perf_counter()
 
-        if use_raster:
-            # Rasterized base is a concrete datashader/raster layer, so static overlays
-            # can be composed here.
-            selection_overlay = self._selection_points(data)
-            t_sel1 = time.perf_counter()
+        selection_overlay = self._selection_points(data)
+        t_sel1 = time.perf_counter()
 
-            focus_overlay = self._focus_overlay(
-                data,
-                size=max(float(self.state.point_size) + 8, 12),
-            )
+        focus_overlay = self._focus_overlay(
+            data,
+            size=max(float(self.state.point_size) + 8, 12),
+        )
+        t_focus1 = time.perf_counter()
 
-            t_focus1 = time.perf_counter()
-
-            overlay = self._compose_element_layers(
-                [
-                    base,
-                    selection_overlay,
-                    focus_overlay,
-                ]
-            )
-        else:
-            # Interactive base is a DynamicMap. Its overlays are now built inside the
-            # DynamicMap callback to avoid Bokeh failing on a mixed DynamicMap/static
-            # top-level Overlay.
-            selection_overlay = self._selection_points(data)
-            t_sel1 = time.perf_counter()
-            focus_overlay = self._focus_overlay(
-                data,
-                size=max(float(self.state.point_size) + 8, 12),
-            )
-            overlay = self._compose_element_layers([base, selection_overlay, focus_overlay])
-            t_focus1 = t_sel1
+        overlay = self._compose_element_layers(
+            [
+                base,
+                selection_overlay,
+                focus_overlay,
+            ]
+        )
 
         overlay = overlay.opts(
             responsive=True,
@@ -1505,6 +1590,8 @@ class ScatterPanel(BaseVisualisationPanel):
         )
 
         self.plot_pane.object = overlay
+        self._last_scatter_assigned_object = overlay
+        self._last_scatter_render_identity = render_identity
 
         t5 = time.perf_counter()
 
@@ -1532,6 +1619,7 @@ class ScatterPanel(BaseVisualisationPanel):
             f"total={t5 - t0:.2f}s",
             flush=True,
         )
+
 
     def _range_cache_key(self, range_value):
         if not range_value:
@@ -1966,6 +2054,8 @@ class ScatterPanel(BaseVisualisationPanel):
             )
             return points_dmap
 
+
+
     def _scatter_interactive_dynamic(self, data: PreparedFrame):
         range_stream = streams.RangeXY(
             x_range=self._last_x_range,
@@ -1996,15 +2086,12 @@ class ScatterPanel(BaseVisualisationPanel):
             effective_x_range = x_range or self._last_x_range
             effective_y_range = y_range or self._last_y_range
 
-            forced_ids = tuple(
-                str(row_id)
-                for row_id in (
-                    tuple(self._current_focus_forced_ids())
-                )
-                if row_id is not None and str(row_id)
-            )
-
-            forced_ids = tuple(dict.fromkeys(forced_ids))
+            # Do not force the focused row into the sampled base point layer.
+            # The focus marker is already drawn separately by _focus_overlay().
+            #
+            # Keeping focus IDs out of this cache key prevents every focus change from
+            # invalidating the expensive interactive sample cache.
+            forced_ids: tuple[str, ...] = ()
 
             limit = int(self.state.interactive_sample_limit)
 
@@ -2416,6 +2503,9 @@ class ScatterPanel(BaseVisualisationPanel):
             )
 
         return points_dmap
+
+
+
 
     def _scatter_points_element(self, data: PreparedFrame):
         frame = self._bokeh_safe_frame(data.frame)
@@ -2859,8 +2949,14 @@ class ScatterPanel(BaseVisualisationPanel):
             panel_id=self.panel_id,
             metadata=metadata or {},
         )
+        # Do not schedule a full refresh on the origin panel for a focus event.
+        # The focus event payload already contains the clicked coordinates, and other
+        # panels will receive the normal selection.focus.changed event.
+        #
+        # Scheduling the origin panel here causes a full HoloViews reassignment even
+        # though only the focus marker changed.
         print(
-            "[AstronomicAL scatter] scheduling origin focus refresh "
+            "[AstronomicAL scatter] skipping origin focus full refresh "
             f"panel_id={self.panel_id}",
             flush=True,
         )

@@ -368,6 +368,51 @@ class DatasetManager:
             id_column=id_column,
             columns=columns,
         )
+    
+    def get_rows_by_ids(
+        self,
+        dataset_id: str,
+        row_ids: Sequence[Any],
+        *,
+        id_column: str,
+        columns: Optional[Sequence[str]] = None,
+    ) -> pd.DataFrame:
+        """Return multiple rows by record id using the active DatasetSource.
+
+        This is the preferred path for visual overlays and small selected
+        subsets because it lets DuckDB/Parquet backends do one vectorised
+        lookup instead of requiring full prepared-frame scans.
+        """
+        source = self.get_source(dataset_id)
+
+        method = getattr(source, "get_rows_by_ids", None)
+        if callable(method):
+            return method(
+                row_ids,
+                id_column=id_column,
+                columns=columns,
+            )
+
+        frames: list[pd.DataFrame] = []
+        for row_id in row_ids or []:
+            try:
+                row = source.get_row_by_id(
+                    row_id,
+                    id_column=id_column,
+                    columns=columns,
+                )
+            except Exception:
+                continue
+            if row is not None and not row.empty:
+                frames.append(row)
+
+        if not frames:
+            try:
+                return pd.DataFrame(columns=source.columns() if columns is None else list(columns))
+            except Exception:
+                return pd.DataFrame(columns=list(columns or []))
+
+        return pd.concat(frames, ignore_index=True)
 
     def find_position_by_id(
         self,

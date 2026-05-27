@@ -115,8 +115,8 @@ def create_table_transform_panel(context, data=None, **kwargs):
 
 def add_column_action(context, request: ActionRequest, **_kwargs) -> ActionResult:
     dataset_id = _request_dataset_id(context, request)
-
     params = request.params or {}
+
     new_column = str(params.get("new_column", "")).strip()
     expression = str(params.get("expression", "")).strip()
 
@@ -133,6 +133,12 @@ def add_column_action(context, request: ActionRequest, **_kwargs) -> ActionResul
 
     source = _active_source(context, dataset_id)
 
+    # Important:
+    # Use the relation predicate, not the plain-parquet predicate.
+    # This supports:
+    # - duckdb_parquet
+    # - duckdb_parquet_filtered
+    # - duckdb_parquet_derived_column
     if _is_duckdb_relation_source(source):
         row_count = _add_column_duckdb_parquet(
             context,
@@ -168,6 +174,14 @@ def add_column_action(context, request: ActionRequest, **_kwargs) -> ActionResul
                     "dataset_id": dataset_id,
                     "change": "column.added",
                     "column": new_column,
+                    "changed_columns": [new_column],
+                    "added_columns": [new_column],
+                    "schema_changed": True,
+                    "row_filter_changed": False,
+                    "filter_changed": False,
+                    "row_count_changed": False,
+                    "rows_changed": False,
+                    "data_changed": False,
                     "origin": manifest.id,
                     "materialized": materialized,
                     "backend": backend,
@@ -175,7 +189,6 @@ def add_column_action(context, request: ActionRequest, **_kwargs) -> ActionResul
             )
         ],
     )
-
 
 def create_subset_action(context, request: ActionRequest, **_kwargs) -> ActionResult:
     base_dataset_id = _request_dataset_id(context, request)
@@ -198,7 +211,7 @@ def create_subset_action(context, request: ActionRequest, **_kwargs) -> ActionRe
     source = _active_source(context, base_dataset_id)
     new_dataset_id = f"{base_dataset_id}__subset__{uuid.uuid4().hex[:8]}"
 
-    if _is_duckdb_parquet_source(source):
+    if _is_duckdb_relation_source(source):
         row_count = _create_subset_duckdb_parquet(
             context,
             source=source,
@@ -908,6 +921,24 @@ class TableTransformPanel:
 # Shared helpers
 # ---------------------------------------------------------------------
 
+def _debug_source_chain(source: Any) -> str:
+    parts = []
+    seen = set()
+    current = source
+
+    while current is not None:
+        obj_id = id(current)
+        backend = getattr(current, "backend_name", type(current).__name__)
+        parts.append(f"{backend}@{obj_id:x}")
+
+        if obj_id in seen:
+            parts.append("CYCLE")
+            break
+
+        seen.add(obj_id)
+        current = getattr(current, "base_source", None)
+
+    return " -> ".join(parts)
 
 def _request_dataset_id(context, request: Optional[ActionRequest] = None) -> str:
     if request is not None and request.dataset_id:
@@ -919,9 +950,19 @@ def _active_dataset_id(context) -> str:
     datasets = getattr(context, "datasets", None)
     if datasets is not None:
         try:
-            return datasets.active_id()
+            active = datasets.active_id()
+            if active:
+                return str(active)
         except Exception:
             pass
+
+        try:
+            ids = list(datasets.list_ids())
+            if ids:
+                return str(ids[0])
+        except Exception:
+            pass
+
     return "default"
 
 def _active_source(context, dataset_id: Optional[str] = None):
@@ -1197,21 +1238,149 @@ def _is_duckdb_relation_source(source: Any) -> bool:
 
 
 def _duckdb_relation_params(source: Any) -> list[Any]:
+
+    if source is None:
+        return []
+
+    seen: set[int] = set()
+
+    def _walk(src: Any) -> list[Any]:
+        if src is None:
+            return []
+
+        obj_id = id(src)
+        if obj_id in seen:
+            raise RuntimeError(
+                "Cycle detected in DuckDB dataset source chain while building "
+                "SQL parameters. A lazy source probably has base_source pointing "
+                "to itself or to one of its descendants."
+            )
+
+        seen.add(obj_id)
+
+        base_source = getattr(src, "base_source", None)
+
+        if base_source is not None:
+            params = _walk(base_source)
+            where_params = getattr(src, "where_params", None)
+            if where_params:
+                params.extend(list(where_params))
+            seen.remove(obj_id)
+            return params
+
+        path_argument = getattr(src, "_path_argument", None)
+        if callable(path_argument):
+            seen.remove(obj_id)
+            return [path_argument()]
+
+        seen.remove(obj_id)
+        return []
+
+    return _walk(source)
+
+def _duckdb_relation_query_sql(source: Any) -> str:
+    """Return a SELECT query for a DuckDB relation source."""
+    seen: set[int] = set()
+
+    def _query(src: Any) -> str:
+        obj_id = id(src)
+        if obj_id in seen:
+            raise RuntimeError(
+                "Cycle detected in DuckDB dataset source chain while building "
+                "relation SQL. A lazy source probably has base_source pointing "
+                "to itself or to one of its descendants."
+            )
+
+        seen.add(obj_id)
+
+        relation_sql = str(src._relation_sql()).strip()
+        lower = relation_sql.lower()
+
+        seen.remove(obj_id)
+
+        if lower.startswith("select ") or lower.startswith("with "):
+            return relation_sql
+
+        return f"SELECT * FROM {relation_sql}"
+
+    return _query(source)
+
+def _duckdb_rows_by_ids_from_relation(
+    source: Any,
+    row_ids: Sequence[Any],
+    *,
+    id_column: str,
+    columns: Optional[Sequence[str]] = None,
+) -> pd.DataFrame:
+    ids = [str(row_id) for row_id in (row_ids or [])]
+    if not ids:
+        return pd.DataFrame(columns=list(columns or []))
+
+    if id_column == "Use Index" or id_column not in source.columns():
+        return pd.DataFrame(columns=list(columns or source.columns()))
+
+    seen: set[str] = set()
+    ordered_ids: list[str] = []
+
+    for row_id in ids:
+        if row_id in seen:
+            continue
+        seen.add(row_id)
+        ordered_ids.append(row_id)
+
+    selected_columns = list(columns or [])
+    if id_column not in selected_columns:
+        selected_columns.insert(0, id_column)
+
+    available_columns = set(source.columns())
+    selected_columns = [col for col in selected_columns if col in available_columns]
+
+    if not selected_columns:
+        selected_columns = [id_column]
+
+    select_sql = ", ".join(
+        f"src.{_quote_identifier(col)}" for col in selected_columns
+    )
+
+    values_sql = ", ".join(["(?, ?)"] * len(ordered_ids))
+
+    values_params: list[Any] = []
+    for order, row_id in enumerate(ordered_ids):
+        values_params.extend([order, row_id])
+
+    sql = (
+        "WITH requested(__astronomical_lookup_order, __astronomical_lookup_id) AS "
+        f"(VALUES {values_sql}) "
+        f"SELECT {select_sql} "
+        f"FROM {_duckdb_relation_from_sql(source, alias='src')} "
+        "JOIN requested "
+        f"ON CAST(src.{_quote_identifier(id_column)} AS VARCHAR) = requested.__astronomical_lookup_id "
+        "ORDER BY requested.__astronomical_lookup_order"
+    )
+
+    con = source._connect()
+    try:
+        return con.execute(
+            sql,
+            [*values_params, *_duckdb_relation_params(source)],
+        ).df()
+    finally:
+        con.close()
+
+def _duckdb_relation_from_sql(source: Any, *, alias: str = "base") -> str:
+    """Return a safe FROM-clause target for a DuckDB relation source."""
+    return f"({_duckdb_relation_query_sql(source)}) AS {_quote_identifier(alias)}"
+
+def _duckdb_self_from_sql(source: Any, *, alias: str = "src") -> str:
+    """Return a FROM target for a lazy source's own SELECT query.
+
+    Use this inside LazyDerivedColumnDuckDBSource and
+    FilteredDuckDBParquetDatasetSource methods.
+
+    Do not call _duckdb_relation_from_sql(self) inside those classes because
+    that asks the helper to rediscover self._relation_sql(), which can recurse.
     """
-    Parameters required by source._relation_sql().
-
-    Plain DuckDBParquetDatasetSource usually needs only [path_arg].
-    Filtered/derived lazy sources may need [path_arg, ...filter_params].
-    """
-    relation_params = getattr(source, "_relation_params", None)
-    if callable(relation_params):
-        return list(relation_params())
-
-    params_method = getattr(source, "_params", None)
-    if callable(params_method):
-        return list(params_method())
-
-    return [source._path_argument()]
+    return f"({source._relation_sql()}) AS {_quote_identifier(alias)}"
 
 def _is_duckdb_parquet_source(source: Any) -> bool:
     if source is None:
@@ -1281,7 +1450,7 @@ class LazyDerivedColumnDuckDBSource:
         return (
             "SELECT base.*, "
             f"{self.expression_sql} AS {_quote_identifier(self.new_column)} "
-            f"FROM {self._base_relation_sql()} AS base"
+            f"FROM {_duckdb_relation_from_sql(self.base_source, alias='base')}"
         )
 
     def _select_sql(
@@ -1306,7 +1475,7 @@ class LazyDerivedColumnDuckDBSource:
         con = self._connect()
         try:
             df = con.execute(
-                f"DESCRIBE SELECT * FROM ({self._relation_sql()}) LIMIT 0",
+                f"DESCRIBE SELECT * FROM {_duckdb_self_from_sql(self, alias='src')} LIMIT 0",
                 self._relation_params(),
             ).df()
         finally:
@@ -1324,7 +1493,7 @@ class LazyDerivedColumnDuckDBSource:
         con = self._connect()
         try:
             result = con.execute(
-                f"SELECT COUNT(*) FROM ({self._relation_sql()})",
+                f"SELECT COUNT(*) FROM {_duckdb_self_from_sql(self, alias='src')}",
                 self._relation_params(),
             ).fetchone()
         finally:
@@ -1343,7 +1512,7 @@ class LazyDerivedColumnDuckDBSource:
     ) -> pd.DataFrame:
         sql = (
             f"SELECT {self._select_sql(columns=columns)} "
-            f"FROM ({self._relation_sql()})"
+            f"FROM {_duckdb_self_from_sql(self, alias='src')}"
         )
         sql_params = self._relation_params()
 
@@ -1370,6 +1539,20 @@ class LazyDerivedColumnDuckDBSource:
     ) -> pd.DataFrame:
         return self.to_pandas(columns=columns, limit=n)
 
+    def get_rows_by_ids(
+        self,
+        row_ids: Sequence[Any],
+        *,
+        id_column: str,
+        columns: Optional[Sequence[str]] = None,
+    ) -> pd.DataFrame:
+        return _duckdb_rows_by_ids_from_relation(
+            self,
+            row_ids,
+            id_column=id_column,
+            columns=columns,
+        )
+
     def get_row_by_position(
         self,
         position: int,
@@ -1381,7 +1564,7 @@ class LazyDerivedColumnDuckDBSource:
 
         sql = (
             f"SELECT {self._select_sql(columns=columns)} "
-            f"FROM ({self._relation_sql()}) "
+            f"FROM {_duckdb_self_from_sql(self, alias='src')} "
             "LIMIT 1 OFFSET ?"
         )
 
@@ -1423,9 +1606,10 @@ class LazyDerivedColumnDuckDBSource:
         sql = (
             "SELECT rn FROM ("
             " SELECT "
-            f" ROW_NUMBER() OVER () - 1 AS rn, {_quote_identifier(id_column)} AS rid "
-            f" FROM ({self._relation_sql()})"
-            ") "
+            f" ROW_NUMBER() OVER () - 1 AS rn, "
+            f" {_quote_identifier(id_column)} AS rid "
+            f" FROM {_duckdb_self_from_sql(self, alias='src')}"
+            ") AS numbered "
             "WHERE CAST(rid AS VARCHAR) = ? "
             "LIMIT 1"
         )
@@ -1502,8 +1686,9 @@ class FilteredDuckDBParquetDatasetSource:
 
     def _relation_sql(self) -> str:
         return (
-            f"(SELECT * FROM {self._base_relation_sql()} "
-            f"WHERE ({self.where_sql}))"
+            "SELECT base.* "
+            f"FROM {_duckdb_relation_from_sql(self.base_source, alias='base')} "
+            f"WHERE ({self.where_sql})"
         )
 
     def _select_sql(
@@ -1518,9 +1703,14 @@ class FilteredDuckDBParquetDatasetSource:
 
         return ", ".join(_quote_identifier(col) for col in selected_columns)
 
-    def _params(self, extra: Optional[Sequence[Any]] = None) -> list[Any]:
-        params = [self._path_argument()]
+    def _relation_params(self) -> list[Any]:
+        params = _duckdb_relation_params(self.base_source)
         params.extend(self.where_params)
+        return params
+
+
+    def _params(self, extra: Optional[Sequence[Any]] = None) -> list[Any]:
+        params = self._relation_params()
         if extra:
             params.extend(list(extra))
         return params
@@ -1538,8 +1728,8 @@ class FilteredDuckDBParquetDatasetSource:
         con = self._connect()
         try:
             df = con.execute(
-                f"DESCRIBE SELECT * FROM {self._relation_sql()} LIMIT 0",
-                self._params(),
+                f"DESCRIBE SELECT * FROM {_duckdb_self_from_sql(self, alias="src")} LIMIT 0",
+                self._relation_params(),
             ).df()
         finally:
             con.close()
@@ -1551,8 +1741,8 @@ class FilteredDuckDBParquetDatasetSource:
         con = self._connect()
         try:
             df = con.execute(
-                f"DESCRIBE SELECT * FROM {self._relation_sql()} LIMIT 0",
-                self._params(),
+                f"DESCRIBE SELECT * FROM {_duckdb_self_from_sql(self, alias="src")} LIMIT 0",
+                self._relation_params(),
             ).df()
         finally:
             con.close()
@@ -1569,8 +1759,8 @@ class FilteredDuckDBParquetDatasetSource:
         con = self._connect()
         try:
             result = con.execute(
-                f"SELECT COUNT(*) FROM {self._relation_sql()}",
-                self._params(),
+                f"SELECT COUNT(*) FROM {_duckdb_self_from_sql(self, alias="src")}",
+                self._relation_params(),
             ).fetchone()
         finally:
             con.close()
@@ -1588,8 +1778,11 @@ class FilteredDuckDBParquetDatasetSource:
     ) -> pd.DataFrame:
         select_sql = self._select_sql(columns=columns)
 
-        sql = f"SELECT {select_sql} FROM {self._relation_sql()}"
-        sql_params = self._params()
+        sql = (
+            f"SELECT {select_sql} "
+            f"FROM {_duckdb_self_from_sql(self, alias="src")}"
+        )
+        sql_params = self._relation_params()
 
         if where_sql:
             sql += f" WHERE ({where_sql})"
@@ -1627,7 +1820,7 @@ class FilteredDuckDBParquetDatasetSource:
 
         sql = (
             f"SELECT {select_sql} "
-            f"FROM {self._relation_sql()} "
+            f"FROM {_duckdb_self_from_sql(self, alias="src")} "
             "LIMIT 1 OFFSET ?"
         )
 
@@ -1635,10 +1828,24 @@ class FilteredDuckDBParquetDatasetSource:
         try:
             return con.execute(
                 sql,
-                self._params([int(position)]),
+                [*self._relation_params(), int(position)],
             ).df()
         finally:
             con.close()
+
+    def get_rows_by_ids(
+        self,
+        row_ids: Sequence[Any],
+        *,
+        id_column: str,
+        columns: Optional[Sequence[str]] = None,
+    ) -> pd.DataFrame:
+        return _duckdb_rows_by_ids_from_relation(
+            self,
+            row_ids,
+            id_column=id_column,
+            columns=columns,
+        )
 
     def get_row_by_id(
         self,
@@ -1672,9 +1879,10 @@ class FilteredDuckDBParquetDatasetSource:
         sql = (
             "SELECT rn FROM ("
             " SELECT "
-            f" ROW_NUMBER() OVER () - 1 AS rn, {_quote_identifier(id_column)} AS rid "
-            f" FROM {self._relation_sql()}"
-            ") "
+            f" ROW_NUMBER() OVER () - 1 AS rn, "
+            f" {_quote_identifier(id_column)} AS rid "
+            f" FROM {_duckdb_self_from_sql(self, alias="src")}"
+            ") AS numbered "
             "WHERE CAST(rid AS VARCHAR) = ? "
             "LIMIT 1"
         )
@@ -1683,7 +1891,7 @@ class FilteredDuckDBParquetDatasetSource:
         try:
             result = con.execute(
                 sql,
-                self._params([str(row_id)]),
+                [*self._relation_params(), str(row_id)],
             ).fetchone()
         finally:
             con.close()
@@ -1702,48 +1910,6 @@ class FilteredDuckDBParquetDatasetSource:
             "row_count": self._row_count_cache,
         }
 
-def _is_selection_subset_source(source: Any) -> bool:
-    return (
-        source is not None
-        and getattr(source, "backend_name", None) == "selection_subset"
-        and getattr(source, "base_source", None) is not None
-        and getattr(source, "row_ids", None) is not None
-        and getattr(source, "id_column", None) is not None
-    )
-
-
-def _duckdb_base_source_for_subset(source: Any) -> Optional[Any]:
-    if _is_duckdb_parquet_source(source):
-        return source
-
-    if _is_selection_subset_source(source):
-        base_source = getattr(source, "base_source", None)
-        if _is_duckdb_parquet_source(base_source):
-            return base_source
-
-    return None
-
-
-def _can_create_subset_with_duckdb(source: Any) -> bool:
-    return _duckdb_base_source_for_subset(source) is not None
-
-
-def _selection_subset_info(source: Any) -> Optional[Dict[str, Any]]:
-    if not _is_selection_subset_source(source):
-        return None
-
-    row_ids = [str(row_id) for row_id in list(getattr(source, "row_ids", []) or [])]
-    id_column = getattr(source, "id_column", None)
-
-    if not row_ids or not id_column:
-        return None
-
-    return {
-        "row_ids": row_ids,
-        "id_column": str(id_column),
-    }
-
-
 def _configure_duckdb_for_large_copy(con: Any) -> None:
     """
     Keep DuckDB COPY/SELECT operations from building avoidable large in-memory
@@ -1760,42 +1926,6 @@ def _configure_duckdb_for_large_copy(con: Any) -> None:
             con.execute(statement)
         except Exception:
             pass
-
-
-def _insert_selection_ids_temp_table(
-    con: Any,
-    row_ids: Sequence[str],
-    *,
-    table_name: str = "__astronomical_selection_ids",
-    batch_size: int = 10_000,
-) -> None:
-    con.execute(f"DROP TABLE IF EXISTS {table_name}")
-    con.execute(f"CREATE TEMP TABLE {table_name} (__al_selection_id VARCHAR)")
-
-    values = [str(row_id) for row_id in row_ids]
-
-    for start in range(0, len(values), batch_size):
-        batch = [(row_id,) for row_id in values[start : start + batch_size]]
-        if batch:
-            con.executemany(
-                f"INSERT INTO {table_name} VALUES (?)",
-                batch,
-            )
-
-
-def _count_parquet_rows(path: Path) -> int:
-    import duckdb
-
-    con = duckdb.connect(database=":memory:", read_only=False)
-    try:
-        result = con.execute(
-            "SELECT COUNT(*) FROM read_parquet(?)",
-            [str(Path(path))],
-        ).fetchone()
-    finally:
-        con.close()
-
-    return int(result[0]) if result is not None else 0
 
 def _duckdb_query_df(
     source: Any,
@@ -1976,31 +2106,30 @@ def _add_column_duckdb_parquet(
     new_column: str,
     expression: str,
 ) -> int:
-    """
-    Add a derived column lazily.
-
-    This does not physically rewrite the Parquet file. It replaces the active
-    dataset source with a derived-column DatasetSource that computes the column
-    through DuckDB when queried.
-    """
-    if not _is_duckdb_relation_source(source):
-        raise RuntimeError(
-            f"Dataset `{dataset_id}` is not a DuckDB-compatible source."
-        )
-
+    """Register a lazy derived-column view over any DuckDB relation source."""
     datasets = getattr(context, "datasets", None)
     if datasets is None:
         raise RuntimeError("DatasetManager is required.")
 
-    columns = _dataset_columns(context, dataset_id)
-    expr_sql = _expression_to_sql(expression, columns)
+    if not _is_duckdb_relation_source(source):
+        raise RuntimeError(
+            "Cannot add a lazy DuckDB column to this dataset because it does "
+            "not expose a DuckDB relation."
+        )
 
-    # Validate the expression over one row before registering the new source.
+    columns = _dataset_columns(context, dataset_id)
+
+    if new_column in columns:
+        raise ValueError(f"Column `{new_column}` already exists.")
+
+    expr_sql = _expression_to_sql(expression, columns)
+    from_sql = _duckdb_relation_from_sql(source, alias="base")
+
     preview = _duckdb_query_df(
         source,
         (
             f"SELECT {expr_sql} AS {_quote_identifier(new_column)} "
-            f"FROM ({source._relation_sql()}) "
+            f"FROM {from_sql} "
             "LIMIT 1"
         ),
         _duckdb_relation_params(source),
@@ -2010,7 +2139,6 @@ def _add_column_duckdb_parquet(
         raise RuntimeError(f"Could not validate derived column `{new_column}`.")
 
     row_count = _dataset_row_count(context, dataset_id)
-
     dataset_name = _active_dataset_name(context, dataset_id)
     meta = _active_dataset_meta(context, dataset_id)
 
@@ -2025,6 +2153,12 @@ def _add_column_duckdb_parquet(
         columns_hint=new_columns,
         row_count_hint=row_count,
     )
+
+    if derived_source.base_source is derived_source:
+        raise RuntimeError(
+            "Internal error: lazy derived column source was created with itself "
+            "as base_source."
+        )
 
     meta.update(
         {
@@ -2049,7 +2183,6 @@ def _add_column_duckdb_parquet(
     )
 
     return int(row_count) if row_count is not None else 0
-
 
 def _add_column_pandas_fallback(
     context,
@@ -2115,20 +2248,39 @@ def _create_subset_duckdb_parquet(
     subset_name: str,
     expression: str,
 ) -> int:
+    """Register a lazy filtered subset over any DuckDB relation source.
+
+    Works for:
+    - base duckdb_parquet sources
+    - duckdb_parquet_filtered sources
+    - duckdb_parquet_derived_column sources
+
+    The important part is that source._relation_sql() may be `read_parquet(?)`.
+    That cannot be wrapped directly as `(read_parquet(?))`, so use
+    _duckdb_relation_from_sql().
+    """
+    if not _is_duckdb_relation_source(source):
+        raise RuntimeError(
+            "Cannot create a DuckDB-backed subset because this dataset does "
+            "not expose a DuckDB relation."
+        )
 
     columns = _dataset_columns(context, base_dataset_id)
     where_sql = _expression_to_sql(expression, columns)
 
-    # Counting can still be expensive, but it is much cheaper than writing a new
-    # 12M-row parquet file. If the UI already has a cached preview count later,
-    # pass that through and avoid recounting.
-    relation_sql = source._relation_sql()
-    path_arg = source._path_argument()
+    print(
+        "[TableTools] create subset source chain:",
+        _debug_source_chain(source),
+        flush=True,
+    )
+
+    from_sql = _duckdb_relation_from_sql(source, alias="base")
+    relation_params = _duckdb_relation_params(source)
 
     count_result = _duckdb_fetchone(
         source,
-        f"SELECT COUNT(*) FROM {relation_sql} WHERE ({where_sql})",
-        [path_arg],
+        f"SELECT COUNT(*) FROM {from_sql} WHERE ({where_sql})",
+        relation_params,
     )
     matched_count = int(count_result[0]) if count_result is not None else 0
 
@@ -2206,13 +2358,13 @@ def _preview_column_expression(
     if _is_duckdb_relation_source(source):
         columns = _dataset_columns(context, dataset_id)
         expr_sql = _expression_to_sql(expression, columns)
-        relation_sql = source._relation_sql()
+        from_sql = _duckdb_relation_from_sql(source, alias="base")
 
         return _duckdb_query_df(
             source,
             (
                 f"SELECT {expr_sql} AS {_quote_identifier('__preview_result__')} "
-                f"FROM ({relation_sql}) "
+                f"FROM {from_sql} "
                 "LIMIT ?"
             ),
             [*_duckdb_relation_params(source), int(limit)],
@@ -2220,9 +2372,7 @@ def _preview_column_expression(
 
     df = _active_df(context, dataset_id, limit=limit)
     result = _evaluate_expression(expression, df)
-
     return pd.DataFrame({"__preview_result__": result.head(limit).values})
-
 
 def _preview_subset_expression(
     context,
@@ -2233,74 +2383,45 @@ def _preview_subset_expression(
 ) -> tuple[pd.DataFrame, int, Optional[int]]:
     source = _active_source(context, dataset_id)
 
-    if _can_create_subset_with_duckdb(source):
-        duckdb_source = _duckdb_base_source_for_subset(source)
-        if duckdb_source is None:
-            raise RuntimeError("Could not resolve DuckDB source for preview.")
-
+    if _is_duckdb_relation_source(source):
         columns = _dataset_columns(context, dataset_id)
         where_sql = _expression_to_sql(expression, columns)
+        from_sql = _duckdb_relation_from_sql(source, alias="base")
+        relation_params = _duckdb_relation_params(source)
 
-        relation_sql = duckdb_source._relation_sql()
-        path_arg = duckdb_source._path_argument()
-        selection_info = _selection_subset_info(source)
+        print(
+            "[TableTools] preview source chain:",
+            _debug_source_chain(source),
+            flush=True,
+        )
 
-        con = duckdb_source._connect()
+        count_sql = (
+            f"SELECT COUNT(*) "
+            f"FROM {from_sql} "
+            f"WHERE ({where_sql})"
+        )
+
+        preview_sql = (
+            f"SELECT * "
+            f"FROM {from_sql} "
+            f"WHERE ({where_sql}) "
+            "LIMIT ?"
+        )
+
+        con = source._connect()
         try:
             _configure_duckdb_for_large_copy(con)
 
-            if selection_info is not None:
-                id_column = selection_info["id_column"]
-                row_ids = selection_info["row_ids"]
+            count_result = con.execute(
+                count_sql,
+                relation_params,
+            ).fetchone()
 
-                if id_column == "Use Index":
-                    raise RuntimeError(
-                        "Cannot preview a large Parquet subset from a "
-                        "selection that uses `Use Index`. Map a stable "
-                        "`record_id` column first."
-                    )
-
-                _insert_selection_ids_temp_table(con, row_ids)
-
-                base_from_sql = (
-                    f"{relation_sql} AS base "
-                    "INNER JOIN __astronomical_selection_ids AS selected "
-                    f"ON CAST(base.{_quote_identifier(id_column)} AS VARCHAR) "
-                    "= selected.__al_selection_id"
-                )
-
-                count_sql = (
-                    f"SELECT COUNT(*) "
-                    f"FROM {base_from_sql} "
-                    f"WHERE ({where_sql})"
-                )
-
-                preview_sql = (
-                    f"SELECT base.* "
-                    f"FROM {base_from_sql} "
-                    f"WHERE ({where_sql}) "
-                    "LIMIT ?"
-                )
-            else:
-                count_sql = (
-                    f"SELECT COUNT(*) "
-                    f"FROM {relation_sql} "
-                    f"WHERE ({where_sql})"
-                )
-
-                preview_sql = (
-                    f"SELECT * "
-                    f"FROM {relation_sql} "
-                    f"WHERE ({where_sql}) "
-                    "LIMIT ?"
-                )
-
-            count_result = con.execute(count_sql, [path_arg]).fetchone()
             matched_count = int(count_result[0]) if count_result is not None else 0
 
             preview_df = con.execute(
                 preview_sql,
-                [path_arg, int(limit)],
+                [*relation_params, int(limit)],
             ).df()
 
         finally:

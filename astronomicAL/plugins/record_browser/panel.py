@@ -96,6 +96,8 @@ class RecordBrowserPanel(param.Parameterized):
         self._pending_focus_row_id = None
         self._focus_sync_scheduled = False
 
+        self._dataset_refresh_scheduled = False
+        self._pending_dataset_reset_history = False
 
         self._root = pn.Column(
             sizing_mode="stretch_both",
@@ -509,6 +511,36 @@ class RecordBrowserPanel(param.Parameterized):
             self._row_position_cache.popitem(last=False)
 
 
+    def _schedule_dataset_refresh(self, *, reset_history: bool) -> None:
+        """Schedule dataset refresh outside the EventBus subscriber.
+
+        Record browser refresh can rebuild widgets and resolve focus. That is
+        too heavy to run synchronously inside dataset.updated publication.
+        """
+        self._pending_dataset_reset_history = (
+            bool(self._pending_dataset_reset_history) or bool(reset_history)
+        )
+
+        if self._dataset_refresh_scheduled:
+            return
+
+        self._dataset_refresh_scheduled = True
+
+        def _run():
+            self._dataset_refresh_scheduled = False
+            reset = bool(self._pending_dataset_reset_history)
+            self._pending_dataset_reset_history = False
+
+            if self._disposed:
+                return
+
+            self._refresh_from_active_dataset(reset_history=reset)
+
+        try:
+            pn.state.curdoc.add_next_tick_callback(_run)
+        except Exception:
+            _run()
+
     def _schedule_focus_from_selection(self, row_id: str) -> None:
         """
         Do not run potentially slow record-browser seeking directly inside the
@@ -561,13 +593,24 @@ class RecordBrowserPanel(param.Parameterized):
         self._subscribe("selection.focus.changed", self._on_selection_focus_changed)
 
     def _on_dataset_active_changed(self, _topic, payload) -> None:
-        self._refresh_from_active_dataset(reset_history=True)
+        if isinstance(payload, dict):
+            dataset_id = payload.get("dataset_id")
+            if dataset_id is not None and dataset_id != self._dataset_id():
+                # active_id may already have changed by this point, so do not
+                # return solely because payload disagrees. This guard mainly
+                # prevents unrelated dataset chatter.
+                pass
+
+        self._schedule_dataset_refresh(reset_history=True)
 
     def _on_dataset_updated(self, _topic, payload) -> None:
         dataset_id = payload.get("dataset_id") if isinstance(payload, dict) else None
         if dataset_id is not None and dataset_id != self._dataset_id():
             return
-        self._refresh_from_active_dataset(reset_history=False)
+
+        # Keep the subscriber cheap. The scheduled refresh will update schema,
+        # column counts, label selector options, and extra-info rendering.
+        self._schedule_dataset_refresh(reset_history=False)
 
     def _on_dataset_mapping_updated(self, _topic, payload) -> None:
         if not isinstance(payload, dict):
@@ -579,7 +622,7 @@ class RecordBrowserPanel(param.Parameterized):
 
         semantic_name = payload.get("semantic_name")
         if semantic_name in {"record_id", "target_label"}:
-            self._refresh_from_active_dataset(reset_history=False)
+            self._schedule_dataset_refresh(reset_history=False)
 
     def _on_selection_focus_changed(self, _topic, payload) -> None:
         if not isinstance(payload, dict):
