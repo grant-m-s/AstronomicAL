@@ -48,14 +48,25 @@ class DynamicReactGrid(ReactComponent):
 
     _importmap = {
         "imports": {
-            "react": "https://esm.sh/react@18.2.0",
-            "react-dom": "https://esm.sh/react-dom@18.2.0",
-
-            # clsx ESM with default function export
+            "react": "https://esm.sh/react@18.2.0?dev",
+            "react-dom": "https://esm.sh/react-dom@18.2.0?dev&deps=react@18.2.0",
+            "prop-types": "https://esm.sh/prop-types@15.8.1",
+            "react-draggable": (
+                "https://esm.sh/react-draggable@4.4.6"
+                "?dev&deps=react@18.2.0,react-dom@18.2.0"
+            ),
+            "react-resizable": (
+                "https://esm.sh/react-resizable@3.0.5"
+                "?dev&deps=react@18.2.0,react-dom@18.2.0,react-draggable@4.4.6"
+            ),
             "clsx": "https://unpkg.com/clsx@2.1.1/dist/clsx.mjs",
-
-            # IMPORTANT: externalize clsx so the above mapping is used
-            "react-grid-layout": "https://esm.sh/react-grid-layout@1.4.4?external=react,react-dom,clsx",
+            "react-grid-layout": (
+                "https://esm.sh/react-grid-layout@1.4.4"
+                "?dev"
+                "&deps=react@18.2.0,react-dom@18.2.0,"
+                "react-draggable@4.4.6,react-resizable@3.0.5,prop-types@15.8.1"
+                "&external=react,react-dom,clsx,prop-types,react-draggable,react-resizable"
+            ),
         }
     }
 
