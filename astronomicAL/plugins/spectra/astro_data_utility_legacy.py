@@ -7,11 +7,9 @@ import concurrent.futures
 from io import BytesIO
 import numpy as np
 import pandas as pd
-from scipy.stats import median_abs_deviation
 import warnings
 from astropy import units as u
-from astroquery.esa.euclid import EuclidClass, Euclid
-from astroquery.cadc import Cadc
+from astroquery.esa.euclid import EuclidClass
 from astropy.io import fits
 from astropy.wcs import WCS
 from reproject import reproject_interp 
@@ -24,15 +22,9 @@ import mocpy
 from sparcl.client import SparclClient 
 from astronomicAL.utils.error_tracker import ErrorTracker
 
-
-import matplotlib.transforms as transforms
 import matplotlib.pyplot as plt
 import holoviews as hv
 from holoviews import opts
-
-#from scipy.ndimage import zoom
-
-
 
 class EuclidCutoutsClass:
     
@@ -1195,93 +1187,6 @@ class EuclidSpectraClass(BaseSpectraClass):
             for attribute in ["spectype", "redshift"]:
                 col_name = "spe_class" if attribute == "spectype" else attribute 
                 self._update_info_spectra(attribute, self.specz_table[col_name].values)
-   
-    
-
-
-
-def LoTSS_cutout(ra, dec, radius = 10, check_coverage = True):
-    """radius in arcsec"""
-    if check_coverage:
-        has_coverage = check_isin_survey(ra, dec, survey = "LoTSS")
-    else: 
-        has_coverage = True
-    if has_coverage:
-        coordinates = SkyCoord(ra*u.deg, dec*u.deg, frame = "icrs")
-        stringa = coordinates.to_string(style = "hmsdms").replace("h",":").replace("d",":").replace("m",":").replace("s","")
-        url = f"https://lofar-surveys.org/dr2-cutout.fits?pos={stringa}&size={radius/60}"
-        response =requests.get(url)
-        try:
-            image = fits.open(BytesIO(response.content))[0].data
-            return image
-        except Exception as e:
-            print(e)
-            return None
-    else:
-        print("LOFAR-LoTSS does not cover these coordinates")
-        return None
-   
-
-
-def VLASS_cutout(ra, dec, radius = 10, verbose = False, check_coverage = True):
-    import warnings
-    from bs4 import XMLParsedAsHTMLWarning
-    if check_coverage:
-        has_coverage = check_isin_survey(ra, dec, survey = "VLASS")
-    else: 
-        has_coverage = True
-    if has_coverage:
-        cadc = Cadc()
-        coordinates = SkyCoord(ra*u.deg, dec*u.deg, frame = "icrs")
-        warnings.filterwarnings("ignore", category= XMLParsedAsHTMLWarning)
-        tic = time.perf_counter()
-        query_results = cadc.query_region(coordinates = coordinates, radius = radius*u.arcsec, 
-                                        collection = "VLASS")
-        query_results = query_results[query_results['requirements_flag'] != "fail"]
-        query_results.sort("proposal_id", reverse = True)   ##first 3.1 then 2.1 then 1.1
-        toc = time.perf_counter()
-        if verbose:
-            print(f"Queried coordinates in {toc-tic} seconds")
-        if len(query_results)>0:
-            urls = cadc.get_image_list(query_result=query_results[0:1], coordinates = coordinates, 
-                                        radius = radius*u.arcsec)
-            urls = [url for url in urls if "tt0.rms" not in url and "tt1.rms" not in url and "se.alpha" not in url] 
-            response =requests.get(urls[0])
-            try:
-                image = fits.open(BytesIO(response.content))[0].data
-                return image[0,0,:,:]
-            except Exception as e:
-                print(e)
-                return None
-    print("VLA-VLASS does not cover these coordinates")
-    return None
-
-def make_srcdoc_aladin_lite(survey_id, ra, dec, fov = 0.08):
-    tpl = Template("""<!doctype html>
-            <html><head>
-            <meta charset="utf-8"/>
-            <meta name="viewport" content="width=device-width, height=device-height, initial-scale=1.0, user-scalable=no">
-            <style>html,body,#aladin{margin:0;width:100%;height:100%}</style>
-            </head><body>
-            <div id="aladin"></div>
-            <script src="https://aladin.cds.unistra.fr/AladinLite/api/v3/latest/aladin.js" charset="utf-8"></script>
-            <script>
-            A.init.then(function () {
-                A.aladin("#aladin", {
-                cooFrame: "ICRSd",
-                survey: "$survey",
-                target: "$ra $dec",
-                fov: $fov,
-                showFullscreenControl: false,
-                showLayersControl: false
-                });
-            });
-            </script>
-            </body></html>""")
-    return tpl.substitute(survey=survey_id, ra = ra, dec =dec, fov=fov)
-
-
-
 
 def load_moc(survey, path = "data/mocs"):
     surveys = {"Euclid_Q1" : "Euclid_Q1_color.fits",
@@ -1296,122 +1201,3 @@ def load_moc(survey, path = "data/mocs"):
 
 def check_isin_survey(ra, dec, moc):
     return moc.contains_lonlat(ra*u.deg, dec*u.deg)
-
-# def get_ra_dec_DESI():
-#     """"
-#     Utility function to get ra and dec for a source with DESI spectra.
-#     Only useful for testing the routines
-#     """
-#     client = SparclClient(read_timeout=60)
-#     outs = ['sparcl_id', 'ra', 'dec']
-#     cons = {'data_release': ['DESI-DR1']}
-#     found = client.find(outfields=outs, constraints=cons)
-#     ra = found.records[0]["ra"]
-#     dec = found.records[0]["dec"]
-#     return ra, dec
-
-# def get_ra_dec_Euclid():
-#     ra = 265.94946 
-#     dec = 65.83025    
-#     return ra, dec  
-
-# def print_Euclid_tables():
-#     tables = Euclid.load_tables(only_names=True, include_shared_tables=True)
-#     print(f"{len(tables)} tables are available")
-#     print(*(table.name for table in tables), sep="\n")
-
-
-#########previous stuff 
-
-
-class radio_cutouts_class:
-
-    def __init__(self, ra, dec):
-        self.ra = float(ra)
-        self.dec = float(dec)
-        self.get_url()
-        return None
-    
-    def get_url(self):
-        h = np.floor(self.ra / 15.0)
-        d = self.ra - h * 15
-        m = np.floor(d / 0.25)
-        d = d - m * 0.25
-        s = d / (0.25 / 60.0)
-        s = np.round(s)
-        ra_conv = f"{h} {m} {s}"
-        sign = 1
-        if self.dec < 0:
-            sign = -1
-        g = np.abs(self.dec)
-        d = np.floor(g) * sign
-        g = g - np.floor(g)
-        m = np.floor(g * 60.0)
-        g = g - m / 60.0
-        s = g * 3600.0
-
-        s = np.round(s)
-        dec_conv = f"{d} {m} {s}"
-
-        url1 = "https://third.ucllnl.org/cgi-bin/firstimage?RA="
-        url2 = "&Equinox=J2000&ImageSize=2.5&MaxInt=200&GIF=1"
-        self.url = f"{url1}{ra_conv} {dec_conv}{url2}"
-        return None
-
-    def get_image(self):
-        r = requests.get(self.url)
-        self.image = BytesIO(r.content).seek(0)
-        return None
-    
-    def reset(self, ra, dec):
-        self.ra = float(ra)
-        self.dec = float(dec)
-        self.get_url()
-        return None
-    
-
-def SDSS_cutout(ra, dec, radius):
-    from PIL import Image
-    scale = radius/64
-    scale = 0.4
-    url = "http://skyserver.sdss.org/dr17/SkyServerWS/ImgCutout/getjpeg?TaskName=Skyserver.Explore.Image&ra="
-    url = f"{url}{ra}&dec={dec}&opt=G&scale={scale}"
-    response =requests.get(url)
-    try:
-        image = Image.open(BytesIO(response.content))
-        return np.array(image)
-    except Exception as e:
-        print(e)
-        return None
-    
-
-
-class sdss_cutouts_class:
-        
-        def __init__(self, ra, dec, radius = 5):
-            self.ra = ra
-            self.dec = dec 
-            self.radius = radius
-            self.scale = radius/64
-            self.get_url()
-
-        def get_url(self):
-            url = "http://skyserver.sdss.org/dr17/SkyServerWS/ImgCutout/getjpeg?TaskName=Skyserver.Explore.Image&ra="
-
-            self.url = f"{url}{self.ra}&dec={self.dec}&opt=G&scale={self.scale}"
-            return None
-
-        def update_scale(self, scale):
-            url = "http://skyserver.sdss.org/dr17/SkyServerWS/ImgCutout/getjpeg?TaskName=Skyserver.Explore.Image&ra="
-            self.scale = scale
-            self.url = f"{url}{self.ra}&dec={self.dec}&opt=G&scale={self.scale}"
-            return None
-        
-        def reset(self, ra, dec, scale = 0.2):
-            self.ra = ra
-            self.dec = dec 
-            self.scale = scale
-            self.get_url()
-            return None
-         
-   
