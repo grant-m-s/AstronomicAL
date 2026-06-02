@@ -5,6 +5,9 @@ models
 data/
 data/*.fits
 
+.astronomical_cache/
+**.parquet
+
 #Added by Ivano
 .venv*/
 *test.ipynb
