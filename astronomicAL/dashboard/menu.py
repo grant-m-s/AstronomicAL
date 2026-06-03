@@ -70,6 +70,8 @@ class MenuDashboard:
         "Active Learning": 1,
         "ML": 2,
         "Astro": 3,
+        "Integration": 4,
+        "Integrations": 4,  # optional backward-compatible alias
         "Extensions": 8,
         "Legacy": 9,
         "Plugins": 10,
@@ -579,6 +581,8 @@ class MenuDashboard:
             return "ML"
         if {"diagnostics", "debug"} & tags or "diagnostics" in capabilities:
             return "Core"
+        if prefix in {"integration", "integrations"}:
+            return "Integration"
 
         if prefix:
             return prefix.replace("_", " ").replace("-", " ").title()

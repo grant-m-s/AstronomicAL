@@ -21,6 +21,8 @@ import time
 
 import panel as pn
 
+import threading
+
 from astronomicAL.platform.panel_state import restore_controller_state
 from astronomicAL.utils.debug import boot_print
 from .mapping_gate import MappingGatedPanel
@@ -63,6 +65,17 @@ except Exception:
     Version = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
+
+def plugin_open_debug(label: str, **values: Any) -> None:
+    try:
+        parts = " ".join(f"{key}={value!r}" for key, value in values.items())
+        print(
+            f"[AL_DEBUG][PluginManager][{label}] "
+            f"thread={threading.current_thread().name} {parts}",
+            flush=True,
+        )
+    except Exception:
+        print(f"[AL_DEBUG][PluginManager][{label}] <print failed>", flush=True)
 
 
 class LoadingPanelController:
@@ -1226,6 +1239,14 @@ class PluginManager:
 
         reg = self.get_panel(panel_id)
 
+        plugin_open_debug(
+            "add_panel_to_workspace START",
+            requested_panel_id=panel_id,
+            registration_id=reg.id,
+            plugin_id=reg.plugin_id,
+            title=title or reg.title,
+        )
+
         workspace_id = instance_id or f"{reg.id}:{uuid.uuid4().hex[:10]}"
         visible_title = title or reg.title
 
@@ -1256,11 +1277,26 @@ class PluginManager:
             },
         )
 
+        plugin_open_debug(
+            "loading_panel ADDED",
+            workspace_id=workspace_id,
+            registration_id=reg.id,
+            plugin_id=reg.plugin_id,
+            workspace_keys=list(getattr(context.workspace.grid, "keys", []) or []),
+        )
+
         self._workspace_panels_by_plugin.setdefault(reg.plugin_id, set()).add(workspace_id)
 
         def _build_panel_job(*, cancel_token) -> CreatedPanel:
             if cancel_token is not None and cancel_token.cancelled():
                 raise RuntimeError("Panel opening was cancelled.")
+
+            plugin_open_debug(
+                "build_panel_job START",
+                workspace_id=workspace_id,
+                registration_id=reg.id,
+                plugin_id=reg.plugin_id,
+            )
 
             created = self.create_panel_instance(
                 panel_id,
@@ -1270,6 +1306,15 @@ class PluginManager:
                 restore_metadata=restore_metadata,
                 open_kwargs=open_kwargs,
                 **kwargs,
+            )
+
+            plugin_open_debug(
+                "build_panel_job CREATED",
+                workspace_id=workspace_id,
+                registration_id=reg.id,
+                created_type=type(created).__name__,
+                view_type=type(getattr(created, "view", None)).__name__,
+                controller_type=type(getattr(created, "controller", None)).__name__,
             )
 
             if cancel_token is not None and cancel_token.cancelled():
@@ -1315,6 +1360,14 @@ class PluginManager:
                 },
             )
 
+            plugin_open_debug(
+                "plugin_panel ADDED",
+                workspace_id=workspace_id,
+                registration_id=reg.id,
+                plugin_id=reg.plugin_id,
+                workspace_keys=list(getattr(context.workspace.grid, "keys", []) or []),
+            )
+
             if hasattr(context, "events"):
                 try:
                     context.events.publish(
@@ -1330,6 +1383,16 @@ class PluginManager:
                     pass
 
         def _on_panel_error(exc: BaseException) -> None:
+
+            plugin_open_debug(
+                "on_panel_error ENTER",
+                workspace_id=workspace_id,
+                registration_id=reg.id,
+                plugin_id=reg.plugin_id,
+                error=repr(exc),
+            )
+            traceback.print_exception(type(exc), exc, exc.__traceback__)
+
             if not self._workspace_panel_exists(context, workspace_id):
                 return
 
@@ -1381,6 +1444,13 @@ class PluginManager:
         jobs = getattr(context, "jobs", None)
 
         if jobs is not None:
+
+            plugin_open_debug(
+                "jobs.submit PANEL_OPEN",
+                workspace_id=workspace_id,
+                registration_id=reg.id,
+                plugin_id=reg.plugin_id,
+            )
             handle = jobs.submit(
                 _build_panel_job,
                 title=f"Open panel: {visible_title}",
@@ -1388,6 +1458,14 @@ class PluginManager:
                 on_done=_on_panel_ready,
                 on_error=_on_panel_error,
             )
+
+            plugin_open_debug(
+                "jobs.submit RETURNED",
+                workspace_id=workspace_id,
+                job_id=getattr(handle, "job_id", None),
+                title=getattr(handle, "title", None),
+            )
+
             self._job_handles_by_plugin.setdefault(reg.plugin_id, []).append(handle)
         else:
             # Fallback for tests or contexts without JobManager.
@@ -1420,6 +1498,16 @@ class PluginManager:
         This is intentionally thin over add_panel_to_workspace(), but the name
         reads better in persistence and menu code.
         """
+
+        plugin_open_debug(
+            "open_panel ENTER",
+            panel_id=panel_id,
+            instance_id=instance_id,
+            title=title,
+            open_kwargs=open_kwargs,
+        )
+
+
         return self.add_panel_to_workspace(
             panel_id,
             context,

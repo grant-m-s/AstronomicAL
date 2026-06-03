@@ -6,6 +6,8 @@ from typing import Any, Dict, Optional
 
 import panel as pn
 
+import threading
+
 from astronomicAL.extensions.dynamic_react_layout import DynamicReactGrid
 from astronomicAL.platform.panel_state import (
     get_controller_state,
@@ -32,6 +34,17 @@ class PanelRecord:
     open_kwargs: Dict[str, Any] = field(default_factory=dict)
     metadata: Dict[str, Any] = field(default_factory=dict)
 
+
+def workspace_panel_debug(label: str, **values) -> None:
+    try:
+        parts = " ".join(f"{key}={value!r}" for key, value in values.items())
+        print(
+            f"[AL_DEBUG][Workspace][{label}] "
+            f"thread={threading.current_thread().name} {parts}",
+            flush=True,
+        )
+    except Exception:
+        print(f"[AL_DEBUG][Workspace][{label}] <print failed>", flush=True)
 
 class WorkspaceManager:
     """
@@ -496,6 +509,18 @@ class WorkspaceManager:
     ) -> bool:
 
         panel_id = str(panel_id)
+
+        workspace_panel_debug(
+            "replace_panel_in_place ENTER",
+            panel_id=panel_id,
+            title=title,
+            kind=kind,
+            plugin_id=plugin_id,
+            registration_id=registration_id,
+            current_keys=[str(k) for k in (self.grid.keys or [])],
+        )
+
+
         keys = [str(key) for key in (self.grid.keys or [])]
 
         if panel_id not in keys:
@@ -592,6 +617,13 @@ class WorkspaceManager:
 
         self.grid.param.update(**update)
 
+        workspace_panel_debug(
+            "replace_panel_in_place AFTER",
+            panel_id=panel_id,
+            grid_keys=[str(k) for k in (self.grid.keys or [])],
+            object_count=len(self.grid.objects or []),
+        )
+
         # Dispose the old panel after the grid no longer references it.
         if old_controller is not None and old_controller is not controller:
             self._safe_dispose(old_controller)
@@ -641,6 +673,17 @@ class WorkspaceManager:
         self._normalize_grid_state()
 
         panel_id = str(panel_id)
+
+        workspace_panel_debug(
+            "add_panel ENTER",
+            panel_id=panel_id,
+            title=title,
+            kind=kind,
+            plugin_id=plugin_id,
+            registration_id=registration_id,
+            existing_keys=[str(k) for k in (self.grid.keys or [])],
+        )
+
         title = title or panel_id
 
         existing_keys = [str(k) for k in (self.grid.keys or [])]
@@ -744,7 +787,22 @@ class WorkspaceManager:
             new_titles[panel_id] = str(title)
             update["titles"] = new_titles
 
+        workspace_panel_debug(
+            "grid.update BEFORE",
+            panel_id=panel_id,
+            update_keys=list(update.keys()),
+            new_keys=[str(k) for k in update.get("keys", [])],
+            object_count=len(update.get("objects", []) or []),
+        )
+
         self.grid.param.update(**update)
+
+        workspace_panel_debug(
+            "grid.update AFTER",
+            panel_id=panel_id,
+            grid_keys=[str(k) for k in (self.grid.keys or [])],
+            object_count=len(self.grid.objects or []),
+        )
 
         workspace_debug_print(
             "add_panel",

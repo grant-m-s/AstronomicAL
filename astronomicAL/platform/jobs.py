@@ -8,9 +8,21 @@ import threading
 import uuid
 import traceback
 
+import time
 
 DoneCallback = Callable[[Any], None]
 ErrorCallback = Callable[[BaseException], None]
+
+def job_debug(label: str, **values: Any) -> None:
+    try:
+        parts = " ".join(f"{key}={value!r}" for key, value in values.items())
+        print(
+            f"[AL_DEBUG][JobManager][{label}] "
+            f"thread={threading.current_thread().name} {parts}",
+            flush=True,
+        )
+    except Exception:
+        print(f"[AL_DEBUG][JobManager][{label}] <print failed>", flush=True)
 
 
 def _call_on_ui_thread(fn: Callable[[], None]) -> None:
@@ -98,6 +110,14 @@ class JobManager:
 
         kwargs are passed into fn, plus a reserved kwarg `cancel_token`.
         """
+
+        job_debug(
+            "submit ENTER",
+            title=title,
+            key=key,
+            inflight_keys=list(self._inflight.keys()),
+        )
+
         with self._lock:
             if key and key in self._inflight:
                 handle = self._inflight[key]
@@ -116,14 +136,38 @@ class JobManager:
                                 traceback.print_exc()
 
                     handle.future.add_done_callback(_late_join_callback)
-
+                job_debug(
+                    "submit DEDUPED",
+                    title=title,
+                    key=key,
+                    existing_job_id=getattr(handle, "job_id", None),
+                )
                 return handle
 
             job_id = uuid.uuid4().hex
             token = CancellationToken()
 
             def _runner() -> Any:
-                return fn(cancel_token=token, **kwargs)
+                started = time.time()
+                job_debug("runner START", title=title, key=key)
+                try:
+                    result = fn(cancel_token=token, **kwargs)
+                    job_debug(
+                        "runner DONE",
+                        title=title,
+                        key=key,
+                        elapsed=round(time.time() - started, 3),
+                    )
+                    return result
+                except BaseException as exc:
+                    job_debug(
+                        "runner ERROR",
+                        title=title,
+                        key=key,
+                        elapsed=round(time.time() - started, 3),
+                        error=repr(exc),
+                    )
+                    raise
 
             fut = self._executor.submit(_runner)
             handle = JobHandle(job_id=job_id, title=title, future=fut, token=token)
@@ -133,6 +177,14 @@ class JobManager:
 
             # One canonical completion callback handles cleanup + the first submitter's callbacks.
             def _cleanup_callback(_f: Future) -> None:
+
+                job_debug(
+                    "cleanup_callback ENTER",
+                    title=title,
+                    key=key,
+                    job_id=job_id,
+                    cancelled=_f.cancelled(),
+                )
                 # Remove inflight on completion
                 if key:
                     with self._lock:

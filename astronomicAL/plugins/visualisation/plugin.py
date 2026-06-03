@@ -108,7 +108,6 @@ def register(api) -> None:
         icon="scatter_plot",
         tags=["core", "visualisation", "scatter", "selection", "plot"],
         required_mappings=["record_id"],
-        optional_mappings=["target_label"],
         produces=["selection.focus.changed", "selection.set.changed"],
         default_layout={"x": 0, "y": 0, "w": 3, "h": 4},
     )
@@ -122,7 +121,6 @@ def register(api) -> None:
         icon="bar_chart",
         tags=["core", "visualisation", "histogram", "labels", "plot"],
         required_mappings=["record_id"],
-        optional_mappings=["target_label"],
         default_layout={"x": 0, "y": 0, "w": 3, "h": 4},
     )
 
@@ -138,7 +136,6 @@ def register(api) -> None:
         icon="grid_on",
         tags=["core", "visualisation", "density", "datashader", "rasterize", "plot"],
         required_mappings=["record_id"],
-        optional_mappings=["target_label"],
         default_layout={"x": 0, "y": 0, "w": 3, "h": 4},
     )
 
@@ -154,7 +151,6 @@ def register(api) -> None:
         icon="dashboard",
         tags=["core", "visualisation", "explorer", "linked", "dashboard", "plot"],
         required_mappings=["record_id"],
-        optional_mappings=["target_label"],
         produces=["selection.focus.changed", "selection.set.changed"],
         default_layout={"x": 0, "y": 0, "w": 4, "h": 5},
     )
