@@ -1524,7 +1524,7 @@ Depending on how the action was registered, the plugin manager may run it direct
 
 ---
 
-## Stage 15: register a service
+## Stage 14: register a service
 
 Services are for shared, live runtime capabilities: clients, caches, sessions, connections, or stateful helpers. They are not for storing derived outputs.
 
@@ -1584,7 +1584,7 @@ Use a service when the object is a live capability. Use an artifact when the obj
 
 ---
 
-## Stage 16: use a service from a focused-row panel
+## Stage 15: use a service from a focused-row panel
 
 ```python
 def register(api) -> None:
@@ -1698,7 +1698,7 @@ class MetadataLookupPanel:
 
 ---
 
-## Stage 17: submit slow work as a job
+## Stage 16: submit slow work as a job
 
 If work may block the UI, run it through the job manager. This includes network requests, model inference, expensive table transforms, large file IO, image generation, remote queries, and long plotting preparation.
 
@@ -1902,7 +1902,7 @@ Use jobs for expensive work. Keep panel construction fast. Check cancellation in
 
 ---
 
-## Stage 18: register and use an artifact viewer
+## Stage 17: register and use an artifact viewer
 
 Stage 10 created an artifact of type:
 
@@ -2223,7 +2223,7 @@ That is the key reason artifact viewers are useful: they let producers of artifa
 
 ---
 
-## Stage 19: save and restore small panel state
+## Stage 18: save and restore small panel state
 
 Panels may implement `get_state()` and `restore_state(state)` so the workspace can preserve small UI state.
 
@@ -2275,7 +2275,7 @@ Put data in datasets/artifacts/services, and store only ids in panel state.
 
 ---
 
-## Stage 21: add plugin settings schema
+## Stage 19: add plugin settings schema
 
 Settings schemas let plugins describe configurable values without manually building all settings UI themselves.
 
@@ -2306,7 +2306,7 @@ Panels, services, and actions can then read plugin settings through the platform
 
 ---
 
-## Stage 22: create a complete tutorial plugin
+## Stage 20: create a complete tutorial plugin
 
 This example combines the common pieces into one plugin file. It registers:
 
