@@ -1308,6 +1308,24 @@ class EuclidCutoutPanel:
         except Exception:
              return None
         return value if np.isfinite(value) else None
+    
+    def _combine_global_and_channel_clip(self, channel_clip):
+        """Allows the global clip bar to control all three channels"""
+        global_low, global_high = self.clip_slider.value
+        channel_low, channel_high = channel_clip
+    
+        global_low = float(global_low)
+        global_high = float(global_high)
+        channel_low = float(channel_low)
+        channel_high = float(channel_high)
+    
+        span = max(global_high - global_low, 0.0)
+    
+        low = global_low + channel_low * span
+        high = global_low + channel_high * span
+
+        return low, high
+
 
     def _refresh_display(self) -> None:
         if self.image_container is None:
@@ -1315,12 +1333,11 @@ class EuclidCutoutPanel:
         try:
             filter_name = self.filter_input.value
             if filter_name == "Color":
-                low_clip = [self.rgb_clip_r.value[0],
-                            self.rgb_clip_g.value[0],
-                            self.rgb_clip_b.value[0],]
-                high_clip = [self.rgb_clip_r.value[1],
-                            self.rgb_clip_g.value[1],
-                            self.rgb_clip_b.value[1],]
+                r_low, r_high = self._combine_global_and_channel_clip(self.rgb_clip_r.value)
+                g_low, g_high = self._combine_global_and_channel_clip(self.rgb_clip_g.value)
+                b_low, b_high = self._combine_global_and_channel_clip(self.rgb_clip_b.value)
+                low_clip = [r_low, g_low, b_low]
+                high_clip = [r_high, g_high, b_high]
                 gamma_color = [self.gamma_r.value,
                                self.gamma_g.value,
                                self.gamma_b.value,]
