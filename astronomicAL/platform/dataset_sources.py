@@ -45,6 +45,26 @@ class DatasetSource(ABC):
     def row_count(self) -> Optional[int]:
         """Return row count if cheaply available."""
 
+    def count_where(
+        self,
+        *,
+        where_sql: Optional[str] = None,
+        params: Optional[Sequence[Any]] = None,
+    ) -> Optional[int]:
+        """
+        Return a filtered row count if the backend can do it cheaply.
+
+        This is intentionally separate from to_pandas(...), because selection
+        tools need counts without materialising selected rows.
+        """
+        if not where_sql:
+            count = self.row_count()
+            return None if count is None else int(count)
+
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement count_where()"
+        )
+
     @abstractmethod
     def to_pandas(
         self,
@@ -177,6 +197,18 @@ class PandasDatasetSource(DatasetSource):
         return [str(col) for col in self._df.columns]
 
     def row_count(self) -> int:
+        return int(len(self._df))
+
+    def count_where(
+        self,
+        *,
+        where_sql: Optional[str] = None,
+        params: Optional[Sequence[Any]] = None,
+    ) -> Optional[int]:
+        if where_sql:
+            raise NotImplementedError(
+                "PandasDatasetSource does not support SQL count_where()."
+            )
         return int(len(self._df))
 
     def to_pandas(
@@ -412,6 +444,28 @@ class DuckDBParquetDatasetSource(DatasetSource):
 
         self._row_count_cache = int(value)
         return self._row_count_cache
+
+    def count_where(
+        self,
+        *,
+        where_sql: Optional[str] = None,
+        params: Optional[Sequence[Any]] = None,
+    ) -> int:
+        sql = f"SELECT COUNT(*) AS n FROM {self._relation_sql()}"
+        sql_params: list[Any] = [self._path_argument()]
+
+        if where_sql:
+            sql += f" WHERE {where_sql}"
+            if params:
+                sql_params.extend(list(params))
+
+        con = self._connect()
+        try:
+            value = con.execute(sql, sql_params).fetchone()[0]
+        finally:
+            con.close()
+
+        return int(value or 0)
 
     def to_pandas(
         self,

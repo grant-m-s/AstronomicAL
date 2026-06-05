@@ -46,21 +46,6 @@ class MenuDashboard:
 
     # Transitional grouping while these panels still live in legacy custom_plots.
     LEGACY_HINTS: Dict[str, Tuple[str, str]] = {
-        "Notes Panel": ("Core", "Annotation"),
-        "Selection Set": ("Core", "Selection"),
-
-        "Euclid Cutout": ("Astro", "Images / Cutouts"),
-        "VLASS Cutout": ("Astro", "Images / Cutouts"),
-        "LoTSS Cutout": ("Astro", "Images / Cutouts"),
-
-        "DESI Spectra": ("Astro", "Spectra"),
-        "Euclid Spectra": ("Astro", "Spectra"),
-        "SDSS Spectra": ("Astro", "Spectra"),
-        "spec_analyser": ("Astro", "Spectra"),
-
-        "BroadBand SED": ("Astro", "SED / Photometry"),
-        "Aladin Lite": ("Astro", "Sky Viewers"),
-
         "SAMP Send": ("Astro", "Interop"),
         "SAMP Receive": ("Astro", "Interop"),
     }
@@ -447,16 +432,16 @@ class MenuDashboard:
             traceback.print_exc()
             extension_dict = {}
 
-        for title in extension_dict.keys():
-            entries.append(
-                MenuEntry(
-                    title=title,
-                    value=title,
-                    source="Extension",
-                    domain="Extensions",
-                    category="Extension Plots",
-                )
-            )
+        # for title in extension_dict.keys():
+        #     entries.append(
+        #         MenuEntry(
+        #             title=title,
+        #             value=title,
+        #             source="Extension",
+        #             domain="Extensions",
+        #             category="Extension Plots",
+        #         )
+        #     )
 
         entries.extend(plugin_entries)
 

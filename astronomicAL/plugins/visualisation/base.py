@@ -77,6 +77,9 @@ class BaseVisualisationPanel(param.Parameterized):
         self._last_refresh_reason = None
         self._last_focus_payload = None
 
+        self._force_next_render_rebind = False
+        self._post_attach_rebind_done = False
+
         self._interactive_sample_cache = {}
         self._interactive_sample_cache_max = 30
         self._last_interactive_frame_id = None
@@ -903,6 +906,30 @@ class BaseVisualisationPanel(param.Parameterized):
             getattr(self.state, "log_y", None),
             tuple(getattr(self.state, "label_filter", []) or []),
         )
+
+    def _schedule_post_attach_rebind(self, delay_ms: int = 500) -> None:
+        def _run():
+            if getattr(self, "_disposed", False):
+                return
+            if getattr(self, "_post_attach_rebind_done", False):
+                return
+
+            self._post_attach_rebind_done = True
+            self._force_next_render_rebind = True
+
+            try:
+                self.refresh()
+            finally:
+                self._force_next_render_rebind = False
+
+        try:
+            doc = pn.state.curdoc
+            if doc is not None:
+                doc.add_timeout_callback(_run, int(delay_ms))
+            else:
+                _run()
+        except Exception:
+            _run()
 
     def _schedule_refresh(self, *, reason: str = "unknown", delay_ms: Optional[int] = None):
         if delay_ms is None:
@@ -3069,6 +3096,6 @@ class BaseVisualisationPanel(param.Parameterized):
         )
 
         self._schedule_refresh(reason="panel.attach", delay_ms=50)
-        self._schedule_refresh(reason="panel.attach.late", delay_ms=300)
+        self._schedule_post_attach_rebind(delay_ms=500)
 
         return self._layout

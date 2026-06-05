@@ -39,7 +39,7 @@ def register(api) -> None:
             "set, move focus through selected row IDs, and create a derived "
             "dataset from the active selection."
         ),
-        category="Selection",
+        category="Multi-Selection",
         icon="list-checks",
         tags=["selection", "focus", "dataset", "review"],
         optional_mappings=[
@@ -1490,7 +1490,7 @@ class SelectionSetPanel:
                 0,
                 "focus",
                 [
-                    "◀" if str(row_id) == str(focus_row_id) else ""
+                    "▶" if str(row_id) == str(focus_row_id) else ""
                     for row_id in preview["row_id"]
                 ],
             )
@@ -1522,7 +1522,7 @@ class SelectionSetPanel:
         preview.insert(
             0,
             "focus",
-            ["◀" if str(row_id) == str(focus_row_id) else "" for row_id in row_ids],
+            ["▶" if str(row_id) == str(focus_row_id) else "" for row_id in row_ids],
         )
         return preview.head(50)
 

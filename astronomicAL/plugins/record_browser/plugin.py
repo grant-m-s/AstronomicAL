@@ -27,7 +27,7 @@ def register(api) -> None:
             "Browse the active dataset, inspect one record at a time, and "
             "publish the focused record through the platform selection service."
         ),
-        category="Core",
+        category="Single Selection",
         icon="list",
         tags=["core", "dataset", "selection", "records"],
         required_mappings=["record_id"],

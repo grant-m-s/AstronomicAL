@@ -44,6 +44,7 @@ class EventBus:
 
         self._trace_enabled: bool = trace
         self._trace_buf: Deque[Tuple[float, str, Any]] = deque(maxlen=trace_limit)
+        self._publish_seq: int = 0
 
     # --------------------
     # Tracing / inspection
@@ -99,13 +100,20 @@ class EventBus:
     # Metadata helpers
     # --------------------
     @staticmethod
-    def _normalise_meta(callback: EventCallback, meta: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def _normalise_meta(
+        callback: EventCallback,
+        meta: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         """
         Fill in any missing ownership metadata from a bound callback method.
         """
         meta = dict(meta or {})
 
-        callback_name = getattr(callback, "__qualname__", None) or getattr(callback, "__name__", None) or repr(callback)
+        callback_name = (
+            getattr(callback, "__qualname__", None)
+            or getattr(callback, "__name__", None)
+            or repr(callback)
+        )
         module = getattr(callback, "__module__", None)
 
         meta.setdefault("callback_name", callback_name)
@@ -142,6 +150,56 @@ class EventBus:
         meta.setdefault("owner_label", None)
         meta.setdefault("owner_kind", "subscriber")
         return meta
+
+    @staticmethod
+    def _payload_summary(payload: Any) -> str:
+        """
+        Summarise payloads without dumping huge selected ID lists.
+        """
+        if not isinstance(payload, dict):
+            return type(payload).__name__
+
+        parts: list[str] = []
+
+        for key in (
+            "dataset_id",
+            "selection_id",
+            "selection_set_id",
+            "row_id",
+            "focused_id",
+            "origin_panel_id",
+            "origin",
+        ):
+            if key in payload:
+                parts.append(f"{key}={payload.get(key)!r}")
+
+        for key in ("row_ids", "ids", "selected_ids"):
+            value = payload.get(key)
+            if isinstance(value, (list, tuple, set)):
+                parts.append(f"{key}_len={len(value):,}")
+
+        meta = payload.get("metadata")
+        if isinstance(meta, dict):
+            for key in (
+                "total_matches",
+                "published_ids",
+                "truncated",
+                "source",
+                "geometry",
+            ):
+                if key in meta:
+                    parts.append(f"metadata.{key}={meta.get(key)!r}")
+
+        return " ".join(parts) if parts else f"dict_keys={sorted(payload.keys())!r}"
+
+    @staticmethod
+    def _slow_threshold_for_topic(topic: str) -> float:
+        """
+        Lower threshold for selection topics while debugging UI stalls.
+        """
+        if topic.startswith("selection."):
+            return 0.01
+        return 0.05
 
     # --------------------
     # Pub/Sub
@@ -186,22 +244,39 @@ class EventBus:
                 self._subs.pop(sub.topic, None)
 
     def publish(self, topic: str, payload: Any = None) -> None:
-        """Publish synchronously to subscribers.
+        """
+        Publish synchronously to subscribers.
 
         If a subscriber raises, log it and continue.
         Also delivers to wildcard '*' subscribers.
         """
         publish_start = time.perf_counter()
-
-        if self._trace_enabled:
-            with self._lock:
-                self._trace_buf.append((time.time(), topic, payload))
+        threshold = self._slow_threshold_for_topic(topic)
 
         with self._lock:
+            self._publish_seq += 1
+            publish_id = self._publish_seq
+
+            if self._trace_enabled:
+                self._trace_buf.append((time.time(), topic, payload))
+
             callbacks = list(self._subs.get(topic, []))
             wildcard_callbacks = list(self._subs.get("*", []))
 
-        for _sid, cb, meta in callbacks + wildcard_callbacks:
+        all_callbacks = callbacks + wildcard_callbacks
+        payload_summary = self._payload_summary(payload)
+
+        if topic.startswith("selection."):
+            print(
+                "[AstronomicAL events] publish start "
+                f"id={publish_id} "
+                f"topic={topic!r} "
+                f"callbacks={len(all_callbacks)} "
+                f"payload={payload_summary}",
+                flush=True,
+            )
+
+        for _sid, cb, meta in all_callbacks:
             info = self._normalise_meta(cb, meta)
 
             cb_start = time.perf_counter()
@@ -212,9 +287,10 @@ class EventBus:
             finally:
                 duration = time.perf_counter() - cb_start
 
-                if duration >= 0.05:
+                if duration >= threshold:
                     print(
                         "[AstronomicAL events] slow subscriber "
+                        f"id={publish_id} "
                         f"topic={topic!r} "
                         f"duration={duration:.3f}s "
                         f"owner={info.get('owner_label')!r} "
@@ -226,13 +302,16 @@ class EventBus:
 
         total = time.perf_counter() - publish_start
 
-        if total >= 0.05:
+        if total >= threshold:
             print(
                 "[AstronomicAL events] publish complete "
+                f"id={publish_id} "
                 f"topic={topic!r} "
                 f"subscribers={len(callbacks)} "
                 f"wildcards={len(wildcard_callbacks)} "
-                f"duration={total:.3f}s",
+                f"callbacks={len(all_callbacks)} "
+                f"duration={total:.3f}s "
+                f"payload={payload_summary}",
                 flush=True,
             )
 

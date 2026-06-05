@@ -57,11 +57,10 @@ def register(api) -> None:
             "Attach notes and review decisions to the currently focused record. "
             "Works with any dataset that has a mapped record_id."
         ),
-        category="Core",
+        category="Labelling",
         icon="edit",
-        tags=["core", "annotations", "review", "notes"],
+        tags=["core", "annotations", "labelling", "review", "notes"],
         required_mappings=["record_id"],
-        optional_mappings=["target_label"],
         produces=[
             "annotation.created",
             "review.status.changed",
@@ -84,9 +83,9 @@ def register(api) -> None:
             "Summarise all annotation.note and review.status artifacts for the "
             "active dataset, with options to create a summary dataset or CSV artifact."
         ),
-        category="Core",
+        category="Labelling",
         icon="table",
-        tags=["core", "annotations", "summary", "export"],
+        tags=["core", "annotations", "summary", "export", "labelling"],
         produces=[
             "artifact.created",
             "dataset.loaded",

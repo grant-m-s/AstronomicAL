@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import time
-from typing import List, Optional, Sequence
+from typing import Any, List, Optional, Sequence
 
 import datashader as ds
 import holoviews as hv
@@ -57,6 +57,13 @@ from .utils import (
 SELECTION_OVERLAY_METADATA_KEY = "visualisation.scatter.overlay_points"
 SELECTION_OVERLAY_LIMIT_DEFAULT = 5000
 
+def _quote_sql_identifier(identifier: Any) -> str:
+    """
+    Quote a SQL identifier for DatasetSource where_sql strings.
+
+    Values must still be passed separately through params.
+    """
+    return '"' + str(identifier).replace('"', '""') + '"'
 
 class ScatterPanel(BaseVisualisationPanel):
     title = "Scatter Plot"
@@ -990,6 +997,400 @@ class ScatterPanel(BaseVisualisationPanel):
         except Exception:
             return SELECTION_OVERLAY_LIMIT_DEFAULT
 
+    def _infer_box_bounds_from_rendered_indices(
+        self,
+        frame: pd.DataFrame,
+        indices,
+        *,
+        pad_fraction: float = 0.02,
+    ):
+        """
+        Infer rectangular selection bounds from selected rendered points.
+
+        HoloViews/Bokeh sometimes emits Selection1D indices for box-select but
+        does not emit BoundsXY bounds for DynamicMap-backed scatter plots. This
+        helper lets us still detect likely box-select gestures and route them to
+        the backend exact-selection path.
+
+        Returns:
+            (detection_bounds, query_bounds)
+
+        detection_bounds are tight bounds around selected rendered points and
+        are used only to decide whether the gesture looks box-like.
+
+        query_bounds are slightly padded bounds used for the backend query, so
+        points close to the drawn box edge are less likely to be missed.
+        """
+        if frame is None or frame.empty:
+            return None
+
+        if not indices or len(indices) < 3:
+            return None
+
+        if INTERNAL_X not in frame.columns or INTERNAL_Y not in frame.columns:
+            return None
+
+        try:
+            x_values = frame[INTERNAL_X].to_numpy(copy=False)
+            y_values = frame[INTERNAL_Y].to_numpy(copy=False)
+            n_rows = len(frame)
+
+            valid_indices = [
+                int(index)
+                for index in indices
+                if 0 <= int(index) < n_rows
+            ]
+
+            if len(valid_indices) < 3:
+                return None
+
+            selected_x = x_values[valid_indices]
+            selected_y = y_values[valid_indices]
+
+            finite = np.isfinite(selected_x) & np.isfinite(selected_y)
+            if not bool(finite.any()):
+                return None
+
+            selected_x = selected_x[finite]
+            selected_y = selected_y[finite]
+
+            if len(selected_x) < 3:
+                return None
+
+            x_min = float(np.nanmin(selected_x))
+            x_max = float(np.nanmax(selected_x))
+            y_min = float(np.nanmin(selected_y))
+            y_max = float(np.nanmax(selected_y))
+
+            if not all(np.isfinite(value) for value in (x_min, x_max, y_min, y_max)):
+                return None
+
+            x_span = float(x_max - x_min)
+            y_span = float(y_max - y_min)
+
+            if x_span <= 0.0 or y_span <= 0.0:
+                return None
+
+            detection_bounds = (x_min, y_min, x_max, y_max)
+
+            try:
+                full_x = x_values[np.isfinite(x_values)]
+                full_y = y_values[np.isfinite(y_values)]
+
+                full_x_span = float(np.nanmax(full_x) - np.nanmin(full_x)) if len(full_x) else x_span
+                full_y_span = float(np.nanmax(full_y) - np.nanmin(full_y)) if len(full_y) else y_span
+            except Exception:
+                full_x_span = x_span
+                full_y_span = y_span
+
+            x_pad = max(
+                x_span * float(pad_fraction),
+                full_x_span * 1.0e-6,
+                1.0e-12,
+            )
+            y_pad = max(
+                y_span * float(pad_fraction),
+                full_y_span * 1.0e-6,
+                1.0e-12,
+            )
+
+            query_bounds = (
+                x_min - x_pad,
+                y_min - y_pad,
+                x_max + x_pad,
+                y_max + y_pad,
+            )
+
+            return detection_bounds, query_bounds
+
+        except Exception as exc:
+            print(
+                "[AstronomicAL scatter] failed to infer box bounds "
+                f"panel_id={self.panel_id} "
+                f"{type(exc).__name__}: {exc}",
+                flush=True,
+            )
+            return None
+
+    def _box_bounds_sql(self, bounds):
+        if bounds is None or len(bounds) != 4:
+            return None
+
+        x_col = getattr(self.state, "x", None)
+        y_col = getattr(self.state, "y", None)
+
+        if not x_col or not y_col:
+            return None
+
+        try:
+            left, bottom, right, top = bounds
+            x_min = min(float(left), float(right))
+            x_max = max(float(left), float(right))
+            y_min = min(float(bottom), float(top))
+            y_max = max(float(bottom), float(top))
+        except Exception:
+            return None
+
+        if not all(np.isfinite(value) for value in (x_min, x_max, y_min, y_max)):
+            return None
+
+        qx = _quote_sql_identifier(x_col)
+        qy = _quote_sql_identifier(y_col)
+
+        clauses = [
+            f"{qx} >= ?",
+            f"{qx} <= ?",
+            f"{qy} >= ?",
+            f"{qy} <= ?",
+        ]
+        params: list[Any] = [x_min, x_max, y_min, y_max]
+
+        if bool(getattr(self.state, "log_x", False)):
+            clauses.append(f"{qx} > 0")
+
+        if bool(getattr(self.state, "log_y", False)):
+            clauses.append(f"{qy} > 0")
+
+        return " AND ".join(clauses), params
+
+    def _selection_records_from_source_frame(
+        self,
+        frame: pd.DataFrame,
+        *,
+        record_id_col: str,
+        limit: Optional[int] = None,
+    ) -> list[dict]:
+        if frame is None or frame.empty:
+            return []
+
+        x_col = getattr(self.state, "x", None)
+        y_col = getattr(self.state, "y", None)
+
+        if not x_col or not y_col:
+            return []
+
+        required = [record_id_col, x_col, y_col]
+        if any(column not in frame.columns for column in required):
+            return []
+
+        out: list[dict] = []
+        max_rows = int(limit or self._selection_overlay_limit())
+
+        for _, row in frame.head(max_rows).iterrows():
+            try:
+                x_value = float(row[x_col])
+                y_value = float(row[y_col])
+            except Exception:
+                continue
+
+            if not np.isfinite(x_value) or not np.isfinite(y_value):
+                continue
+
+            if bool(getattr(self.state, "log_x", False)) and x_value <= 0:
+                continue
+
+            if bool(getattr(self.state, "log_y", False)) and y_value <= 0:
+                continue
+
+            row_id = row.get(record_id_col, "")
+            out.append(
+                {
+                    INTERNAL_ROW_ID: "" if row_id is None else str(row_id),
+                    INTERNAL_X: x_value,
+                    INTERNAL_Y: y_value,
+                }
+            )
+
+        return out
+
+    def _box_selection_from_dataset_source(
+        self,
+        bounds,
+        *,
+        max_ids: int,
+        overlay_limit: Optional[int] = None,
+    ):
+        """
+        Exact box selection for SQL-capable DatasetSource backends.
+
+        This avoids scanning/stringifying the full prepared scatter frame for
+        large DuckDB/Parquet datasets. Returns None when the source cannot
+        satisfy the query, so callers can fall back to row_ids_in_bounds(...).
+        """
+        dataset_id = self._dataset_id()
+        datasets = getattr(self.context, "datasets", None)
+
+        if not dataset_id or datasets is None:
+            return None
+
+        record_id_col = getattr(self.state, "record_id_col", None)
+        x_col = getattr(self.state, "x", None)
+        y_col = getattr(self.state, "y", None)
+
+        if (
+            not record_id_col
+            or record_id_col == "Use Index"
+            or not x_col
+            or not y_col
+        ):
+            return None
+
+        sql_parts = self._box_bounds_sql(bounds)
+        if sql_parts is None:
+            return None
+
+        where_sql, params = sql_parts
+
+        try:
+            source = datasets.get_source(dataset_id)
+        except Exception:
+            return None
+
+        try:
+            available_columns = set(str(column) for column in source.columns())
+        except Exception:
+            available_columns = set()
+
+        required_columns = [str(record_id_col), str(x_col), str(y_col)]
+        if available_columns and any(column not in available_columns for column in required_columns):
+            return None
+
+        max_ids = max(1, int(max_ids))
+        overlay_limit = max(1, int(overlay_limit or self._selection_overlay_limit()))
+        query_limit = max(max_ids, overlay_limit)
+
+        columns = list(dict.fromkeys([str(record_id_col), str(x_col), str(y_col)]))
+
+        total_matches = None
+        count_where = getattr(source, "count_where", None)
+        if callable(count_where):
+            try:
+                total_matches = int(
+                    count_where(where_sql=where_sql, params=params)
+                )
+            except Exception as exc:
+                print(
+                    "[AstronomicAL scatter] source count_where failed; "
+                    "falling back to limited query count "
+                    f"panel_id={self.panel_id} "
+                    f"{type(exc).__name__}: {exc}",
+                    flush=True,
+                )
+                total_matches = None
+
+        try:
+            selected_frame = source.to_pandas(
+                columns=columns,
+                where_sql=where_sql,
+                params=params,
+                limit=query_limit,
+            )
+        except TypeError:
+            return None
+        except Exception as exc:
+            print(
+                "[AstronomicAL scatter] source box selection failed; "
+                "falling back to prepared-frame selection "
+                f"panel_id={self.panel_id} "
+                f"{type(exc).__name__}: {exc}",
+                flush=True,
+            )
+            return None
+
+        if selected_frame is None or selected_frame.empty:
+            return [], int(total_matches or 0), False, []
+
+        if str(record_id_col) not in selected_frame.columns:
+            return None
+
+        row_ids = (
+            selected_frame[str(record_id_col)]
+            .head(max_ids)
+            .astype(str)
+            .tolist()
+        )
+
+        if total_matches is None:
+            total_matches = len(row_ids)
+
+        truncated = int(total_matches) > len(row_ids)
+
+        overlay_points = self._selection_records_from_source_frame(
+            selected_frame,
+            record_id_col=str(record_id_col),
+            limit=overlay_limit,
+        )
+
+        print(
+            "[AstronomicAL scatter] source-backed box selection "
+            f"panel_id={self.panel_id} "
+            f"total={int(total_matches):,} "
+            f"published={len(row_ids):,} "
+            f"overlay={len(overlay_points):,} "
+            f"truncated={bool(truncated)}",
+            flush=True,
+        )
+
+        return row_ids, int(total_matches), bool(truncated), overlay_points
+
+    def _box_selection_fallback_from_prepared_frame(
+        self,
+        data: PreparedFrame,
+        bounds,
+        *,
+        max_ids: int,
+    ):
+        row_ids, total, truncated = row_ids_in_bounds(
+            data,
+            bounds,
+            max_ids=int(max_ids),
+        )
+
+        overlay_points = self._selection_overlay_records_from_bounds(
+            data,
+            bounds,
+            limit=self._selection_overlay_limit(),
+        )
+
+        return row_ids, total, truncated, overlay_points
+
+    def _publish_box_selection(
+        self,
+        data: PreparedFrame,
+        bounds,
+        *,
+        max_ids: Optional[int] = None,
+    ) -> None:
+        if bounds is None:
+            return
+
+        max_ids = int(max_ids or getattr(self.state, "max_selection_ids", 5000))
+
+        result = self._box_selection_from_dataset_source(
+            bounds,
+            max_ids=max_ids,
+            overlay_limit=self._selection_overlay_limit(),
+        )
+
+        if result is None:
+            result = self._box_selection_fallback_from_prepared_frame(
+                data,
+                bounds,
+                max_ids=max_ids,
+            )
+
+        row_ids, total, truncated, overlay_points = result
+
+        if not row_ids:
+            return
+
+        self._publish_selection(
+            row_ids,
+            bounds=bounds,
+            total_matches=total,
+            truncated=truncated,
+            overlay_points=overlay_points,
+        )
 
     def _active_selection_state(self):
         selection = getattr(self.context, "selection", None)
@@ -1482,8 +1883,11 @@ class ScatterPanel(BaseVisualisationPanel):
             use_raster=use_raster,
         )
 
+        force_rebind = bool(getattr(self, "_force_next_render_rebind", False))
+
         if (
-            getattr(self, "_last_scatter_render_identity", None) == render_identity
+            not force_rebind
+            and getattr(self, "_last_scatter_render_identity", None) == render_identity
             and getattr(self, "_last_scatter_assigned_object", None) is not None
             and self.plot_pane.object is getattr(self, "_last_scatter_assigned_object", None)
         ):
@@ -2369,37 +2773,67 @@ class ScatterPanel(BaseVisualisationPanel):
 
             bounds = payload.get("bounds")
 
-            # Box-select path. If the selected indices are effectively the same
-            # as the rendered points inside the rectangle, treat it as a box and
-            # compute exact row IDs from the full prepared data.
-            if bounds is not None:
-                box_rendered_count = rendered_count_in_bounds(frame, bounds)
+            # Box-select path.
+            #
+            # Preferred path:
+            #   BoundsXY gives us the actual drawn rectangle.
+            #
+            # Fallback path:
+            #   On DynamicMap-backed interactive scatter plots, Bokeh/HoloViews
+            #   often emits Selection1D indices but no BoundsXY bounds. In that
+            #   case, infer tight bounds from the selected rendered points and
+            #   only treat it as box-select if the selected points are close to
+            #   all rendered points inside that inferred rectangle.
+            detection_bounds = bounds
+            query_bounds = bounds
+            inferred_bounds = None
+
+            if detection_bounds is None:
+                inferred_bounds = self._infer_box_bounds_from_rendered_indices(
+                    frame,
+                    indices,
+                )
+                if inferred_bounds is not None:
+                    detection_bounds, query_bounds = inferred_bounds
+
+            if detection_bounds is not None:
+                box_rendered_count = rendered_count_in_bounds(
+                    frame,
+                    detection_bounds,
+                )
                 selected_count = len(indices)
 
-                tolerance = max(3, int(0.02 * max(box_rendered_count, selected_count, 1)))
-                is_box_like = abs(box_rendered_count - selected_count) <= tolerance
+                tolerance = max(
+                    3,
+                    int(0.05 * max(box_rendered_count, selected_count, 1)),
+                )
 
-                if is_box_like:
-                    row_ids, total, truncated = row_ids_in_bounds(
-                        data,
-                        bounds,
-                        max_ids=int(self.state.max_selection_ids),
+                is_box_like = (
+                    selected_count >= 3
+                    and box_rendered_count > 0
+                    and abs(box_rendered_count - selected_count) <= tolerance
+                )
+
+                if inferred_bounds is not None:
+                    print(
+                        "[AstronomicAL scatter] inferred box bounds "
+                        f"panel_id={self.panel_id} "
+                        f"selected={selected_count:,} "
+                        f"rendered_in_bounds={box_rendered_count:,} "
+                        f"tolerance={tolerance:,} "
+                        f"is_box_like={is_box_like} "
+                        f"detection_bounds={detection_bounds!r} "
+                        f"query_bounds={query_bounds!r}",
+                        flush=True,
                     )
 
-                    if row_ids:
-                        overlay_points = self._selection_overlay_records_from_bounds(
-                            data,
-                            bounds,
-                        )
-
-                        self._publish_selection(
-                            row_ids,
-                            bounds=bounds,
-                            total_matches=total,
-                            truncated=truncated,
-                            overlay_points=overlay_points,
-                        )
-                        return
+                if is_box_like:
+                    self._publish_box_selection(
+                        data,
+                        query_bounds,
+                        max_ids=int(self.state.max_selection_ids),
+                    )
+                    return
 
             # Lasso path. This uses the final stable selected indices from the
             # current rendered frame. When zoomed in under the sample limit, all
@@ -2451,6 +2885,15 @@ class ScatterPanel(BaseVisualisationPanel):
                 indices,
             )
 
+            print(
+                "[Scatter] publish_latest_selection",
+                "seq=", seq,
+                "current_seq=", getattr(self, "_selection_event_seq", None),
+                "payload=", getattr(self, "_latest_selection_payload", None),
+                "frame_empty=", getattr(self, "_interactive_current_frame", pd.DataFrame()).empty,
+                flush=True,
+            )
+
             self._publish_selection(
                 deduped,
                 bounds=None,
@@ -2462,6 +2905,7 @@ class ScatterPanel(BaseVisualisationPanel):
         self._publish_latest_selection_callback = publish_latest_selection
 
         def on_select(event):
+
             if time.monotonic() < getattr(self, "_ignore_selection_events_until", 0.0):
                 return
 
@@ -2484,6 +2928,21 @@ class ScatterPanel(BaseVisualisationPanel):
                 "time": time.monotonic(),
             }
 
+            print(
+                "[Scatter] on_select fired",
+                "new=",
+                event.new,
+                "bounds=",
+                bounds,
+                "ignore_until=",
+                getattr(self, "_ignore_selection_events_until", 0.0),
+                "now=",
+                time.monotonic(),
+                "panel_id=",
+                self.panel_id,
+                flush=True,
+            )
+    
             self._schedule_selection_publish(seq, 450)
 
         self._watch_param(bounds_stream, on_bounds, "bounds", render_scoped=True)
@@ -2657,23 +3116,10 @@ class ScatterPanel(BaseVisualisationPanel):
             if not bounds:
                 return
 
-            row_ids, total, truncated = row_ids_in_bounds(
+            self._publish_box_selection(
                 data,
                 bounds,
                 max_ids=int(self.state.max_selection_ids),
-            )
-
-            overlay_points = self._selection_overlay_records_from_bounds(
-                data,
-                bounds,
-            )
-
-            self._publish_selection(
-                row_ids,
-                bounds=bounds,
-                total_matches=total,
-                truncated=truncated,
-                overlay_points=overlay_points,
             )
 
         self._watch_param(bounds_stream, on_bounds, "bounds", render_scoped=True)

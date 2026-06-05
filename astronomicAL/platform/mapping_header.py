@@ -550,15 +550,15 @@ class MappingAlertController:
                 ),
             ]
 
-            sorted_items = sorted(
-                items,
-                key=lambda pair: (
-                    not bool(pair[1].get("required", True)),
-                    str(pair[1].get("display_name") or pair[1].get("semantic_name", "")).casefold(),
-                ),
-            )
+            # sorted_items = sorted(
+            #     items,
+            #     key=lambda pair: (
+            #         not bool(pair[1].get("required", True)),
+            #         str(pair[1].get("display_name") or pair[1].get("semantic_name", "")).casefold(),
+            #     ),
+            # )
 
-            for key, item in sorted_items:
+            for key, item in items:
                 current = self.context.datasets.get_mapping(
                     dataset_id,
                     item["semantic_name"],

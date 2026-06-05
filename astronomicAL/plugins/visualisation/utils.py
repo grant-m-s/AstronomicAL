@@ -1729,32 +1729,51 @@ def row_ids_in_bounds(
     if bounds is None or len(bounds) != 4 or data.empty:
         return [], 0, False
 
-    left, bottom, right, top = bounds
-
-    x_min = min(left, right)
-    x_max = max(left, right)
-    y_min = min(bottom, top)
-    y_max = max(bottom, top)
-
-    frame = data.frame
-    if INTERNAL_Y not in frame.columns:
+    try:
+        left, bottom, right, top = bounds
+        x_min = min(float(left), float(right))
+        x_max = max(float(left), float(right))
+        y_min = min(float(bottom), float(top))
+        y_max = max(float(bottom), float(top))
+    except Exception:
         return [], 0, False
 
+    frame = data.frame
+
+    if (
+        frame is None
+        or frame.empty
+        or INTERNAL_X not in frame.columns
+        or INTERNAL_Y not in frame.columns
+        or INTERNAL_ROW_ID not in frame.columns
+    ):
+        return [], 0, False
+
+    x = frame[INTERNAL_X].to_numpy(copy=False)
+    y = frame[INTERNAL_Y].to_numpy(copy=False)
+
     mask = (
-        (frame[INTERNAL_X].to_numpy(copy=False) >= x_min)
-        & (frame[INTERNAL_X].to_numpy(copy=False) <= x_max)
-        & (frame[INTERNAL_Y].to_numpy(copy=False) >= y_min)
-        & (frame[INTERNAL_Y].to_numpy(copy=False) <= y_max)
+        np.isfinite(x)
+        & np.isfinite(y)
+        & (x >= x_min)
+        & (x <= x_max)
+        & (y >= y_min)
+        & (y <= y_max)
     )
 
     indices = np.flatnonzero(mask)
     total = int(len(indices))
+
     if total == 0:
         return [], 0, False
 
-    truncated = total > int(max_ids)
-    if truncated:
-        indices = indices[: int(max_ids)]
+    max_ids = max(1, int(max_ids))
+    truncated = total > max_ids
 
-    row_ids = frame.iloc[indices][INTERNAL_ROW_ID].astype(str).tolist()
+    if truncated:
+        indices = indices[:max_ids]
+
+    row_values = frame[INTERNAL_ROW_ID].to_numpy(copy=False)
+    row_ids = [str(value) for value in row_values[indices]]
+
     return row_ids, total, truncated
