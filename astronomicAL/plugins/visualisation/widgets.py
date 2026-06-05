@@ -54,6 +54,22 @@ def settings_int_input(parameter, *, name: str, width: int = 140):
     )
 
 
+def settings_float_input(parameter, *, name: str, width: int = 120):
+    """Compact float input for settings panels.
+
+    The corresponding Param parameter should usually have allow_None=True
+    when an empty widget should mean "automatic".
+    """
+    return pn.widgets.FloatInput.from_param(
+        parameter,
+        name=name,
+        width=width,
+        height=50,
+        sizing_mode="fixed",
+        margin=(0, 6, 2, 6),
+    )
+
+
 def settings_float_slider(parameter, *, name: str, width: int = 180):
     return pn.widgets.FloatSlider.from_param(
         parameter,
@@ -94,7 +110,6 @@ def settings_box(*controls):
     should fit its content naturally and should not try to stretch with the
     outer plot panel.
     """
-
     return pn.FlexBox(
         *controls,
         sizing_mode="stretch_width",

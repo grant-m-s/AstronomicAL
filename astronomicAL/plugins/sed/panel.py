@@ -1,21 +1,30 @@
 from __future__ import annotations
 
 from pathlib import Path
+import math
 from typing import Any, Dict, List, Mapping, Optional, Sequence
+
 import html
 import traceback
 
 import holoviews as hv
 import pandas as pd
 import panel as pn
+from bokeh.models import CustomJSTickFormatter, LinearAxis, NormalHead
 
-from .service import SEDRuntime
+from .service import SEDRuntime, SED_UNIT_OPTIONS, normalise_sed_unit
 
 PLUGIN_ID = "astro.sed"
 RUNTIME_SERVICE_KEY = f"{PLUGIN_ID}.runtime"
 SED_ARTIFACT_TYPE = "astro.sed.broadband"
 MIN_POINTS_TO_PLOT = 3
 SHOW_SED_ERROR_BARS_BY_DEFAULT = True
+SHOW_AB_MAGNITUDE_AXIS_BY_DEFAULT = True
+UPPER_LIMIT_ARROW_SCALE = 0.6
+PLOT_UNIT_MICROJY = "microJy"
+PLOT_UNIT_NUFNU = "erg/s/cm² (νFν)"
+PLOT_UNIT_OPTIONS = [PLOT_UNIT_MICROJY, PLOT_UNIT_NUFNU]
+SPEED_OF_LIGHT_CM_S = 2.99792458e10
 
 
 def _safe_str(value: Any) -> str:
@@ -25,79 +34,198 @@ def _safe_str(value: Any) -> str:
 def _payload_records(payload: Mapping[str, Any] | None) -> List[Dict[str, Any]]:
     if not payload:
         return []
+
     records = payload.get("records", [])
     if isinstance(records, list):
         return [dict(item) for item in records if isinstance(item, Mapping)]
+
     return []
+
+
+
+def microjy_to_abmag(flux_uJy: float) -> float:
+    """Convert microJy to AB magnitude."""
+    return 23.9 - 2.5 * math.log10(float(flux_uJy))
+
+
+def add_ab_magnitude_axis(plot, element) -> None:
+    """Bokeh hook: add a right-hand AB-magnitude axis to a flux-density plot.
+
+    The plot y-axis remains flux density in microJy.  The right axis reuses the
+    same tick locations and formats them as m_AB = 23.9 - 2.5 log10(F_uJy).
+    This keeps the magnitude labels aligned even when the flux axis is log-scaled.
+    """
+    fig = plot.state
+
+    # Avoid adding duplicate right axes when HoloViews re-renders the element.
+    for axis in getattr(fig, "right", []):
+        if getattr(axis, "axis_label", None) == "AB magnitude":
+            return
+
+    formatter = CustomJSTickFormatter(
+        code="""
+        if (tick <= 0 || !isFinite(tick)) {
+            return "";
+        }
+        const mag = 23.9 - 2.5 * Math.log10(tick);
+        return mag.toFixed(1);
+        """
+    )
+
+    mag_axis = LinearAxis(
+        axis_label="AB magnitude",
+        formatter=formatter,
+        major_label_text_color="black",
+        axis_label_text_color="black",
+    )
+    fig.add_layout(mag_axis, "right")
+
+def _microjy_to_nufnu(flux_uJy: float, wavelength_um: float) -> float:
+    """Convert F_nu in microJy to nu F_nu in erg/s/cm^2."""
+    return (SPEED_OF_LIGHT_CM_S / (float(wavelength_um) * 1.0e-4)) * float(flux_uJy) * 1.0e-29
+
+
+def _normalise_plot_unit(value: Any) -> str:
+    value = str(value or PLOT_UNIT_MICROJY).strip()
+    aliases = {
+        "microjy": PLOT_UNIT_MICROJY,
+        "ujy": PLOT_UNIT_MICROJY,
+        "µjy": PLOT_UNIT_MICROJY,
+        "flux_density": PLOT_UNIT_MICROJY,
+        "flux density": PLOT_UNIT_MICROJY,
+        "nufnu": PLOT_UNIT_NUFNU,
+        "nu fnu": PLOT_UNIT_NUFNU,
+        "nuFnu": PLOT_UNIT_NUFNU,
+        "erg/s": PLOT_UNIT_NUFNU,
+        "erg/s/cm2": PLOT_UNIT_NUFNU,
+        "erg/s/cm^2": PLOT_UNIT_NUFNU,
+        "erg/s/cm²": PLOT_UNIT_NUFNU,
+    }
+    return aliases.get(value.lower(), value if value in PLOT_UNIT_OPTIONS else PLOT_UNIT_MICROJY)
 
 
 def create_sed_plot(
     records: Sequence[Mapping[str, Any]],
     *,
     show_error_bars: bool = SHOW_SED_ERROR_BARS_BY_DEFAULT,
+    show_fwhm_error_bars: bool = True,
+    show_magnitude_axis: bool = SHOW_AB_MAGNITUDE_AXIS_BY_DEFAULT,
+    plot_unit: str = PLOT_UNIT_MICROJY,
+    upper_limit_arrow_scale: float = UPPER_LIMIT_ARROW_SCALE,
 ) -> hv.Overlay | hv.Element:
     """Create the broadband SED plot.
 
-    Error bars come from the legacy SED JSON fields:
+    The runtime stores all photometry as microJy.  The plotting layer can show
+    either F_nu in microJy or nu F_nu in erg/s/cm^2.  The right-hand AB
+    magnitude axis is only meaningful for F_nu, so it is disabled for nu F_nu.
 
-    - FWHM  -> horizontal wavelength/filter-width bars
-    - error -> vertical magnitude/flux uncertainty bars
+    Negative ``flux_error_uJy`` values are interpreted as upper limits.  Positive
+    errors larger than the flux are also drawn as downward-arrow limit markers,
+    matching the behaviour of the legacy SED panel.
     """
+    plot_unit = _normalise_plot_unit(plot_unit)
+    use_nufnu = plot_unit == PLOT_UNIT_NUFNU
+    show_magnitude_axis = bool(show_magnitude_axis and not use_nufnu)
+
+    y_col = "nuFnu_erg_s_cm2" if use_nufnu else "flux_uJy"
+    y_err_col = "nuFnu_error_erg_s_cm2" if use_nufnu else "flux_error_uJy"
+    y_label = r"νFν (erg s⁻¹ cm⁻²)" if use_nufnu else "flux density (µJy)"
 
     data = pd.DataFrame([dict(item) for item in records or []])
+    required = {"wavelength (µm)", "flux_uJy"}
 
-    required = {"wavelength (µm)", "magnitude"}
+    empty = hv.Scatter(
+        pd.DataFrame({"wavelength (µm)": [], y_col: []}),
+        kdims=["wavelength (µm)"],
+        vdims=[y_col],
+    ).opts(
+        responsive=True,
+        active_tools=["pan", "wheel_zoom"],
+        logx=True,
+        logy=True,
+        xlabel="wavelength (µm)",
+        ylabel=y_label,
+        hooks=[add_ab_magnitude_axis] if show_magnitude_axis else [],
+    )
+
     if data.empty or not required.issubset(set(data.columns)):
-        return hv.Scatter(
-            pd.DataFrame({"wavelength (µm)": [], "magnitude": []}),
-            kdims=["wavelength (µm)"],
-            vdims=["magnitude"],
-        ).opts(
-            responsive=True,
-            active_tools=["pan", "wheel_zoom"],
-            invert_yaxis=True,
-            logx=True,
-            xlabel="wavelength (µm)",
-            ylabel="magnitude",
-        )
+        return empty
 
-    for column in ("wavelength (µm)", "magnitude", "FWHM", "error"):
+    for column in ("wavelength (µm)", "flux_uJy", "flux_error_uJy", "FWHM"):
         if column not in data.columns:
             data[column] = 0
         data[column] = pd.to_numeric(data[column], errors="coerce")
 
-    data = data.dropna(subset=["wavelength (µm)", "magnitude"])
-    data = data[data["wavelength (µm)"] > 0]
+    data = data.dropna(subset=["wavelength (µm)", "flux_uJy"])
+    data = data[(data["wavelength (µm)"] > 0) & (data["flux_uJy"] > 0)]
     data = data.sort_values("wavelength (µm)")
 
+    if use_nufnu and not data.empty:
+        scale = SPEED_OF_LIGHT_CM_S / (data["wavelength (µm)"] * 1.0e-4) * 1.0e-29
+        data[y_col] = data["flux_uJy"] * scale
+        data[y_err_col] = data["flux_error_uJy"] * scale
+    else:
+        data[y_col] = data["flux_uJy"]
+        data[y_err_col] = data["flux_error_uJy"]
+
+    data = data.dropna(subset=[y_col])
+    data = data[data[y_col] > 0]
+
     if len(data) < MIN_POINTS_TO_PLOT:
-        return hv.Scatter(
-            pd.DataFrame({"wavelength (µm)": [], "magnitude": []}),
+        return empty
+
+    # Limit classification follows the legacy panel:
+    #   error < 0        -> upper limit
+    #   error > flux     -> very uncertain measurement, plotted with an arrow
+    #   0 < error <= flux -> ordinary symmetric error bar
+    data["is_upper_limit"] = data[y_err_col] < 0
+    data["has_larger_error"] = data[y_err_col] > data[y_col]
+    data["is_detection"] = ~(data["is_upper_limit"] | data["has_larger_error"])
+
+    detection_data = data[data["is_detection"]].copy()
+
+    if len(detection_data) >= 2:
+        overlay: hv.Overlay | hv.Element = hv.Curve(
+            detection_data,
             kdims=["wavelength (µm)"],
-            vdims=["magnitude"],
+            vdims=[y_col],
         ).opts(
             responsive=True,
             active_tools=["pan", "wheel_zoom"],
-            invert_yaxis=True,
-            logx=True,
-            xlabel="wavelength (µm)",
-            ylabel="magnitude",
+            line_width=2,
+        )
+    else:
+        overlay = hv.Curve(
+            pd.DataFrame({"wavelength (µm)": [], y_col: []}),
+            kdims=["wavelength (µm)"],
+            vdims=[y_col],
+        ).opts(
+            responsive=True,
+            active_tools=["pan", "wheel_zoom"],
+            line_width=2,
         )
 
-    line = hv.Curve(
-        data,
-        kdims=["wavelength (µm)"],
-        vdims=["magnitude"],
-    ).opts(
-        responsive=True,
-        active_tools=["pan", "wheel_zoom"],
-        line_width=2,
-    )
+    vdims = [
+        y_col,
+        "band",
+        "flux_uJy",
+        "flux_error_uJy",
+        "FWHM",
+        "input_value",
+        "input_error",
+        "input_unit",
+        "value_column",
+        "error_column",
+        "is_upper_limit",
+        "has_larger_error",
+    ]
+    if use_nufnu:
+        vdims.extend(["nuFnu_erg_s_cm2", "nuFnu_error_erg_s_cm2"])
 
     points = hv.Scatter(
         data,
         kdims=["wavelength (µm)"],
-        vdims=["magnitude", "band", "FWHM", "error"],
+        vdims=vdims,
     ).opts(
         marker="circle",
         alpha=0.8,
@@ -105,51 +233,102 @@ def create_sed_plot(
         active_tools=["pan", "wheel_zoom"],
     )
 
-    overlay = line * points
+    overlay = overlay * points
 
     if show_error_bars:
-        y_error_rows = []
-        for _, row in data.iterrows():
-            err = float(row.get("error", 0) or 0)
-            if err > 0:
-                y_error_rows.append(
+        good_error_data = data[
+            data["is_detection"]
+            & data[y_err_col].notna()
+            & (data[y_err_col] > 0)
+        ]
+
+        if not good_error_data.empty:
+            overlay = overlay * hv.ErrorBars(
+                (
+                    good_error_data["wavelength (µm)"].to_numpy(),
+                    good_error_data[y_col].to_numpy(),
+                    good_error_data[y_err_col].to_numpy(),
+                    good_error_data[y_err_col].to_numpy(),
+                ),
+                kdims="wavelength (µm)",
+                vdims=[y_col, "yneg", "ypos"],
+            ).opts(
+                color="black",
+                line_width=1.5,
+                active_tools=["pan", "wheel_zoom"],
+            )
+
+        upper_limit_data = data[data["is_upper_limit"]].copy()
+        if not upper_limit_data.empty:
+            arrow_length = upper_limit_arrow_scale * upper_limit_data[y_col].to_numpy()
+            overlay = overlay * hv.ErrorBars(
+                (
+                    upper_limit_data["wavelength (µm)"].to_numpy(),
+                    upper_limit_data[y_col].to_numpy(),
+                    arrow_length,
+                    0.0 * arrow_length,
+                ),
+                kdims="wavelength (µm)",
+                vdims=[y_col, "yneg", "ypos"],
+            ).opts(
+                color="black",
+                lower_head=NormalHead(size=8),
+                line_width=1.5,
+                active_tools=["pan", "wheel_zoom"],
+            )
+
+        larger_error_data = data[data["has_larger_error"]].copy()
+        if not larger_error_data.empty:
+            arrow_length = upper_limit_arrow_scale * larger_error_data[y_col].to_numpy()
+            overlay = overlay * hv.ErrorBars(
+                (
+                    larger_error_data["wavelength (µm)"].to_numpy(),
+                    larger_error_data[y_col].to_numpy(),
+                    arrow_length,
+                    larger_error_data[y_err_col].to_numpy(),
+                ),
+                kdims="wavelength (µm)",
+                vdims=[y_col, "yneg", "ypos"],
+            ).opts(
+                color="black",
+                lower_head=NormalHead(size=8),
+                line_width=1.5,
+                active_tools=["pan", "wheel_zoom"],
+            )
+
+        if show_fwhm_error_bars:
+            x_error_data = data[data["FWHM"].notna() & (data["FWHM"] > 0)]
+            if not x_error_data.empty:
+                half_fwhm = 0.5 * x_error_data["FWHM"].to_numpy()
+                overlay = overlay * hv.ErrorBars(
                     (
-                        float(row["wavelength (µm)"]),
-                        float(row["magnitude"]),
-                        err,
-                    )
+                        x_error_data["wavelength (µm)"].to_numpy(),
+                        x_error_data[y_col].to_numpy(),
+                        half_fwhm,
+                        half_fwhm,
+                    ),
+                    kdims="wavelength (µm)",
+                    vdims=[y_col, "xneg", "xpos"],
+                    horizontal=True,
+                ).opts(
+                    color="black",
+                    lower_head=None,
+                    upper_head=None,
+                    active_tools=["pan", "wheel_zoom"],
                 )
-
-        if y_error_rows:
-            overlay = overlay * hv.ErrorBars(y_error_rows)
-
-        x_error_rows = []
-        for _, row in data.iterrows():
-            fwhm = float(row.get("FWHM", 0) or 0)
-            if fwhm > 0:
-                x_error_rows.append(
-                    (
-                        float(row["wavelength (µm)"]),
-                        float(row["magnitude"]),
-                        0.5 * fwhm,
-                    )
-                )
-
-        if x_error_rows:
-            overlay = overlay * hv.ErrorBars(x_error_rows, horizontal=True)
 
     return overlay.opts(
-        invert_yaxis=True,
         logx=True,
+        logy=True,
         responsive=True,
         active_tools=["pan", "wheel_zoom"],
         xlabel="wavelength (µm)",
-        ylabel="magnitude",
+        ylabel=y_label,
+        hooks=[add_ab_magnitude_axis] if show_magnitude_axis else [],
     )
 
-
 class BroadbandSEDPanel:
-    state_version = 1
+    state_version = 3
 
     def __init__(
         self,
@@ -164,15 +343,42 @@ class BroadbandSEDPanel:
         self.restore_state = dict(restore_state or {})
         self.subscriptions: List[Any] = []
         self.job_handles: List[Any] = []
-
         self.runtime: SEDRuntime = self._get_runtime()
 
         self.sed_file: Optional[str] = self.restore_state.get("sed_file")
+
         self.column_overrides: Dict[str, str] = dict(
             self.restore_state.get("column_overrides") or {}
         )
-
         self.pending_column_overrides: Dict[str, str] = dict(self.column_overrides)
+
+        self.error_column_overrides: Dict[str, str] = dict(
+            self.restore_state.get("error_column_overrides") or {}
+        )
+        self.pending_error_column_overrides: Dict[str, str] = dict(
+            self.error_column_overrides
+        )
+
+        self.unit_overrides: Dict[str, str] = {
+            str(key): normalise_sed_unit(value)
+            for key, value in dict(self.restore_state.get("unit_overrides") or {}).items()
+        }
+        self.pending_unit_overrides: Dict[str, str] = dict(self.unit_overrides)
+
+        self.show_fwhm_error_bars: bool = bool(
+            self.restore_state.get("show_fwhm_error_bars", True)
+        )
+        self.plot_unit: str = _normalise_plot_unit(
+            self.restore_state.get("plot_unit", PLOT_UNIT_MICROJY)
+        )
+        self.show_flux_table: bool = bool(
+            self.restore_state.get("show_flux_table", False)
+        )
+        self.settings_expanded: bool = bool(
+            self.restore_state.get("settings_expanded", False)
+        )
+        self.latest_payload: Optional[Dict[str, Any]] = None
+        self.latest_payload_artifact_id: Optional[str] = None
 
         self.current_dataset_id: Optional[str] = None
         self.current_row_id: Optional[str] = None
@@ -185,25 +391,57 @@ class BroadbandSEDPanel:
             sizing_mode="stretch_width",
             min_width=360,
         )
-
         self.refresh_button = pn.widgets.Button(
             name="Refresh",
             button_type="primary",
             width=90,
         )
-
         self.create_file_button = pn.widgets.Button(
             name="Create new SED data file",
             button_type="default",
             width=190,
         )
-
         self.clear_mappings_button = pn.widgets.Button(
-            name="Clear local column mappings",
+            name="Clear local SED mappings",
             button_type="default",
             width=190,
         )
-
+        self.settings_button = pn.widgets.Button(
+            name="⚙",
+            width=32,
+            height=32,
+            button_type="default",
+            sizing_mode="fixed",
+            margin=(14, 0, 0, 0),
+        )
+        self.show_fwhm_checkbox = pn.widgets.Checkbox(
+            name="Show horizontal FWHM error bars",
+            value=self.show_fwhm_error_bars,
+            sizing_mode="stretch_width",
+            margin=(0, 0, 8, 0),
+        )
+        self.plot_unit_select = pn.widgets.Select(
+            name="Plotting units",
+            options=PLOT_UNIT_OPTIONS,
+            value=self.plot_unit,
+            sizing_mode="stretch_width",
+            margin=(0, 0, 8, 0),
+        )
+        self.show_flux_table_checkbox = pn.widgets.Checkbox(
+            name="Show tabular flux data",
+            value=self.show_flux_table,
+            sizing_mode="stretch_width",
+            margin=(0, 0, 8, 0),
+        )
+        self.plot_settings_panel = pn.Column(
+            self.show_fwhm_checkbox,
+            self.plot_unit_select,
+            self.show_flux_table_checkbox,
+            sizing_mode="stretch_width",
+            visible=self.settings_expanded,
+            margin=(0, 0, 12, 0),
+        )
+        self.settings_box = self.plot_settings_panel
         self.status = pn.pane.Alert(
             "Select a SED photometry-band file and focus a row.",
             alert_type="info",
@@ -214,19 +452,22 @@ class BroadbandSEDPanel:
         self.mapping_table: Optional[pn.widgets.Tabulator] = None
         self.mapping_reference_select: Optional[pn.widgets.Select] = None
         self.mapping_column_select: Optional[pn.widgets.Select] = None
+        self.mapping_error_column_select: Optional[pn.widgets.Select] = None
+        self.mapping_unit_select: Optional[pn.widgets.Select] = None
+        self.assign_all_unit_select: Optional[pn.widgets.Select] = None
         self.mapping_content: Optional[pn.Column] = None
         self.mapping_toggle_button: Optional[pn.widgets.Button] = None
-        self.last_valid_point_count: int = 0
 
+        self.last_valid_point_count: int = 0
         self.mapping_ui_signature: Optional[tuple] = None
         self.mapping_ui_changed_this_refresh: bool = False
-
         self.mapping_controls_expanded: bool = bool(
             self.restore_state.get("mapping_controls_expanded", True)
         )
 
-        # Diagnostics should not appear before the user has actually tried to apply
-        # mappings. Otherwise the panel looks broken before the user has done anything.
+        # Diagnostics should not appear before the user has actually tried to
+        # apply mappings. Otherwise the panel looks broken before the user has
+        # done anything.
         self.mapping_applied_once: bool = bool(
             self.restore_state.get("mapping_applied_once", False)
         )
@@ -244,7 +485,6 @@ class BroadbandSEDPanel:
                 "overflow": "visible",
             },
         )
-
         self.plot_placeholder = pn.pane.Alert(
             (
                 "SED plot will appear once at least "
@@ -255,36 +495,40 @@ class BroadbandSEDPanel:
             visible=True,
             margin=(12, 0, 12, 0),
         )
-
         self.plot_pane = pn.pane.HoloViews(
-            create_sed_plot([]),
+            create_sed_plot(
+                [],
+                show_fwhm_error_bars=self.show_fwhm_error_bars,
+                show_magnitude_axis=self.plot_unit == PLOT_UNIT_MICROJY,
+                plot_unit=self.plot_unit,
+            ),
             sizing_mode="stretch_width",
             height=320,
             min_height=260,
             margin=(12, 0, 14, 0),
             visible=False,
         )
-
         self.table_pane = pn.Column(
             sizing_mode="stretch_width",
             margin=(6, 0, 0, 0),
+            visible=self.show_flux_table,
         )
-
         self.skipped_pane = pn.Column(
             sizing_mode="stretch_width",
             margin=(6, 0, 0, 0),
         )
-
         self.view = pn.Column(
             self.file_select,
             pn.Row(
                 self.refresh_button,
                 self.create_file_button,
                 self.clear_mappings_button,
+                self.settings_button,
                 sizing_mode="stretch_width",
                 margin=(8, 0, 10, 0),
             ),
             self.status,
+            self.plot_settings_panel,
             self.mapping_box,
             self.plot_placeholder,
             self.plot_pane,
@@ -300,12 +544,14 @@ class BroadbandSEDPanel:
         )
 
         self._refresh_file_options()
-
         self.file_select.param.watch(self._on_file_selected, "value")
         self.refresh_button.on_click(lambda event: self.refresh(refresh_file_options=True))
         self.create_file_button.on_click(self._on_create_file)
         self.clear_mappings_button.on_click(self._on_clear_mappings)
-
+        self.settings_button.on_click(self._on_toggle_settings)
+        self.show_fwhm_checkbox.param.watch(self._on_plot_settings_changed, "value")
+        self.plot_unit_select.param.watch(self._on_plot_settings_changed, "value")
+        self.show_flux_table_checkbox.param.watch(self._on_plot_settings_changed, "value")
         self._subscribe()
 
         focus = self._get_focus()
@@ -332,18 +578,22 @@ class BroadbandSEDPanel:
                 if runtime is not None:
                     return runtime
             except Exception:
-                try:
-                    runtime = services.get(RUNTIME_SERVICE_KEY)
-                    if runtime is not None:
-                        return runtime
-                except Exception:
-                    pass
+                pass
+
+            try:
+                runtime = services.get(RUNTIME_SERVICE_KEY)
+                if runtime is not None:
+                    return runtime
+            except Exception:
+                pass
+
         return SEDRuntime()
 
     def _get_focus(self):
         selection = getattr(self.context, "selection", None)
         if selection is None:
             return None
+
         try:
             return selection.get_focus()
         except Exception:
@@ -358,6 +608,7 @@ class BroadbandSEDPanel:
     def _dataset_columns(self, dataset_id: Optional[str]) -> List[str]:
         if not dataset_id:
             return []
+
         try:
             return [str(col) for col in self.context.datasets.list_columns(dataset_id)]
         except Exception:
@@ -368,6 +619,7 @@ class BroadbandSEDPanel:
 
     def _record_id_column(self, dataset_id: str) -> str:
         datasets = self.context.datasets
+
         for method_name in ("get_mapping", "mapping", "get_column_mapping"):
             method = getattr(datasets, method_name, None)
             if callable(method):
@@ -375,6 +627,7 @@ class BroadbandSEDPanel:
                     value = method(dataset_id, "record_id")
                 except Exception:
                     value = None
+
                 if value:
                     return str(value)
 
@@ -430,6 +683,9 @@ class BroadbandSEDPanel:
         self.mapping_table = None
         self.mapping_reference_select = None
         self.mapping_column_select = None
+        self.mapping_error_column_select = None
+        self.mapping_unit_select = None
+        self.assign_all_unit_select = None
         self.mapping_content = None
         self.mapping_toggle_button = None
         self.mapping_ui_signature = None
@@ -442,19 +698,41 @@ class BroadbandSEDPanel:
         self.status.alert_type = alert_type
         self.status.margin = (8, 0, 12, 0)
 
+
+    def _on_toggle_settings(self, event) -> None:
+        self.settings_expanded = not self.settings_expanded
+        self.plot_settings_panel.visible = self.settings_expanded
+
+    def _on_plot_settings_changed(self, event) -> None:
+        self.show_fwhm_error_bars = bool(self.show_fwhm_checkbox.value)
+        self.plot_unit = _normalise_plot_unit(self.plot_unit_select.value)
+        self.show_flux_table = bool(self.show_flux_table_checkbox.value)
+        self.table_pane.visible = self.show_flux_table
+        if self.plot_unit_select.value != self.plot_unit:
+            self.plot_unit_select.value = self.plot_unit
+        if self.latest_payload is not None:
+            self._render_payload(
+                self.latest_payload,
+                artifact_id=self.latest_payload_artifact_id,
+                collapse_mapping=False,
+            )
+
     def _refresh_file_options(self) -> None:
         files = self.runtime.list_band_files()
         options = [""] + files
         old_value = self.sed_file or self.file_select.value or ""
+
         if old_value and old_value not in options:
             options.append(old_value)
+
         self.file_select.options = options
         self.file_select.value = old_value if old_value in options else ""
 
     def _on_file_selected(self, event) -> None:
         value = event.new or ""
         self.sed_file = value or None
-
+        self.latest_payload = None
+        self.latest_payload_artifact_id = None
         # File context changed, so mapping requirements may change.
         self.mapping_ui_signature = None
         self.refresh(refresh_file_options=False)
@@ -480,84 +758,157 @@ class BroadbandSEDPanel:
         self._refresh_file_options()
         self.file_select.value = created
         self._set_status(f"Created SED data file: `{created}`", "success")
-
         self.mapping_ui_signature = None
         self.refresh(refresh_file_options=False)
+
+    def _enabled_filter_names(
+        self,
+        bands: Mapping[str, Mapping[str, Any]],
+    ) -> List[str]:
+        names: List[str] = []
+
+        for filter_name, spec in bands.items():
+            try:
+                if self.runtime._is_enabled_band(spec):
+                    names.append(str(filter_name))
+            except Exception:
+                continue
+
+        return names
 
     def _mapping_rows_for_display(
         self,
         dataset_id: str,
-        tokens: Sequence[str],
+        filter_names: Sequence[str],
     ) -> pd.DataFrame:
         columns = set(self._dataset_columns(dataset_id))
-
         rows = []
-        for token in tokens:
-            token = str(token)
-            mapped = (
-                self.pending_column_overrides.get(token)
-                or self.column_overrides.get(token)
+
+        for filter_name in filter_names:
+            filter_name = str(filter_name)
+
+            value_col = (
+                self.pending_column_overrides.get(filter_name)
+                or self.column_overrides.get(filter_name)
                 or ""
             )
+            error_col = (
+                self.pending_error_column_overrides.get(filter_name)
+                or self.error_column_overrides.get(filter_name)
+                or ""
+            )
+            unit = normalise_sed_unit(
+                self.pending_unit_overrides.get(filter_name)
+                or self.unit_overrides.get(filter_name)
+                or "ABmag"
+            )
 
-            if token in columns:
-                status = "direct column"
-                mapped_display = token
-            elif mapped:
+            if value_col:
+                value_display = value_col
                 status = "mapped"
-                mapped_display = mapped
+            elif filter_name in columns:
+                value_display = filter_name
+                status = "direct column"
             else:
+                value_display = ""
                 status = "unmapped"
-                mapped_display = ""
 
             rows.append(
                 {
-                    "SED reference": token,
-                    "Mapped dataset column": mapped_display,
+                    "Filter": filter_name,
+                    "Flux/mag column": value_display,
+                    "Error column": error_col,
+                    "Unit": unit,
                     "Status": status,
                 }
             )
 
         return pd.DataFrame(rows)
 
-
     def _on_mapping_reference_changed(self, event) -> None:
-        if self.mapping_column_select is None:
-            return
-
-        token = str(event.new or "")
-        mapped = (
-            self.pending_column_overrides.get(token)
-            or self.column_overrides.get(token)
-            or ""
+        filter_name = str(event.new or "")
+        columns = self.mapping_column_select.options if self.mapping_column_select is not None else []
+        error_columns = (
+            self.mapping_error_column_select.options
+            if self.mapping_error_column_select is not None
+            else []
         )
 
-        if mapped in self.mapping_column_select.options:
-            self.mapping_column_select.value = mapped
-        else:
-            self.mapping_column_select.value = ""
+        value_col = (
+            self.pending_column_overrides.get(filter_name)
+            or self.column_overrides.get(filter_name)
+            or (filter_name if filter_name in columns else "")
+        )
+        error_col = (
+            self.pending_error_column_overrides.get(filter_name)
+            or self.error_column_overrides.get(filter_name)
+            or ""
+        )
+        unit = normalise_sed_unit(
+            self.pending_unit_overrides.get(filter_name)
+            or self.unit_overrides.get(filter_name)
+            or "ABmag"
+        )
 
+        if self.mapping_column_select is not None:
+            self.mapping_column_select.value = value_col if value_col in columns else ""
+
+        if self.mapping_error_column_select is not None:
+            self.mapping_error_column_select.value = error_col if error_col in error_columns else ""
+
+        if self.mapping_unit_select is not None:
+            self.mapping_unit_select.value = unit if unit in self.mapping_unit_select.options else "ABmag"
 
     def _on_set_single_mapping(self, event) -> None:
-        if self.mapping_reference_select is None or self.mapping_column_select is None:
+        if (
+            self.mapping_reference_select is None
+            or self.mapping_column_select is None
+            or self.mapping_error_column_select is None
+            or self.mapping_unit_select is None
+        ):
             return
 
-        token = str(self.mapping_reference_select.value or "").strip()
-        mapped = str(self.mapping_column_select.value or "").strip()
+        filter_name = str(self.mapping_reference_select.value or "").strip()
+        value_col = str(self.mapping_column_select.value or "").strip()
+        error_col = str(self.mapping_error_column_select.value or "").strip()
+        unit = normalise_sed_unit(self.mapping_unit_select.value or "ABmag")
 
-        if not token:
+        if not filter_name:
             return
 
-        if mapped:
-            self.pending_column_overrides[token] = mapped
+        if value_col:
+            self.pending_column_overrides[filter_name] = value_col
         else:
-            self.pending_column_overrides.pop(token, None)
+            self.pending_column_overrides.pop(filter_name, None)
+
+        if error_col:
+            self.pending_error_column_overrides[filter_name] = error_col
+        else:
+            self.pending_error_column_overrides.pop(filter_name, None)
+
+        self.pending_unit_overrides[filter_name] = unit
 
         dataset_id = self.current_dataset_id or self._active_dataset_id()
         if dataset_id and self.mapping_table is not None:
-            tokens = list(self.mapping_reference_select.options)
-            self.mapping_table.value = self._mapping_rows_for_display(dataset_id, tokens)
+            filters = list(self.mapping_reference_select.options)
+            self.mapping_table.value = self._mapping_rows_for_display(dataset_id, filters)
 
+    def _on_assign_unit_to_all(self, event) -> None:
+        if self.assign_all_unit_select is None or self.mapping_reference_select is None:
+            return
+
+        unit = normalise_sed_unit(self.assign_all_unit_select.value or "ABmag")
+
+        for filter_name in self.mapping_reference_select.options:
+            self.pending_unit_overrides[str(filter_name)] = unit
+
+        if self.mapping_unit_select is not None:
+            self.mapping_unit_select.value = unit
+
+        dataset_id = self.current_dataset_id or self._active_dataset_id()
+        if dataset_id and self.mapping_table is not None:
+            filters = list(self.mapping_reference_select.options)
+            self.mapping_table.value = self._mapping_rows_for_display(dataset_id, filters)
 
     def _on_apply_column_mappings(self, event) -> None:
         self.column_overrides = {
@@ -565,23 +916,42 @@ class BroadbandSEDPanel:
             for key, value in self.pending_column_overrides.items()
             if value
         }
+        self.error_column_overrides = {
+            str(key): str(value)
+            for key, value in self.pending_error_column_overrides.items()
+            if value
+        }
+        self.unit_overrides = {
+            str(key): normalise_sed_unit(value)
+            for key, value in self.pending_unit_overrides.items()
+            if value
+        }
+
         self.pending_column_overrides = dict(self.column_overrides)
+        self.pending_error_column_overrides = dict(self.error_column_overrides)
+        self.pending_unit_overrides = dict(self.unit_overrides)
 
         self.mapping_applied_once = True
-
         self.mapping_ui_signature = None
-
         self.refresh(refresh_file_options=False)
 
     def _on_clear_mappings(self, event) -> None:
         self.column_overrides.clear()
         self.pending_column_overrides.clear()
+
+        self.error_column_overrides.clear()
+        self.pending_error_column_overrides.clear()
+
+        self.unit_overrides.clear()
+        self.pending_unit_overrides.clear()
+
         self.mapping_ui_signature = None
         self.refresh(refresh_file_options=False)
 
     def _load_bands(self) -> Dict[str, Dict[str, Any]]:
         if not self.sed_file:
             return {}
+
         return self.runtime.load_band_file(self.sed_file)
 
     def _unknown_tokens(self, dataset_id: str, bands: Mapping[str, Mapping[str, Any]]) -> List[str]:
@@ -594,28 +964,29 @@ class BroadbandSEDPanel:
                 continue
             if mapped and mapped in columns:
                 continue
-            unknown.append(token)
+            unknown.append(str(token))
 
         return unknown
 
     def _build_mapping_controls(
         self,
+        *,
         dataset_id: str,
+        filter_names: Sequence[str],
         unknown_tokens: Sequence[str],
     ) -> None:
-        if not unknown_tokens:
+        filters = [str(filter_name) for filter_name in filter_names]
+        if not filters:
             self._clear_mapping_controls()
             return
 
         columns = [""] + self._dataset_columns(dataset_id)
-        tokens = [str(token) for token in unknown_tokens]
-        dataset_columns = set(columns)
-
         signature = (
             str(dataset_id),
             str(self.sed_file or ""),
-            tuple(tokens),
+            tuple(filters),
             tuple(columns),
+            tuple(sorted(str(token) for token in unknown_tokens)),
         )
 
         if (
@@ -626,9 +997,8 @@ class BroadbandSEDPanel:
             self.mapping_ui_changed_this_refresh = False
             self._set_mapping_content_visible(self.mapping_controls_expanded)
             return
-        
-        self.mapping_ui_changed_this_refresh = True
 
+        self.mapping_ui_changed_this_refresh = True
         previous_signature = self.mapping_ui_signature
         self.mapping_ui_signature = signature
 
@@ -639,29 +1009,47 @@ class BroadbandSEDPanel:
             self.mapping_controls_expanded = True
 
         self.mapping_reference_select = pn.widgets.Select(
-            name="SED reference",
-            options=tokens,
-            value=tokens[0] if tokens else None,
+            name="Filter",
+            options=filters,
+            value=filters[0] if filters else None,
             sizing_mode="stretch_width",
             margin=(0, 0, 10, 0),
         )
-
         self.mapping_column_select = pn.widgets.Select(
-            name="Dataset column",
+            name="Flux / magnitude column",
             options=columns,
             value="",
             sizing_mode="stretch_width",
             margin=(0, 0, 12, 0),
         )
-
-        first_token = self.mapping_reference_select.value
-        first_mapped = (
-            self.pending_column_overrides.get(first_token)
-            or self.column_overrides.get(first_token)
-            or ""
+        self.mapping_error_column_select = pn.widgets.Select(
+            name="Error column",
+            options=columns,
+            value="",
+            sizing_mode="stretch_width",
+            margin=(0, 0, 12, 0),
         )
-        if first_mapped in columns:
-            self.mapping_column_select.value = first_mapped
+        self.mapping_unit_select = pn.widgets.Select(
+            name="Unit",
+            options=SED_UNIT_OPTIONS,
+            value="ABmag",
+            sizing_mode="stretch_width",
+            margin=(0, 0, 12, 0),
+        )
+        self.assign_all_unit_select = pn.widgets.Select(
+            name="Unit for all filters",
+            options=SED_UNIT_OPTIONS,
+            value="ABmag",
+            sizing_mode="stretch_width",
+            margin=(0, 0, 12, 0),
+        )
+
+        # Populate the three dropdowns for the first filter.
+        class _Event:
+            def __init__(self, new):
+                self.new = new
+
+        self._on_mapping_reference_changed(_Event(self.mapping_reference_select.value))
 
         self.mapping_reference_select.param.watch(
             self._on_mapping_reference_changed,
@@ -669,7 +1057,7 @@ class BroadbandSEDPanel:
         )
 
         set_button = pn.widgets.Button(
-            name="Set mapping",
+            name="Set filter mapping",
             button_type="default",
             height=32,
             sizing_mode="stretch_width",
@@ -686,6 +1074,15 @@ class BroadbandSEDPanel:
         )
         apply_button.on_click(self._on_apply_column_mappings)
 
+        assign_all_unit_button = pn.widgets.Button(
+            name="Assign unit to all filters",
+            button_type="default",
+            height=32,
+            sizing_mode="stretch_width",
+            margin=(0, 6, 0, 0),
+        )
+        assign_all_unit_button.on_click(self._on_assign_unit_to_all)
+
         clear_pending_button = pn.widgets.Button(
             name="Clear pending",
             button_type="default",
@@ -696,52 +1093,57 @@ class BroadbandSEDPanel:
 
         def _clear_pending(event) -> None:
             self.pending_column_overrides.clear()
-            if self.mapping_column_select is not None:
-                self.mapping_column_select.value = ""
+            self.pending_error_column_overrides.clear()
+            self.pending_unit_overrides.clear()
+
+            if self.mapping_reference_select is not None:
+                self._on_mapping_reference_changed(_Event(self.mapping_reference_select.value))
+
             if self.mapping_table is not None:
-                self.mapping_table.value = self._mapping_rows_for_display(dataset_id, tokens)
+                self.mapping_table.value = self._mapping_rows_for_display(dataset_id, filters)
 
         clear_pending_button.on_click(_clear_pending)
 
         self.mapping_table = pn.widgets.Tabulator(
-            self._mapping_rows_for_display(dataset_id, tokens),
+            self._mapping_rows_for_display(dataset_id, filters),
             show_index=False,
             disabled=True,
             pagination="local",
-            page_size=4,
-            height=128,
+            page_size=6,
+            height=170,
             sizing_mode="stretch_width",
             widths={
-                "SED reference": 140,
-                "Mapped dataset column": 220,
+                "Filter": 140,
+                "Flux/mag column": 220,
+                "Error column": 220,
+                "Unit": 75,
                 "Status": 95,
             },
             margin=(10, 0, 0, 0),
         )
 
-        mapped_count = sum(
-            1
-            for token in tokens
+        mapped_count = 0
+        dataset_columns = set(columns)
+        for filter_name in filters:
             if (
-                token in dataset_columns
-                or self.pending_column_overrides.get(token)
-                or self.column_overrides.get(token)
-            )
-        )
+                filter_name in dataset_columns
+                or self.pending_column_overrides.get(filter_name)
+                or self.column_overrides.get(filter_name)
+            ):
+                mapped_count += 1
+
+        unknown_count = len(unknown_tokens)
+        if unknown_count:
+            attention_text = f"{unknown_count} filter value column(s) need attention."
+        else:
+            attention_text = "All filter value columns are directly available or mapped."
 
         summary = pn.pane.HTML(
             f"""
-            <div style="
-                font-size: 12px;
-                line-height: 1.45;
-                color: #444;
-                margin: 0 0 10px 0;
-            ">
-                <b>{len(tokens)} SED references need attention.</b><br>
-                {mapped_count} currently have a direct, saved, or pending mapping.
-                The plot appears after at least <b>{MIN_POINTS_TO_PLOT}</b>
-                finite SED points can be built.
-            </div>
+            <b>SED column mappings</b><br>
+            {html.escape(attention_text)}<br>
+            {mapped_count} / {len(filters)} filters currently have a direct, saved, or pending value-column mapping.<br>
+            Choose one value column, optional error column, and unit per filter. Error columns are assumed to have the same unit.
             """,
             sizing_mode="stretch_width",
         )
@@ -772,6 +1174,8 @@ class BroadbandSEDPanel:
             ),
             pn.Row(
                 self.mapping_column_select,
+                self.mapping_error_column_select,
+                self.mapping_unit_select,
                 sizing_mode="stretch_width",
                 margin=(0, 0, 0, 0),
             ),
@@ -782,13 +1186,17 @@ class BroadbandSEDPanel:
                 sizing_mode="stretch_width",
                 margin=(4, 0, 10, 0),
             ),
+            pn.Row(
+                self.assign_all_unit_select,
+                assign_all_unit_button,
+                sizing_mode="stretch_width",
+                margin=(6, 0, 10, 0),
+            ),
             self.mapping_table,
             sizing_mode="stretch_width",
             visible=True,
             margin=(0, 0, 0, 0),
-            styles={
-                "overflow": "visible",
-            },
+            styles={"overflow": "visible"},
         )
 
         self.mapping_box.objects = [
@@ -797,7 +1205,6 @@ class BroadbandSEDPanel:
             self.mapping_content,
         ]
         self.mapping_box.visible = True
-
         self._set_mapping_content_visible(self.mapping_controls_expanded)
 
     # ------------------------------------------------------------------
@@ -830,8 +1237,10 @@ class BroadbandSEDPanel:
     def _on_focus_changed(self, topic, payload) -> None:
         dataset_id = payload.get("dataset_id")
         row_id = payload.get("row_id")
+
         if dataset_id is None or row_id is None:
             return
+
         self.current_dataset_id = str(dataset_id)
         self.current_row_id = str(row_id)
         self.refresh()
@@ -839,8 +1248,15 @@ class BroadbandSEDPanel:
     def _on_focus_cleared(self, topic, payload) -> None:
         self.current_dataset_id = None
         self.current_row_id = None
+        self.latest_payload = None
+        self.latest_payload_artifact_id = None
         self._clear_mapping_controls()
-        self.plot_pane.object = create_sed_plot([])
+        self.plot_pane.object = create_sed_plot(
+            [],
+            show_fwhm_error_bars=self.show_fwhm_error_bars,
+            show_magnitude_axis=self.plot_unit == PLOT_UNIT_MICROJY,
+            plot_unit=self.plot_unit,
+        )
         self.plot_pane.visible = False
         self.plot_placeholder.visible = True
         self.plot_placeholder.object = (
@@ -848,6 +1264,7 @@ class BroadbandSEDPanel:
             f"{MIN_POINTS_TO_PLOT} finite broadband points are available."
         )
         self.table_pane.clear()
+        self.table_pane.visible = self.show_flux_table
         self.skipped_pane.clear()
         self._set_status("Focus a row to plot its SED.", "info")
 
@@ -861,7 +1278,7 @@ class BroadbandSEDPanel:
         ):
             self.current_dataset_id = str(focus.dataset_id)
             self.current_row_id = str(focus.row_id)
-        self.refresh()
+            self.refresh()
 
     def refresh(self, *, refresh_file_options: bool = False, source_change: bool = False) -> None:
         if refresh_file_options:
@@ -883,6 +1300,7 @@ class BroadbandSEDPanel:
                 f"least {MIN_POINTS_TO_PLOT} finite broadband points are available."
             )
             self.table_pane.clear()
+            self.table_pane.visible = self.show_flux_table
             self.skipped_pane.clear()
             self._set_status(
                 "Select a SED photometry-band JSON file or create a new one.",
@@ -911,15 +1329,20 @@ class BroadbandSEDPanel:
             self._set_status(f"Could not load SED band file: {html.escape(str(exc))}", "danger")
             return
 
+        filter_names = self._enabled_filter_names(bands)
         unknown_tokens = self._unknown_tokens(dataset_id, bands)
-        self._build_mapping_controls(dataset_id, unknown_tokens)
+        self._build_mapping_controls(
+            dataset_id=dataset_id,
+            filter_names=filter_names,
+            unknown_tokens=unknown_tokens,
+        )
 
         if unknown_tokens:
             if self.mapping_ui_changed_this_refresh:
                 self._set_status(
                     (
-                        "Some SED references are unmapped. The panel will still plot using "
-                        f"any available or mapped bands once at least {MIN_POINTS_TO_PLOT} "
+                        "Some SED filter value columns are unmapped. The panel will still plot "
+                        f"using any available or mapped filters once at least {MIN_POINTS_TO_PLOT} "
                         "finite points are available."
                     ),
                     "warning",
@@ -936,6 +1359,7 @@ class BroadbandSEDPanel:
                 f"{MIN_POINTS_TO_PLOT} finite broadband points are available."
             )
             self.table_pane.clear()
+            self.table_pane.visible = self.show_flux_table
             self.skipped_pane.clear()
             self._set_status("Focus a row to plot its SED.", "info")
             return
@@ -1012,6 +1436,8 @@ class BroadbandSEDPanel:
             row=row,
             bands=bands,
             column_overrides=self.column_overrides,
+            error_column_overrides=self.error_column_overrides,
+            unit_overrides=self.unit_overrides,
         )
 
         if cancel_token is not None and cancel_token.cancelled():
@@ -1023,6 +1449,8 @@ class BroadbandSEDPanel:
             row_id=row_id,
             sed_file=sed_file,
             column_overrides=self.column_overrides,
+            error_column_overrides=self.error_column_overrides,
+            unit_overrides=self.unit_overrides,
             skipped=result.skipped,
         )
 
@@ -1071,6 +1499,7 @@ class BroadbandSEDPanel:
                     )
                 except Exception:
                     pass
+
             try:
                 events.publish(
                     "astro.sed.updated",
@@ -1092,50 +1521,68 @@ class BroadbandSEDPanel:
         self.skipped_pane.clear()
         self.skipped_pane.append(
             pn.pane.HTML(
-                f"<pre>{html.escape(''.join(traceback.format_exception(type(exc), exc, exc.__traceback__)))}</pre>",
+                f"""
+                <pre>{html.escape(''.join(traceback.format_exception(type(exc), exc, exc.__traceback__)))}</pre>
+                """,
                 sizing_mode="stretch_width",
             )
         )
 
-    def _render_payload(self, payload: Mapping[str, Any], *, artifact_id: Optional[str] = None) -> None:
+    def _render_payload(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        artifact_id: Optional[str] = None,
+        collapse_mapping: bool = True,
+    ) -> None:
+        self.latest_payload = dict(payload)
+        self.latest_payload_artifact_id = artifact_id
         records = _payload_records(payload)
-
         finite_records = []
+
         for record in records:
             try:
                 wavelength = float(record.get("wavelength (µm)"))
-                magnitude = float(record.get("magnitude"))
+                flux_uJy = float(record.get("flux_uJy"))
             except Exception:
                 continue
 
-            if pd.notna(wavelength) and pd.notna(magnitude) and wavelength > 0:
+            if pd.notna(wavelength) and pd.notna(flux_uJy) and wavelength > 0 and flux_uJy > 0:
                 finite_records.append(record)
 
         self.last_valid_point_count = len(finite_records)
-
         self.table_pane.clear()
+        self.table_pane.visible = self.show_flux_table
         self.skipped_pane.clear()
 
         if len(finite_records) >= MIN_POINTS_TO_PLOT:
             self.plot_pane.object = create_sed_plot(
                 finite_records,
                 show_error_bars=SHOW_SED_ERROR_BARS_BY_DEFAULT,
+                show_fwhm_error_bars=self.show_fwhm_error_bars,
+                show_magnitude_axis=self.plot_unit == PLOT_UNIT_MICROJY,
+                plot_unit=self.plot_unit,
             )
             self.plot_pane.visible = True
             self.plot_placeholder.visible = False
 
-            msg = f"Plotted {len(finite_records)} broadband SED points"
+            plotted_unit_label = "νFν" if self.plot_unit == PLOT_UNIT_NUFNU else "µJy"
+            msg = f"Plotted {len(finite_records)} broadband SED points in {plotted_unit_label}"
             if artifact_id:
                 msg += f". Artifact: `{artifact_id}`"
             self._set_status(msg, "success")
 
-            # Once the plot is useful, collapse the mapping controls so the panel
-            # is not vertically crowded. The user can reopen them.
-            if self.mapping_box.visible:
+            # Once the plot is useful, collapse the mapping controls so the
+            # panel is not vertically crowded. The user can reopen them.
+            if collapse_mapping and self.mapping_box.visible:
                 self._set_mapping_content_visible(False)
-
         else:
-            self.plot_pane.object = create_sed_plot([])
+            self.plot_pane.object = create_sed_plot(
+                [],
+                show_fwhm_error_bars=self.show_fwhm_error_bars,
+                show_magnitude_axis=self.plot_unit == PLOT_UNIT_MICROJY,
+                plot_unit=self.plot_unit,
+            )
             self.plot_pane.visible = False
             self.plot_placeholder.visible = True
             self.plot_placeholder.object = (
@@ -1152,7 +1599,7 @@ class BroadbandSEDPanel:
                 "info",
             )
 
-        if records and len(finite_records) >= MIN_POINTS_TO_PLOT:
+        if self.show_flux_table and records and len(finite_records) >= MIN_POINTS_TO_PLOT:
             sed_df = pd.DataFrame(records)
             self.table_pane.append(
                 pn.widgets.Tabulator(
@@ -1162,13 +1609,12 @@ class BroadbandSEDPanel:
                     pagination="local",
                     page_size=5,
                     sizing_mode="stretch_width",
-                    height=160,
+                    height=180,
                     margin=(14, 0, 12, 0),
                 )
             )
 
         skipped = payload.get("skipped") or []
-
         show_skipped_diagnostics = (
             bool(skipped)
             and self.mapping_applied_once
@@ -1177,28 +1623,13 @@ class BroadbandSEDPanel:
 
         if show_skipped_diagnostics:
             skipped_df = pd.DataFrame([dict(item) for item in skipped])
-
             skipped_summary = pn.pane.HTML(
                 f"""
-                <div style="
-                    padding: 8px 10px;
-                    border: 1px solid #d8d8d8;
-                    border-radius: 5px;
-                    background: #fbfbfb;
-                    color: #444;
-                    font-size: 12px;
-                    line-height: 1.4;
-                    box-sizing: border-box;
-                ">
-                    <b>Skipped references:</b> {len(skipped)}.
-                    These were ignored because they were unmapped, disabled,
-                    non-finite, or unavailable for the focused row.
-                </div>
+                Skipped references: {len(skipped)}. These were ignored because they were unmapped, disabled, non-finite, or unavailable for the focused row.
                 """,
                 sizing_mode="stretch_width",
                 margin=(0, 0, 8, 0),
             )
-
             skipped_table = pn.widgets.Tabulator(
                 skipped_df,
                 disabled=True,
@@ -1209,14 +1640,12 @@ class BroadbandSEDPanel:
                 height=130,
                 margin=(0, 0, 0, 0),
             )
-
             skipped_content = pn.Column(
                 skipped_table,
                 sizing_mode="stretch_width",
                 visible=False,
                 margin=(8, 0, 0, 0),
             )
-
             skipped_toggle = pn.widgets.Button(
                 name="Show skipped references",
                 button_type="light",
@@ -1234,7 +1663,6 @@ class BroadbandSEDPanel:
                 )
 
             skipped_toggle.on_click(_toggle_skipped)
-
             self.skipped_pane.append(
                 pn.Column(
                     skipped_summary,
@@ -1258,9 +1686,15 @@ class BroadbandSEDPanel:
             "state_version": self.state_version,
             "sed_file": self.sed_file,
             "column_overrides": dict(self.column_overrides),
+            "error_column_overrides": dict(self.error_column_overrides),
+            "unit_overrides": dict(self.unit_overrides),
             "latest_artifact_id": self.latest_artifact_id,
             "mapping_applied_once": self.mapping_applied_once,
             "mapping_controls_expanded": self.mapping_controls_expanded,
+            "show_fwhm_error_bars": self.show_fwhm_error_bars,
+            "plot_unit": self.plot_unit,
+            "show_flux_table": self.show_flux_table,
+            "settings_expanded": self.settings_expanded,
         }
 
     def dispose(self) -> None:
@@ -1271,6 +1705,7 @@ class BroadbandSEDPanel:
                     events.unsubscribe(sub)
                 except Exception:
                     pass
+
         self.subscriptions.clear()
 
         for handle in self.job_handles:
@@ -1278,6 +1713,7 @@ class BroadbandSEDPanel:
                 handle.cancel()
             except Exception:
                 pass
+
         self.job_handles.clear()
 
 
@@ -1316,8 +1752,8 @@ class BroadbandSEDArtifactViewer:
 
         records = _payload_records(payload)
         self.plot_pane.object = create_sed_plot(records)
-
         self.table_pane.clear()
+
         if records:
             self.table_pane.append(
                 pn.widgets.Tabulator(
