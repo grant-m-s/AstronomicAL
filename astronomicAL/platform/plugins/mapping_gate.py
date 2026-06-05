@@ -363,22 +363,41 @@ class MappingGatedPanel:
 
         label = dataset_id or "active dataset"
 
-        self.view[:] = [
-            pn.Column(
-                pn.pane.Markdown(
-                    f"""
-### Waiting for dataset
+        if (label == "main"):
 
-This panel has column mapping requirements, but `{label}` is not loaded yet.
+            self.view[:] = [
+                pn.Column(
+                    pn.pane.Markdown(
+                        f"""
+    ### Waiting for dataset
 
-Saved workspace mappings will be applied automatically after the dataset is loaded.
-                    """,
-                    sizing_mode="stretch_width",
-                ),
-                sizing_mode="stretch_both",
-                margin=10,
-            )
-        ]
+    This panel has column mapping requirements, but a dataset has not been loaded yet.
+
+    Saved workspace mappings will be applied automatically after the dataset is loaded.
+                        """,
+                        sizing_mode="stretch_width",
+                    ),
+                    sizing_mode="stretch_both",
+                    margin=10,
+                )
+            ]
+        else:
+            self.view[:] = [
+                pn.Column(
+                    pn.pane.Markdown(
+                        f"""
+    ### Waiting for dataset
+
+    This panel has column mapping requirements, but the dataset (`{label}`) is not loaded yet.
+
+    Saved workspace mappings will be applied automatically after the dataset is loaded.
+                        """,
+                        sizing_mode="stretch_width",
+                    ),
+                    sizing_mode="stretch_both",
+                    margin=10,
+                )
+            ]
 
     def _mapping_source(self) -> str:
         return getattr(self.registration, "id", None) or getattr(
