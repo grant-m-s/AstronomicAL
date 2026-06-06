@@ -1,434 +1,450 @@
+from __future__ import annotations
+
+import concurrent.futures
 import os
 import time
-import concurrent.futures 
-import numpy as np
+from pathlib import Path
+from typing import Any, Dict, Iterable, Optional, Tuple
 
-import warnings
+import numpy as np
 from astropy import units as u
-from astroquery.esa.euclid import EuclidClass
+from astropy.coordinates import SkyCoord
 from astropy.io import fits
 from astropy.wcs import WCS
-from reproject import reproject_interp 
-from astropy.visualization import  PowerStretch, SqrtStretch, LogStretch
-from astropy.visualization import AsinhStretch, LinearStretch, AsymmetricPercentileInterval
-from astropy.coordinates import SkyCoord 
+from astroquery.esa.euclid import EuclidClass
 import mocpy
 
 from astronomicAL.utils.error_tracker import ErrorTracker
 
 
+DEFAULT_EUCLID_FILTERS = ["VIS", "NIR_Y", "NIR_J", "NIR_H"]
+DEFAULT_SAVE_DIR = "data/cutouts"
+DEFAULT_MOC_PATH = "data/mocs"
+
+
 class EuclidCutoutsClass:
-    
-    def __init__(self, ra, dec, 
-                 euclid_filters = ["VIS", "NIR_Y", "NIR_J", "NIR_H"],
-                 save_dir = "data/cutouts",
-                 context = None):
+    """Retrieve raw Euclid image cutouts from the ESA archive.
 
+    This class is intentionally data-only. It performs archive access, FITS
+    download, FITS reading, and WCS extraction. It does not stretch images,
+    reproject bands, build RGB images, scale/clip arrays, convert coordinates
+    for plotting, or create HoloViews objects. Those steps belong in
+    ``image_visualization.ImageVisualizationClass`` and the panel layer.
+
+    The constructor keeps the plugin-version signature so the runtime can
+    instantiate it as::
+
+        EuclidCutoutsClass(ra=ra, dec=dec, euclid_filters=filters,
+                           save_dir=save_dir, context=context)
+    """
+
+    def __init__(
+        self,
+        ra: Optional[float] = None,
+        dec: Optional[float] = None,
+        *,
+        client: Any = None,
+        euclid_filters: Optional[Iterable[str]] = None,
+        save_dir: str = DEFAULT_SAVE_DIR,
+        context: Any = None,
+        check_moc_coverage: bool = True,
+        moc_survey: str = "Euclid_Q1",
+        moc_path: str = DEFAULT_MOC_PATH,
+    ) -> None:
         self.context = context
-        if (context is not None and getattr(context, "config", None) is not None):
-            self.config = context.config
+        self.save_dir = str(Path(save_dir).expanduser())
+        os.makedirs(self.save_dir, exist_ok=True)
 
-        svc = getattr(self.context, "services", None) if self.context is not None else None
-        key = "euclid.client"
-
-        if svc is not None and svc.has(key):
-            self.client = svc.get(key)
-        else:
-            self.client = EuclidClass(environment="PDR")
-            print("Initialized EuclidClass")
-            if svc is not None:
-                svc.set(key, self.client)
-        
-        self.moc = load_moc("Euclid_Q1")
         self.error_tracker = ErrorTracker()
-        self.coordinates = SkyCoord(ra, dec, unit = "degree", frame = "icrs")   
-        self.euclid_filters = euclid_filters
-        self.save_dir = save_dir
-        os.makedirs(self.save_dir, exist_ok = True)
+        self.check_moc_coverage = bool(check_moc_coverage)
+        self.moc_survey = moc_survey
+        self.moc_path = moc_path
+        self.moc = None
+        if self.check_moc_coverage:
+            try:
+                self.moc = load_moc(self.moc_survey, path=self.moc_path)
+            except Exception as exc:
+                # Missing local MOC files should not make the whole plugin
+                # unusable. The archive query can still fail gracefully later.
+                self.error_tracker.log_error(exc, "Could not load Euclid MOC coverage file")
+                self.moc = None
 
-    def reset_data(self, ra, dec):
-        self.coordinates = SkyCoord(ra, dec, unit = "degree", frame = "icrs")
+        self.euclid_filters = list(euclid_filters or DEFAULT_EUCLID_FILTERS)
+
+        self.client = client if client is not None else self._get_or_create_client()
+        self.coordinates: Optional[SkyCoord] = None
+        if ra is not None and dec is not None:
+            self.set_coordinates(ra=ra, dec=dec)
+
+    # ------------------------------------------------------------------
+    # Client / context helpers
+    # ------------------------------------------------------------------
+    def _get_or_create_client(self) -> Any:
+        services = getattr(self.context, "services", None) if self.context is not None else None
+        key = "euclid.client"
+        if services is not None:
+            try:
+                if services.has(key):
+                    return services.get(key)
+            except Exception:
+                pass
+
+        client = EuclidClass(environment="PDR")
+        print("Initialized EuclidClass")
+
+        if services is not None:
+            for method_name in ("set", "register", "put"):
+                method = getattr(services, method_name, None)
+                if callable(method):
+                    try:
+                        method(key, client)
+                        break
+                    except Exception:
+                        pass
+        return client
+
+    def change_environment(
+        self,
+        environment: str,
+        user: Optional[str] = None,
+        password: Optional[str] = None,
+        credentials_filepath: Optional[str] = None,
+    ) -> None:
+        """Switch the Euclid archive environment and optionally log in."""
+        assert environment in ("PDR", "IDR", "OTF", "REG"), (
+            "environment must be 'PDR', 'IDR', 'OTF', or 'REG'"
+        )
+
+        self.client = EuclidClass(environment=environment)
+
+        if environment != "PDR":
+            if credentials_filepath is not None:
+                self.client.login(user=None, password=None, credentials_file=credentials_filepath)
+            else:
+                self.client.login(user=user, password=password, credentials_file=None)
+
+        services = getattr(self.context, "services", None) if self.context is not None else None
+        if services is not None:
+            for method_name in ("set", "register", "put"):
+                method = getattr(services, method_name, None)
+                if callable(method):
+                    try:
+                        method("euclid.client", self.client)
+                        break
+                    except Exception:
+                        pass
+
+    # ------------------------------------------------------------------
+    # State / coordinates
+    # ------------------------------------------------------------------
+    def reset_data(self, ra: Optional[float] = None, dec: Optional[float] = None) -> None:
+        """Reset source-specific attributes, optionally changing coordinates."""
+        if ra is not None and dec is not None:
+            self.set_coordinates(ra=ra, dec=dec)
         self.error_tracker.reset()
         self._remove_source_attributes()
-    
-    def _remove_source_attributes(self):
-        """Removes all attributes specific to a source"""
-        attributes = ["cone_results", "data", "wcs", "arcsec_per_pix", "reprojected_data",
-                      "plot_data", "overplot_coordinates"]
+
+    def _remove_source_attributes(self) -> None:
+        """Remove attributes generated for a specific source."""
+        attributes = [
+            "cone_results",
+            "cutout_radius",
+            "cutouts_paths",
+            "data",
+            "wcs",
+            "headers",
+        ]
         for attribute in attributes:
             if hasattr(self, attribute):
                 delattr(self, attribute)
 
+    def set_coordinates(
+        self,
+        coordinates: Optional[SkyCoord] = None,
+        *,
+        ra: Optional[float] = None,
+        dec: Optional[float] = None,
+    ) -> None:
+        if coordinates is not None:
+            self.coordinates = coordinates
+        elif (ra is not None) and (dec is not None):
+            self.coordinates = SkyCoord(ra, dec, unit="deg", frame="icrs")
+        else:
+            raise ValueError("Either coordinates or ra and dec must be provided")
 
-    def change_environment(self, environment, user = None, password = None, credentials_filepath = None):
-        """This function handles the change of the environment of the client EuclidClass
-            Note that at the moment there is no way to automatically recognize if the login failed"""
-        assert environment in ("PDR", "IDR", "OTF", "REG"), "environment must be  'PDR', 'IDR,, 'OTF', 'REG'"
-        self.client =  EuclidClass(environment = environment)
-        if environment != "PDR":
-            if credentials_filepath is not None:
-                self.client.login(user = None, password = None, credentials_file = credentials_filepath)
-            else:
-                self.client.login(user = user, password = password, credentials_file = None)
+    # ------------------------------------------------------------------
+    # Archive query / download / FITS read
+    # ------------------------------------------------------------------
+    def get_cone(
+        self,
+        initial_radius: u.Quantity = 0.5 * u.degree,
+        async_job: bool = False,
+        verbose: bool = True,
+        Nattempts_max: int = 2,
+    ) -> None:
+        """Run a cone search on the Euclid mosaic-product table."""
+        if self.coordinates is None:
+            raise ValueError("No coordinates set — provide ra and dec first")
 
-    
-    def get_cone(self, initial_radius = 0.5*u.degree, async_job= False, verbose = True):
-        """Performs a cone search and retrieves a table with information about where the image
-           containing the source are stored"""
-        
         try:
             tic = time.perf_counter()
-            job = self.client.cone_search(self.coordinates, initial_radius, table_name = "sedm.mosaic_product", ra_column_name="ra",
-                                      dec_column_name="dec", columns="*", async_job= async_job)
-            self.cone_results = job.get_results()
-            toc = time.perf_counter()
+            self.cone_results = None
+            for attempt in range(Nattempts_max):
+                radius = initial_radius * (1 + attempt)
+                job = self.client.cone_search(
+                    self.coordinates,
+                    radius,
+                    table_name="sedm.mosaic_product",
+                    ra_column_name="ra",
+                    dec_column_name="dec",
+                    columns="*",
+                    async_job=async_job,
+                )
+                self.cone_results = job.get_results()
+                if len(self.cone_results) > 0:
+                    break
+
             if verbose:
-                print(f"Cone search required {toc-tic} seconds")
-        except ConnectionError as e:
-            self.error_tracker.log_error(e, "Failed to connect to ESA Science Archive")
-        
-    
+                toc = time.perf_counter()
+                print(f"Cone search required {toc - tic:.3f} seconds")
+                if self.cone_results is not None and len(self.cone_results) == 0:
+                    print(
+                        f"No cone-search results found after {Nattempts_max} attempts "
+                        f"(max radius: {initial_radius * Nattempts_max})"
+                    )
+
+        except ConnectionError as exc:
+            self.error_tracker.log_error(exc, "Failed to connect to ESA Science Archive")
+        except Exception as exc:
+            self.error_tracker.log_error(exc, "Euclid cone search failed")
+
     @staticmethod
-    def get_info_cutout(cone_results, filter_name):
-        line = cone_results[cone_results["filter_name"]==filter_name][0]
-        file_path = os.path.join(line["file_path"], line["file_name"])
+    def get_info_cutout(cone_results: Any, filter_name: str) -> Tuple[str, Any, Any]:
+        """Return archive file path, instrument, and observation/tile id for one band."""
+        matching = cone_results[cone_results["filter_name"] == filter_name]
+        if len(matching) == 0:
+            raise KeyError(f"No Euclid cone-search product found for filter {filter_name!r}")
+
+        line = matching[0]
+        file_path = os.path.join(str(line["file_path"]), str(line["file_name"]))
         instrument = line["instrument_name"]
         obs_id = line["tile_index"]
         return file_path, instrument, obs_id
-    
-    def get_band_cutout(self, band, fname = None):
-        file_path, instrument, obs_id = self.get_info_cutout(self.cone_results, band)
-        if fname is None:
-            fname = f"{obs_id}_{band}"
-        else:
-            fname = f"{fname}_{band}" #Need a different fname in each of the bands
-        output_file = os.path.join(self.save_dir, f"{fname}.fits")  
-        try:
-            return self.client.get_cutout(file_path=file_path, instrument=instrument, id=obs_id, 
-                                          coordinate=self.coordinates, radius = self.cutout_radius, 
-                                          output_file=output_file)[0]
-        except ConnectionError as e:
-             self.error_tracker.log_error(e, "Failed to connect to ESA Science Archive")
 
-    def get_cutouts(self, radius, verbose = False):
-        
-        self.cutout_radius = radius*u.arcsec
-        self.cutouts_paths = {}
-        
-        tic = time.perf_counter()
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            futures = { 
-                 executor.submit(self.get_band_cutout, band, fname = "tmp") : band
-                 for band in self.euclid_filters
-            }
-        for future in concurrent.futures.as_completed(futures):
-            band = futures[future]
-            save_path = future.result()
-            self.cutouts_paths[band] = save_path  
-        
-        toc = time.perf_counter()
-        if verbose:
-            print(f"Retrieving all cutouts requiered {toc-tic} seconds")
-
-    def read_cutouts(self):
-        self.data = {}
-        self.wcs = {}
-        self.arcsec_per_pix ={}
-        for band in self.cutouts_paths:
-            try:
-                with fits.open(self.cutouts_paths[band]) as hdul:
-                    self.data[band] = hdul[0].data
-                    self.wcs[band] = WCS(hdul[0].header)  
-                    self.arcsec_per_pix[band] = np.abs(hdul[0].header["CD1_1"]*3600)
-            except OSError as e:
-                self.error_tracker.log_error(e, "Downloaded Corrupted FITS file")
-                continue
-
-    def reproject_cutouts(self, reference = "VIS"):
-        """Aligns and resizes VIS and NISP images so that can be stacked
-        Reference can be either the name of the filter or its index"""
-
-        if isinstance(reference, int):
-            reference = self.euclid_filters[reference]
-        
-        ref_wcs = self.wcs[reference]  
-        ref_shape = self.data[reference].shape
-        self.arcsec_per_pix |= {"Color" : self.arcsec_per_pix[reference]}
-        self.wcs  |= {"Color" : ref_wcs} 
-        
-        self.reprojected_data = {}
-        for band in self.euclid_filters:
-            reprojected, _ = reproject_interp((self.data[band], self.wcs[band]), ref_wcs, shape_out=ref_shape)
-            self.reprojected_data |= {band : reprojected}
-        
-        self.data["Color"] = self.get_color_cutout(r_img = "NIR_H", g_img = "NIR_Y", b_img = "VIS", stretch=None,
-                                                        stretch_interval = None)
-
-
-    def get_plot_data(self, stretch = "Linear", 
-                        stretch_scale = None,
-                        stretch_interval = AsymmetricPercentileInterval(lower_percentile = 0.1, upper_percentile=100),
-                        ):
-        """This is just a convenient method which initializes the cutouts to be plotted for all bands plus 
-           the color image by calling self._stretch_image"""
-        
-        stretch_map = {"Linear": lambda: LinearStretch(slope = stretch_scale if stretch_scale is not None else 1),
-                      "Sqrt": lambda: SqrtStretch(),
-                      "Log" : lambda: LogStretch(a = stretch_scale if stretch_scale is not None else 1000),
-                      "Asinh": lambda: AsinhStretch(a = stretch_scale if stretch_scale is not None else 0.1),
-                      "PowerLaw": lambda: PowerStretch(a = stretch_scale if stretch_scale is not None else 2)}
-            
-        if isinstance(stretch, str):
-            stretch = stretch_map.get(stretch)()
-
-        self.plot_data = {}
-        self.plot_data_info = {}
-        
-        for band in self.euclid_filters:
-            self.plot_data[band] =  self._stretch_image(self.data[band], stretch = stretch, 
-                                                        stretch_interval = stretch_interval)
-            self.plot_data_info[band] =  {"min_value" : np.nanmin(self.plot_data[band]),
-                                          "max_value" : np.nanmax(self.plot_data[band]) }
-        
-        
-        self.plot_data["Color"] = self.get_color_cutout(r_img = "NIR_H", g_img = "NIR_Y", b_img = "VIS", stretch=stretch,
-                                                        stretch_interval = stretch_interval)
-
-        self.plot_data_info["Color"] = { "min_value" : [np.nanmin(i) for i in self.plot_data["Color"]], 
-                                         "max_value" : [np.nanmax(i) for i in self.plot_data["Color"]]}
-
-
-    def get_color_cutout(self, r_img = "NIR_H", g_img = "NIR_Y", b_img = "VIS",
-                        stretch = None, 
-                        stretch_interval = None):
-        
-        images = [self._stretch_image(self.reprojected_data[band], stretch = stretch, 
-                 stretch_interval = stretch_interval) for band in [r_img, g_img, b_img]]
-         
-        return  np.dstack(images)
-  
-    def transform_image_range(self, band, low, high, gamma = 1, scale_method = "MinMax",
-                              scale_by_channel = False):
-        """Clip and scales the plot. This is used to update the plot due 
-           to a change of parameters in CustomPlot
-        """
-        
-        if  band != "Color":
-            image = self.plot_data[band]
-            image_min = self.plot_data_info[band].get("min_value", None)
-            image_max = self.plot_data_info[band].get("max_value", None)
-            clipped_image, new_min, new_max = self._clip_image(image, low, high, 
-                                            image_min = image_min, image_max = image_max)
-            scaled_image = self._scale_image(clipped_image, 
-                                            scale_method = scale_method,
-                                            image_min = new_min, image_max = new_max)
-        else:
-            ##band == Color
-            if not np.iterable(low):
-                low = [low] * 3
-            if not np.iterable(high):
-                high = [high] * 3
-            if not np.iterable(gamma):
-                gamma = [gamma] * 3
-            clipped_images = []
-            abs_min, abs_max = np.inf, -np.inf
-            image_min = np.min(self.plot_data_info[band]["min_value"])
-            image_max = np.max(self.plot_data_info[band]["max_value"])
-            for i in range(3):
-                image = self.plot_data[band][:, :, i]
-                clipped_image, new_min, new_max = self._clip_image(image, low[i], high[i], 
-                                            image_min = image_min, image_max = image_max)
-                clipped_image = clipped_image**gamma[i]
-                abs_min = min(abs_min, new_min)
-                abs_max = max(abs_max, new_max)
-                if scale_by_channel:
-                    clipped_image = self._scale_image(clipped_image, 
-                                            scale_method = scale_method,
-                                            image_min = new_min, image_max = new_max)
-                clipped_images.append(clipped_image)
-            
-            scaled_image = self._scale_image(np.dstack(clipped_images), scale_method = "minmax",
-                                             image_min = abs_min, image_max = abs_max)
-
-        return scaled_image
-    
-    @staticmethod
-    def _stretch_image(image, stretch, stretch_interval):
-        if stretch is None:
-            stretch = LinearStretch()
-        if stretch_interval is None:
-            transform = stretch
-        else:
-            transform = stretch + stretch_interval 
-        return transform(image)
-    
-    @staticmethod
-    def _clip_image(image, low, high, image_min = None, image_max = None, clip = False):
-        
-        if (low == 0) and (high == 1):
-            return image, image_min, image_max
-        if image_min is None:
-            image_min = np.nanmin(image)
-        if image_max is None:
-            image_max = np.nanmax(image)
-        
-        image_range = image_max - image_min
-        absolute_low = image_min + low * image_range
-        absolute_high = image_min + high * image_range
-
-        return np.clip(image, absolute_low, absolute_high), absolute_low, absolute_high
-    
-    @staticmethod
-    def _scale_image(image, scale_method= "minmax", image_min = None, image_max = None):
-        if scale_method.lower() =="minmax":
-            if image_min is None:
-                image_min = np.nanmin(image)
-            if image_max is None:
-                image_max = np.nanmax(image)
-            scaled_image = (image-image_min)/(image_max-image_min)
-            scaled_image = np.clip(scaled_image, 0,1)
-    
-        elif scale_method.lower() == "expand":
-            print("using expand scale")
-            mid_value = np.nanmedian(image)
-            sigma = np.nanstd(image)
-            scaled_image = np.where(image>mid_value+(1*sigma), image * 2, image / 2)
-        
-        else:
-            raise ValueError(f"Unknown scale_method: {scale_method}") 
-        return scaled_image
-
-
-    def _add_overplot_coordinates(self, ra, dec, dataset = "default"):
-        """
-        Creates a dictionary to store coordinates from different datasets which can
-        be then overplotted n the cutout.
-        Parameters:
-        ra, dec: float or list of floats, icrs coordinates
-        dataset : str, allows to store independently coordinates from different datasets
-        """
-        if not hasattr(self, "overplot_coordinates"):
-            self.overplot_coordinates = {}
-        self.overplot_coordinates[dataset] = {"ra" : ra, "dec" : dec}
-
-    def _convert_overplot_coordinates(self, filtro = "Color", dataset = "default", zipped = True):
-        """
-        Converts the stored coordinates into pixel coordinates for a given filter.
-        If zipped == True returns a list of (x,y) poais of pixel coordinates
-        otherwise returns x and y 
-        Parameters:
-        filtro : str, WCS key (default is "Color")
-        dataset : str, datasets coordinates to be transformed into pixels
-        """
-        if not hasattr(self, "overplot_coordinates"):
-            warnings.warn("No stored coordinates", UserWarning)
-            return [] if zipped else (None, None)
-
-        coords = SkyCoord(ra = self.overplot_coordinates[dataset]["ra"],
-                          dec = self.overplot_coordinates[dataset]["dec"],
-                          unit="deg", frame="icrs")
-        x_pix, y_pix = self.wcs[filtro].world_to_pixel(coords)
-        return list(zip(x_pix, y_pix)) if zipped else (x_pix, y_pix)
-            
-
-    def world_2_pix(self, ra, dec, filtro = "Color", zipped = True):
-        """
-        Same as _convert_overplot_coordinates but for external coordinates
-        """
-        coords = SkyCoord(ra = ra, dec = dec, unit="deg", frame="icrs")
-        x_pix, y_pix = self.wcs[filtro].world_to_pixel(coords)
-        return list(zip(x_pix, y_pix)) if zipped else (x_pix, y_pix)
-    
-
-    def export_cutouts_to_fits(self, bands_to_export, directory_path = "data/saved_sources"):
-        """Saves the fits file, Fits file have already been downloaded/saved so it might actually be 
-            better to just copy them into the required directory.
-        """
-        for band in bands_to_export:
-            try:
-                with fits.open(self.cutouts_paths[band]) as hdul:
-                    data = hdul[0].data       
-                    header =hdul[0].header
-                hdu = fits.PrimaryHDU(data = data, header=header)
-                hdul = fits.HDUList([hdu])
-                
-                filename = f"{band}_cutout.fits"
-                hdul.writeto(os.path.join(directory_path, filename), overwrite=True)
-            except KeyError:
-                print("The required band is not available")
-            except OSError as e:
-                print(e)
-            except FileNotFoundError as e:
-                print(f"I could not find {self.cutouts_paths[band]}\n {e}")
-
-        
-    def get_final_cutout(self, radius, 
-                         stretch =  "Linear", 
-                         filtro = "Color", 
-                         reference = "VIS", 
-                         stretch_scale = None,
-                         verbose = False,
-                         return_object = False):
-        """
-        Method which calls sequentially all the other methods to get a cutout. return_object returns 
-        the required cutout in addition to storing it as an attribute for multithread purposes.
-        """
-        
-        self.error_tracker.reset()
-        if not check_isin_survey(ra = self.coordinates.ra.value,
-                                 dec = self.coordinates.dec.value,
-                                 moc  = self.moc):
-            self.error_tracker.log_error("Source not in the survey", 
-                                         "The selected source is outside the survey coverage area")
-            return None
-
+    def get_band_cutout(self, band: str, fname: Optional[str] = None) -> Optional[str]:
+        """Download one band and return the local FITS path."""
+        if self.coordinates is None:
+            raise ValueError("No coordinates set — provide ra and dec first")
         if not hasattr(self, "cone_results"):
-            self.get_cone(verbose = verbose, async_job= False)
-        
-        if len(self.cone_results) <= 2:
-            if verbose:
-                print("Initial Cone Results failed, trying with a 1 deg^2 search radius")
-            self.get_cone(initial_radius = 1*u.degree,  verbose = verbose, async_job= False)
-        
+            raise RuntimeError("Run get_cone before downloading cutouts")
+        if not hasattr(self, "cutout_radius"):
+            raise RuntimeError("cutout_radius is not set; call download_cutouts")
+
+        try:
+            file_path, instrument, obs_id = self.get_info_cutout(self.cone_results, band)
+            stem = f"{obs_id}_{band}" if fname is None else f"{fname}_{band}"
+            output_file = os.path.join(self.save_dir, f"{stem}.fits")
+
+            result = self.client.get_cutout(
+                file_path=file_path,
+                instrument=instrument,
+                id=obs_id,
+                coordinate=self.coordinates,
+                radius=self.cutout_radius,
+                output_file=output_file,
+            )
+            return result[0] if result else output_file
+
+        except ConnectionError as exc:
+            self.error_tracker.log_error(exc, "Failed to connect to ESA Science Archive")
+        except Exception as exc:
+            self.error_tracker.log_error(exc, f"Failed to download Euclid {band} cutout")
+        return None
+
+
+    def download_cutouts(
+        self,
+        radius: float,
+        verbose: bool = False,
+        bands_to_retrieve: Optional[Iterable[str]] = None,
+    ) -> Dict[str, str]:
+        """Download FITS cutouts for the requested bands."""
+        self.cutout_radius = float(radius) * u.arcsec
+        self.cutouts_paths: Dict[str, str] = {}
+
+        bands = list(bands_to_retrieve or self.euclid_filters)
+        tic = time.perf_counter()
+
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            futures = {
+                executor.submit(self.get_band_cutout, band, fname="tmp"): band
+                for band in bands
+            }
+            for future in concurrent.futures.as_completed(futures):
+                band = futures[future]
+                try:
+                    save_path = future.result()
+                except Exception as exc:
+                    self.error_tracker.log_error(exc, f"Failed to download Euclid {band} cutout")
+                    continue
+                if save_path is not None:
+                    self.cutouts_paths[band] = str(save_path)
+
+        if verbose:
+            toc = time.perf_counter()
+            print(f"Retrieving all cutouts required {toc - tic:.3f} seconds")
+
+        return self.cutouts_paths
+
+    def read_cutouts(self) -> Tuple[Dict[str, np.ndarray], Dict[str, WCS]]:
+        """Read downloaded FITS cutouts into raw arrays and WCS objects."""
+        self.data: Dict[str, np.ndarray] = {}
+        self.wcs: Dict[str, WCS] = {}
+        self.headers: Dict[str, Any] = {}
+
+        for band, path in getattr(self, "cutouts_paths", {}).items():
+            try:
+                with fits.open(path) as hdul:
+                    hdu = hdul[0]
+                    self.data[band] = np.asarray(hdu.data)
+                    self.headers[band] = hdu.header.copy()
+                    self.wcs[band] = WCS(hdu.header)
+
+            except OSError as exc:
+                self.error_tracker.log_error(exc, f"Downloaded corrupted FITS file for {band}")
+            except Exception as exc:
+                self.error_tracker.log_error(exc, f"Could not read Euclid {band} FITS cutout")
+
+        return self.data, self.wcs
+
+    def get_cutouts(
+        self,
+        radius: float = 5,
+        *,
+        ra: Optional[float] = None,
+        dec: Optional[float] = None,
+        bands_to_retrieve: Optional[Iterable[str]] = None,
+        verbose: bool = False,
+    ) -> Tuple[Optional[Dict[str, np.ndarray]], Optional[Dict[str, WCS]]]:
+        """Download and read raw Euclid cutouts, returning ``(data, wcs)``.
+
+        This is the only high-level public retrieval method. It performs:
+
+        1. optional coordinate update;
+        2. optional MOC coverage check;
+        3. archive cone search;
+        4. FITS cutout download;
+        5. FITS reading into raw arrays and WCS objects.
+
+        It intentionally does not stretch, clip, scale, reproject for display,
+        build RGB images, or create plotting objects.
+        """
+        self.error_tracker.reset()
+
+        if ra is not None or dec is not None:
+            if ra is None or dec is None:
+                raise ValueError("Both ra and dec must be provided together")
+            self.set_coordinates(ra=ra, dec=dec)
+
+        if self.coordinates is None:
+            raise ValueError("No coordinates set — provide ra and dec")
+
+        if self.check_moc_coverage and self.moc is not None:
+            inside = check_isin_survey(
+                ra=self.coordinates.ra.value,
+                dec=self.coordinates.dec.value,
+                moc=self.moc,
+            )
+            if not inside:
+                self.error_tracker.log_error(
+                    "Source not in the survey",
+                    "The selected source is outside the survey coverage area",
+                )
+                return None, None
+
+        self.get_cone(verbose=verbose, async_job=False)
         if self.error_tracker.has_error:
-            return None
-        
-        elif len(self.cone_results) <= 2:
+            return None, None
+
+        if not hasattr(self, "cone_results") or self.cone_results is None or len(self.cone_results) <= 0:
             self.error_tracker.log_error(
-                                       "Cone search failed",
-                                       "No sources found within search radius")
-            return None
-        
-        self.get_cutouts(radius=radius, verbose=verbose)
+                "Cone search failed",
+                "No Euclid mosaic products found within the search radius",
+            )
+            return None, None
+
+        self.download_cutouts(
+            radius=radius,
+            verbose=verbose,
+            bands_to_retrieve=bands_to_retrieve,
+        )
         if self.error_tracker.has_error:
-            return None
+            return None, None
+
         self.read_cutouts()
         if self.error_tracker.has_error:
-            return None
-            
-        self.reproject_cutouts(reference=reference)
-        self.get_plot_data(stretch=stretch, stretch_scale = stretch_scale)
-        
-        if return_object:
-            return self.plot_data.get(filtro, None)
-         
-    def clean_space(self):
-        """Free quota of queries to Euclid Science Archive by removing asinchronous jobs. 
-         It takes a couple of minutes"""
-        joblist = self.client.list_async_jobs()
-        to_remove = [j.jobid for j in joblist]
-        self.client.remove_jobs(to_remove)           
+            return None, None
 
-def load_moc(survey, path = "data/mocs"):
-    surveys = {"Euclid_Q1" : "Euclid_Q1_color.fits",
-               "Euclid_DR1": "Euclid_Q1_color.fits",
-               "DESI" : "DESI_from_query.fits",
-               "SDSS" : "SDSS_color.fits",
-               "VLASS" : "VLASS_QL.fits",
-               "LoTSS" : "LoTSS_dr2.fits",
-               }
-    assert survey in surveys, f"No Moc file available for {survey}"
+        return self.data, self.wcs
+
+    # ------------------------------------------------------------------
+    # Export / cleanup helpers
+    # ------------------------------------------------------------------
+    def export_cutouts_to_fits(
+        self,
+        bands_to_export: Iterable[str],
+        directory_path: str = "data/saved_sources",
+    ) -> None:
+        """Copy downloaded cutouts to a target directory as FITS files."""
+        os.makedirs(directory_path, exist_ok=True)
+
+        for band in bands_to_export:
+            try:
+                path = self.cutouts_paths[band]
+                with fits.open(path) as hdul:
+                    data = hdul[0].data
+                    header = hdul[0].header
+                    hdu = fits.PrimaryHDU(data=data, header=header)
+                    filename = f"{band}_cutout.fits"
+                    fits.HDUList([hdu]).writeto(
+                        os.path.join(directory_path, filename),
+                        overwrite=True,
+                    )
+            except KeyError:
+                print(f"The required band is not available: {band}")
+            except OSError as exc:
+                print(exc)
+            except FileNotFoundError as exc:
+                missing = getattr(self, "cutouts_paths", {}).get(band, "<unknown>")
+                print(f"I could not find {missing}\n{exc}")
+
+    def clean_space(self) -> None:
+        """Free Euclid archive async-job quota."""
+        try:
+            joblist = self.client.list_async_jobs()
+            to_remove = [job.jobid for job in joblist]
+            if to_remove:
+                self.client.remove_jobs(to_remove)
+        except Exception:
+            return
+
+
+# ----------------------------------------------------------------------
+# Small module helpers
+# ----------------------------------------------------------------------
+def load_moc(survey: str, path: str = DEFAULT_MOC_PATH) -> mocpy.MOC:
+    surveys = {
+        "Euclid_Q1": "Euclid_Q1_color.fits",
+        "Euclid_DR1": "Euclid_Q1_color.fits",
+        "DESI": "DESI_from_query.fits",
+        "SDSS": "SDSS_color.fits",
+        "VLASS": "VLASS_QL.fits",
+        "LoTSS": "LoTSS_dr2.fits",
+    }
+    assert survey in surveys, f"No MOC file available for {survey}"
     return mocpy.MOC.from_fits(os.path.join(path, surveys[survey]))
 
-def check_isin_survey(ra, dec, moc):
-    return moc.contains_lonlat(ra*u.deg, dec*u.deg)
+
+def check_isin_survey(ra: float, dec: float, moc: mocpy.MOC) -> bool:
+    value = moc.contains_lonlat(ra * u.deg, dec * u.deg)
+    return bool(np.asarray(value).item())
