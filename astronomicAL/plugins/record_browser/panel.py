@@ -587,7 +587,7 @@ class RecordBrowserPanel(param.Parameterized):
     def _subscribe_to_dataset_events(self) -> None:
         self._subscribe("dataset.active.changed", self._on_dataset_active_changed)
         self._subscribe("dataset.updated", self._on_dataset_updated)
-        self._subscribe("dataset.mapping_updated", self._on_dataset_mapping_updated)
+        self._subscribe("dataset.mapping.updated", self._on_dataset_mapping_updated)
 
     def _subscribe_to_selection_events(self) -> None:
         self._subscribe("selection.focus.changed", self._on_selection_focus_changed)

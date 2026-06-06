@@ -61,7 +61,7 @@ class EventMonitorPanel:
         "dataset.loaded",
         "dataset.active.changed",
         "dataset.updated",
-        "dataset.mapping_updated",
+        "dataset.mapping.updated",
     ]
 
     TOPIC_FILTER_OPTIONS = [
@@ -166,7 +166,7 @@ class EventMonitorPanel:
                     "dataset.loaded",
                     "dataset.active.changed",
                     "dataset.updated",
-                    "dataset.mapping_updated",
+                    "dataset.mapping.updated",
                     "status",
                     "topics",
                 ]
@@ -614,8 +614,8 @@ class EventMonitorPanel:
                     "yes" if wildcard or "dataset.active.changed" in topics else "no"
                 ),
                 "dataset.updated": "yes" if wildcard or "dataset.updated" in topics else "no",
-                "dataset.mapping_updated": (
-                    "yes" if wildcard or "dataset.mapping_updated" in topics else "no"
+                "dataset.mapping.updated": (
+                    "yes" if wildcard or "dataset.mapping.updated" in topics else "no"
                 ),
                 "topics": ", ".join(sorted(str(t) for t in topics))[:240],
             }
@@ -638,7 +638,7 @@ class EventMonitorPanel:
             "dataset.loaded",
             "dataset.active.changed",
             "dataset.updated",
-            "dataset.mapping_updated",
+            "dataset.mapping.updated",
             "status",
             "topics",
         ]

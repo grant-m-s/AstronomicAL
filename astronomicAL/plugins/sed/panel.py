@@ -1416,7 +1416,7 @@ class BroadbandSEDPanel:
             ("selection.focus.changed", self._on_focus_changed),
             ("selection.focus.cleared", self._on_focus_cleared),
             ("dataset.active.changed", self._on_dataset_changed),
-            ("dataset.mapping_updated", self._on_dataset_changed),
+            ("dataset.mapping.updated", self._on_dataset_changed),
         ):
             try:
                 sub = events.subscribe(

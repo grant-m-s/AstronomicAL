@@ -560,7 +560,7 @@ class TableTransformPanel:
             "dataset.loaded",
             "dataset.active.changed",
             "dataset.updated",
-            "dataset.mapping_updated",
+            "dataset.mapping.updated",
         ):
             try:
                 sub = events.subscribe(

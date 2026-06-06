@@ -629,7 +629,7 @@ class DatasetManager:
 
         try:
             events.publish(
-                "dataset.mapping_updated",
+                "dataset.mapping.updated",
                 {
                     "dataset_id": dataset_id,
                     "mappings": dict(mappings),

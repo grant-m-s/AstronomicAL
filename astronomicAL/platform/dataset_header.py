@@ -96,7 +96,7 @@ class DatasetHeaderController:
             "dataset.updated",
             "dataset.removed",
             "dataset.open_requested",
-            "dataset.mapping_updated",
+            "dataset.mapping.updated",
         ):
             try:
                 sub = events.subscribe(

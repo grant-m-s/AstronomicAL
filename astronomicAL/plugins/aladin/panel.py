@@ -649,7 +649,7 @@ class AladinPanel:
         self._subscribe("selection.focus.changed", self._selection_changed)
         self._subscribe("selection.focus.cleared", self._selection_cleared)
         self._subscribe("dataset.active.changed", self._dataset_changed)
-        self._subscribe("dataset.mapping_updated", self._dataset_changed)
+        self._subscribe("dataset.mapping.updated", self._dataset_changed)
 
     def _subscribe(self, topic: str, callback: Any) -> None:
         events = getattr(self.context, "events", None)

@@ -192,7 +192,7 @@ class BaseVisualisationPanel(param.Parameterized):
             "dataset.loaded",
             "dataset.updated",
             "dataset.active.changed",
-            "dataset.mapping_updated",
+            "dataset.mapping.updated",
             "labels.settings.updated",
         ):
             self._subscribe(topic, self._on_dataset_event)
@@ -2524,7 +2524,7 @@ class BaseVisualisationPanel(param.Parameterized):
             "dataset.loaded",
             "dataset.updated",
             "dataset.active.changed",
-            "dataset.mapping_updated",
+            "dataset.mapping.updated",
         }:
             return
 
@@ -2669,7 +2669,7 @@ class BaseVisualisationPanel(param.Parameterized):
         after = self._visual_state_signature()
         now_using_labels = self._uses_label_rendering()
 
-        if topic == "dataset.mapping_updated" and before == after:
+        if topic == "dataset.mapping.updated" and before == after:
             print(
                 "[AstronomicAL visualisation] mapping update did not change visual state; "
                 "skipping refresh",

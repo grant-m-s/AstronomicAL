@@ -337,7 +337,7 @@ class MappingGatedPanel:
 
         self._subscriptions.append(
             events.subscribe(
-                "dataset.mapping_updated",
+                "dataset.mapping.updated",
                 self._on_dataset_mapping_updated,
                 owner_id=owner_id,
                 owner_label=owner_label,

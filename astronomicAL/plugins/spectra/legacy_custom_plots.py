@@ -495,7 +495,7 @@ class CustomPlotClass(param.Parameterized):
             self.subscribe("dataset.loaded", self._dataset_loaded_cb)
 
         if include_mapping:
-            self.subscribe("dataset.mapping_updated", self._dataset_mapping_updated_cb)
+            self.subscribe("dataset.mapping.updated", self._dataset_mapping_updated_cb)
 
 
     def _dataset_active_changed_cb(self, topic, payload):
@@ -517,7 +517,7 @@ class CustomPlotClass(param.Parameterized):
     def _dataset_mapping_updated_cb(self, topic, payload):
         if not self._event_matches_active_dataset(payload):
             return
-        self._request_refresh(reason=str(topic or "dataset.mapping_updated"), payload=payload)
+        self._request_refresh(reason=str(topic or "dataset.mapping.updated"), payload=payload)
 
 
     def _get_focus_state(self):
@@ -1460,7 +1460,7 @@ class EuclidPlotClass(CustomPlotClass):
                     pass
 
         self._request_refresh(
-            reason=str(topic or "dataset.mapping_updated"),
+            reason=str(topic or "dataset.mapping.updated"),
             payload=payload,
         )
 

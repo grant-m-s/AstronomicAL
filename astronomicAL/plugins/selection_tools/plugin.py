@@ -1321,7 +1321,7 @@ class SelectionSetPanel:
             "selection.set.cleared",
             "dataset.active.changed",
             "dataset.updated",
-            "dataset.mapping_updated",
+            "dataset.mapping.updated",
             "dataset.loaded",
         ):
             self._subscribe(topic, self._runtime_event_cb)

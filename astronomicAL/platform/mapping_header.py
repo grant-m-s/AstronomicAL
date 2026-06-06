@@ -746,7 +746,7 @@ Choose the dataset columns needed by active panels. Pending requirements are app
                 resolved_payload["source"] = source
                 self.context.events.publish("mapping.resolved", resolved_payload)
             if changed:
-                self.context.events.publish("dataset.mapping_updated", payload)
+                self.context.events.publish("dataset.mapping.updated", payload)
 
         return True
 
@@ -835,7 +835,7 @@ Choose the dataset columns needed by active panels. Pending requirements are app
 
         if getattr(self.context, "events", None) is not None and changed:
             self.context.events.publish(
-                "dataset.mapping_updated",
+                "dataset.mapping.updated",
                 {
                     "source": "mapping_header",
                     "dataset_id": dataset_id,
@@ -871,7 +871,7 @@ Choose the dataset columns needed by active panels. Pending requirements are app
 
         if getattr(self.context, "events", None) is not None:
             self.context.events.publish(
-                "dataset.mapping_updated",
+                "dataset.mapping.updated",
                 {
                     "source": "mapping_header",
                     "dataset_id": dataset_id,

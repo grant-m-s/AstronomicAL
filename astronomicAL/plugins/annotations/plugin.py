@@ -970,7 +970,7 @@ class AnnotationsPanel:
         self._subscribe("selection.focus.cleared", self._on_selection_focus_cleared)
         self._subscribe("dataset.active.changed", self._on_dataset_active_changed)
         self._subscribe("dataset.updated", self._on_dataset_updated)
-        self._subscribe("dataset.mapping_updated", self._on_dataset_mapping_updated)
+        self._subscribe("dataset.mapping.updated", self._on_dataset_mapping_updated)
         self._subscribe("artifact.created", self._on_artifact_created)
 
     def _subscribe(self, topic: str, callback) -> None:

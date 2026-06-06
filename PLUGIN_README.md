@@ -395,7 +395,7 @@ Good event names use dotted topics:
 dataset.loaded
 dataset.active.changed
 dataset.updated
-dataset.mapping_updated
+dataset.mapping.updated
 mapping.requested
 mapping.resolved
 mapping.open_requested
@@ -1869,7 +1869,7 @@ Useful mapping events include:
 mapping.requested
 mapping.resolved
 mapping.open_requested
-dataset.mapping_updated
+dataset.mapping.updated
 ```
 
 ---
@@ -2342,7 +2342,7 @@ Common platform topics:
 dataset.loaded
 dataset.active.changed
 dataset.updated
-dataset.mapping_updated
+dataset.mapping.updated
 mapping.requested
 mapping.resolved
 mapping.open_requested
