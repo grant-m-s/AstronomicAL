@@ -35,12 +35,12 @@ SED_UNIT_ALIASES = {
     "millijy": "mJy",
     "millijansky": "mJy",
     "millijanskys": "mJy",
-    "ujy": "uJy",
-    "µjy": "uJy",
-    "μjy": "uJy",
-    "microjy": "uJy",
-    "microjansky": "uJy",
-    "microjanskys": "uJy",
+    "ujy": "µJy",
+    "µjy": "µJy",
+    "μjy": "µJy",
+    "microjy": "µJy",
+    "microjansky": "µJy",
+    "microjanskys": "µJy",
     "njy": "nJy",
     "nanojy": "nJy",
     "nanojansky": "nJy",
@@ -71,7 +71,7 @@ def flux_value_to_microjy(value: float, unit: Any) -> float:
     if unit == "mJy":
         return value * 1.0e3
 
-    if unit == "uJy":
+    if unit in {"uJy", "µJy"}:
         return value
 
     if unit == "nJy":

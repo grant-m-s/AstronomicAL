@@ -365,6 +365,16 @@ class BroadbandSEDPanel:
         }
         self.pending_unit_overrides: Dict[str, str] = dict(self.unit_overrides)
 
+        restored_assign_all_unit = (
+            self.restore_state.get("assign_all_unit_value")
+            or self.restore_state.get("unit_for_all_filters")
+        )
+        self.assign_all_unit_value: Optional[str] = (
+            normalise_sed_unit(restored_assign_all_unit)
+            if restored_assign_all_unit
+            else None
+        )
+
         self.show_fwhm_error_bars: bool = bool(
             self.restore_state.get("show_fwhm_error_bars", True)
         )
@@ -383,6 +393,7 @@ class BroadbandSEDPanel:
         self.current_dataset_id: Optional[str] = None
         self.current_row_id: Optional[str] = None
         self.latest_artifact_id: Optional[str] = self.restore_state.get("latest_artifact_id")
+        self._latest_build_context: Dict[str, str] = {}
 
         self.file_select = pn.widgets.Select(
             name="SED photometry-band file",
@@ -698,6 +709,169 @@ class BroadbandSEDPanel:
         self.status.alert_type = alert_type
         self.status.margin = (8, 0, 12, 0)
 
+    def _sed_unit_value(self, value: Any, *, default: str = "ABmag") -> str:
+        """Return a unit value that is safe to put into the SED unit dropdown."""
+        unit = normalise_sed_unit(value or default)
+        if unit in SED_UNIT_OPTIONS:
+            return unit
+
+        default_unit = normalise_sed_unit(default)
+        if default_unit in SED_UNIT_OPTIONS:
+            return default_unit
+
+        return "ABmag"
+
+    def _current_filter_unit(self, filter_name: Any) -> str:
+        """Resolve the unit that should be shown for one filter.
+
+        Priority:
+        1. pending per-filter unit
+        2. saved per-filter unit
+        3. last assigned "unit for all filters"
+        4. ABmag
+        """
+        key = str(filter_name or "")
+
+        if key:
+            pending = self.pending_unit_overrides.get(key)
+            if pending:
+                return self._sed_unit_value(pending)
+
+            saved = self.unit_overrides.get(key)
+            if saved:
+                return self._sed_unit_value(saved)
+
+        if self.assign_all_unit_value:
+            return self._sed_unit_value(self.assign_all_unit_value)
+
+        return "ABmag"
+
+    def _inferred_assign_all_unit(self, filter_names: Sequence[str]) -> str:
+        """Return the value that should be displayed by "Unit for all filters"."""
+        if self.assign_all_unit_value:
+            return self._sed_unit_value(self.assign_all_unit_value)
+
+        units = []
+        for filter_name in filter_names:
+            key = str(filter_name)
+            value = self.pending_unit_overrides.get(key) or self.unit_overrides.get(key)
+            if value:
+                units.append(self._sed_unit_value(value))
+
+        if units and len(set(units)) == 1:
+            return units[0]
+
+        return "ABmag"
+
+    def _publish(self, topic: str, payload: Optional[Dict[str, Any]] = None) -> None:
+        events = getattr(self.context, "events", None)
+        if events is None:
+            return
+
+        try:
+            events.publish(topic, payload or {})
+        except Exception:
+            pass
+
+    def _event_identity(
+        self,
+        *,
+        dataset_id: Optional[Any] = None,
+        row_id: Optional[Any] = None,
+        artifact_id: Optional[str] = None,
+        sed_file: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "plugin_id": PLUGIN_ID,
+            "origin": self.instance_id,
+            "panel_id": self.instance_id,
+        }
+
+        if dataset_id is not None:
+            payload["dataset_id"] = str(dataset_id)
+
+        if row_id is not None:
+            row_id_str = str(row_id)
+            payload["row_id"] = row_id_str
+            payload["row_ids"] = [row_id_str]
+
+        if artifact_id is not None:
+            payload["artifact_id"] = str(artifact_id)
+
+        if sed_file is not None:
+            payload["sed_file"] = str(sed_file)
+
+        return payload
+
+    def _publish_sed_running(
+        self,
+        running: bool,
+        *,
+        dataset_id: Optional[Any] = None,
+        row_id: Optional[Any] = None,
+        sed_file: Optional[str] = None,
+        artifact_id: Optional[str] = None,
+        reason: Optional[str] = None,
+        error: Optional[Any] = None,
+    ) -> None:
+        payload = self._event_identity(
+            dataset_id=dataset_id,
+            row_id=row_id,
+            artifact_id=artifact_id,
+            sed_file=sed_file,
+        )
+        payload["running"] = bool(running)
+
+        if reason:
+            payload["reason"] = str(reason)
+
+        if error is not None:
+            payload["error"] = str(error)
+
+        self._publish("astro.sed.running", payload)
+
+    def _publish_artifact_created(
+        self,
+        *,
+        artifact_id: Optional[str],
+        dataset_id: Any,
+        row_id: Any,
+    ) -> None:
+        if artifact_id is None:
+            return
+
+        payload = self._event_identity(
+            dataset_id=dataset_id,
+            row_id=row_id,
+            artifact_id=artifact_id,
+            sed_file=self.sed_file,
+        )
+        payload["type"] = SED_ARTIFACT_TYPE
+        self._publish("artifact.created", payload)
+
+    def _publish_plugin_error(
+        self,
+        *,
+        stage: str,
+        error: Any,
+        dataset_id: Optional[Any] = None,
+        row_id: Optional[Any] = None,
+        sed_file: Optional[str] = None,
+    ) -> None:
+        payload = self._event_identity(
+            dataset_id=dataset_id,
+            row_id=row_id,
+            sed_file=sed_file,
+        )
+        payload.update(
+            {
+                "stage": str(stage),
+                "error": str(error),
+                "error_type": type(error).__name__,
+            }
+        )
+        self._publish("plugin.error", payload)
+
 
     def _on_toggle_settings(self, event) -> None:
         self.settings_expanded = not self.settings_expanded
@@ -782,6 +956,7 @@ class BroadbandSEDPanel:
         filter_names: Sequence[str],
     ) -> pd.DataFrame:
         columns = set(self._dataset_columns(dataset_id))
+
         rows = []
 
         for filter_name in filter_names:
@@ -792,16 +967,14 @@ class BroadbandSEDPanel:
                 or self.column_overrides.get(filter_name)
                 or ""
             )
+
             error_col = (
                 self.pending_error_column_overrides.get(filter_name)
                 or self.error_column_overrides.get(filter_name)
                 or ""
             )
-            unit = normalise_sed_unit(
-                self.pending_unit_overrides.get(filter_name)
-                or self.unit_overrides.get(filter_name)
-                or "ABmag"
-            )
+
+            unit = self._current_filter_unit(filter_name)
 
             if value_col:
                 value_display = value_col
@@ -827,7 +1000,9 @@ class BroadbandSEDPanel:
 
     def _on_mapping_reference_changed(self, event) -> None:
         filter_name = str(event.new or "")
+
         columns = self.mapping_column_select.options if self.mapping_column_select is not None else []
+
         error_columns = (
             self.mapping_error_column_select.options
             if self.mapping_error_column_select is not None
@@ -839,16 +1014,14 @@ class BroadbandSEDPanel:
             or self.column_overrides.get(filter_name)
             or (filter_name if filter_name in columns else "")
         )
+
         error_col = (
             self.pending_error_column_overrides.get(filter_name)
             or self.error_column_overrides.get(filter_name)
             or ""
         )
-        unit = normalise_sed_unit(
-            self.pending_unit_overrides.get(filter_name)
-            or self.unit_overrides.get(filter_name)
-            or "ABmag"
-        )
+
+        unit = self._current_filter_unit(filter_name)
 
         if self.mapping_column_select is not None:
             self.mapping_column_select.value = value_col if value_col in columns else ""
@@ -857,7 +1030,7 @@ class BroadbandSEDPanel:
             self.mapping_error_column_select.value = error_col if error_col in error_columns else ""
 
         if self.mapping_unit_select is not None:
-            self.mapping_unit_select.value = unit if unit in self.mapping_unit_select.options else "ABmag"
+            self.mapping_unit_select.value = self._sed_unit_value(unit)
 
     def _on_set_single_mapping(self, event) -> None:
         if (
@@ -871,7 +1044,7 @@ class BroadbandSEDPanel:
         filter_name = str(self.mapping_reference_select.value or "").strip()
         value_col = str(self.mapping_column_select.value or "").strip()
         error_col = str(self.mapping_error_column_select.value or "").strip()
-        unit = normalise_sed_unit(self.mapping_unit_select.value or "ABmag")
+        unit = self._sed_unit_value(self.mapping_unit_select.value or "ABmag")
 
         if not filter_name:
             return
@@ -897,7 +1070,8 @@ class BroadbandSEDPanel:
         if self.assign_all_unit_select is None or self.mapping_reference_select is None:
             return
 
-        unit = normalise_sed_unit(self.assign_all_unit_select.value or "ABmag")
+        unit = self._sed_unit_value(self.assign_all_unit_select.value or "ABmag")
+        self.assign_all_unit_value = unit
 
         for filter_name in self.mapping_reference_select.options:
             self.pending_unit_overrides[str(filter_name)] = unit
@@ -916,13 +1090,15 @@ class BroadbandSEDPanel:
             for key, value in self.pending_column_overrides.items()
             if value
         }
+
         self.error_column_overrides = {
             str(key): str(value)
             for key, value in self.pending_error_column_overrides.items()
             if value
         }
+
         self.unit_overrides = {
-            str(key): normalise_sed_unit(value)
+            str(key): self._sed_unit_value(value)
             for key, value in self.pending_unit_overrides.items()
             if value
         }
@@ -931,8 +1107,14 @@ class BroadbandSEDPanel:
         self.pending_error_column_overrides = dict(self.error_column_overrides)
         self.pending_unit_overrides = dict(self.unit_overrides)
 
+        if self.assign_all_unit_select is not None:
+            self.assign_all_unit_value = self._sed_unit_value(
+                self.assign_all_unit_select.value or self.assign_all_unit_value or "ABmag"
+            )
+
         self.mapping_applied_once = True
         self.mapping_ui_signature = None
+
         self.refresh(refresh_file_options=False)
 
     def _on_clear_mappings(self, event) -> None:
@@ -944,8 +1126,16 @@ class BroadbandSEDPanel:
 
         self.unit_overrides.clear()
         self.pending_unit_overrides.clear()
+        self.assign_all_unit_value = None
+
+        if self.assign_all_unit_select is not None:
+            self.assign_all_unit_select.value = "ABmag"
+
+        if self.mapping_unit_select is not None:
+            self.mapping_unit_select.value = "ABmag"
 
         self.mapping_ui_signature = None
+
         self.refresh(refresh_file_options=False)
 
     def _load_bands(self) -> Dict[str, Dict[str, Any]]:
@@ -1029,17 +1219,23 @@ class BroadbandSEDPanel:
             sizing_mode="stretch_width",
             margin=(0, 0, 12, 0),
         )
+
+        initial_filter = filters[0] if filters else ""
+        initial_filter_unit = self._current_filter_unit(initial_filter)
+        initial_assign_all_unit = self._inferred_assign_all_unit(filters)
+
         self.mapping_unit_select = pn.widgets.Select(
             name="Unit",
             options=SED_UNIT_OPTIONS,
-            value="ABmag",
+            value=self._sed_unit_value(initial_filter_unit),
             sizing_mode="stretch_width",
             margin=(0, 0, 12, 0),
         )
+
         self.assign_all_unit_select = pn.widgets.Select(
             name="Unit for all filters",
             options=SED_UNIT_OPTIONS,
-            value="ABmag",
+            value=self._sed_unit_value(initial_assign_all_unit),
             sizing_mode="stretch_width",
             margin=(0, 0, 12, 0),
         )
@@ -1370,44 +1566,59 @@ class BroadbandSEDPanel:
         if self.mapping_ui_changed_this_refresh or self.last_valid_point_count < MIN_POINTS_TO_PLOT:
             self._set_status(f"Building SED for row `{html.escape(str(row_id))}`...", "info")
 
-        events = getattr(self.context, "events", None)
-        if events is not None:
-            try:
-                events.publish(
-                    "astro.sed.running",
-                    {
-                        "dataset_id": dataset_id,
-                        "row_id": str(row_id),
-                        "sed_file": sed_file,
-                        "origin": self.instance_id,
-                    },
-                )
-            except Exception:
-                pass
+        self._latest_build_context = {
+            "dataset_id": str(dataset_id),
+            "row_id": str(row_id),
+            "sed_file": str(sed_file),
+        }
+
+        self._publish_sed_running(
+            True,
+            dataset_id=dataset_id,
+            row_id=row_id,
+            sed_file=sed_file,
+            reason="build_started",
+        )
+
+        def _worker(cancel_token=None) -> Dict[str, Any]:
+            return self._build_sed_payload(
+                cancel_token=cancel_token,
+                dataset_id=dataset_id,
+                row_id=row_id,
+                sed_file=sed_file,
+            )
+
+        def _done(payload: Dict[str, Any]) -> None:
+            self._on_build_done(
+                payload,
+                dataset_id=dataset_id,
+                row_id=row_id,
+                sed_file=sed_file,
+            )
+
+        def _error(exc: BaseException) -> None:
+            self._on_build_error(
+                exc,
+                dataset_id=dataset_id,
+                row_id=row_id,
+                sed_file=sed_file,
+            )
 
         jobs = getattr(self.context, "jobs", None)
         if jobs is None:
             try:
-                payload = self._build_sed_payload(
-                    cancel_token=None,
-                    dataset_id=dataset_id,
-                    row_id=row_id,
-                    sed_file=sed_file,
-                )
-                self._on_build_done(payload)
+                payload = _worker(cancel_token=None)
+                _done(payload)
             except Exception as exc:
-                self._on_build_error(exc)
+                _error(exc)
             return
 
         handle = jobs.submit(
-            self._build_sed_payload,
+            _worker,
             title="Build broadband SED",
             key=f"broadband-sed:{self.instance_id}:{dataset_id}:{row_id}:{sed_file}",
-            on_done=self._on_build_done,
-            on_error=self._on_build_error,
-            dataset_id=dataset_id,
-            row_id=row_id,
-            sed_file=sed_file,
+            on_done=_done,
+            on_error=_error,
         )
         self.job_handles.append(handle)
 
@@ -1454,17 +1665,47 @@ class BroadbandSEDPanel:
             skipped=result.skipped,
         )
 
-    def _on_build_done(self, payload: Dict[str, Any]) -> None:
+    def _on_build_done(
+        self,
+        payload: Dict[str, Any],
+        *,
+        dataset_id: Optional[str] = None,
+        row_id: Optional[str] = None,
+        sed_file: Optional[str] = None,
+    ) -> None:
         if not payload:
+            self._publish_sed_running(
+                False,
+                dataset_id=dataset_id,
+                row_id=row_id,
+                sed_file=sed_file,
+                reason="cancelled",
+            )
             return
 
-        dataset_id = str(payload.get("dataset_id") or "")
-        row_id = str(payload.get("row_id") or "")
+        dataset_id = str(payload.get("dataset_id") or dataset_id or "")
+        row_id = str(payload.get("row_id") or row_id or "")
+        sed_file = str(payload.get("sed_file") or sed_file or self.sed_file or "")
 
-        # Ignore late results for an old focus.
+        # Ignore late results for an old focus, but still close the lifecycle event.
         if self.current_dataset_id and dataset_id != self.current_dataset_id:
+            self._publish_sed_running(
+                False,
+                dataset_id=dataset_id,
+                row_id=row_id,
+                sed_file=sed_file,
+                reason="stale_result",
+            )
             return
+
         if self.current_row_id and row_id != self.current_row_id:
+            self._publish_sed_running(
+                False,
+                dataset_id=dataset_id,
+                row_id=row_id,
+                sed_file=sed_file,
+                reason="stale_result",
+            )
             return
 
         artifact_id = None
@@ -1477,52 +1718,71 @@ class BroadbandSEDPanel:
                 params={
                     "sed_file": payload.get("sed_file"),
                     "origin": self.instance_id,
+                    "plugin_id": PLUGIN_ID,
                 },
             )
             self.latest_artifact_id = artifact_id
         except Exception:
             artifact_id = None
 
-        events = getattr(self.context, "events", None)
-        if events is not None:
-            if artifact_id is not None:
-                try:
-                    events.publish(
-                        "artifact.created",
-                        {
-                            "artifact_id": artifact_id,
-                            "type": SED_ARTIFACT_TYPE,
-                            "dataset_id": dataset_id,
-                            "row_id": row_id,
-                            "origin": self.instance_id,
-                        },
-                    )
-                except Exception:
-                    pass
+        self._publish_artifact_created(
+            artifact_id=artifact_id,
+            dataset_id=dataset_id,
+            row_id=row_id,
+        )
 
-            try:
-                events.publish(
-                    "astro.sed.updated",
-                    {
-                        "artifact_id": artifact_id,
-                        "dataset_id": dataset_id,
-                        "row_id": row_id,
-                        "record_count": len(_payload_records(payload)),
-                        "origin": self.instance_id,
-                    },
-                )
-            except Exception:
-                pass
+        updated_payload = self._event_identity(
+            dataset_id=dataset_id,
+            row_id=row_id,
+            artifact_id=artifact_id,
+            sed_file=sed_file,
+        )
+        updated_payload["record_count"] = len(_payload_records(payload))
+        self._publish("astro.sed.updated", updated_payload)
+
+        self._publish_sed_running(
+            False,
+            dataset_id=dataset_id,
+            row_id=row_id,
+            sed_file=sed_file,
+            artifact_id=artifact_id,
+            reason="completed",
+        )
 
         self._render_payload(payload, artifact_id=artifact_id)
 
-    def _on_build_error(self, exc: BaseException) -> None:
+    def _on_build_error(
+        self,
+        exc: BaseException,
+        *,
+        dataset_id: Optional[str] = None,
+        row_id: Optional[str] = None,
+        sed_file: Optional[str] = None,
+    ) -> None:
+        self._publish_sed_running(
+            False,
+            dataset_id=dataset_id,
+            row_id=row_id,
+            sed_file=sed_file,
+            reason="error",
+            error=exc,
+        )
+        self._publish_plugin_error(
+            stage="build_sed",
+            error=exc,
+            dataset_id=dataset_id,
+            row_id=row_id,
+            sed_file=sed_file,
+        )
+
         self._set_status(f"Could not build SED: {html.escape(str(exc))}", "danger")
         self.skipped_pane.clear()
         self.skipped_pane.append(
             pn.pane.HTML(
                 f"""
-                <pre>{html.escape(''.join(traceback.format_exception(type(exc), exc, exc.__traceback__)))}</pre>
+                <pre style="white-space: pre-wrap; font-size: 11px;">
+                {html.escape(''.join(traceback.format_exception(type(exc), exc, exc.__traceback__)))}
+                </pre>
                 """,
                 sizing_mode="stretch_width",
             )
@@ -1688,6 +1948,7 @@ class BroadbandSEDPanel:
             "column_overrides": dict(self.column_overrides),
             "error_column_overrides": dict(self.error_column_overrides),
             "unit_overrides": dict(self.unit_overrides),
+            "assign_all_unit_value": self.assign_all_unit_value,
             "latest_artifact_id": self.latest_artifact_id,
             "mapping_applied_once": self.mapping_applied_once,
             "mapping_controls_expanded": self.mapping_controls_expanded,
@@ -1698,6 +1959,24 @@ class BroadbandSEDPanel:
         }
 
     def dispose(self) -> None:
+        latest_context = dict(getattr(self, "_latest_build_context", {}) or {})
+
+        for handle in self.job_handles:
+            try:
+                handle.cancel()
+            except Exception:
+                pass
+        self.job_handles.clear()
+
+        if latest_context:
+            self._publish_sed_running(
+                False,
+                dataset_id=latest_context.get("dataset_id"),
+                row_id=latest_context.get("row_id"),
+                sed_file=latest_context.get("sed_file"),
+                reason="panel.dispose",
+            )
+
         events = getattr(self.context, "events", None)
         if events is not None:
             for sub in self.subscriptions:
@@ -1705,16 +1984,7 @@ class BroadbandSEDPanel:
                     events.unsubscribe(sub)
                 except Exception:
                     pass
-
         self.subscriptions.clear()
-
-        for handle in self.job_handles:
-            try:
-                handle.cancel()
-            except Exception:
-                pass
-
-        self.job_handles.clear()
 
 
 def create_broadband_sed_panel(context, **kwargs):
