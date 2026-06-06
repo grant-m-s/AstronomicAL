@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+from collections import defaultdict
+from copy import deepcopy
 import json
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from astronomicAL.platform.missing_panel import create_missing_panel
-from astronomicAL.platform.panel_state import make_json_safe
+from astronomicAL.platform.panel_state import make_json_safe, restore_controller_state
 from astronomicAL.utils.debug import (
     persistence_debug_print,
     summarize_dataset_snapshot,
@@ -14,19 +16,17 @@ from astronomicAL.utils.debug import (
     summarize_workspace_snapshot,
 )
 
-
 SCHEMA_NAME = "astronomical.workspace"
 SCHEMA_VERSION = 1
 
 
 class WorkspacePersistence:
     """
-    Save/load service for the new plugin workspace.
+    Save/load service for the plugin workspace.
 
-    This service owns the save/load orchestration. It does not require plugin
-    authors to do anything for basic layout restore. Plugin authors only add
-    get_state() / restore_state() to their controllers when they want internal
-    widget state preserved.
+    restore(...) keeps the existing destructive cold-start behaviour.
+    reconcile(...) is the user-facing layout-load behaviour: keep matching
+    panels, close surplus panels, open missing panels, then apply saved geometry.
     """
 
     def __init__(self, context: Any) -> None:
@@ -74,10 +74,22 @@ class WorkspacePersistence:
             snapshot = json.load(handle)
 
         self._validate_snapshot(snapshot)
-
         return snapshot
 
-    def restore(self, snapshot: dict[str, Any], *, strict: bool = False) -> list[dict[str, Any]]:
+    def restore(
+        self,
+        snapshot: dict[str, Any],
+        *,
+        strict: bool = False,
+    ) -> list[dict[str, Any]]:
+        """
+        Destructive restore.
+
+        This is still useful for cold-start compatibility, tests, and explicit
+        reset-style workflows. User-driven layout loading should call
+        reconcile(...) instead.
+        """
+
         self._validate_snapshot(snapshot)
 
         issues: list[dict[str, Any]] = []
@@ -91,27 +103,89 @@ class WorkspacePersistence:
             },
         )
 
-        # Important:
-        # Queue restored dataset mappings before plugin panels are restored.
-        # Plugin panels may be mapping-gated and need those mappings later when
-        # the dataset is actually loaded.
         self._restore_datasets(snapshot.get("datasets", {}) or {})
-
         issues.extend(self._restore_plugins(snapshot.get("plugins", {}) or {}, strict=strict))
-
         issues.extend(
             self._restore_workspace(
                 snapshot.get("workspace", {}) or {},
                 strict=strict,
             )
         )
-
         self._restore_selection(snapshot.get("selection", {}) or {})
 
+        self._publish_restore_completed(
+            topic="workspace.restore.completed",
+            snapshot=snapshot,
+            issues=issues,
+        )
+
+        if strict and issues:
+            self._raise_strict_issues("Workspace restore completed with issues", issues)
+
+        return issues
+
+    def reconcile(
+        self,
+        snapshot: dict[str, Any],
+        *,
+        strict: bool = False,
+    ) -> list[dict[str, Any]]:
+        """
+        Reconcile the current workspace to match a saved layout.
+
+        Rules:
+        - panels not required by the layout are closed/disposed
+        - required panels already open are kept
+        - missing required panels are opened
+        - duplicate panel counts are matched by registration id
+        - saved grid geometry is applied after panel counts are correct
+        """
+
+        self._validate_snapshot(snapshot)
+
+        issues: list[dict[str, Any]] = []
+
+        persistence_debug_print(
+            "reconcile start",
+            {
+                "top_level_keys": list(snapshot.keys()),
+                "datasets": summarize_dataset_snapshot(snapshot.get("datasets")),
+                "workspace": summarize_workspace_snapshot(snapshot.get("workspace")),
+            },
+        )
+
+        self._restore_datasets(snapshot.get("datasets", {}) or {})
+        issues.extend(self._restore_plugins(snapshot.get("plugins", {}) or {}, strict=strict))
+        issues.extend(
+            self._reconcile_workspace(
+                snapshot.get("workspace", {}) or {},
+                strict=strict,
+            )
+        )
+        self._restore_selection(snapshot.get("selection", {}) or {})
+
+        self._publish_restore_completed(
+            topic="workspace.reconcile.completed",
+            snapshot=snapshot,
+            issues=issues,
+        )
+
+        if strict and issues:
+            self._raise_strict_issues("Workspace reconcile completed with issues", issues)
+
+        return issues
+
+    def _publish_restore_completed(
+        self,
+        *,
+        topic: str,
+        snapshot: dict[str, Any],
+        issues: list[dict[str, Any]],
+    ) -> None:
         events = getattr(self.context, "events", None)
         if events is not None:
             events.publish(
-                "workspace.restore.completed",
+                topic,
                 {
                     "schema": snapshot.get("schema"),
                     "schema_version": snapshot.get("schema_version"),
@@ -119,11 +193,10 @@ class WorkspacePersistence:
                 },
             )
 
-        if strict and issues:
-            issue_text = "; ".join(issue.get("message", str(issue)) for issue in issues)
-            raise RuntimeError(f"Workspace restore completed with issues: {issue_text}")
-
-        return issues
+    @staticmethod
+    def _raise_strict_issues(prefix: str, issues: list[dict[str, Any]]) -> None:
+        issue_text = "; ".join(issue.get("message", str(issue)) for issue in issues)
+        raise RuntimeError(f"{prefix}: {issue_text}")
 
     def _validate_snapshot(self, snapshot: dict[str, Any]) -> None:
         if not isinstance(snapshot, dict):
@@ -152,6 +225,7 @@ class WorkspacePersistence:
                 status = getattr(info, "status", None)
                 status_value = getattr(status, "value", status)
                 plugin_id = getattr(info, "id", None)
+
                 if not plugin_id:
                     continue
 
@@ -167,7 +241,6 @@ class WorkspacePersistence:
                     enabled.append(plugin_id)
 
         required = {}
-
         if workspace is not None:
             for panel in workspace.snapshot_panels():
                 plugin_id = panel.get("plugin_id")
@@ -182,6 +255,7 @@ class WorkspacePersistence:
                         "panels": [],
                     },
                 )
+
                 registration_id = panel.get("registration_id")
                 if registration_id:
                     required[plugin_id]["panels"].append(registration_id)
@@ -252,14 +326,15 @@ class WorkspacePersistence:
                 if strict:
                     return issues
 
-        required = plugin_snapshot.get("required", [])
-        enabled = set(plugin_snapshot.get("enabled", []))
+        required = plugin_snapshot.get("required", []) or []
+        enabled = set(plugin_snapshot.get("enabled", []) or [])
 
         required_ids = {
             item.get("id")
             for item in required
             if isinstance(item, dict) and item.get("id")
         }
+
         plugin_ids_to_enable = sorted(enabled.union(required_ids))
 
         currently_enabled = set()
@@ -316,7 +391,6 @@ class WorkspacePersistence:
 
         if not hasattr(datasets, "_pending_restore_items"):
             datasets._pending_restore_items = []
-
         if not hasattr(datasets, "_pending_active_id"):
             datasets._pending_active_id = None
 
@@ -356,7 +430,6 @@ class WorkspacePersistence:
                 continue
 
             applied = False
-
             if item_id and str(item_id) in existing_dataset_ids:
                 apply_method = getattr(datasets, "_apply_restore_item_to_dataset", None)
                 if callable(apply_method):
@@ -416,6 +489,10 @@ class WorkspacePersistence:
         *,
         strict: bool,
     ) -> list[dict[str, Any]]:
+        """
+        Destructive clear-and-restore workspace load.
+        """
+
         issues: list[dict[str, Any]] = []
 
         workspace = getattr(self.context, "workspace", None)
@@ -426,12 +503,46 @@ class WorkspacePersistence:
 
         workspace.clear()
 
-        grid_snapshot = workspace_snapshot.get("grid", {})
-        panel_snapshots = workspace_snapshot.get("panels", [])
+        grid_snapshot = workspace_snapshot.get("grid", {}) or {}
+        panel_snapshots = workspace_snapshot.get("panels", []) or []
+
+        workspace.apply_grid_snapshot(grid_snapshot, apply_layout=False)
+
+        for panel_snapshot in panel_snapshots:
+            issue = self._open_saved_panel(
+                panel_snapshot=panel_snapshot,
+                grid_snapshot=grid_snapshot,
+                plugins=plugins,
+                strict=strict,
+            )
+            if issue is not None:
+                issues.append(issue)
+                if strict:
+                    return issues
 
         workspace.apply_grid_snapshot(grid_snapshot)
 
-        for panel_snapshot in panel_snapshots:
+        return issues
+
+    def _reconcile_workspace(
+        self,
+        workspace_snapshot: dict[str, Any],
+        *,
+        strict: bool,
+    ) -> list[dict[str, Any]]:
+        issues: list[dict[str, Any]] = []
+
+        workspace = getattr(self.context, "workspace", None)
+        plugins = getattr(self.context, "plugins", None)
+
+        if workspace is None:
+            return issues
+
+        grid_snapshot = workspace_snapshot.get("grid", {}) or {}
+        raw_panel_snapshots = workspace_snapshot.get("panels", []) or []
+
+        panel_snapshots: list[dict[str, Any]] = []
+        for panel_snapshot in raw_panel_snapshots:
             if not isinstance(panel_snapshot, dict):
                 continue
 
@@ -447,90 +558,304 @@ class WorkspacePersistence:
                     return issues
                 continue
 
-            kind = panel_snapshot.get("kind") or "plugin_panel"
-            layout_items = self._layout_items_for_panel(grid_snapshot, instance_id)
+            panel_snapshots.append(panel_snapshot)
 
-            if kind != "plugin_panel":
-                self._restore_missing_panel(
-                    panel_snapshot=panel_snapshot,
-                    reason=f"Unsupported panel kind: {kind}",
-                    layout_items=layout_items,
-                )
-                issues.append(
-                    {
-                        "type": "unsupported_panel_kind",
-                        "instance_id": instance_id,
-                        "kind": kind,
-                        "message": f"Unsupported panel kind: {kind}",
-                    }
-                )
-                continue
+        saved_by_key: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+        for panel_snapshot in panel_snapshots:
+            saved_by_key[self._panel_key_from_snapshot(panel_snapshot)].append(panel_snapshot)
 
-            registration_id = panel_snapshot.get("registration_id")
-            if not registration_id:
-                self._restore_missing_panel(
-                    panel_snapshot=panel_snapshot,
-                    reason="Saved plugin panel is missing registration_id.",
-                    layout_items=layout_items,
-                )
-                issues.append(
-                    {
-                        "type": "missing_registration_id",
-                        "instance_id": instance_id,
-                        "message": "Saved plugin panel is missing registration_id.",
-                    }
-                )
-                continue
+        required_keys = set(saved_by_key.keys())
 
-            if plugins is None:
-                self._restore_missing_panel(
-                    panel_snapshot=panel_snapshot,
-                    reason="Plugin manager is unavailable.",
-                    layout_items=layout_items,
-                )
-                issues.append(
-                    {
-                        "type": "plugin_manager_unavailable",
-                        "instance_id": instance_id,
-                        "registration_id": registration_id,
-                        "message": "Plugin manager is unavailable.",
-                    }
-                )
-                continue
+        # Close anything not required by the target layout.
+        for record in list(workspace.list_panels().values()):
+            record_key = self._panel_key_from_record(record)
+            if record_key not in required_keys:
+                workspace.remove_panel(record.panel_id)
 
-            try:
-                plugins.open_panel(
-                    registration_id,
-                    context=self.context,
-                    instance_id=instance_id,
-                    title=panel_snapshot.get("title"),
-                    layout_items=layout_items,
-                    restore_state=panel_snapshot.get("state") or {},
-                    restore_metadata={
-                        "state_version": panel_snapshot.get("state_version", 1),
-                        "plugin_version": panel_snapshot.get("plugin_version"),
-                        "panel_snapshot": panel_snapshot,
-                    },
-                    open_kwargs=panel_snapshot.get("open_kwargs") or {},
-                )
-            except Exception as exc:
-                self._restore_missing_panel(
+        saved_to_actual_id: dict[str, str] = {}
+
+        for key, saved_group in saved_by_key.items():
+            current_records = [
+                record
+                for record in workspace.list_panels().values()
+                if self._panel_key_from_record(record) == key
+            ]
+
+            matched, unmatched_saved, surplus_current = self._match_saved_to_current(
+                saved_group=saved_group,
+                current_records=current_records,
+            )
+
+            for panel_snapshot, record in matched:
+                saved_id = str(panel_snapshot.get("instance_id"))
+                saved_to_actual_id[saved_id] = record.panel_id
+                self._restore_existing_panel(
+                    record=record,
                     panel_snapshot=panel_snapshot,
-                    reason=str(exc),
-                    layout_items=layout_items,
                 )
-                issues.append(
-                    {
-                        "type": "panel_restore_failed",
-                        "instance_id": instance_id,
-                        "registration_id": registration_id,
-                        "message": str(exc),
-                    }
+
+            for record in surplus_current:
+                workspace.remove_panel(record.panel_id)
+
+            for panel_snapshot in unmatched_saved:
+                issue = self._open_saved_panel(
+                    panel_snapshot=panel_snapshot,
+                    grid_snapshot=grid_snapshot,
+                    plugins=plugins,
+                    strict=strict,
                 )
-                if strict:
-                    return issues
+
+                saved_id = str(panel_snapshot.get("instance_id"))
+                saved_to_actual_id[saved_id] = saved_id
+
+                if issue is not None:
+                    issues.append(issue)
+                    if strict:
+                        return issues
+
+        workspace.apply_grid_snapshot(
+            grid_snapshot,
+            remap_ids=saved_to_actual_id,
+            apply_layout=True,
+        )
 
         return issues
+
+    @staticmethod
+    def _panel_key_from_snapshot(panel_snapshot: dict[str, Any]) -> tuple[str, str]:
+        kind = str(panel_snapshot.get("kind") or "plugin_panel")
+        registration_id = panel_snapshot.get("registration_id")
+
+        if kind == "plugin_panel":
+            return ("plugin_panel", str(registration_id or ""))
+
+        if kind == "missing_panel":
+            return (
+                "missing_panel",
+                str(
+                    registration_id
+                    or panel_snapshot.get("plugin_id")
+                    or panel_snapshot.get("title")
+                    or ""
+                ),
+            )
+
+        return (
+            kind,
+            str(
+                registration_id
+                or panel_snapshot.get("plugin_id")
+                or panel_snapshot.get("title")
+                or ""
+            ),
+        )
+
+    @staticmethod
+    def _panel_key_from_record(record: Any) -> tuple[str, str]:
+        kind = str(getattr(record, "kind", None) or "plugin_panel")
+        registration_id = getattr(record, "registration_id", None)
+
+        if kind == "plugin_panel":
+            return ("plugin_panel", str(registration_id or ""))
+
+        if kind == "missing_panel":
+            return (
+                "missing_panel",
+                str(
+                    registration_id
+                    or getattr(record, "plugin_id", None)
+                    or getattr(record, "title", None)
+                    or ""
+                ),
+            )
+
+        return (
+            kind,
+            str(
+                registration_id
+                or getattr(record, "plugin_id", None)
+                or getattr(record, "title", None)
+                or ""
+            ),
+        )
+
+    @staticmethod
+    def _match_saved_to_current(
+        *,
+        saved_group: list[dict[str, Any]],
+        current_records: list[Any],
+    ) -> tuple[list[tuple[dict[str, Any], Any]], list[dict[str, Any]], list[Any]]:
+        """
+        Match saved panel slots to existing panel instances.
+
+        Prefer exact instance-id matches first; then match remaining panels by
+        group order. Any remaining current panels are surplus.
+        """
+
+        matched: list[tuple[dict[str, Any], Any]] = []
+        used_saved_ids: set[int] = set()
+        used_current_ids: set[str] = set()
+
+        current_by_id = {str(record.panel_id): record for record in current_records}
+
+        for index, panel_snapshot in enumerate(saved_group):
+            saved_id = str(panel_snapshot.get("instance_id") or "")
+            record = current_by_id.get(saved_id)
+            if record is None:
+                continue
+
+            matched.append((panel_snapshot, record))
+            used_saved_ids.add(index)
+            used_current_ids.add(record.panel_id)
+
+        remaining_saved = [
+            panel_snapshot
+            for index, panel_snapshot in enumerate(saved_group)
+            if index not in used_saved_ids
+        ]
+        remaining_current = [
+            record
+            for record in current_records
+            if record.panel_id not in used_current_ids
+        ]
+
+        while remaining_saved and remaining_current:
+            panel_snapshot = remaining_saved.pop(0)
+            record = remaining_current.pop(0)
+            matched.append((panel_snapshot, record))
+            used_current_ids.add(record.panel_id)
+
+        surplus_current = [
+            record
+            for record in current_records
+            if record.panel_id not in used_current_ids
+        ]
+
+        return matched, remaining_saved, surplus_current
+
+    def _restore_existing_panel(
+        self,
+        *,
+        record: Any,
+        panel_snapshot: dict[str, Any],
+    ) -> None:
+        controller = getattr(record, "controller", None)
+        view = getattr(record, "view", None)
+
+        if controller is None and view is not None:
+            controller = getattr(view, "_al_controller", None)
+
+        state = panel_snapshot.get("state") or {}
+        if controller is not None:
+            restore_controller_state(controller, state)
+        elif view is not None:
+            restore_controller_state(view, state)
+
+        workspace = getattr(self.context, "workspace", None)
+        if workspace is not None and hasattr(workspace, "update_panel_metadata"):
+            workspace.update_panel_metadata(
+                record.panel_id,
+                title=panel_snapshot.get("title") or getattr(record, "title", None),
+                kind=panel_snapshot.get("kind") or getattr(record, "kind", None),
+                plugin_id=panel_snapshot.get("plugin_id"),
+                registration_id=panel_snapshot.get("registration_id"),
+                plugin_version=panel_snapshot.get("plugin_version"),
+                state_version=panel_snapshot.get("state_version", 1),
+                persistent=True,
+                open_kwargs=panel_snapshot.get("open_kwargs") or {},
+                metadata=panel_snapshot.get("metadata") or {},
+            )
+
+    def _open_saved_panel(
+        self,
+        *,
+        panel_snapshot: dict[str, Any],
+        grid_snapshot: dict[str, Any],
+        plugins: Any,
+        strict: bool,
+    ) -> dict[str, Any] | None:
+        if not isinstance(panel_snapshot, dict):
+            return None
+
+        instance_id = str(panel_snapshot.get("instance_id") or "")
+        if not instance_id:
+            return {
+                "type": "panel_restore_failed",
+                "message": "Saved panel is missing instance_id.",
+                "panel": panel_snapshot,
+            }
+
+        kind = panel_snapshot.get("kind") or "plugin_panel"
+        layout_items = self._layout_items_for_panel(grid_snapshot, instance_id)
+
+        if kind != "plugin_panel":
+            self._restore_missing_panel(
+                panel_snapshot=panel_snapshot,
+                reason=f"Unsupported panel kind: {kind}",
+                layout_items=layout_items,
+            )
+            return {
+                "type": "unsupported_panel_kind",
+                "instance_id": instance_id,
+                "kind": kind,
+                "message": f"Unsupported panel kind: {kind}",
+            }
+
+        registration_id = panel_snapshot.get("registration_id")
+        if not registration_id:
+            self._restore_missing_panel(
+                panel_snapshot=panel_snapshot,
+                reason="Saved plugin panel is missing registration_id.",
+                layout_items=layout_items,
+            )
+            return {
+                "type": "missing_registration_id",
+                "instance_id": instance_id,
+                "message": "Saved plugin panel is missing registration_id.",
+            }
+
+        if plugins is None:
+            self._restore_missing_panel(
+                panel_snapshot=panel_snapshot,
+                reason="Plugin manager is unavailable.",
+                layout_items=layout_items,
+            )
+            return {
+                "type": "plugin_manager_unavailable",
+                "instance_id": instance_id,
+                "registration_id": registration_id,
+                "message": "Plugin manager is unavailable.",
+            }
+
+        try:
+            plugins.open_panel(
+                registration_id,
+                context=self.context,
+                instance_id=instance_id,
+                title=panel_snapshot.get("title"),
+                layout_items=layout_items,
+                restore_state=panel_snapshot.get("state") or {},
+                restore_metadata={
+                    "state_version": panel_snapshot.get("state_version", 1),
+                    "plugin_version": panel_snapshot.get("plugin_version"),
+                    "panel_snapshot": panel_snapshot,
+                },
+                open_kwargs=panel_snapshot.get("open_kwargs") or {},
+            )
+        except Exception as exc:
+            self._restore_missing_panel(
+                panel_snapshot=panel_snapshot,
+                reason=str(exc),
+                layout_items=layout_items,
+            )
+            return {
+                "type": "panel_restore_failed",
+                "instance_id": instance_id,
+                "registration_id": registration_id,
+                "message": str(exc),
+            }
+
+        return None
 
     def _restore_missing_panel(
         self,
@@ -542,6 +867,7 @@ class WorkspacePersistence:
         workspace = self.context.workspace
         instance_id = str(panel_snapshot.get("instance_id"))
         title = panel_snapshot.get("title") or "Missing panel"
+
         view, controller = create_missing_panel(reason=reason, snapshot=panel_snapshot)
 
         workspace.add_panel(
@@ -559,7 +885,7 @@ class WorkspacePersistence:
             open_kwargs=panel_snapshot.get("open_kwargs") or {},
             metadata={
                 "restore_reason": reason,
-                "original_panel_snapshot": panel_snapshot,
+                "original_panel_snapshot": deepcopy(panel_snapshot),
             },
         )
 

@@ -263,6 +263,12 @@ context.config.layout_file = getattr(
     "astronomicAL/layout.json",
 )
 
+context.config.layout_directory = getattr(
+    context.config,
+    "layout_directory",
+    "layouts",
+)
+
 # Optional compatibility handles for older code that reaches into config.
 context.config.plugins = plugins
 context.config.app_context = context
@@ -296,21 +302,19 @@ _discover_and_enable_plugins(context)
 # ---------------------------------------------------------------------
 
 boot_print("main.py: layout creation start")
-boot_print(f"main.py: layout_file={config.layout_file}")
-boot_print(f"main.py: layout_file_exists={os.path.isfile(config.layout_file)}")
+
+boot_print(f"main.py: layout_directory={context.config.layout_directory}")
+
 boot_print(
     "main.py: plugin panels before layout="
     f"{[p.id for p in plugins.list_panels()]}"
 )
 
-if os.path.isfile(config.layout_file):
-    boot_print("main.py: calling create_layout_from_file")
-    load_config.create_layout_from_file(react, context)
-    boot_print("main.py: returned from create_layout_from_file")
-else:
-    boot_print("main.py: calling create_default_layout")
-    load_config.create_default_layout(react, context)
-    boot_print("main.py: returned from create_default_layout")
+boot_print("main.py: calling create_default_layout")
+
+load_config.create_default_layout(react, context)
+
+boot_print("main.py: returned from create_default_layout")
 
 boot_print("main.py: workspace.register_existing start")
 workspace.register_existing()

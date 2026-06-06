@@ -9,7 +9,7 @@ from typing import Any
 import pandas as pd
 import panel as pn
 
-from astronomicAL.config import get_save_layout_button
+from astronomicAL.platform.layout_controls import create_layout_controls
 from astronomicAL.dashboard.dashboard import Dashboard
 from astronomicAL.extensions.dynamic_react_layout import DynamicReactGrid
 from astronomicAL.platform.dataset_header import DatasetHeaderController
@@ -119,26 +119,45 @@ def create_header(
     react._dataset_header = dataset_header
     react._mapping_alert = mapping_alert
 
-    save_button = get_save_layout_button(
-        enable_button=True,
-        from_main=True,
+    layout_controls = create_layout_controls(
         context=context,
+        template=react,
     )
 
     add_menu_btn = pn.widgets.Button(
-        name="+",
+        name="Add Panel",
         button_type="default",
-        width=38,
+        width=88,
         height=34,
+        margin=(0, 0, 0, 0),
     )
+    add_menu_btn.description = "Add Panel"
     add_menu_btn.styles = {
-        "font-size": "26px",
+        "font-size": "22px",
         "font-weight": "700",
         "line-height": "1",
         "padding": "0",
+        "display": "flex",
+        "align-items": "center",
+        "justify-content": "center",
     }
     add_menu_btn.css_classes = ["al-add-menu-btn"]
-    add_menu_btn.description = "Add Panel"
+
+    right_header_controls = pn.Row(
+        mapping_alert.view,
+        add_menu_btn,
+        width=250,
+        height=40,
+        sizing_mode="fixed",
+        margin=(0, 8, 0, 0),
+        align="center",
+        styles={
+            "display": "flex",
+            "align-items": "center",
+            "gap": "12px",
+        },
+    )
+
 
     def _on_add_menu(_event) -> None:
         try:
@@ -154,12 +173,20 @@ def create_header(
     export_fits_file_button = _build_export_labelled_data_button(context)
 
     header_row = pn.Row(
-        save_button,
+        layout_controls,
         dataset_header.view,
-        mapping_alert.view,
-        add_menu_btn,
-        # export_fits_file_button,
+        pn.layout.HSpacer(),
+        right_header_controls,
         sizing_mode="stretch_width",
+        height=40,
+        margin=(0, 8, 0, 0),
+        align="center",
+        styles={
+            "display": "flex",
+            "align-items": "center",
+            "gap": "8px",
+            "overflow": "visible",
+        },
     )
 
     react._header_box[:] = [header_row]

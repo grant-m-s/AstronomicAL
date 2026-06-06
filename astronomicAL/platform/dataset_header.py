@@ -1,3 +1,4 @@
+# BUG: If reloading the same file again it starts create another parquet.
 from __future__ import annotations
 
 import re
@@ -36,7 +37,7 @@ class DatasetHeaderController:
             value="",
             width=260,
             height=34,
-            margin=(6, 4, 6, 8),
+            margin=(0, 4, 6, 8),
         )
         self.active_dataset_select.param.watch(
             self._on_active_dataset_select_changed,
@@ -47,8 +48,8 @@ class DatasetHeaderController:
             name="Add Data",
             button_type="default",
             width=92,
-            height=38,
-            margin=(6, 8, 6, 4),
+            height=34,
+            margin=(0, 8, 6, 4),
         )
         self.button.on_click(self._open_modal)
 

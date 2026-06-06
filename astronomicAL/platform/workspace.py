@@ -971,6 +971,61 @@ class WorkspaceManager:
     def get_panel_record(self, panel_id: str) -> PanelRecord:
         return self._panels[str(panel_id)]
 
+    def update_panel_metadata(
+        self,
+        panel_id: str,
+        *,
+        title: Optional[str] = None,
+        kind: Optional[str] = None,
+        plugin_id: Optional[str] = None,
+        registration_id: Optional[str] = None,
+        plugin_version: Optional[str] = None,
+        state_version: Optional[int] = None,
+        persistent: Optional[bool] = None,
+        open_kwargs: Optional[dict[str, Any]] = None,
+        metadata: Optional[dict[str, Any]] = None,
+    ) -> None:
+        """
+        Update saved/restored metadata for an existing panel without replacing it.
+        """
+
+        self._sync_grid()
+
+        panel_id = str(panel_id)
+        record = self._panels.get(panel_id)
+        if record is None:
+            return
+
+        if title is not None:
+            record.title = str(title)
+        if kind is not None:
+            record.kind = str(kind)
+        if plugin_id is not None:
+            record.plugin_id = plugin_id
+        if registration_id is not None:
+            record.registration_id = registration_id
+        if plugin_version is not None:
+            record.plugin_version = plugin_version
+        if state_version is not None:
+            try:
+                record.state_version = int(state_version)
+            except Exception:
+                pass
+        if persistent is not None:
+            record.persistent = bool(persistent)
+        if open_kwargs is not None:
+            record.open_kwargs = dict(open_kwargs or {})
+        if metadata is not None:
+            record.metadata = dict(metadata or {})
+
+        self._attach_metadata_to_view(record)
+
+        if hasattr(self.grid, "titles"):
+            titles = dict(getattr(self.grid, "titles", {}) or {})
+            titles[panel_id] = record.title
+            self.grid.param.update(titles=titles)
+
+
     def snapshot_grid(self) -> dict[str, Any]:
 
         self._sync_grid()
@@ -998,34 +1053,154 @@ class WorkspaceManager:
 
         return snapshot
 
-    def apply_grid_snapshot(self, grid_snapshot: dict[str, Any]) -> None:
+    def apply_grid_snapshot(
+        self,
+        grid_snapshot: dict[str, Any],
+        *,
+        remap_ids: Optional[dict[str, str]] = None,
+        apply_layout: bool = True,
+    ) -> None:
+        """
+        Apply saved DynamicReactGrid settings and, optionally, geometry.
+
+        remap_ids maps saved panel ids to the actual panel ids that are open
+        after a reconcile load. This lets a currently open panel remain open
+        while taking the saved panel's x/y/w/h geometry.
+        """
+
         self._sync_grid()
 
-        update = {}
+        if not isinstance(grid_snapshot, dict):
+            return
+
+        remap_ids = {str(k): str(v) for k, v in (remap_ids or {}).items()}
+
+        def _remap(value: Any) -> str:
+            value = str(value)
+            return remap_ids.get(value, value)
+
+        update: dict[str, Any] = {}
 
         if "breakpoints" in grid_snapshot:
-            update["breakpoints"] = grid_snapshot["breakpoints"]
-
+            update["breakpoints"] = dict(grid_snapshot["breakpoints"] or {})
         if "cols_by_breakpoint" in grid_snapshot:
-            update["cols_by_breakpoint"] = grid_snapshot["cols_by_breakpoint"]
-
+            update["cols_by_breakpoint"] = dict(grid_snapshot["cols_by_breakpoint"] or {})
         if "row_height" in grid_snapshot:
             update["row_height"] = grid_snapshot["row_height"]
-
         if "margin" in grid_snapshot:
-            update["margin"] = grid_snapshot["margin"]
-
+            update["margin"] = list(grid_snapshot["margin"] or [])
         if "compact_type" in grid_snapshot:
             update["compact_type"] = grid_snapshot["compact_type"]
-
         if "prevent_collision" in grid_snapshot and hasattr(self.grid, "prevent_collision"):
             update["prevent_collision"] = grid_snapshot["prevent_collision"]
-
         if "resize_handles" in grid_snapshot:
-            update["resize_handles"] = grid_snapshot["resize_handles"]
+            update["resize_handles"] = list(grid_snapshot["resize_handles"] or [])
+        if "current_breakpoint" in grid_snapshot:
+            update["current_breakpoint"] = grid_snapshot["current_breakpoint"]
+
+        current_keys = [str(key) for key in (self.grid.keys or [])]
+        current_key_set = set(current_keys)
+        current_objects_by_key = {
+            str(key): obj
+            for key, obj in zip((self.grid.keys or []), (self.grid.objects or []))
+        }
+
+        if apply_layout:
+            saved_key_order = [_remap(key) for key in (grid_snapshot.get("keys") or [])]
+            desired_keys: list[str] = []
+
+            for key in saved_key_order:
+                if key in current_key_set and key not in desired_keys:
+                    desired_keys.append(key)
+
+            for key in current_keys:
+                if key not in desired_keys:
+                    desired_keys.append(key)
+
+            if desired_keys != current_keys:
+                update["keys"] = desired_keys
+                update["objects"] = [
+                    current_objects_by_key.get(key, pn.Spacer(sizing_mode="stretch_both"))
+                    for key in desired_keys
+                ]
+                current_keys = desired_keys
+                current_key_set = set(current_keys)
+
+            saved_layouts = dict(grid_snapshot.get("layouts") or {})
+            cleaned_layouts: dict[str, list[dict[str, Any]]] = {}
+
+            breakpoints = self._breakpoint_names(saved_layouts)
+            for breakpoint in breakpoints:
+                breakpoint = str(breakpoint)
+                raw_layout = list(saved_layouts.get(breakpoint, []) or [])
+                cleaned: list[dict[str, Any]] = []
+                seen: set[str] = set()
+
+                for item in raw_layout:
+                    if not isinstance(item, dict):
+                        continue
+
+                    saved_id = item.get("i")
+                    if saved_id is None:
+                        continue
+
+                    actual_id = _remap(saved_id)
+                    if actual_id not in current_key_set or actual_id in seen:
+                        continue
+
+                    item_copy = dict(item)
+                    item_copy["i"] = actual_id
+                    cleaned.append(
+                        self._sanitize_layout_item(
+                            item_copy,
+                            panel_id=actual_id,
+                            breakpoint=breakpoint,
+                        )
+                    )
+                    seen.add(actual_id)
+
+                for panel_id in current_keys:
+                    if panel_id in seen:
+                        continue
+
+                    cleaned.append(
+                        self._new_default_layout_item(
+                            panel_id,
+                            breakpoint=breakpoint,
+                            existing_layout=cleaned,
+                        )
+                    )
+                    seen.add(panel_id)
+
+                cleaned_layouts[breakpoint] = cleaned
+
+            update["layouts"] = cleaned_layouts
+            update["current_layout"] = self._current_breakpoint_layout(cleaned_layouts)
+
+            if hasattr(self.grid, "titles"):
+                saved_titles = dict(grid_snapshot.get("titles") or {})
+                existing_titles = dict(getattr(self.grid, "titles", {}) or {})
+                titles: dict[str, str] = {}
+
+                for saved_id, title in saved_titles.items():
+                    actual_id = _remap(saved_id)
+                    if actual_id in current_key_set:
+                        titles[actual_id] = str(title)
+
+                for panel_id in current_keys:
+                    if panel_id not in titles:
+                        record = self._panels.get(panel_id)
+                        if record is not None and record.title:
+                            titles[panel_id] = str(record.title)
+                        else:
+                            titles[panel_id] = str(existing_titles.get(panel_id, panel_id))
+
+                update["titles"] = titles
 
         if update:
             self.grid.param.update(**update)
+
+        self._normalize_grid_state()
 
     def snapshot_panels(self) -> list[dict[str, Any]]:
         panels = []

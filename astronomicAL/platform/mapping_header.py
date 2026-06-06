@@ -97,18 +97,25 @@ class MappingAlertController:
         self._subs = []
 
         self.button = pn.widgets.Button(
-            name="✅ 0",
-            button_type="success",
-            width=112,
-            height=38,
-            margin=(6, 8, 6, 8),
+            name="Mappings: 0",
+            button_type="default",
+            width=150,
+            height=34,
+            margin=(0, 0, 0, 0),
         )
         self.button.on_click(self._open_modal)
 
         self.view = pn.Row(
-            pn.layout.HSpacer(),
             self.button,
-            sizing_mode="stretch_width",
+            width=150,
+            height=40,
+            sizing_mode="fixed",
+            margin=(0, 0, 0, 0),
+            align="center",
+            styles={
+                "display": "flex",
+                "align-items": "center",
+            },
         )
 
         self.modal_header = pn.Column(
@@ -309,22 +316,20 @@ class MappingAlertController:
         required_total = self._required_count()
         current_total = self._current_mapping_count()
 
-        if pending_total == 0 and current_total == 0:
-            self.button.name = "✅ 0"
-            self.button.button_type = "success"
-            self.button.disabled = True
-            return
-
         self.button.disabled = False
+
         if required_total > 0:
-            self.button.name = f"⚠ {required_total} Mappings Required"
-            self.button.button_type = "danger"
+            self.button.name = f"⚠ {required_total} Required"
+            self.button.button_type = "warning"
         elif pending_total > 0:
-            self.button.name = f"ℹ {pending_total} Optional Mappings"
-            self.button.button_type = "primary"
+            self.button.name = f"ℹ {pending_total} Optional"
+            self.button.button_type = "default"
+        elif current_total > 0:
+            self.button.name = "View Mappings"
+            self.button.button_type = "default"
         else:
-            self.button.name = f"View Mappings"
-            self.button.button_type = "success"
+            self.button.name = "Mappings: 0"
+            self.button.button_type = "default"
 
     # ------------------------------------------------------------------
     # Dataset helpers
