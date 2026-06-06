@@ -66,8 +66,17 @@ class EuclidCutoutResult:
     save_dir: str
     fits_paths: Dict[str, str]
 
-    def artifact_payload(self) -> Dict[str, Any]:
-        return {
+    def artifact_payload(self, *, include_pixels: bool = False) -> Dict[str, Any]:
+        """Return a platform-friendly artifact payload.
+
+        By default this stores serialisable metadata and FITS references only.
+        Raw image arrays and WCS objects are large/non-serialisable runtime
+        objects and should not become the default artifact convention.
+
+        Set ``include_pixels=True`` only for temporary in-memory debugging or
+        compatibility artifacts.
+        """
+        payload: Dict[str, Any] = {
             "source": "Euclid",
             "ra": self.ra,
             "dec": self.dec,
@@ -76,9 +85,15 @@ class EuclidCutoutResult:
             "save_dir": self.save_dir,
             "fits_paths": dict(self.fits_paths),
             "filters": list(self.filters),
-            "images": dict(self.images),
-            "wcs": dict(self.wcs),
+            "payload_kind": "metadata+fits",
         }
+
+        if include_pixels:
+            payload["images"] = dict(self.images)
+            payload["wcs"] = dict(self.wcs)
+            payload["payload_kind"] = "in_memory_pixels"
+
+        return payload
 
 
 class EuclidCutoutRuntime:

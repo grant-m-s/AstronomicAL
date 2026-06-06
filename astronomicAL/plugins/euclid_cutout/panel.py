@@ -20,6 +20,7 @@ from .service import DEFAULT_EUCLID_FILTERS, DEFAULT_SAVE_DIR, EuclidCutoutRunti
 
 PLUGIN_ID = "astro.euclid_cutout"
 RUNTIME_SERVICE_KEY = f"{PLUGIN_ID}.runtime"
+CUTOUT_ARTIFACT_TYPE = "astro.cutout.euclid"
 SETTINGS_HEIGHT = 118
 
 
@@ -560,6 +561,103 @@ class EuclidCutoutPanel:
         except Exception:
             traceback.print_exc()
 
+    def _event_identity(
+        self,
+        *,
+        target: Optional[_ResolvedTarget] = None,
+        dataset_id: Optional[str] = None,
+        row_id: Optional[Any] = None,
+        artifact_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        resolved_dataset_id = dataset_id or getattr(target, "dataset_id", None)
+
+        if row_id is None and target is not None:
+            row_id = target.row_id
+
+        payload: Dict[str, Any] = {
+            "source": "Euclid",
+            "plugin_id": PLUGIN_ID,
+            "origin": self.panel_id,
+            "panel_id": self.panel_id,
+        }
+
+        if resolved_dataset_id is not None:
+            payload["dataset_id"] = str(resolved_dataset_id)
+
+        if row_id is not None:
+            row_id_str = str(row_id)
+            payload["row_id"] = row_id_str
+            payload["row_ids"] = [row_id_str]
+
+            # Transitional compatibility for older Euclid/Spectra code paths.
+            payload["selected_id"] = row_id_str
+
+        if artifact_id is not None:
+            payload["artifact_id"] = str(artifact_id)
+
+        return payload
+
+    def _publish_cutout_running(
+        self,
+        running: bool,
+        *,
+        target: Optional[_ResolvedTarget] = None,
+        dataset_id: Optional[str] = None,
+        row_id: Optional[Any] = None,
+        artifact_id: Optional[str] = None,
+        reason: Optional[str] = None,
+        error: Optional[Any] = None,
+    ) -> None:
+        payload = self._event_identity(
+            target=target,
+            dataset_id=dataset_id,
+            row_id=row_id,
+            artifact_id=artifact_id,
+        )
+        payload["running"] = bool(running)
+
+        if reason:
+            payload["reason"] = str(reason)
+
+        if target is not None:
+            payload["ra"] = target.ra
+            payload["dec"] = target.dec
+
+        if error is not None:
+            payload["error"] = str(error)
+
+        self._publish("astro.cutout.running", payload)
+
+    def _publish_cutout_artifact_created(
+        self,
+        *,
+        artifact_id: Optional[str],
+        target: _ResolvedTarget,
+    ) -> None:
+        if not artifact_id:
+            return
+
+        payload = self._event_identity(target=target, artifact_id=artifact_id)
+        payload["type"] = CUTOUT_ARTIFACT_TYPE
+        self._publish("artifact.created", payload)
+
+    def _publish_plugin_error(
+        self,
+        *,
+        stage: str,
+        error: Any,
+        target: Optional[_ResolvedTarget] = None,
+    ) -> None:
+        payload = self._event_identity(target=target)
+        payload.update(
+            {
+                "stage": str(stage),
+                "error": str(error),
+                "error_type": type(error).__name__,
+            }
+        )
+        self._publish("plugin.error", payload)
+
     def _reset_loaded_cutout(self) -> None:
         self._cutout_result = None
         self.euclid_object = None
@@ -567,16 +665,18 @@ class EuclidCutoutPanel:
         self.figure.object = self._empty_image()
 
     def _selection_changed(self, topic: str, payload: Any) -> None:
-        self._cancel_job()
+        self._cancel_job(reason=str(topic or "selection.focus.changed"))
         self._current_target = None
         self.stored_spectrum_coordinates.clear()
         self.overplotted_coordinates = []
         self._reset_loaded_cutout()
         self._update_target_status()
+
         if self.auto_reload.value:
             self.load_cutout(reason=str(topic or "selection.focus.changed"))
 
     def _selection_cleared(self, topic: str, payload: Any) -> None:
+        self._cancel_job(reason=str(topic or "selection.focus.cleared"))
         self._current_target = None
         self.stored_spectrum_coordinates.clear()
         self.overplotted_coordinates = []
@@ -585,12 +685,13 @@ class EuclidCutoutPanel:
         self._reset_loaded_cutout()
 
     def _dataset_changed(self, topic: str, payload: Any) -> None:
-        self._cancel_job()
+        self._cancel_job(reason=str(topic or "dataset.changed"))
         self._current_target = None
         self.stored_spectrum_coordinates.clear()
         self.overplotted_coordinates = []
         self._reset_loaded_cutout()
         self._update_target_status()
+
         if self.auto_reload.value:
             self.load_cutout(reason=str(topic or "dataset.changed"))
 
@@ -1068,6 +1169,7 @@ class EuclidCutoutPanel:
     def load_cutout(self, *, reason: str = "manual") -> None:
         if self._disposed:
             return
+
         try:
             target = self._resolve_target()
             self._current_target = target
@@ -1076,21 +1178,12 @@ class EuclidCutoutPanel:
             self.figure.object = self._empty_image()
             return
 
-        self._cancel_job()
+        self._cancel_job(reason="superseded")
         self._reset_loaded_cutout()
         self.status.object = "Loading Euclid cutout…"
         self.target_status.object = self._target_html(target)
-        self._publish(
-            "astro.cutout.running",
-            {
-                "source": "Euclid",
-                "running": True,
-                "panel_id": self.panel_id,
-                "dataset_id": target.dataset_id,
-                "selected_id": target.row_id,
-                "reason": reason,
-            },
-        )
+
+        self._publish_cutout_running(True, target=target, reason=reason)
 
         runtime = self._runtime()
         credentials = self.credentials_file_input.value.strip() or None
@@ -1145,19 +1238,38 @@ class EuclidCutoutPanel:
                 on_error=_error,
             )
 
-    def _cancel_job(self) -> None:
+    def _cancel_job(
+        self,
+        *,
+        target: Optional[_ResolvedTarget] = None,
+        reason: str = "cancelled",
+        publish: bool = True,
+    ) -> None:
         handle = self._job_handle
         self._job_handle = None
-        if handle is not None:
-            try:
-                handle.cancel()
-            except Exception:
-                pass
+
+        if handle is None:
+            return
+
+        try:
+            handle.cancel()
+        except Exception:
+            pass
+
+        if publish:
+            self._publish_cutout_running(
+                False,
+                target=target or self._current_target,
+                reason=reason,
+            )
 
     def _on_cutout_loaded(self, result: Any, *, target: _ResolvedTarget, reason: str) -> None:
         if self._disposed:
+            self._publish_cutout_running(False, target=target, reason="panel.disposed")
             return
+
         if not self._target_matches_current_focus(target):
+            self._publish_cutout_running(False, target=target, reason="stale_result")
             return
 
         self._job_handle = None
@@ -1169,35 +1281,40 @@ class EuclidCutoutPanel:
         except Exception as exc:
             self.status.object = f"**Could not initialise Euclid image visualisation:** {exc}"
             self.figure.object = self._empty_image()
+            self._publish_cutout_running(
+                False,
+                target=target,
+                reason="visualisation_error",
+                error=exc,
+            )
+            self._publish_plugin_error(
+                stage="initialise_cutout_visualisation",
+                error=exc,
+                target=target,
+            )
             return
 
         self.status.object = ""
         self._refresh_display()
-        artifact_id = self._put_cutout_artifact(result, target=target)
 
-        self._publish(
-            "astro.cutout.updated",
+        artifact_id = self._put_cutout_artifact(result, target=target)
+        self._publish_cutout_artifact_created(artifact_id=artifact_id, target=target)
+
+        updated_payload = self._event_identity(target=target, artifact_id=artifact_id)
+        updated_payload.update(
             {
-                "source": "Euclid",
-                "artifact_id": artifact_id,
-                "panel_id": self.panel_id,
-                "dataset_id": target.dataset_id,
-                "selected_id": target.row_id,
                 "ra": target.ra,
                 "dec": target.dec,
                 "reason": reason,
-            },
+            }
         )
-        self._publish(
-            "astro.cutout.running",
-            {
-                "source": "Euclid",
-                "running": False,
-                "panel_id": self.panel_id,
-                "dataset_id": target.dataset_id,
-                "selected_id": target.row_id,
-                "reason": reason,
-            },
+        self._publish("astro.cutout.updated", updated_payload)
+
+        self._publish_cutout_running(
+            False,
+            target=target,
+            artifact_id=artifact_id,
+            reason="completed",
         )
 
     def _create_image_container(self, result: Any) -> None:
@@ -1237,23 +1354,37 @@ class EuclidCutoutPanel:
 
     def _on_cutout_error(self, exc: BaseException, *, target: _ResolvedTarget, reason: str) -> None:
         if self._disposed:
+            self._publish_cutout_running(
+                False,
+                target=target,
+                reason="panel.disposed",
+                error=exc,
+            )
             return
+
         if not self._target_matches_current_focus(target):
+            self._publish_cutout_running(
+                False,
+                target=target,
+                reason="stale_result",
+                error=exc,
+            )
             return
+
         self._job_handle = None
         self.status.object = f"**Euclid cutout unavailable:** {exc}"
         self.figure.object = self._empty_image()
-        self._publish(
-            "astro.cutout.running",
-            {
-                "source": "Euclid",
-                "running": False,
-                "panel_id": self.panel_id,
-                "dataset_id": target.dataset_id,
-                "selected_id": target.row_id,
-                "reason": reason,
-                "error": str(exc),
-            },
+
+        self._publish_cutout_running(
+            False,
+            target=target,
+            reason=reason,
+            error=exc,
+        )
+        self._publish_plugin_error(
+            stage="fetch_cutout",
+            error=exc,
+            target=target,
         )
 
     def _put_cutout_artifact(self, result: Any, *, target: _ResolvedTarget) -> Optional[str]:
@@ -1261,13 +1392,15 @@ class EuclidCutoutPanel:
         if artifacts is None:
             return None
 
-        payload = result.artifact_payload()
+        payload = result.artifact_payload(include_pixels=False)
+
         if self.image_container is not None:
             payload["visualization"] = self.image_container.get_current_plot_config()
             payload["display_band"] = self.filter_input.value
 
         params = {
             "source": "Euclid",
+            "row_id": target.row_id,
             "selected_id": target.row_id,
             "ra": target.ra,
             "dec": target.dec,
@@ -1276,22 +1409,27 @@ class EuclidCutoutPanel:
             "stretch": self.stretch_input.value,
             "stretch_scale": self._stretch_scale_value(),
             "environment": result.environment,
+            "origin": self.panel_id,
+            "plugin_id": PLUGIN_ID,
         }
+
+        row_ids = [target.row_id] if target.row_id is not None else None
+
         try:
             return artifacts.put(
-                "astro.cutout.euclid",
+                CUTOUT_ARTIFACT_TYPE,
                 payload,
                 dataset_id=target.dataset_id,
-                row_ids=[target.row_id] if target.row_id is not None else None,
+                row_ids=row_ids,
                 params=params,
                 persist=False,
             )
         except TypeError:
             return artifacts.put(
-                type="astro.cutout.euclid",
+                type=CUTOUT_ARTIFACT_TYPE,
                 payload=payload,
                 dataset_id=target.dataset_id,
-                row_ids=[target.row_id] if target.row_id is not None else None,
+                row_ids=row_ids,
                 params=params,
                 persist=False,
             )
@@ -1666,17 +1804,80 @@ class EuclidCutoutArtifactViewer:
             return candidate
         return {}
 
+    @staticmethod
+    def _load_images_from_fits(fits_paths: Dict[str, str]) -> Tuple[Dict[str, np.ndarray], Dict[str, Any]]:
+        images: Dict[str, np.ndarray] = {}
+        wcs: Dict[str, Any] = {}
+
+        if not fits_paths:
+            return images, wcs
+
+        try:
+            from astropy.io import fits
+            from astropy.wcs import WCS
+        except Exception:
+            return images, wcs
+
+        for band, path in dict(fits_paths).items():
+            if not path:
+                continue
+
+            try:
+                with fits.open(str(path)) as hdul:
+                    selected_hdu = None
+
+                    for hdu in hdul:
+                        data = getattr(hdu, "data", None)
+                        if data is None:
+                            continue
+
+                        array = np.asarray(data)
+                        if array.size and array.ndim >= 2:
+                            selected_hdu = hdu
+                            break
+
+                    if selected_hdu is None:
+                        continue
+
+                    array = np.asarray(selected_hdu.data)
+                    while array.ndim > 2:
+                        array = array[0]
+
+                    images[str(band)] = array
+
+                    try:
+                        wcs[str(band)] = WCS(selected_hdu.header)
+                    except Exception:
+                        pass
+            except Exception:
+                continue
+
+        return images, wcs
+
     def _build_view(self) -> Any:
         try:
             images = self.payload.get("images") or {}
             wcs = self.payload.get("wcs") or {}
             filters = self.payload.get("filters") or list(images.keys())
+
+            if not images:
+                loaded_images, loaded_wcs = self._load_images_from_fits(
+                    self.payload.get("fits_paths") or {}
+                )
+                images = loaded_images
+                wcs = loaded_wcs
+                filters = self.payload.get("filters") or list(images.keys())
+
             if not images or not filters:
                 return hv.Image(np.zeros((2, 2)), bounds=(0, 0, 2, 2)).opts(cmap="grey")
 
-            bands = [band for band in filters if band in images]
+            bands = [str(band) for band in filters if str(band) in images]
+            if not bands:
+                bands = list(images.keys())
+
             reference = "VIS" if "VIS" in bands else bands[0]
             color_bands = [band for band in ["NIR_H", "NIR_Y", "VIS"] if band in bands]
+
             container = ImageVisualizationClass(
                 images=[images[band] for band in bands],
                 wcs=[wcs.get(band) for band in bands],
@@ -1686,15 +1887,28 @@ class EuclidCutoutArtifactViewer:
                 color_name="Color",
                 target_wcs=wcs.get(reference),
             )
+
             band = self.payload.get("display_band") or ("Color" if container.has_color else bands[0])
             if band not in container.available_bands:
                 band = "Color" if container.has_color else bands[0]
+
             data = container.get_plot_data(band)
             height, width = data.shape[:2]
             bounds = (0, 0, width, height)
+
             if data.ndim == 3:
-                return hv.RGB(data[::-1, ...], bounds=bounds).opts(xaxis=None, yaxis=None, toolbar=None)
-            return hv.Image(data[::-1, ...], bounds=bounds).opts(cmap="grey", xaxis=None, yaxis=None, toolbar=None)
+                return hv.RGB(data[::-1, ...], bounds=bounds).opts(
+                    xaxis=None,
+                    yaxis=None,
+                    toolbar=None,
+                )
+
+            return hv.Image(data[::-1, ...], bounds=bounds).opts(
+                cmap="grey",
+                xaxis=None,
+                yaxis=None,
+                toolbar=None,
+            )
         except Exception:
             traceback.print_exc()
             return hv.Image(np.zeros((2, 2)), bounds=(0, 0, 2, 2)).opts(cmap="grey")
