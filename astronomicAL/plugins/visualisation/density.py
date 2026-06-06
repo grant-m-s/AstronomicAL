@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import Optional, Tuple
+from typing import Any, Optional, Tuple
 
 import datashader as ds
 import holoviews as hv
+import panel as pn
 import numpy as np
 from holoviews.operation.datashader import rasterize
 
@@ -37,12 +38,15 @@ class DensityPanel(BaseVisualisationPanel):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        # BaseVisualisationPanel currently does not watch density_bins or the
-        # optional density-domain limits. Keep this local to the density panel
-        # so we do not need to replace the large shared base.py file.
+        self._density_range_hook_keys = set()
+        self._density_range_sync_pending = False
+        self._density_pending_bokeh_ranges = None
+        self._density_range_syncing = False
+
         self._watch_state(
             [
                 "density_bins",
+                "density_interactive_sample_limit",
                 "x_min",
                 "x_max",
                 "y_min",
@@ -57,7 +61,7 @@ class DensityPanel(BaseVisualisationPanel):
             settings_int_slider(self.state.param.density_bins, name="Density bins", width=175),
             settings_select(self.state.param.render_mode, name="Render", width=130),
             settings_int_input(self.state.param.datashade_threshold, name="Shade threshold", width=145),
-            settings_int_input(self.state.param.interactive_sample_limit, name="Sample limit", width=130),
+            settings_int_input(self.state.param.density_interactive_sample_limit, name="Sample limit", width=150),
             settings_float_input(self.state.param.x_min, name="xmin", width=105),
             settings_float_input(self.state.param.x_max, name="xmax", width=105),
             settings_float_input(self.state.param.y_min, name="ymin", width=105),
@@ -66,6 +70,183 @@ class DensityPanel(BaseVisualisationPanel):
             settings_checkbox(self.state.param.log_y, name="Log Y"),
             settings_checkbox(self.state.param.log_density, name="Log density"),
         )
+
+    def _density_view_range_hook(self, plot: Any, element: Any) -> None:
+        """Attach Bokeh range listeners so plot zoom/pan updates xmin/xmax/ymin/ymax.
+
+        The density plot manually transforms log axes with np.log10 before
+        rendering. Therefore Bokeh's visible range is in display-space for log
+        axes, and must be converted back to raw data-space before writing the
+        limit widgets.
+        """
+        try:
+            figure = plot.state
+            x_range = figure.x_range
+            y_range = figure.y_range
+        except Exception:
+            return
+
+        key = (id(figure), id(x_range), id(y_range))
+        if key in self._density_range_hook_keys:
+            return
+
+        # Avoid unbounded growth across repeated HoloViews re-renders.
+        if len(self._density_range_hook_keys) > 64:
+            self._density_range_hook_keys.clear()
+
+        self._density_range_hook_keys.add(key)
+
+        def _changed(attr: str, old: Any, new: Any) -> None:
+            self._schedule_density_view_range_sync(x_range, y_range)
+
+        for range_obj in (x_range, y_range):
+            for attr in ("start", "end"):
+                try:
+                    range_obj.on_change(attr, _changed)
+                except Exception:
+                    pass
+
+    def _schedule_density_view_range_sync(self, x_range: Any, y_range: Any) -> None:
+        if getattr(self, "_disposed", False):
+            return
+
+        if getattr(self, "_density_range_syncing", False):
+            return
+
+        self._density_pending_bokeh_ranges = (x_range, y_range)
+
+        if getattr(self, "_density_range_sync_pending", False):
+            return
+
+        self._density_range_sync_pending = True
+
+        def _run() -> None:
+            self._density_range_sync_pending = False
+            ranges = getattr(self, "_density_pending_bokeh_ranges", None)
+            self._density_pending_bokeh_ranges = None
+
+            if not ranges:
+                return
+
+            pending_x_range, pending_y_range = ranges
+            self._sync_density_limits_from_view(pending_x_range, pending_y_range)
+
+        try:
+            doc = pn.state.curdoc
+            if doc is not None:
+                doc.add_timeout_callback(_run, 150)
+            else:
+                _run()
+        except Exception:
+            _run()
+
+    def _sync_density_limits_from_view(self, x_range: Any, y_range: Any) -> None:
+        try:
+            display_x = self._range_pair_from_bokeh(x_range)
+            display_y = self._range_pair_from_bokeh(y_range)
+
+            if display_x is None or display_y is None:
+                return
+
+            raw_x = self._display_range_to_raw(display_x, log_axis=bool(self.state.log_x))
+            raw_y = self._display_range_to_raw(display_y, log_axis=bool(self.state.log_y))
+
+            if raw_x is None or raw_y is None:
+                return
+
+            xmin, xmax = raw_x
+            ymin, ymax = raw_y
+
+            changed = False
+
+            self._density_range_syncing = True
+            old_suppress = bool(getattr(self, "_suppress_state_refresh", False))
+            self._suppress_state_refresh = True
+
+            try:
+                changed |= self._set_density_limit_if_changed("x_min", xmin)
+                changed |= self._set_density_limit_if_changed("x_max", xmax)
+                changed |= self._set_density_limit_if_changed("y_min", ymin)
+                changed |= self._set_density_limit_if_changed("y_max", ymax)
+            finally:
+                self._suppress_state_refresh = old_suppress
+                self._density_range_syncing = False
+
+            # Keep BaseVisualisationPanel's remembered ranges in display-space.
+            # This is useful for any overlay code that checks the current plot view.
+            try:
+                self._remember_ranges(x_range=display_x, y_range=display_y)
+            except Exception:
+                pass
+
+            if changed:
+                self._schedule_refresh(reason="density.view.range_changed", delay_ms=250)
+
+        except Exception:
+            return
+
+    def _range_pair_from_bokeh(self, range_obj: Any) -> Optional[Tuple[float, float]]:
+        try:
+            start = float(getattr(range_obj, "start", None))
+            end = float(getattr(range_obj, "end", None))
+        except Exception:
+            return None
+
+        if not np.isfinite(start) or not np.isfinite(end) or start == end:
+            return None
+
+        return min(start, end), max(start, end)
+
+    def _display_range_to_raw(
+        self,
+        value: Tuple[float, float],
+        *,
+        log_axis: bool,
+    ) -> Optional[Tuple[float, float]]:
+        lo, hi = value
+
+        if log_axis:
+            try:
+                lo = float(np.power(10.0, lo))
+                hi = float(np.power(10.0, hi))
+            except Exception:
+                return None
+
+        if not np.isfinite(lo) or not np.isfinite(hi) or lo == hi:
+            return None
+
+        if log_axis and (lo <= 0 or hi <= 0):
+            return None
+
+        return min(lo, hi), max(lo, hi)
+
+    def _set_density_limit_if_changed(self, name: str, value: float) -> bool:
+        try:
+            value = float(value)
+        except Exception:
+            return False
+
+        if not np.isfinite(value):
+            return False
+
+        current = getattr(self.state, name, None)
+
+        try:
+            if current is not None and np.isclose(
+                float(current),
+                value,
+                rtol=1e-8,
+                atol=1e-12,
+            ):
+                return False
+        except Exception:
+            pass
+
+        try:
+            setattr(self.state, name, value)
+            return True
+        except Exception:
+            return False
 
     def _render(self) -> None:
         raw_data = self._plot_data(require_y=True)
@@ -114,7 +295,7 @@ class DensityPanel(BaseVisualisationPanel):
         else:
             sampled_plot_data = sample_prepared_frame(
                 plot_data,
-                int(self.state.interactive_sample_limit),
+                int(self.state.density_interactive_sample_limit),
                 seed=1,
             )
             base = self._density_hextiles(sampled_plot_data, extent=plot_extent)
@@ -142,7 +323,7 @@ class DensityPanel(BaseVisualisationPanel):
             toolbar="right",
             tools=["pan", "wheel_zoom", "box_zoom", "reset"],
             active_tools=["wheel_zoom"],
-            hooks=[force_wheel_zoom_hook],
+            hooks=[force_wheel_zoom_hook, self._density_view_range_hook],
             shared_axes=False,
             axiswise=True,
             framewise=True,
@@ -338,7 +519,11 @@ class DensityPanel(BaseVisualisationPanel):
             ylim=(ymin, ymax),
             tools=["pan", "wheel_zoom", "box_zoom", "reset"],
             active_tools=["wheel_zoom"],
-            hooks=[force_wheel_zoom_hook, renderer_name_hook(DENSITY_RENDERER)],
+            hooks=[
+                force_wheel_zoom_hook,
+                self._density_view_range_hook,
+                renderer_name_hook(DENSITY_RENDERER),
+            ],
             show_grid=True,
             toolbar="right",
             line_alpha=0.15,
@@ -380,7 +565,11 @@ class DensityPanel(BaseVisualisationPanel):
             ylim=(ymin, ymax),
             tools=["pan", "wheel_zoom", "box_zoom", "reset"],
             active_tools=["wheel_zoom"],
-            hooks=[force_wheel_zoom_hook, renderer_name_hook(DENSITY_RENDERER)],
+            hooks=[
+                force_wheel_zoom_hook,
+                self._density_view_range_hook,
+                renderer_name_hook(DENSITY_RENDERER),
+            ],
             show_grid=True,
             toolbar="right",
             shared_axes=False,

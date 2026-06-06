@@ -44,6 +44,10 @@ class VisualisationState(param.Parameterized):
         default=DEFAULT_INTERACTIVE_SAMPLE_LIMIT,
         bounds=(1_000, 2_000_000),
     )
+    density_interactive_sample_limit = param.Integer(
+        default=100_000_000,
+        bounds=(1_000, 100_000_000),
+    )
     max_selection_ids = param.Integer(
         default=DEFAULT_MAX_SELECTION_IDS,
         bounds=(1_000, 5_000_000),
