@@ -1174,10 +1174,15 @@ class PluginManager:
         """
         Create a plugin panel immediately.
 
-        MappingGatedPanel calls this once semantic column requirements are
-        satisfied.
+        MappingGatedPanel calls this once semantic column requirements are satisfied.
         """
+        registration_id = reg.id
+        plugin_id = reg.plugin_id
+        workspace_id = instance_id or ""
+        total_t0 = time.perf_counter()
+
         try:
+            t0 = time.perf_counter()
             result = self._call_with_supported_args(
                 reg.factory,
                 context=context,
@@ -1187,23 +1192,75 @@ class PluginManager:
                 restore_metadata=restore_metadata or {},
                 **kwargs,
             )
-            view, controller = self._normalise_panel_result(result)
+            plugin_open_debug(
+                "create_panel_now FACTORY_TIMING",
+                workspace_id=workspace_id,
+                registration_id=registration_id,
+                plugin_id=plugin_id,
+                duration_ms=round((time.perf_counter() - t0) * 1000.0, 1),
+                result_type=type(result).__name__,
+            )
 
+            t0 = time.perf_counter()
+            view, controller = self._normalise_panel_result(result)
+            plugin_open_debug(
+                "create_panel_now NORMALISE_TIMING",
+                workspace_id=workspace_id,
+                registration_id=registration_id,
+                plugin_id=plugin_id,
+                duration_ms=round((time.perf_counter() - t0) * 1000.0, 1),
+                view_type=type(view).__name__,
+                controller_type=type(controller).__name__,
+            )
+
+            t0 = time.perf_counter()
             try:
-                setattr(view, "_al_plugin_id", reg.plugin_id)
-                setattr(view, "_al_registration_id", reg.id)
+                setattr(view, "_al_plugin_id", plugin_id)
+                setattr(view, "_al_registration_id", registration_id)
                 setattr(view, "_al_instance_id", instance_id)
-                setattr(view, "_al_plugin_version", self._plugin_version(reg.plugin_id))
+                setattr(view, "_al_plugin_version", self._plugin_version(plugin_id))
                 setattr(view, "_al_state_version", reg.state_version)
             except Exception:
                 pass
 
+            plugin_open_debug(
+                "create_panel_now METADATA_TIMING",
+                workspace_id=workspace_id,
+                registration_id=registration_id,
+                plugin_id=plugin_id,
+                duration_ms=round((time.perf_counter() - t0) * 1000.0, 1),
+            )
+
             if getattr(reg, "persist_state", True):
+                t0 = time.perf_counter()
                 restore_controller_state(controller, restore_state or {})
+                plugin_open_debug(
+                    "create_panel_now RESTORE_STATE_TIMING",
+                    workspace_id=workspace_id,
+                    registration_id=registration_id,
+                    plugin_id=plugin_id,
+                    duration_ms=round((time.perf_counter() - t0) * 1000.0, 1),
+                )
+
+            plugin_open_debug(
+                "create_panel_now TOTAL_TIMING",
+                workspace_id=workspace_id,
+                registration_id=registration_id,
+                plugin_id=plugin_id,
+                duration_ms=round((time.perf_counter() - total_t0) * 1000.0, 1),
+            )
 
             return view, controller
 
         except Exception as exc:
+            plugin_open_debug(
+                "create_panel_now ERROR",
+                workspace_id=workspace_id,
+                registration_id=registration_id,
+                plugin_id=plugin_id,
+                duration_ms=round((time.perf_counter() - total_t0) * 1000.0, 1),
+                error=repr(exc),
+            )
             raise PluginExecutionError(f"Failed to create panel {reg.id}: {exc}") from exc
 
     def _workspace_panel_exists(self, context: Any, workspace_id: str) -> bool:

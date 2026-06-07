@@ -639,8 +639,19 @@ class BaseVisualisationPanel(param.Parameterized):
             if self._visual_state_signature() != request_signature:
                 return
 
-            # Preferred path: update only the one-point marker.
-            if self._update_focus_marker_from_row_df(row_df, row_id=row_id):
+            try:
+                updated = bool(self._update_focus_marker_from_row_df(row_df, row_id=row_id))
+            except Exception as exc:
+                updated = False
+                print(
+                    "[AstronomicAL visualisation] async focus row marker update failed "
+                    f"panel={type(self).__name__} "
+                    f"row_id={row_id!r} "
+                    f"{type(exc).__name__}: {exc}",
+                    flush=True,
+                )
+
+            if updated:
                 return
 
             # Fallback path for panels that do not yet have a streamed marker.
@@ -989,6 +1000,80 @@ class BaseVisualisationPanel(param.Parameterized):
         except Exception:
             _run()
 
+    def _runtime_timing_service(self):
+        """Best-effort lookup for the runtime status service.
+
+        This deliberately falls back to stdout if the service is not registered
+        under one of these names.
+        """
+        for attr in ("runtime_status", "status", "diagnostics"):
+            service = getattr(self.context, attr, None)
+            if callable(getattr(service, "record_note", None)):
+                return service
+
+        services = getattr(self.context, "services", None)
+        if services is None:
+            return None
+
+        for key in (
+            "platform.runtime_status",
+            "runtime_status",
+            "runtime.status",
+            "core.runtime_status",
+        ):
+            try:
+                service = services.get(key)
+            except Exception:
+                service = None
+            if callable(getattr(service, "record_note", None)):
+                return service
+
+        return None
+
+    def _column_count(self, obj) -> int:
+        """Safely count dataframe-like columns without truth-testing pandas Index."""
+        columns = getattr(obj, "columns", None)
+        if columns is None:
+            return 0
+
+        try:
+            return len(columns)
+        except Exception:
+            return 0
+
+    def _timing(self, label: str, seconds: float, **fields) -> None:
+        """Print and, if available, store a lightweight timing diagnostic."""
+        try:
+            ms = float(seconds) * 1000.0
+        except Exception:
+            return
+
+        panel_name = type(self).__name__
+        panel_id = getattr(self, "panel_id", None)
+
+        parts = [
+            f"panel={panel_name}",
+            f"panel_id={panel_id}",
+            f"label={label}",
+            f"duration_ms={ms:.1f}",
+        ]
+        for key, value in fields.items():
+            parts.append(f"{key}={value!r}")
+
+        line = "[AstronomicAL timing] " + " ".join(parts)
+        print(line, flush=True)
+
+        service = self._runtime_timing_service()
+        if service is not None:
+            try:
+                service.record_note(
+                    "timing",
+                    label,
+                    details=" ".join(parts),
+                )
+            except Exception:
+                pass
+
     def _active_focus_state(self):
         selection = getattr(self.context, "selection", None)
         if selection is None:
@@ -1090,33 +1175,138 @@ class BaseVisualisationPanel(param.Parameterized):
 
     def _update_focus_marker_from_focus_state(self, focus=None) -> bool:
         """Try to update a focus marker without rebuilding the plot."""
-        focus = focus or self._active_focus_state()
-        if focus is None:
-            return self._clear_focus_marker()
-
-        row_id = str(getattr(focus, "row_id", "") or "")
-        if not row_id:
-            return self._clear_focus_marker()
-
-        point = None
+        total_t0 = time.perf_counter()
+        stage = "start"
+        row_id = ""
 
         try:
-            point = self._focus_point_from_metadata(focus)
-        except Exception:
+            focus = focus or self._active_focus_state()
+            if focus is None:
+                stage = "clear.no_focus"
+                t0 = time.perf_counter()
+                result = self._clear_focus_marker()
+                self._timing(
+                    "visualisation.focus.clear_marker",
+                    time.perf_counter() - t0,
+                    stage=stage,
+                    result=result,
+                )
+                return result
+
+            row_id = str(getattr(focus, "row_id", "") or "")
+            if not row_id:
+                stage = "clear.no_row_id"
+                t0 = time.perf_counter()
+                result = self._clear_focus_marker()
+                self._timing(
+                    "visualisation.focus.clear_marker",
+                    time.perf_counter() - t0,
+                    stage=stage,
+                    result=result,
+                )
+                return result
+
             point = None
 
-        if point is None:
-            row_df = self._cached_focus_row_for_focus(focus)
-            point = self._focus_point_from_row_df_for_current_axes(
-                row_df,
+            t0 = time.perf_counter()
+            try:
+                point = self._focus_point_from_metadata(focus)
+            except Exception:
+                point = None
+            self._timing(
+                "visualisation.focus.metadata_point",
+                time.perf_counter() - t0,
                 row_id=row_id,
+                hit=point is not None,
             )
 
+            if point is None:
+                t0 = time.perf_counter()
+                row_df = self._cached_focus_row_for_focus(focus)
+                self._timing(
+                    "visualisation.focus.cached_row_lookup",
+                    time.perf_counter() - t0,
+                    row_id=row_id,
+                    hit=row_df is not None and not getattr(row_df, "empty", True),
+                    columns=self._column_count(row_df),
+                )
+
+                t0 = time.perf_counter()
+                point = self._focus_point_from_row_df_for_current_axes(
+                    row_df,
+                    row_id=row_id,
+                )
+                self._timing(
+                    "visualisation.focus.row_df_to_point",
+                    time.perf_counter() - t0,
+                    row_id=row_id,
+                    hit=point is not None,
+                )
+
+            if point is None:
+                stage = "miss.no_point"
+                return False
+
+            t0 = time.perf_counter()
+            try:
+                result = bool(
+                    self._apply_focus_marker_point(
+                        row_id=row_id,
+                        point=point,
+                        clear=False,
+                    )
+                )
+            except Exception:
+                result = False
+
+            self._timing(
+                "visualisation.focus.apply_marker_point",
+                time.perf_counter() - t0,
+                row_id=row_id,
+                result=result,
+                point=point,
+            )
+            stage = "done"
+            return result
+
+        finally:
+            self._timing(
+                "visualisation.focus.update_from_state.total",
+                time.perf_counter() - total_t0,
+                row_id=row_id,
+                stage=stage,
+            )
+
+    def _update_focus_marker_from_row_df(self, row_df, *, row_id: str) -> bool:
+        total_t0 = time.perf_counter()
+        row_id = str(row_id)
+
+        t0 = time.perf_counter()
+        point = self._focus_point_from_row_df_for_current_axes(
+            row_df,
+            row_id=row_id,
+        )
+        self._timing(
+            "visualisation.focus.async_row_df_to_point",
+            time.perf_counter() - t0,
+            row_id=row_id,
+            hit=point is not None,
+            columns=self._column_count(row_df),
+        )
+
         if point is None:
+            self._timing(
+                "visualisation.focus.async_update_total",
+                time.perf_counter() - total_t0,
+                row_id=row_id,
+                result=False,
+                reason="no_point",
+            )
             return False
 
+        t0 = time.perf_counter()
         try:
-            return bool(
+            result = bool(
                 self._apply_focus_marker_point(
                     row_id=row_id,
                     point=point,
@@ -1124,26 +1314,23 @@ class BaseVisualisationPanel(param.Parameterized):
                 )
             )
         except Exception:
-            return False
+            result = False
 
-    def _update_focus_marker_from_row_df(self, row_df, *, row_id: str) -> bool:
-        point = self._focus_point_from_row_df_for_current_axes(
-            row_df,
+        self._timing(
+            "visualisation.focus.async_apply_marker_point",
+            time.perf_counter() - t0,
             row_id=row_id,
+            result=result,
+            point=point,
         )
-        if point is None:
-            return False
 
-        try:
-            return bool(
-                self._apply_focus_marker_point(
-                    row_id=str(row_id),
-                    point=point,
-                    clear=False,
-                )
-            )
-        except Exception:
-            return False
+        self._timing(
+            "visualisation.focus.async_update_total",
+            time.perf_counter() - total_t0,
+            row_id=row_id,
+            result=result,
+        )
+        return result
 
     def _run_scheduled_refresh(self) -> None:
 
@@ -1315,8 +1502,17 @@ class BaseVisualisationPanel(param.Parameterized):
         return _active_dataset_id(self.context)
 
     def _plot_data(self, *, require_y: bool) -> PreparedFrame:
+        total_t0 = time.perf_counter()
+
+        t0 = time.perf_counter()
         key = prepared_cache_key(self.context, self.state, require_y=require_y)
         self._last_prepared_cache_key = key
+        self._timing(
+            "visualisation.plot_data.cache_key",
+            time.perf_counter() - t0,
+            require_y=require_y,
+        )
+
         print(
             "[AstronomicAL visualisation cache] lookup "
             f"panel={type(self).__name__} "
@@ -1324,12 +1520,27 @@ class BaseVisualisationPanel(param.Parameterized):
             flush=True,
         )
 
+        t0 = time.perf_counter()
         cached = self._prepared_cache_get(key)
+        self._timing(
+            "visualisation.plot_data.cache_lookup",
+            time.perf_counter() - t0,
+            require_y=require_y,
+            hit=cached is not None,
+        )
+
         if cached is not None:
             print(
                 "[AstronomicAL visualisation cache] HIT "
                 f"panel={type(self).__name__} rows={len(cached.frame):,}",
                 flush=True,
+            )
+            self._timing(
+                "visualisation.plot_data.total",
+                time.perf_counter() - total_t0,
+                require_y=require_y,
+                hit=True,
+                rows=len(cached.frame),
             )
             return cached
 
@@ -1339,8 +1550,31 @@ class BaseVisualisationPanel(param.Parameterized):
             flush=True,
         )
 
+        t0 = time.perf_counter()
         data = prepare_plot_frame(self.context, self.state, require_y=require_y)
+        self._timing(
+            "visualisation.plot_data.prepare_plot_frame",
+            time.perf_counter() - t0,
+            require_y=require_y,
+            rows=len(data.frame),
+        )
+
+        t0 = time.perf_counter()
         self._prepared_cache_set(key, data)
+        self._timing(
+            "visualisation.plot_data.cache_set",
+            time.perf_counter() - t0,
+            require_y=require_y,
+            rows=len(data.frame),
+        )
+
+        self._timing(
+            "visualisation.plot_data.total",
+            time.perf_counter() - total_t0,
+            require_y=require_y,
+            hit=False,
+            rows=len(data.frame),
+        )
         return data
 
     def _same_underlying_frame(self, left, right) -> bool:
@@ -3182,21 +3416,34 @@ class BaseVisualisationPanel(param.Parameterized):
 
     def refresh(self) -> None:
         t0 = time.perf_counter()
-
         print(
             f"[AstronomicAL visualisation] refresh start panel={type(self).__name__}",
             flush=True,
         )
-
         try:
+            render_t0 = time.perf_counter()
             self._render()
+            render_dt = time.perf_counter() - render_t0
+
             self._has_completed_refresh = True
             self._last_completed_refresh_key = self._current_refresh_identity()
+
+            self._timing(
+                "visualisation.refresh.render",
+                render_dt,
+                reason=getattr(self, "_last_refresh_reason", None),
+            )
         finally:
+            total_dt = time.perf_counter() - t0
             print(
                 f"[AstronomicAL visualisation] refresh end panel={type(self).__name__} "
-                f"duration={time.perf_counter() - t0:.2f}s",
+                f"duration={total_dt:.2f}s",
                 flush=True,
+            )
+            self._timing(
+                "visualisation.refresh.total",
+                total_dt,
+                reason=getattr(self, "_last_refresh_reason", None),
             )
 
     def _render(self) -> None:

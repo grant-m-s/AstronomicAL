@@ -11,6 +11,10 @@ import pandas as pd
 from holoviews import streams
 from holoviews.operation.datashader import rasterize
 
+from bokeh.models import ColumnDataSource
+
+import time
+
 from .base import BaseVisualisationPanel
 from .constants import INTERNAL_ROW_ID, INTERNAL_X, INTERNAL_Y, PLOT_MIN_HEIGHT
 from .utils import (
@@ -52,6 +56,10 @@ class DensityPanel(BaseVisualisationPanel):
         self._density_focus_signature = None
         self._density_focus_size = None
         self._density_current_raw_extent = None
+
+        self._density_focus_source = None
+        self._density_focus_hook_keys = set()
+        self._density_focus_pending_frame = None
 
         self._watch_state(
             [
@@ -293,6 +301,104 @@ class DensityPanel(BaseVisualisationPanel):
             }
         )
 
+    def _density_focus_source_data(self, frame: Optional[pd.DataFrame]) -> dict:
+        """Convert a 0/1-row focus marker frame into Bokeh CDS data."""
+        if frame is None or getattr(frame, "empty", True):
+            return {
+                INTERNAL_ROW_ID: [],
+                INTERNAL_X: [],
+                INTERNAL_Y: [],
+            }
+
+        try:
+            return {
+                INTERNAL_ROW_ID: [str(v) for v in frame[INTERNAL_ROW_ID].tolist()],
+                INTERNAL_X: [float(v) for v in frame[INTERNAL_X].tolist()],
+                INTERNAL_Y: [float(v) for v in frame[INTERNAL_Y].tolist()],
+            }
+        except Exception:
+            return {
+                INTERNAL_ROW_ID: [],
+                INTERNAL_X: [],
+                INTERNAL_Y: [],
+            }
+
+    def _set_density_focus_source_frame(self, frame: Optional[pd.DataFrame]) -> bool:
+        """Update the live Bokeh focus marker source without touching HoloViews."""
+        source = getattr(self, "_density_focus_source", None)
+        if source is None:
+            self._density_focus_pending_frame = frame
+            return False
+
+        try:
+            source.data = self._density_focus_source_data(frame)
+            return True
+        except Exception as exc:
+            print(
+                "[AstronomicAL density] direct focus source update failed "
+                f"panel_id={getattr(self, 'panel_id', None)} "
+                f"{type(exc).__name__}: {exc}",
+                flush=True,
+            )
+            return False
+
+    def _density_focus_bokeh_hook(self, plot: Any, element: Any) -> None:
+        """Attach a lightweight Bokeh glyph used for focus marker updates.
+
+        This replaces the HoloViews DynamicMap/Pipe focus marker because Pipe
+        updates were taking ~1 second with 13M rows.
+        """
+        try:
+            figure = plot.state
+        except Exception:
+            return
+
+        key = id(figure)
+
+        # Prevent unbounded growth across repeated re-renders.
+        if len(self._density_focus_hook_keys) > 64:
+            self._density_focus_hook_keys.clear()
+
+        if key in self._density_focus_hook_keys:
+            return
+
+        self._density_focus_hook_keys.add(key)
+
+        try:
+            source = ColumnDataSource(
+                data=self._density_focus_source_data(
+                    getattr(self, "_density_focus_pending_frame", None)
+                )
+            )
+
+            figure.scatter(
+                x=INTERNAL_X,
+                y=INTERNAL_Y,
+                source=source,
+                marker="circle",
+                size=14,
+                fill_alpha=0.0,
+                line_color="black",
+                line_width=3.0,
+            )
+
+            self._density_focus_source = source
+
+            print(
+                "[AstronomicAL density] attached direct Bokeh focus marker "
+                f"panel_id={getattr(self, 'panel_id', None)} "
+                f"figure_key={key}",
+                flush=True,
+            )
+
+        except Exception as exc:
+            print(
+                "[AstronomicAL density] failed to attach direct Bokeh focus marker "
+                f"panel_id={getattr(self, 'panel_id', None)} "
+                f"{type(exc).__name__}: {exc}",
+                flush=True,
+            )
+
     def _density_extent_signature(self, extent):
         if extent is None:
             return None
@@ -489,31 +595,15 @@ class DensityPanel(BaseVisualisationPanel):
         raw_data: Optional[PreparedFrame] = None,
         raw_extent: Optional[DensityExtent] = None,
     ) -> bool:
-        if self._density_focus_stream is None:
-            return False
-
         frame = self._current_density_focus_marker_frame(
             raw_data,
             raw_extent,
         )
-
-        try:
-            self._density_focus_stream.send(frame)
-            return True
-        except Exception as exc:
-            print(
-                "[AstronomicAL density] focus stream send failed "
-                f"panel_id={getattr(self, 'panel_id', None)} "
-                f"{type(exc).__name__}: {exc}",
-                flush=True,
-            )
-            return False
+        self._density_focus_pending_frame = frame
+        return self._set_density_focus_source_frame(frame)
 
     def _apply_focus_marker_point(self, *, row_id: str, point, clear: bool = False) -> bool:
-        """BaseVisualisationPanel hook: update only the streamed density focus marker."""
-        if self._density_focus_stream is None:
-            return False
-
+        """BaseVisualisationPanel hook: update only the direct Bokeh focus marker."""
         if clear:
             frame = self._empty_density_focus_marker_frame()
         else:
@@ -523,118 +613,258 @@ class DensityPanel(BaseVisualisationPanel):
                 raw_extent=getattr(self, "_density_current_raw_extent", None),
             )
 
-        try:
-            self._density_focus_stream.send(frame)
-            print(
-                "[AstronomicAL density] focus marker stream updated "
-                f"panel_id={getattr(self, 'panel_id', None)} "
-                f"row_id={row_id!r} "
-                f"rows={len(frame)}",
-                flush=True,
-            )
-            return True
-        except Exception as exc:
-            print(
-                "[AstronomicAL density] focus marker stream update failed "
-                f"panel_id={getattr(self, 'panel_id', None)} "
-                f"{type(exc).__name__}: {exc}",
-                flush=True,
-            )
-            return False
+        self._density_focus_pending_frame = frame
+
+        ok = self._set_density_focus_source_frame(frame)
+
+        print(
+            "[AstronomicAL density] direct focus marker updated "
+            f"panel_id={getattr(self, 'panel_id', None)} "
+            f"row_id={row_id!r} "
+            f"rows={len(frame)} "
+            f"ok={ok}",
+            flush=True,
+        )
+
+        return ok
 
     def _render(self) -> None:
-        raw_data = self._plot_data(require_y=True)
+        total_t0 = time.perf_counter()
+        stage = "start"
 
-        if raw_data.empty:
-            self.plot_pane.object = self._empty("No finite X/Y data")
-            self.status_pane.object = "0 density rows"
-            return
-
-        try:
-            raw_extent = self._density_extent(raw_data)
-        except ValueError as exc:
-            self.plot_pane.object = self._empty(str(exc))
-            self.status_pane.object = "Invalid density limits"
-            return
-
-        clipped_raw_data = self._clip_to_density_extent(raw_data, raw_extent)
-
-        if clipped_raw_data.empty:
-            self.plot_pane.object = self._empty("No finite X/Y data inside limits")
-            self.status_pane.object = "0 density rows inside limits"
-            return
+        def mark(label: str, start: float, **fields) -> None:
+            self._timing(
+                f"density.render.{label}",
+                time.perf_counter() - start,
+                **fields,
+            )
 
         try:
-            plot_data, plot_extent = self._transform_for_plotting(
+            stage = "plot_data"
+            t0 = time.perf_counter()
+            raw_data = self._plot_data(require_y=True)
+            mark(
+                "plot_data",
+                t0,
+                rows=len(raw_data.frame),
+                empty=raw_data.empty,
+            )
+
+            if raw_data.empty:
+                stage = "empty.raw_data"
+                t0 = time.perf_counter()
+                self.plot_pane.object = self._empty("No finite X/Y data")
+                mark("plot_pane_empty_assign", t0, reason="raw_data_empty")
+
+                t0 = time.perf_counter()
+                self.status_pane.object = "0 density rows"
+                mark("status_assign", t0, reason="raw_data_empty")
+
+                return
+
+            try:
+                stage = "density_extent"
+                t0 = time.perf_counter()
+                raw_extent = self._density_extent(raw_data)
+                mark("density_extent", t0, extent=raw_extent)
+            except ValueError as exc:
+                stage = "density_extent.error"
+                t0 = time.perf_counter()
+                self.plot_pane.object = self._empty(str(exc))
+                mark("plot_pane_empty_assign", t0, reason="invalid_density_limits")
+
+                t0 = time.perf_counter()
+                self.status_pane.object = "Invalid density limits"
+                mark("status_assign", t0, reason="invalid_density_limits")
+                return
+
+            stage = "clip_to_density_extent"
+            t0 = time.perf_counter()
+            clipped_raw_data = self._clip_to_density_extent(raw_data, raw_extent)
+            mark(
+                "clip_to_density_extent",
+                t0,
+                input_rows=len(raw_data.frame),
+                output_rows=len(clipped_raw_data.frame),
+            )
+
+            if clipped_raw_data.empty:
+                stage = "empty.clipped"
+                t0 = time.perf_counter()
+                self.plot_pane.object = self._empty("No finite X/Y data inside limits")
+                mark("plot_pane_empty_assign", t0, reason="clipped_empty")
+
+                t0 = time.perf_counter()
+                self.status_pane.object = "0 density rows inside limits"
+                mark("status_assign", t0, reason="clipped_empty")
+                return
+
+            try:
+                stage = "transform_for_plotting"
+                t0 = time.perf_counter()
+                plot_data, plot_extent = self._transform_for_plotting(
+                    clipped_raw_data,
+                    raw_extent,
+                )
+                mark(
+                    "transform_for_plotting",
+                    t0,
+                    input_rows=len(clipped_raw_data.frame),
+                    output_rows=len(plot_data.frame),
+                    plot_extent=plot_extent,
+                )
+            except ValueError as exc:
+                stage = "transform_for_plotting.error"
+                t0 = time.perf_counter()
+                self.plot_pane.object = self._empty(str(exc))
+                mark("plot_pane_empty_assign", t0, reason="invalid_log_density_data")
+
+                t0 = time.perf_counter()
+                self.status_pane.object = "Invalid log-density data"
+                mark("status_assign", t0, reason="invalid_log_density_data")
+                return
+
+            if plot_data.empty:
+                stage = "empty.plot_data"
+                t0 = time.perf_counter()
+                self.plot_pane.object = self._empty("No finite X/Y data inside limits")
+                mark("plot_pane_empty_assign", t0, reason="plot_data_empty")
+
+                t0 = time.perf_counter()
+                self.status_pane.object = "0 density rows inside limits"
+                mark("status_assign", t0, reason="plot_data_empty")
+                return
+
+            stage = "should_rasterize"
+            t0 = time.perf_counter()
+            use_raster = self._should_rasterize(clipped_raw_data)
+            mark(
+                "should_rasterize",
+                t0,
+                use_raster=use_raster,
+                rows=len(clipped_raw_data.frame),
+                render_mode=getattr(self.state, "render_mode", None),
+            )
+
+            if use_raster:
+                stage = "density_rasterized"
+                t0 = time.perf_counter()
+                base = self._density_rasterized(plot_data, extent=plot_extent)
+                mark(
+                    "density_rasterized",
+                    t0,
+                    rows=len(plot_data.frame),
+                    bins=getattr(self.state, "density_bins", None),
+                )
+
+                render_label = "rasterized grid"
+                plotted_count = len(plot_data.frame)
+                sampled_note = ""
+            else:
+                stage = "sample_prepared_frame"
+                t0 = time.perf_counter()
+                sampled_plot_data = sample_prepared_frame(
+                    plot_data,
+                    int(self.state.density_interactive_sample_limit),
+                    seed=1,
+                )
+                mark(
+                    "sample_prepared_frame",
+                    t0,
+                    input_rows=len(plot_data.frame),
+                    output_rows=len(sampled_plot_data.frame),
+                    sampled_from=sampled_plot_data.sampled_from,
+                )
+
+                stage = "density_hextiles"
+                t0 = time.perf_counter()
+                base = self._density_hextiles(sampled_plot_data, extent=plot_extent)
+                mark(
+                    "density_hextiles",
+                    t0,
+                    rows=len(sampled_plot_data.frame),
+                    bins=getattr(self.state, "density_bins", None),
+                )
+
+                render_label = "hexbin grid"
+                plotted_count = len(sampled_plot_data.frame)
+                sampled_note = (
+                    f" · sampled from {sampled_plot_data.sampled_from:,} inside limits"
+                    if sampled_plot_data.sampled_from
+                    else ""
+                )
+
+            stage = "density_focus_dynamic_overlay"
+            t0 = time.perf_counter()
+            self._density_current_raw_extent = raw_extent
+            self._density_current_plot_extent = plot_extent
+            self._density_focus_pending_frame = self._current_density_focus_marker_frame(
                 clipped_raw_data,
                 raw_extent,
             )
-        except ValueError as exc:
-            self.plot_pane.object = self._empty(str(exc))
-            self.status_pane.object = "Invalid log-density data"
-            return
 
-        if plot_data.empty:
-            self.plot_pane.object = self._empty("No finite X/Y data inside limits")
-            self.status_pane.object = "0 density rows inside limits"
-            return
-
-        use_raster = self._should_rasterize(clipped_raw_data)
-
-        if use_raster:
-            base = self._density_rasterized(plot_data, extent=plot_extent)
-            render_label = "rasterized grid"
-            plotted_count = len(plot_data.frame)
-            sampled_note = ""
-        else:
-            sampled_plot_data = sample_prepared_frame(
-                plot_data,
-                int(self.state.density_interactive_sample_limit),
-                seed=1,
+            # Do not add the focus marker as a HoloViews DynamicMap/Pipe overlay.
+            # That path re-renders too much of the density plot on every focus
+            # change. The marker is attached as a direct Bokeh glyph via hook below.
+            items = [base]
+            x_label, y_label = self._axis_labels()
+            overlay = hv.Overlay(items).collate().opts(
+                responsive=True,
+                min_height=PLOT_MIN_HEIGHT,
+                xlabel=x_label,
+                ylabel=y_label,
+                xlim=(plot_extent[0], plot_extent[1]),
+                ylim=(plot_extent[2], plot_extent[3]),
+                show_grid=True,
+                toolbar="right",
+                tools=["pan", "wheel_zoom", "box_zoom", "reset"],
+                active_tools=["wheel_zoom"],
+                hooks=[
+                    force_wheel_zoom_hook,
+                    self._density_view_range_hook,
+                    self._density_focus_bokeh_hook,
+                ],
+                shared_axes=False,
+                axiswise=True,
+                framewise=True,
             )
-            base = self._density_hextiles(sampled_plot_data, extent=plot_extent)
-            render_label = "hexbin grid"
-            plotted_count = len(sampled_plot_data.frame)
-            sampled_note = (
-                f" · sampled from {sampled_plot_data.sampled_from:,} inside limits"
-                if sampled_plot_data.sampled_from
-                else ""
+            mark("overlay_build", t0, item_count=len(items))
+
+            stage = "plot_pane_assign"
+            t0 = time.perf_counter()
+            self.plot_pane.object = overlay
+            mark(
+                "plot_pane_assign",
+                t0,
+                item_count=len(items),
+                plotted_count=plotted_count,
+                render_label=render_label,
             )
-        
-        focus = self._density_focus_dynamic_overlay(
-            clipped_raw_data,
-            raw_extent,
-            plot_extent=plot_extent,
-            size=14,
-        )
-        items = [item for item in [base, focus] if item is not None]
 
-        x_label, y_label = self._axis_labels()
+            full_count = len(raw_data.frame)
+            clipped_count = len(clipped_raw_data.frame)
 
-        self.plot_pane.object = hv.Overlay(items).collate().opts(
-            responsive=True,
-            min_height=PLOT_MIN_HEIGHT,
-            xlabel=x_label,
-            ylabel=y_label,
-            xlim=(plot_extent[0], plot_extent[1]),
-            ylim=(plot_extent[2], plot_extent[3]),
-            show_grid=True,
-            toolbar="right",
-            tools=["pan", "wheel_zoom", "box_zoom", "reset"],
-            active_tools=["wheel_zoom"],
-            hooks=[force_wheel_zoom_hook, self._density_view_range_hook],
-            shared_axes=False,
-            axiswise=True,
-            framewise=True,
-        )
+            stage = "status_assign"
+            t0 = time.perf_counter()
+            self.status_pane.object = (
+                f"{full_count:,} finite rows · "
+                f"{clipped_count:,} inside limits · "
+                f"{plotted_count:,} shown · {render_label}{sampled_note}"
+            )
+            mark(
+                "status_assign",
+                t0,
+                full_count=full_count,
+                clipped_count=clipped_count,
+                plotted_count=plotted_count,
+            )
 
-        full_count = len(raw_data.frame)
-        clipped_count = len(clipped_raw_data.frame)
-        self.status_pane.object = (
-            f"{full_count:,} finite rows · "
-            f"{clipped_count:,} inside limits · "
-            f"{plotted_count:,} shown · {render_label}{sampled_note}"
-        )
+        finally:
+            self._timing(
+                "density.render.total",
+                time.perf_counter() - total_t0,
+                stage=stage,
+            )
 
     def _should_rasterize(self, data: PreparedFrame) -> bool:
         if self.state.render_mode == "datashader":

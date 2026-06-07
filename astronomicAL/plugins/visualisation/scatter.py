@@ -15,6 +15,8 @@ import panel as pn
 from holoviews import streams
 from holoviews.operation.datashader import rasterize
 
+from bokeh.models import ColumnDataSource
+
 from .base import BaseVisualisationPanel
 from .constants import (
     INTERNAL_LABEL_DISPLAY,
@@ -77,6 +79,10 @@ class ScatterPanel(BaseVisualisationPanel):
         self._scatter_focus_dmap = None
         self._scatter_focus_signature = None
         self._scatter_focus_size = None
+
+        self._scatter_focus_source = None
+        self._scatter_focus_hook_keys = set()
+        self._scatter_focus_pending_frame = None
 
     def _frame_extent_cache_key(self, data):
         try:
@@ -1742,6 +1748,104 @@ class ScatterPanel(BaseVisualisationPanel):
             **self._current_range_opts(include_y=True),
         )
 
+    def _scatter_focus_source_data(self, frame):
+        if frame is None or getattr(frame, "empty", True):
+            return {
+                INTERNAL_ROW_ID: [],
+                INTERNAL_X: [],
+                INTERNAL_Y: [],
+            }
+
+        try:
+            return {
+                INTERNAL_ROW_ID: [str(v) for v in frame[INTERNAL_ROW_ID].tolist()],
+                INTERNAL_X: [float(v) for v in frame[INTERNAL_X].tolist()],
+                INTERNAL_Y: [float(v) for v in frame[INTERNAL_Y].tolist()],
+            }
+        except Exception:
+            return {
+                INTERNAL_ROW_ID: [],
+                INTERNAL_X: [],
+                INTERNAL_Y: [],
+            }
+
+    def _set_scatter_focus_source_frame(self, frame) -> bool:
+        source = getattr(self, "_scatter_focus_source", None)
+
+        if source is None:
+            self._scatter_focus_pending_frame = frame
+            print(
+                "[AstronomicAL scatter] focus source not attached yet; "
+                "stored pending marker frame",
+                f"panel_id={getattr(self, 'panel_id', None)}",
+                f"rows={len(frame) if frame is not None else 0}",
+                flush=True,
+            )
+            return True
+
+        try:
+            source.data = self._scatter_focus_source_data(frame)
+            return True
+        except Exception as exc:
+            print(
+                "[AstronomicAL scatter] direct focus source update failed "
+                f"panel_id={getattr(self, 'panel_id', None)} "
+                f"{type(exc).__name__}: {exc}",
+                flush=True,
+            )
+            return False
+
+    def _scatter_focus_bokeh_hook(self, plot, element) -> None:
+        try:
+            figure = plot.state
+        except Exception:
+            return
+
+        key = id(figure)
+
+        if len(self._scatter_focus_hook_keys) > 64:
+            self._scatter_focus_hook_keys.clear()
+
+        if key in self._scatter_focus_hook_keys:
+            return
+
+        self._scatter_focus_hook_keys.add(key)
+
+        try:
+            source = ColumnDataSource(
+                data=self._scatter_focus_source_data(
+                    getattr(self, "_scatter_focus_pending_frame", None)
+                )
+            )
+
+            figure.scatter(
+                x=INTERNAL_X,
+                y=INTERNAL_Y,
+                source=source,
+                marker="circle",
+                size=14,
+                fill_alpha=0.0,
+                line_color="black",
+                line_width=3.0,
+            )
+
+            self._scatter_focus_source = source
+
+            print(
+                "[AstronomicAL scatter] attached direct Bokeh focus marker "
+                f"panel_id={getattr(self, 'panel_id', None)} "
+                f"figure_key={key}",
+                flush=True,
+            )
+
+        except Exception as exc:
+            print(
+                "[AstronomicAL scatter] failed to attach direct Bokeh focus marker "
+                f"panel_id={getattr(self, 'panel_id', None)} "
+                f"{type(exc).__name__}: {exc}",
+                flush=True,
+            )
+
     def _scatter_focus_stream_signature(self):
         return (
             str(self._dataset_id()),
@@ -1827,52 +1931,32 @@ class ScatterPanel(BaseVisualisationPanel):
         *,
         data: Optional[PreparedFrame] = None,
     ) -> bool:
-        if self._scatter_focus_stream is None:
-            return False
-
         frame = self._current_focus_marker_frame(data)
-
-        try:
-            self._scatter_focus_stream.send(frame)
-            return True
-        except Exception as exc:
-            print(
-                "[AstronomicAL scatter] focus stream send failed "
-                f"panel_id={getattr(self, 'panel_id', None)} "
-                f"{type(exc).__name__}: {exc}",
-                flush=True,
-            )
-            return False
+        self._scatter_focus_pending_frame = frame
+        return self._set_scatter_focus_source_frame(frame)
 
     def _apply_focus_marker_point(self, *, row_id: str, point, clear: bool = False) -> bool:
-        """BaseVisualisationPanel hook: update only the streamed focus marker."""
-        if self._scatter_focus_stream is None:
-            return False
+        if clear:
+            frame = self._empty_focus_marker_frame()
+        else:
+            frame = self._focus_marker_frame(
+                row_id=str(row_id or ""),
+                point=point,
+            )
 
-        frame = (
-            self._empty_focus_marker_frame()
-            if clear
-            else self._focus_marker_frame(row_id=str(row_id or ""), point=point)
+        self._scatter_focus_pending_frame = frame
+        ok = self._set_scatter_focus_source_frame(frame)
+
+        print(
+            "[AstronomicAL scatter] direct focus marker updated "
+            f"panel_id={getattr(self, 'panel_id', None)} "
+            f"row_id={row_id!r} "
+            f"rows={len(frame)} "
+            f"ok={ok}",
+            flush=True,
         )
 
-        try:
-            self._scatter_focus_stream.send(frame)
-            print(
-                "[AstronomicAL scatter] focus marker stream updated "
-                f"panel_id={getattr(self, 'panel_id', None)} "
-                f"row_id={row_id!r} "
-                f"rows={len(frame)}",
-                flush=True,
-            )
-            return True
-        except Exception as exc:
-            print(
-                "[AstronomicAL scatter] focus marker stream update failed "
-                f"panel_id={getattr(self, 'panel_id', None)} "
-                f"{type(exc).__name__}: {exc}",
-                flush=True,
-            )
-            return False
+        return ok
 
     def _interactive_dynamic_overlays(self, data: PreparedFrame):
 
@@ -2148,17 +2232,13 @@ class ScatterPanel(BaseVisualisationPanel):
         selection_overlay = self._selection_points(data)
         t_sel1 = time.perf_counter()
 
-        focus_overlay = self._scatter_focus_dynamic_overlay(
-            data,
-            size=max(float(self.state.point_size) + 8, 12),
-        )
+        self._scatter_focus_pending_frame = self._current_focus_marker_frame(data)
         t_focus1 = time.perf_counter()
 
         overlay = self._compose_render_layers(
             [
                 base,
                 selection_overlay,
-                focus_overlay,
             ]
         )
 
@@ -2170,7 +2250,11 @@ class ScatterPanel(BaseVisualisationPanel):
             legend_position="right",
             show_grid=True,
             toolbar="right",
-            hooks=[deduplicate_toolbar_tools_hook, keep_pan_tool_active_hook],
+            hooks=[
+                deduplicate_toolbar_tools_hook, 
+                keep_pan_tool_active_hook,
+                self._scatter_focus_bokeh_hook,
+                ],
             shared_axes=False,
             axiswise=True,
             framewise=True,

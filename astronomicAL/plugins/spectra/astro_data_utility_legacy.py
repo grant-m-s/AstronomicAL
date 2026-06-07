@@ -510,6 +510,74 @@ class BaseSpectraClass:
         select = mask_width >= min_width
         return mask_start_idx[select], mask_end_idx[select]
 
+    def _empty_spectra_result(self, message: str):
+        """Compatibility alias for no-result spectra queries."""
+        if hasattr(self, "_not_found_result"):
+            return self._not_found_result(message)
+
+        self.available_spectra = 0
+        self.spectra = []
+
+        try:
+            import pandas as pd
+            self.table_results = pd.DataFrame()
+        except Exception:
+            self.table_results = None
+
+        return {
+            "status": "not_found",
+            "message": message,
+        }
+
+    def _spectra_count(self) -> int:
+        spectra = getattr(self, "spectra", None)
+        if spectra is None:
+            return 0
+
+        try:
+            return len(spectra)
+        except TypeError:
+            return 1
+
+
+    def _not_found_result(self, message: str):
+        self.available_spectra = 0
+        self.spectra = []
+
+        if not hasattr(self, "table_results") or self.table_results is None:
+            self.table_results = pd.DataFrame()
+
+        return {
+            "status": "not_found",
+            "message": message,
+        }
+
+
+    def _error_result(self, message: str):
+        self.available_spectra = 0
+        self.spectra = []
+
+        if not hasattr(self, "table_results") or self.table_results is None:
+            self.table_results = pd.DataFrame()
+
+        return {
+            "status": "error",
+            "message": message,
+        }
+
+
+    def _is_terminal_result(self, result) -> bool:
+        return (
+            isinstance(result, dict)
+            and result.get("status") in {"not_found", "error"}
+        )
+
+
+    def _finish_get_spectra(self, *, return_object: bool, result=None):
+        if return_object:
+            return getattr(self, "spectra", None) or []
+
+        return result
     
     def plot_spectrum(self, ax, idx=0, plot_model=True, 
                       plot_lines = 'class',
@@ -812,36 +880,134 @@ class DESISpectraClass(BaseSpectraClass):
             self.moc = load_moc(survey = "SDSS")
 
 
-    def get_spectra(self, max_separation = None, return_object = False):
+    def _empty_spectra_result(self, message: str):
+        """Normalise all empty/no-result cases.
+
+        This prevents downstream code from trying to iterate over None.
         """
-        Method which calls sequentially all the other methods to get the spectra. return_object returns 
-        the required spectra in addition to storing it as an attribute for multithread purposes.
+        self.table_results = pd.DataFrame()
+        self.available_spectra = 0
+        return {
+            "status": "not_found",
+            "message": message,
+        }
+
+
+    def _error_spectra_result(self, message: str, error: Exception | None = None):
+        """Normalise connection/query failures."""
+        self.table_results = pd.DataFrame()
+        self.available_spectra = 0
+
+        if error is not None:
+            self.error_tracker.log_error(type(error).__name__, f"{message}: {error}")
+        else:
+            self.error_tracker.log_error("Connection Error", message)
+
+        return {
+            "status": "error",
+            "message": message,
+            "error": repr(error) if error is not None else None,
+        }
+
+    def get_spectra(self, max_separation=None, return_object=False):
+        """
+        Method which calls sequentially all the other methods to get the spectra.
+        return_object returns the required spectra in addition to storing it as an
+        attribute for multithread purposes.
         """
         self.error_tracker.reset()
+        self.spectra = []
+        self.available_spectra = 0
 
-        #if not check_isin_survey(ra = self.ra,
-        #                         dec = self.dec,
-        #                         moc  = self.moc):
-        #    self.error_tracker.log_error("Source not in the survey", 
-        #                                 "The selected source is outside the survey coverage area")
-        #    return None
-        
         if max_separation is not None:
             self.max_separation = max_separation / 3600
 
         if self.sourceId is not None:
-            self.query_spectra_specid(verbose = True)
+            result = self.query_spectra_specid(verbose=True)
+
+            if self._is_terminal_result(result):
+                return self._finish_get_spectra(
+                    return_object=return_object,
+                    result=result,
+                )
+
+            if self.error_tracker.has_error:
+                result = self._error_result("Failed to retrieve DESI spectrum by specid")
+                return self._finish_get_spectra(
+                    return_object=return_object,
+                    result=result,
+                )
+
+            if self._spectra_count() < 1:
+                result = self._not_found_result(
+                    "No DESI spectrum found for the requested specid"
+                )
+                return self._finish_get_spectra(
+                    return_object=return_object,
+                    result=result,
+                )
 
         else:
-            self.query_main_table(verbose = True)
-            if not self.error_tracker.has_error:
-                self.query_spectra_sparclid(verbose = True)
+            result = self.query_main_table(verbose=True)
 
-        if not self.error_tracker.has_error:
-            self.get_smoothed_spectra(kernel = "Box1dkernel",  window = 10)
-        
-        if return_object:
-            return getattr(self, "spectra", None)
+            if self._is_terminal_result(result):
+                return self._finish_get_spectra(
+                    return_object=return_object,
+                    result=result,
+                )
+
+            if self.error_tracker.has_error:
+                result = self._error_result("DESI table query failed")
+                return self._finish_get_spectra(
+                    return_object=return_object,
+                    result=result,
+                )
+
+            if getattr(self, "available_spectra", 0) < 1:
+                result = self._not_found_result(
+                    "No DESI spectrum found near this target"
+                )
+                return self._finish_get_spectra(
+                    return_object=return_object,
+                    result=result,
+                )
+
+            result = self.query_spectra_sparclid(verbose=True)
+
+            if self._is_terminal_result(result):
+                return self._finish_get_spectra(
+                    return_object=return_object,
+                    result=result,
+                )
+
+            if self.error_tracker.has_error:
+                result = self._error_result("Failed to retrieve DESI spectra")
+                return self._finish_get_spectra(
+                    return_object=return_object,
+                    result=result,
+                )
+
+            if self._spectra_count() < 1:
+                result = self._not_found_result(
+                    "No DESI spectrum found near this target"
+                )
+                return self._finish_get_spectra(
+                    return_object=return_object,
+                    result=result,
+                )
+
+        if not self.error_tracker.has_error and self._spectra_count() > 0:
+            self.get_smoothed_spectra(kernel="Box1dkernel", window=10)
+
+        result = {
+            "status": "ok",
+            "available_spectra": self._spectra_count(),
+        }
+
+        return self._finish_get_spectra(
+            return_object=return_object,
+            result=result,
+        )
         
     def _remove_source_attributes(self):
         """Removes all attributes specific to a source"""
@@ -850,41 +1016,103 @@ class DESISpectraClass(BaseSpectraClass):
             if hasattr(self, attribute):
                 delattr(self, attribute)
 
-    def query_main_table(self, verbose = False):
-        
-        """Query using SparcClient. It does not accept cone queries, so we first perform a box search within
-        [ra-radius, ra+radius]* [dec-radius, dec+radius] and then we keep only sources effectively within the cone"""
-        
-        constraints  = {"ra" : [self.ra-self.max_separation, self.ra+self.max_separation],
-                       "dec" : [self.dec - self.max_separation, self.dec+self.max_separation],
-                       "data_release": self.datasets,
-                       "specprimary" : [1]}
-        outfields = ['sparcl_id','specid', 'ra', 'dec', "data_release"]
+    def query_main_table(self, verbose=False):
+        """Query using SparcClient.
 
-        self.coordinates = SkyCoord(ra = self.ra, dec = self.dec, unit = "deg", frame = "icrs")
-        
+        It does not accept cone queries, so we first perform a box search within
+        [ra-radius, ra+radius] * [dec-radius, dec+radius] and then keep only
+        sources effectively within the cone.
+        """
+
+        constraints = {
+            "ra": [self.ra - self.max_separation, self.ra + self.max_separation],
+            "dec": [self.dec - self.max_separation, self.dec + self.max_separation],
+            "data_release": self.datasets,
+            "specprimary": [1],
+        }
+        outfields = ["sparcl_id", "specid", "ra", "dec", "data_release"]
+
+        self.coordinates = SkyCoord(
+            ra=self.ra,
+            dec=self.dec,
+            unit="deg",
+            frame="icrs",
+        )
+
         tic = time.perf_counter()
+
         try:
-            found = self.client.find(outfields = outfields, constraints = constraints, limit = 200)
-            self.table_results = pd.DataFrame.from_records(found.records)
-            self.table_results = self.table_results.drop_duplicates(subset = "specid")
+            found = self.client.find(
+                outfields=outfields,
+                constraints=constraints,
+                limit=200,
+            )
         except ReadTimeout as e:
-            self.error_tracker.log_error(e, "Could not connect to Sparcl server before reaching timeout")
-            return
-        
+            return self._error_spectra_result(
+                "Could not connect to Sparcl server before reaching timeout",
+                e,
+            )
+        except Exception as e:
+            return self._error_spectra_result(
+                "DESI SPARCL query failed",
+                e,
+            )
+
         toc = time.perf_counter()
         if verbose:
-            print(f"Querying table with Sparclient required {toc-tic} seconds")
-        
-        if len(self.table_results) > 1:
+            print(f"Querying table with Sparclient required {toc - tic} seconds")
+
+        records = getattr(found, "records", None) if found is not None else None
+
+        if not records:
+            return self._not_found_result(
+                "No DESI spectrum found near this target"
+            )
+
+        self.table_results = pd.DataFrame.from_records(records)
+
+        if self.table_results.empty:
+            return self._not_found_result(
+                "No DESI spectrum found near this target"
+            )
+
+        if "specid" in self.table_results.columns:
+            self.table_results = self.table_results.drop_duplicates(subset="specid")
+
+        required_cols = {"ra", "dec"}
+        if not required_cols.issubset(set(self.table_results.columns)):
+            return self._empty_spectra_result(
+                "DESI query returned no usable RA/Dec records"
+            )
+
+        if len(self.table_results) > 0:
             self.table_results["separation"] = self.coordinates.separation(
-                          SkyCoord(self.table_results["ra"], self.table_results["dec"], unit = "deg")).value
-            self.table_results = self.table_results[self.table_results["separation"]<= self.max_separation].sort_values("separation")
-        
+                SkyCoord(
+                    self.table_results["ra"],
+                    self.table_results["dec"],
+                    unit="deg",
+                )
+            ).value
+
+            self.table_results = (
+                self.table_results[
+                    self.table_results["separation"] <= self.max_separation
+                ]
+                .sort_values("separation")
+                .reset_index(drop=True)
+            )
+
         self.available_spectra = len(self.table_results)
+
         if self.available_spectra < 1:
-            self.error_tracker.log_error("No spectrum available", 
-                                         "No spectrum found around the provided coordinates")
+            return self._empty_spectra_result(
+                "No DESI spectrum found near this target"
+            )
+
+        return {
+            "status": "ok",
+            "available_spectra": self.available_spectra,
+        }
             
   
     def get_info_spectra(self):
@@ -991,47 +1219,147 @@ class EuclidSpectraClass(BaseSpectraClass):
             if hasattr(self, attribute):
                 delattr(self, attribute)
 
-    def get_spectra(self, max_separation = None, return_object = False,
-                    smooth_kernel = "Box1dkernel",  smooth_window = 5):
-        """Method which calls sequentially all the other methods to get the spectra. return_object returns 
-        the required spectra in addition to storing it as an attribute for multithread purposes.
+    def get_spectra(
+        self,
+        max_separation=None,
+        return_object=False,
+        smooth_kernel="Box1dkernel",
+        smooth_window=5,
+    ):
         """
-        
-        self.error_tracker.reset()
+        Method which calls sequentially all the other methods to get the spectra.
+        return_object returns the required spectra in addition to storing it as an
+        attribute for multithread purposes.
+        """
 
-        if not check_isin_survey(ra = self.ra,
-                                 dec = self.dec,
-                                 moc  = self.moc):
-            self.error_tracker.log_error("Source not in the survey", 
-                                         "The selected source is outside the survey coverage area")
+        self.error_tracker.reset()
+        self.spectra = []
+        self.available_spectra = 0
+
+        if not check_isin_survey(
+            ra=self.ra,
+            dec=self.dec,
+            moc=self.moc,
+        ):
+            self.error_tracker.log_error(
+                "Source not in the survey",
+                "The selected source is outside the survey coverage area",
+            )
+
+            result = self._not_found_result(
+                "The selected source is outside the survey coverage area"
+            )
+            return self._finish_get_spectra(
+                return_object=return_object,
+                result=result,
+            )
+
         if max_separation is not None:
             self.max_separation = max_separation / 3600
-        
-        if self.sourceId is not None:
-            self.query_spectra_sourceId(verbose=True)
-            if not self.error_tracker.has_error:
-                for spectrum in self.spectra:
-                    spectrum.set_attribute("ra", np.nan)
-                    spectrum.set_attribute("dec", np.nan)
-                    spectrum.set_attribute("redshift", np.nan) 
-                    spectrum.set_attribute("spectype", "")
-                    
-        else:
-            self.query_table(verbose = True)
-            if not self.error_tracker.has_error:
-                self.query_spectra_sourceId(verbose=True)
-                if not self.error_tracker.has_error:
-                    source_id = list(self.table_results["source_id"])
-                    self.spectra = self._reorder_spectra(self.spectra, source_id)
-                    self._add_info_spectra()
 
-        if not self.error_tracker.has_error:
-            self.get_smoothed_spectra(kernel = smooth_kernel,  window = smooth_window)
+        if self.sourceId is not None:
+            result = self.query_spectra_sourceId(verbose=True)
+
+            if self._is_terminal_result(result):
+                return self._finish_get_spectra(
+                    return_object=return_object,
+                    result=result,
+                )
+
+            if self.error_tracker.has_error:
+                result = self._error_result("Failed to retrieve Euclid spectra by source_id")
+                return self._finish_get_spectra(
+                    return_object=return_object,
+                    result=result,
+                )
+
+            if self._spectra_count() < 1:
+                result = self._not_found_result(
+                    "No Euclid spectra found for the requested source_id"
+                )
+                return self._finish_get_spectra(
+                    return_object=return_object,
+                    result=result,
+                )
+
+            for spectrum in self.spectra:
+                spectrum.set_attribute("ra", np.nan)
+                spectrum.set_attribute("dec", np.nan)
+                spectrum.set_attribute("redshift", np.nan)
+                spectrum.set_attribute("spectype", "")
+
+        else:
+            result = self.query_table(verbose=True)
+
+            if self._is_terminal_result(result):
+                return self._finish_get_spectra(
+                    return_object=return_object,
+                    result=result,
+                )
+
+            if self.error_tracker.has_error:
+                result = self._error_result("Euclid spectra table query failed")
+                return self._finish_get_spectra(
+                    return_object=return_object,
+                    result=result,
+                )
+
+            if getattr(self, "available_spectra", 0) < 1:
+                result = self._not_found_result(
+                    f"No spectra found around the requested coordinates - "
+                    f"ra: {self.ra}, dec: {self.dec}"
+                )
+                return self._finish_get_spectra(
+                    return_object=return_object,
+                    result=result,
+                )
+
+            result = self.query_spectra_sourceId(verbose=True)
+
+            if self._is_terminal_result(result):
+                return self._finish_get_spectra(
+                    return_object=return_object,
+                    result=result,
+                )
+
+            if self.error_tracker.has_error:
+                result = self._error_result("Failed to retrieve Euclid spectra")
+                return self._finish_get_spectra(
+                    return_object=return_object,
+                    result=result,
+                )
+
+            if self._spectra_count() < 1:
+                result = self._not_found_result(
+                    f"No spectra found around the requested coordinates - "
+                    f"ra: {self.ra}, dec: {self.dec}"
+                )
+                return self._finish_get_spectra(
+                    return_object=return_object,
+                    result=result,
+                )
+
+            source_id = list(self.table_results["source_id"])
+            self.spectra = self._reorder_spectra(self.spectra, source_id)
+            self._add_info_spectra()
+
+        if not self.error_tracker.has_error and self._spectra_count() > 0:
+            self.get_smoothed_spectra(
+                kernel=smooth_kernel,
+                window=smooth_window,
+            )
+
+        result = {
+            "status": "ok",
+            "available_spectra": self._spectra_count(),
+        }
+
+        return self._finish_get_spectra(
+            return_object=return_object,
+            result=result,
+        )
         
-        if return_object:
-            return getattr(self, "spectra", None)
-        
-    def query_table(self, verbose = False):
+    def query_table(self, verbose=False):
         query = f"""SELECT TOP 400
                     spec.file_name, spec.file_path, spec.source_id, spec.spectra_source_oid, spec.ra_obj, spec.dec_obj,
                     DISTANCE(spec.ra_obj, spec.dec_obj, {self.ra}, {self.dec})*3600 AS separation
@@ -1039,21 +1367,72 @@ class EuclidSpectraClass(BaseSpectraClass):
                     WHERE DISTANCE(ra_obj, dec_obj, {self.ra}, {self.dec}) < {self.max_separation}
                     ORDER BY separation
                 """
+
         print(f"query ra dec: ({self.ra},{self.dec})")
+
         tic = time.perf_counter()
-        job = self.client.launch_job(query)
-            
-        if (job is None) or (job.get_phase() in ("ERROR", "ABORTED")):
-            self.error_tracker.log_error("Connection Error", "Failed to connect to ESA Science Archive")
-            return
-        
-        self.table_results = job.get_results()
-        self.available_spectra = len(self.table_results)
+
+        try:
+            job = self.client.launch_job(query)
+        except Exception as e:
+            return self._error_spectra_result(
+                "Failed to connect to ESA Science Archive",
+                e,
+            )
+
+        if job is None:
+            return self._error_spectra_result(
+                "Failed to connect to ESA Science Archive"
+            )
+
+        try:
+            phase = job.get_phase()
+        except Exception as e:
+            return self._error_spectra_result(
+                "Failed to read ESA Science Archive job phase",
+                e,
+            )
+
+        if phase in ("ERROR", "ABORTED"):
+            return self._error_spectra_result(
+                f"ESA Science Archive query failed with phase {phase}"
+            )
+
+        try:
+            results = job.get_results()
+        except Exception as e:
+            return self._error_spectra_result(
+                "Failed to retrieve ESA Science Archive query results",
+                e,
+            )
+
+        if results is None:
+            return self._empty_spectra_result(
+                "No DESI spectrum found near this target"
+            )
+
+        self.table_results = results
+
+        try:
+            self.available_spectra = len(self.table_results)
+        except TypeError:
+            return self._empty_spectra_result(
+                "No DESI spectrum found near this target"
+            )
+
         if self.available_spectra < 1:
-            self.error_tracker.log_error("No spectra in the field", f"No spectra found around the requested coordinates - ra: {self.ra}, dec:{self.dec}")
+            return self._empty_spectra_result(
+                "No DESI spectrum found near this target"
+            )
+
         toc = time.perf_counter()
         if verbose:
-                print(f"Querying Euclid spectra_source table required {toc-tic} seconds")
+            print(f"Querying Euclid spectra_source table required {toc - tic} seconds")
+
+        return {
+            "status": "ok",
+            "available_spectra": self.available_spectra,
+        }
         
   
     @staticmethod
