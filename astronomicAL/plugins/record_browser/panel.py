@@ -639,16 +639,7 @@ class RecordBrowserPanel(param.Parameterized):
         if row_id is None:
             return
 
-        row_id = str(row_id)
-
-        def _run():
-            self._focus_row_from_selection(row_id)
-
-        try:
-            import panel as pn
-            pn.state.curdoc.add_next_tick_callback(_run)
-        except Exception:
-            _run()
+        self._schedule_focus_from_selection(str(row_id))
 
 
     # ---------------------------------------------------------------------
@@ -1534,6 +1525,119 @@ class RecordBrowserPanel(param.Parameterized):
 
         return True
 
+    def _safe_focus_payload_value(self, value: Any) -> Any:
+        """Convert a scalar value into something safe for focus metadata."""
+        try:
+            if isinstance(value, np.generic):
+                value = value.item()
+        except Exception:
+            pass
+
+        try:
+            if pd.isna(value):
+                return None
+        except Exception:
+            pass
+
+        if value is None or isinstance(value, (str, int, float, bool)):
+            return value
+
+        try:
+            if hasattr(value, "isoformat"):
+                return value.isoformat()
+        except Exception:
+            pass
+
+        return str(value)
+
+    def _focus_event_columns(self) -> List[str]:
+        """Columns worth carrying with selection.focus.changed.
+
+        Keep this small. The goal is to avoid expensive follow-up row lookups
+        for common linked panels, not to publish the full 300-column row.
+        """
+        wanted: List[str] = []
+
+        def add(column: Optional[str]) -> None:
+            if not column:
+                return
+            column = str(column)
+            if column == "Use Index":
+                return
+            if column in self.columns and column not in wanted:
+                wanted.append(column)
+
+        add(self.record_id_col)
+        add(self.label_col)
+
+        for column in self.extra_info_cols:
+            add(column)
+
+        # Semantic mappings used by astronomy panels and visualisation axes.
+        for semantic_name in (
+            "coords.ra",
+            "coords.dec",
+            "target_label",
+            "redshift",
+        ):
+            try:
+                add(self._get_mapping(semantic_name))
+            except Exception:
+                pass
+
+        return wanted
+
+    def _focus_event_row_values(self) -> Dict[str, Any]:
+        """Return a small current-row snapshot for focus metadata."""
+        if self.source is None or self.row_count <= 0:
+            return {}
+
+        columns = self._focus_event_columns()
+        if not columns:
+            return {}
+
+        try:
+            row_df = self.source.get_row_by_position(
+                self.index,
+                columns=columns,
+            )
+        except Exception:
+            row_df = pd.DataFrame(columns=columns)
+
+        if row_df is None or row_df.empty:
+            return {}
+
+        row = row_df.iloc[0]
+        values: Dict[str, Any] = {}
+
+        for column in row_df.columns:
+            try:
+                values[str(column)] = self._safe_focus_payload_value(row[column])
+            except Exception:
+                pass
+
+        return values
+
+    def _focus_event_semantic_values(self, row_values: Dict[str, Any]) -> Dict[str, Any]:
+        """Expose semantic aliases alongside raw column names."""
+        semantic_values: Dict[str, Any] = {}
+
+        for semantic_name in (
+            "coords.ra",
+            "coords.dec",
+            "target_label",
+            "redshift",
+        ):
+            try:
+                column = self._get_mapping(semantic_name)
+            except Exception:
+                column = None
+
+            if column and column in row_values:
+                semantic_values[semantic_name] = row_values[column]
+
+        return semantic_values
+
     def _publish_focus_for_current_index(self):
         selection = getattr(self.context, "selection", None)
         if selection is None:
@@ -1551,20 +1655,41 @@ class RecordBrowserPanel(param.Parameterized):
         if focus is not None:
             current_dataset_id = self._focus_value(focus, "dataset_id")
             current_row_id = self._focus_value(focus, "row_id")
-
             if current_dataset_id == dataset_id and str(current_row_id) == str(row_id):
                 return
+
+        row_position = int(self.index)
+        id_column = self.record_id_col or "Use Index"
+
+        row_values = self._focus_event_row_values()
+        semantic_values = self._focus_event_semantic_values(row_values)
+
+        metadata = {
+            # Canonical position key.
+            "row_position": row_position,
+
+            # Compatibility aliases used by downstream plugins.
+            "row_pos": row_position,
+            "row_index": row_position,
+            "position": row_position,
+            "index": row_position,
+
+            "id_column": id_column,
+            "record_id_col": id_column,
+            "panel_type": "record_browser",
+
+            # Small one-row payload for linked plugins.
+            "row_values": row_values,
+            "values": row_values,
+            "semantic_values": semantic_values,
+        }
 
         selection.set_focus(
             dataset_id=dataset_id,
             row_id=str(row_id),
             origin="record_browser.index",
             panel_id=self.panel_id,
-            metadata={
-                "row_position": int(self.index),
-                "id_column": self.record_id_col or "Use Index",
-                "panel_type": "record_browser",
-            },
+            metadata=metadata,
         )
 
     def _focus_row_from_selection(self, row_id):

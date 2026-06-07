@@ -276,6 +276,7 @@ class ImageVisualizationClass:
             if image_max is None:
                 image_max = np.nanmax(image)
 
+            # BUG: RuntimeWarning: invalid value encountered in divide
             scaled_image = (image - image_min) / (image_max - image_min)
             scaled_image = np.clip(scaled_image, 0, 1)
 

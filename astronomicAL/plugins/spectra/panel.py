@@ -150,6 +150,11 @@ class SpectraPanel:
         self._current_target: Optional[_ResolvedTarget] = None
         self._spectra_result: Optional[SpectraResult] = None
 
+        self._auto_load_generation = 0
+        self._auto_load_scheduled = False
+        self._pending_auto_load_reason: Optional[str] = None
+        self._target_status_scheduled = False
+
         self._build_widgets()
         if state:
             self.restore_state(state)
@@ -577,35 +582,132 @@ class SpectraPanel:
         except Exception:
             traceback.print_exc()
 
+    def _schedule_panel_callback(self, callback, *, delay_ms: int = 0) -> None:
+        """Schedule UI work outside the EventBus subscriber call stack."""
+        if getattr(self, "_disposed", False):
+            return
+
+        def _run() -> None:
+            if getattr(self, "_disposed", False):
+                return
+            callback()
+
+        try:
+            doc = pn.state.curdoc
+            if doc is not None:
+                if delay_ms and delay_ms > 0:
+                    doc.add_timeout_callback(_run, int(delay_ms))
+                else:
+                    doc.add_next_tick_callback(_run)
+            else:
+                _run()
+        except Exception:
+            _run()
+
+    def _schedule_target_status_refresh(self, *, delay_ms: int = 75) -> None:
+        """Resolve target status later; do not block selection.focus.changed."""
+        if getattr(self, "_target_status_scheduled", False):
+            return
+
+        self._target_status_scheduled = True
+
+        def _run() -> None:
+            self._target_status_scheduled = False
+            if getattr(self, "_disposed", False):
+                return
+            try:
+                self._refresh_column_options()
+                self._update_target_status()
+            except Exception:
+                traceback.print_exc()
+
+        self._schedule_panel_callback(_run, delay_ms=delay_ms)
+
+    def _schedule_auto_load(self, *, reason: str, delay_ms: int = 175) -> None:
+        """Debounce auto-loads so rapid focus changes only load the latest row."""
+        self._auto_load_generation += 1
+        generation = int(self._auto_load_generation)
+        self._pending_auto_load_reason = str(reason or "auto")
+
+        if getattr(self, "_auto_load_scheduled", False):
+            return
+
+        self._auto_load_scheduled = True
+
+        def _run() -> None:
+            self._auto_load_scheduled = False
+            if getattr(self, "_disposed", False):
+                return
+            if generation != int(getattr(self, "_auto_load_generation", 0)):
+                if self._pending_auto_load_reason:
+                    self._schedule_auto_load(
+                        reason=self._pending_auto_load_reason,
+                        delay_ms=delay_ms,
+                    )
+                return
+
+            reason_to_use = self._pending_auto_load_reason or reason
+            self._pending_auto_load_reason = None
+            try:
+                self.load_spectra(reason=reason_to_use)
+            except Exception:
+                traceback.print_exc()
+
+        self._schedule_panel_callback(_run, delay_ms=delay_ms)
+
     def _selection_changed(self, topic: str, payload: Any) -> None:
+        # Keep EventBus subscriber work cheap.
+        self._auto_load_generation += 1
+
         self._cancel_job()
         self._current_target = None
         self._spectra_result = None
-        self.figure[:] = [self._empty_message("Loading new selection…")]
-        self._refresh_column_options()
-        self._update_target_status()
+
+        self.figure[:] = [self._empty_message("New focused row queued…")]
+        self.target_status.object = "New focused row queued…"
 
         if self.auto_reload.value:
-            self.load_spectra(reason=str(topic or "selection.focus.changed"))
+            self._schedule_auto_load(
+                reason=str(topic or "selection.focus.changed"),
+                delay_ms=175,
+            )
+        else:
+            self._schedule_target_status_refresh(delay_ms=75)
 
     def _selection_cleared(self, topic: str, payload: Any) -> None:
+        self._auto_load_generation += 1
+
         self._cancel_job()
         self._current_target = None
         self._spectra_result = None
+
         self.status.object = "No focused row selected."
         self.target_status.object = ""
         self.figure[:] = [self._empty_message("No focused row selected.")]
 
     def _dataset_changed(self, topic: str, payload: Any) -> None:
+        self._auto_load_generation += 1
+
         self._cancel_job()
         self._current_target = None
         self._spectra_result = None
-        self.figure[:] = [self._empty_message("Dataset changed.")]
-        self._refresh_column_options()
-        self._update_target_status()
 
+        self.figure[:] = [self._empty_message("Dataset changed.")]
+        self.target_status.object = "Dataset changed; resolving target…"
+
+        # Dataset/mapping changes are less frequent than focus changes, so
+        # column option refresh is OK, but still schedule it outside EventBus.
         if self.auto_reload.value:
-            self.load_spectra(reason=str(topic or "dataset.changed"))
+            self._schedule_panel_callback(
+                lambda: self._refresh_column_options(),
+                delay_ms=50,
+            )
+            self._schedule_auto_load(
+                reason=str(topic or "dataset.changed"),
+                delay_ms=225,
+            )
+        else:
+            self._schedule_target_status_refresh(delay_ms=100)
 
     def _euclid_radius_changed(self, topic: str, payload: Any) -> None:
         if not isinstance(payload, dict):
@@ -853,11 +955,19 @@ class SpectraPanel:
             )
 
         row_id = self._get_from_obj(focus, "row_id", "record_id", "id", "source_id")
-        row_pos = self._get_from_obj(focus, "row_pos", "row_index", "position", "index")
+        row_pos = self._get_from_obj(
+            focus,
+            "row_position",
+            "row_pos",
+            "row_index",
+            "position",
+            "index",
+        )
 
         if row_pos is None:
             row_pos = (
-                metadata.get("row_pos")
+                metadata.get("row_position")
+                or metadata.get("row_pos")
                 or metadata.get("row_index")
                 or metadata.get("position")
                 or metadata.get("index")

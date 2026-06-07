@@ -7,10 +7,12 @@ import datashader as ds
 import holoviews as hv
 import panel as pn
 import numpy as np
+import pandas as pd
+from holoviews import streams
 from holoviews.operation.datashader import rasterize
 
 from .base import BaseVisualisationPanel
-from .constants import INTERNAL_X, INTERNAL_Y, PLOT_MIN_HEIGHT
+from .constants import INTERNAL_ROW_ID, INTERNAL_X, INTERNAL_Y, PLOT_MIN_HEIGHT
 from .utils import (
     DENSITY_RENDERER,
     PreparedFrame,
@@ -37,11 +39,16 @@ class DensityPanel(BaseVisualisationPanel):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-
         self._density_range_hook_keys = set()
         self._density_range_sync_pending = False
         self._density_pending_bokeh_ranges = None
         self._density_range_syncing = False
+
+        self._density_focus_stream = None
+        self._density_focus_dmap = None
+        self._density_focus_signature = None
+        self._density_focus_size = None
+        self._density_current_raw_extent = None
 
         self._watch_state(
             [
@@ -248,6 +255,243 @@ class DensityPanel(BaseVisualisationPanel):
         except Exception:
             return False
 
+    def _supports_incremental_focus_marker(self) -> bool:
+        return True
+
+    def _empty_density_focus_marker_frame(self) -> pd.DataFrame:
+        return pd.DataFrame(
+            {
+                INTERNAL_ROW_ID: pd.Series([], dtype="object"),
+                INTERNAL_X: pd.Series([], dtype="float64"),
+                INTERNAL_Y: pd.Series([], dtype="float64"),
+            }
+        )
+
+    def _density_focus_stream_signature(self):
+        return (
+            str(self._dataset_id()),
+            str(getattr(self.state, "x", "") or ""),
+            str(getattr(self.state, "y", "") or ""),
+            str(getattr(self.state, "record_id_col", "") or ""),
+            bool(getattr(self.state, "log_x", False)),
+            bool(getattr(self.state, "log_y", False)),
+        )
+
+    def _density_focus_marker_frame(
+        self,
+        *,
+        row_id: str,
+        point,
+        raw_extent: Optional[DensityExtent] = None,
+    ) -> pd.DataFrame:
+        if point is None:
+            return self._empty_density_focus_marker_frame()
+
+        raw_extent = raw_extent or getattr(self, "_density_current_raw_extent", None)
+        if raw_extent is None:
+            return self._empty_density_focus_marker_frame()
+
+        try:
+            x, y = point
+            x = float(x)
+            y = float(y)
+        except Exception:
+            return self._empty_density_focus_marker_frame()
+
+        if not np.isfinite(x) or not np.isfinite(y):
+            return self._empty_density_focus_marker_frame()
+
+        xmin, xmax, ymin, ymax = raw_extent
+        if x < xmin or x > xmax or y < ymin or y > ymax:
+            return self._empty_density_focus_marker_frame()
+
+        if bool(getattr(self.state, "log_x", False)):
+            if x <= 0:
+                return self._empty_density_focus_marker_frame()
+            x = float(np.log10(x))
+
+        if bool(getattr(self.state, "log_y", False)):
+            if y <= 0:
+                return self._empty_density_focus_marker_frame()
+            y = float(np.log10(y))
+
+        return pd.DataFrame(
+            [
+                {
+                    INTERNAL_ROW_ID: str(row_id or ""),
+                    INTERNAL_X: x,
+                    INTERNAL_Y: y,
+                }
+            ]
+        )
+
+    def _density_focus_marker_element(self, frame: pd.DataFrame, *, size: float):
+        if frame is None or frame.empty:
+            frame = self._empty_density_focus_marker_frame()
+
+        return hv.Points(
+            frame,
+            kdims=[INTERNAL_X, INTERNAL_Y],
+            vdims=[INTERNAL_ROW_ID],
+        ).opts(
+            marker="circle",
+            size=float(size),
+            fill_alpha=0.0,
+            line_color="black",
+            line_width=3.0,
+            tools=[],
+            active_tools=[],
+            toolbar=None,
+            logx=False,
+            logy=False,
+            shared_axes=False,
+            axiswise=True,
+            framewise=True,
+        )
+
+    def _current_density_focus_marker_frame(
+        self,
+        raw_data: Optional[PreparedFrame] = None,
+        raw_extent: Optional[DensityExtent] = None,
+    ) -> pd.DataFrame:
+        focus = self._active_focus_state()
+        if focus is None:
+            return self._empty_density_focus_marker_frame()
+
+        row_id = str(getattr(focus, "row_id", "") or "")
+        if not row_id:
+            return self._empty_density_focus_marker_frame()
+
+        point = None
+
+        try:
+            point = self._focus_point_from_metadata(focus)
+        except Exception:
+            point = None
+
+        if point is None:
+            row_df = self._cached_focus_row_for_focus(focus)
+            point = self._focus_point_from_row_df_for_current_axes(
+                row_df,
+                row_id=row_id,
+            )
+
+        if point is None and raw_data is not None:
+            # This follows the existing density behaviour. For large datasets,
+            # BaseVisualisationPanel should avoid expensive synchronous scans
+            # and schedule async resolution instead.
+            try:
+                point = self._focus_point(raw_data)
+            except Exception:
+                point = None
+
+        return self._density_focus_marker_frame(
+            row_id=row_id,
+            point=point,
+            raw_extent=raw_extent,
+        )
+
+    def _density_focus_dynamic_overlay(
+        self,
+        raw_data: PreparedFrame,
+        raw_extent: DensityExtent,
+        *,
+        size: float = 14,
+    ):
+        signature = self._density_focus_stream_signature()
+        size = float(size)
+
+        self._density_current_raw_extent = raw_extent
+
+        if (
+            self._density_focus_stream is None
+            or self._density_focus_dmap is None
+            or self._density_focus_signature != signature
+            or self._density_focus_size != size
+        ):
+            initial = self._current_density_focus_marker_frame(
+                raw_data,
+                raw_extent,
+            )
+
+            self._density_focus_stream = streams.Pipe(data=initial)
+            self._density_focus_signature = signature
+            self._density_focus_size = size
+
+            def _make_focus_marker(data):
+                return self._density_focus_marker_element(data, size=size)
+
+            self._density_focus_dmap = hv.DynamicMap(
+                _make_focus_marker,
+                streams=[self._density_focus_stream],
+            )
+        else:
+            self._apply_density_focus_marker_from_current_state_without_rebuild(
+                raw_data=raw_data,
+                raw_extent=raw_extent,
+            )
+
+        return self._density_focus_dmap
+
+    def _apply_density_focus_marker_from_current_state_without_rebuild(
+        self,
+        *,
+        raw_data: Optional[PreparedFrame] = None,
+        raw_extent: Optional[DensityExtent] = None,
+    ) -> bool:
+        if self._density_focus_stream is None:
+            return False
+
+        frame = self._current_density_focus_marker_frame(
+            raw_data,
+            raw_extent,
+        )
+
+        try:
+            self._density_focus_stream.send(frame)
+            return True
+        except Exception as exc:
+            print(
+                "[AstronomicAL density] focus stream send failed "
+                f"panel_id={getattr(self, 'panel_id', None)} "
+                f"{type(exc).__name__}: {exc}",
+                flush=True,
+            )
+            return False
+
+    def _apply_focus_marker_point(self, *, row_id: str, point, clear: bool = False) -> bool:
+        """BaseVisualisationPanel hook: update only the streamed density focus marker."""
+        if self._density_focus_stream is None:
+            return False
+
+        if clear:
+            frame = self._empty_density_focus_marker_frame()
+        else:
+            frame = self._density_focus_marker_frame(
+                row_id=str(row_id or ""),
+                point=point,
+                raw_extent=getattr(self, "_density_current_raw_extent", None),
+            )
+
+        try:
+            self._density_focus_stream.send(frame)
+            print(
+                "[AstronomicAL density] focus marker stream updated "
+                f"panel_id={getattr(self, 'panel_id', None)} "
+                f"row_id={row_id!r} "
+                f"rows={len(frame)}",
+                flush=True,
+            )
+            return True
+        except Exception as exc:
+            print(
+                "[AstronomicAL density] focus marker stream update failed "
+                f"panel_id={getattr(self, 'panel_id', None)} "
+                f"{type(exc).__name__}: {exc}",
+                flush=True,
+            )
+            return False
+
     def _render(self) -> None:
         raw_data = self._plot_data(require_y=True)
 
@@ -307,7 +551,7 @@ class DensityPanel(BaseVisualisationPanel):
                 else ""
             )
         
-        focus = self._density_focus_overlay(clipped_raw_data,raw_extent,size=14,)
+        focus = self._density_focus_dynamic_overlay(clipped_raw_data,raw_extent,size=14,)
         items = [item for item in [base, focus] if item is not None]
 
         x_label, y_label = self._axis_labels()

@@ -293,6 +293,7 @@ class EuclidCutoutsClass:
         if verbose:
             toc = time.perf_counter()
             print(f"Retrieving all cutouts required {toc - tic:.3f} seconds")
+            # BUG: Seems like being held by scatter...
 
         return self.cutouts_paths
 

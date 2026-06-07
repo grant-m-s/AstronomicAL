@@ -68,6 +68,15 @@ def _quote_sql_identifier(identifier: Any) -> str:
 class ScatterPanel(BaseVisualisationPanel):
     title = "Scatter Plot"
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        # Streamed one-point focus marker. This lets focus move without
+        # rebuilding/reassigning the full HoloViews scatter overlay.
+        self._scatter_focus_stream = None
+        self._scatter_focus_dmap = None
+        self._scatter_focus_signature = None
+        self._scatter_focus_size = None
 
     def _frame_extent_cache_key(self, data):
         try:
@@ -1667,6 +1676,204 @@ class ScatterPanel(BaseVisualisationPanel):
         # Small-dataset or external-selection fallback.
         return super()._selection_points(data)
 
+    def _supports_incremental_focus_marker(self) -> bool:
+        return True
+
+    def _empty_focus_marker_frame(self) -> pd.DataFrame:
+        return pd.DataFrame(
+            {
+                INTERNAL_ROW_ID: pd.Series([], dtype="object"),
+                INTERNAL_X: pd.Series([], dtype="float64"),
+                INTERNAL_Y: pd.Series([], dtype="float64"),
+            }
+        )
+
+    def _focus_marker_frame(self, *, row_id: str, point) -> pd.DataFrame:
+        if point is None:
+            return self._empty_focus_marker_frame()
+
+        try:
+            x, y = point
+            x = float(x)
+            y = float(y)
+        except Exception:
+            return self._empty_focus_marker_frame()
+
+        if not np.isfinite(x) or not np.isfinite(y):
+            return self._empty_focus_marker_frame()
+
+        if bool(getattr(self.state, "log_x", False)) and x <= 0:
+            return self._empty_focus_marker_frame()
+        if bool(getattr(self.state, "log_y", False)) and y <= 0:
+            return self._empty_focus_marker_frame()
+
+        return pd.DataFrame(
+            [
+                {
+                    INTERNAL_ROW_ID: str(row_id or ""),
+                    INTERNAL_X: x,
+                    INTERNAL_Y: y,
+                }
+            ]
+        )
+
+    def _focus_marker_element(self, frame: pd.DataFrame, *, size: float):
+        if frame is None or frame.empty:
+            frame = self._empty_focus_marker_frame()
+
+        return hv.Points(
+            frame,
+            kdims=[INTERNAL_X, INTERNAL_Y],
+            vdims=[INTERNAL_ROW_ID],
+        ).opts(
+            marker="circle",
+            size=float(size),
+            fill_alpha=0.0,
+            line_color="black",
+            line_width=3.0,
+            tools=[],
+            active_tools=[],
+            toolbar=None,
+            logx=bool(getattr(self.state, "log_x", False)),
+            logy=bool(getattr(self.state, "log_y", False)),
+            shared_axes=False,
+            axiswise=True,
+            framewise=True,
+            **self._current_range_opts(include_y=True),
+        )
+
+    def _scatter_focus_stream_signature(self):
+        return (
+            str(self._dataset_id()),
+            str(getattr(self.state, "x", "") or ""),
+            str(getattr(self.state, "y", "") or ""),
+            str(getattr(self.state, "record_id_col", "") or ""),
+            bool(getattr(self.state, "log_x", False)),
+            bool(getattr(self.state, "log_y", False)),
+        )
+
+    def _current_focus_marker_frame(self, data: Optional[PreparedFrame] = None) -> pd.DataFrame:
+        focus = self._active_focus_state()
+        if focus is None:
+            return self._empty_focus_marker_frame()
+
+        row_id = str(getattr(focus, "row_id", "") or "")
+        if not row_id:
+            return self._empty_focus_marker_frame()
+
+        point = None
+
+        try:
+            point = self._focus_point_from_metadata(focus)
+        except Exception:
+            point = None
+
+        if point is None:
+            row_df = self._cached_focus_row_for_focus(focus)
+            point = self._focus_point_from_row_df_for_current_axes(
+                row_df,
+                row_id=row_id,
+            )
+
+        if point is None and data is not None:
+            # This may schedule the async lookup for large datasets, but should
+            # not synchronously scan a 13M-row frame because BaseVisualisationPanel
+            # guards large sources.
+            try:
+                point = self._focus_point(data)
+            except Exception:
+                point = None
+
+        return self._focus_marker_frame(row_id=row_id, point=point)
+
+    def _scatter_focus_dynamic_overlay(
+        self,
+        data: PreparedFrame,
+        *,
+        size: float,
+    ):
+        signature = self._scatter_focus_stream_signature()
+        size = float(size)
+
+        if (
+            self._scatter_focus_stream is None
+            or self._scatter_focus_dmap is None
+            or self._scatter_focus_signature != signature
+            or self._scatter_focus_size != size
+        ):
+            initial = self._current_focus_marker_frame(data)
+
+            self._scatter_focus_stream = streams.Pipe(data=initial)
+            self._scatter_focus_signature = signature
+            self._scatter_focus_size = size
+
+            def _make_focus_marker(data):
+                return self._focus_marker_element(data, size=size)
+
+            self._scatter_focus_dmap = hv.DynamicMap(
+                _make_focus_marker,
+                streams=[self._scatter_focus_stream],
+            )
+
+        else:
+            # Keep the marker in sync when the full plot is rebuilt for a
+            # non-focus reason such as range/axis/selection changes.
+            self._apply_focus_marker_from_current_state_without_rebuild(data=data)
+
+        return self._scatter_focus_dmap
+
+    def _apply_focus_marker_from_current_state_without_rebuild(
+        self,
+        *,
+        data: Optional[PreparedFrame] = None,
+    ) -> bool:
+        if self._scatter_focus_stream is None:
+            return False
+
+        frame = self._current_focus_marker_frame(data)
+
+        try:
+            self._scatter_focus_stream.send(frame)
+            return True
+        except Exception as exc:
+            print(
+                "[AstronomicAL scatter] focus stream send failed "
+                f"panel_id={getattr(self, 'panel_id', None)} "
+                f"{type(exc).__name__}: {exc}",
+                flush=True,
+            )
+            return False
+
+    def _apply_focus_marker_point(self, *, row_id: str, point, clear: bool = False) -> bool:
+        """BaseVisualisationPanel hook: update only the streamed focus marker."""
+        if self._scatter_focus_stream is None:
+            return False
+
+        frame = (
+            self._empty_focus_marker_frame()
+            if clear
+            else self._focus_marker_frame(row_id=str(row_id or ""), point=point)
+        )
+
+        try:
+            self._scatter_focus_stream.send(frame)
+            print(
+                "[AstronomicAL scatter] focus marker stream updated "
+                f"panel_id={getattr(self, 'panel_id', None)} "
+                f"row_id={row_id!r} "
+                f"rows={len(frame)}",
+                flush=True,
+            )
+            return True
+        except Exception as exc:
+            print(
+                "[AstronomicAL scatter] focus marker stream update failed "
+                f"panel_id={getattr(self, 'panel_id', None)} "
+                f"{type(exc).__name__}: {exc}",
+                flush=True,
+            )
+            return False
+
     def _interactive_dynamic_overlays(self, data: PreparedFrame):
 
         selection_overlay = None
@@ -1794,19 +2001,9 @@ class ScatterPanel(BaseVisualisationPanel):
 
     def _scatter_render_identity(self, data: PreparedFrame, *, use_raster: bool):
         selection = getattr(self.context, "selection", None)
-
-        focus_id = None
         selection_signature = None
 
         if selection is not None:
-            try:
-                focus = selection.get_focus()
-            except Exception:
-                focus = None
-
-            if focus is not None and getattr(focus, "dataset_id", None) == self._dataset_id():
-                focus_id = str(getattr(focus, "row_id", "") or "")
-
             try:
                 active_set = selection.get_active_set()
             except Exception:
@@ -1834,7 +2031,6 @@ class ScatterPanel(BaseVisualisationPanel):
             int(getattr(self.state, "interactive_sample_limit", 0)),
             float(getattr(self.state, "point_size", 0.0)),
             float(getattr(self.state, "point_alpha", 0.0)),
-            focus_id,
             selection_signature,
             self._last_x_range,
             self._last_y_range,
@@ -1843,14 +2039,12 @@ class ScatterPanel(BaseVisualisationPanel):
 
     def _render(self) -> None:
         t0 = time.perf_counter()
-
         self._clear_stream_watchers()
 
         data = self._plot_data(require_y=True)
-
         prepared_key = getattr(self, "_last_prepared_cache_key", None)
-        last_key = getattr(self, "_last_interactive_prepared_key", None)
 
+        last_key = getattr(self, "_last_interactive_prepared_key", None)
         if last_key != prepared_key:
             self._interactive_sample_cache.clear()
             self._last_interactive_prepared_key = prepared_key
@@ -1865,9 +2059,7 @@ class ScatterPanel(BaseVisualisationPanel):
             if getattr(self, "_last_scatter_assigned_object", None) is not empty:
                 self.plot_pane.object = empty
                 self._last_scatter_assigned_object = empty
-
             self.status_pane.object = "0 plotted rows"
-
             print(
                 "[AstronomicAL scatter] empty render "
                 f"prepare={t1 - t0:.2f}s",
@@ -1882,7 +2074,6 @@ class ScatterPanel(BaseVisualisationPanel):
             data,
             use_raster=use_raster,
         )
-
         force_rebind = bool(getattr(self, "_force_next_render_rebind", False))
 
         if (
@@ -1891,14 +2082,18 @@ class ScatterPanel(BaseVisualisationPanel):
             and getattr(self, "_last_scatter_assigned_object", None) is not None
             and self.plot_pane.object is getattr(self, "_last_scatter_assigned_object", None)
         ):
+            # The expensive base object is already correct. Still make sure the
+            # streamed focus marker reflects the latest focus.
+            self._apply_focus_marker_from_current_state_without_rebuild(data=data)
+
             plotted_count = (
                 self._frame_len(data)
                 if use_raster
                 else min(self._frame_len(data), int(self.state.interactive_sample_limit))
             )
-
             render_label = "rasterized" if use_raster else "interactive"
             sampled_note = ""
+
             if not use_raster:
                 sampled_note = (
                     f" · coverage-aware sample from {self._frame_len(data):,}"
@@ -1915,7 +2110,6 @@ class ScatterPanel(BaseVisualisationPanel):
             )
             if selection_note:
                 status += f" · {selection_note}"
-
             self.status_pane.object = status
 
             print(
@@ -1951,17 +2145,16 @@ class ScatterPanel(BaseVisualisationPanel):
         t3 = time.perf_counter()
 
         t_sel0 = time.perf_counter()
-
         selection_overlay = self._selection_points(data)
         t_sel1 = time.perf_counter()
 
-        focus_overlay = self._focus_overlay(
+        focus_overlay = self._scatter_focus_dynamic_overlay(
             data,
             size=max(float(self.state.point_size) + 8, 12),
         )
         t_focus1 = time.perf_counter()
 
-        overlay = self._compose_element_layers(
+        overlay = self._compose_render_layers(
             [
                 base,
                 selection_overlay,
@@ -1988,7 +2181,7 @@ class ScatterPanel(BaseVisualisationPanel):
         print(
             "[AstronomicAL scatter] overlay timing "
             f"selection={t_sel1 - t_sel0:.3f}s "
-            f"focus={t_focus1 - t_sel1:.3f}s "
+            f"focus_stream={t_focus1 - t_sel1:.3f}s "
             f"compose={t4 - t_focus1:.3f}s",
             flush=True,
         )
@@ -2000,15 +2193,12 @@ class ScatterPanel(BaseVisualisationPanel):
         t5 = time.perf_counter()
 
         selection_note = getattr(self, "_selection_overlay_status_note", "") or ""
-
         status = (
             f"{self._frame_len(data):,} eligible rows · "
             f"{plotted_count:,} shown · {render_label}{sampled_note}"
         )
-
         if selection_note:
             status += f" · {selection_note}"
-
         self.status_pane.object = status
 
         print(

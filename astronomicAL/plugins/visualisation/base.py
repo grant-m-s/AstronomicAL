@@ -554,15 +554,14 @@ class BaseVisualisationPanel(param.Parameterized):
         self._focus_point_cache_set(point_key, point)
         return point
 
-    def _schedule_async_focus_lookup(self, focus, data: PreparedFrame) -> None:
+    def _schedule_async_focus_lookup(self, focus, data: Optional[PreparedFrame] = None) -> None:
         """
         Schedule a shared focused-row lookup without blocking the UI.
 
-        Multiple panels requesting the same focused row dedupe through JobManager's
-        key. Late joiners attach their own on_done callback.
+        If the panel supports an incremental focus marker, the async result
+        updates only that marker instead of rebuilding the whole plot.
         """
         jobs = getattr(self.context, "jobs", None)
-
         if jobs is None:
             return
 
@@ -572,7 +571,6 @@ class BaseVisualisationPanel(param.Parameterized):
 
         if not dataset_id or not row_id:
             return
-
         if not record_id_col or record_id_col == "Use Index":
             return
 
@@ -582,7 +580,6 @@ class BaseVisualisationPanel(param.Parameterized):
             str(record_id_col),
             str(row_id),
         )
-
         failed_key = (
             "focus_row_failed",
             str(dataset_id),
@@ -590,7 +587,12 @@ class BaseVisualisationPanel(param.Parameterized):
             str(row_id),
         )
 
-        if self._shared_focus_row_get(row_key) is not None:
+        cached = self._shared_focus_row_get(row_key)
+        if cached is not None:
+            if self._update_focus_marker_from_row_df(cached, row_id=row_id):
+                return
+            if data is not None:
+                self._schedule_refresh(reason="focus.cached_resolved", delay_ms=25)
             return
 
         if self._shared_focus_row_get(failed_key) is True:
@@ -601,11 +603,8 @@ class BaseVisualisationPanel(param.Parameterized):
 
         self._async_focus_pending.add(row_key)
 
-        # Capture the current visual state so stale async results do not refresh
-        # the wrong panel after axes or dataset have changed.
         request_signature = self._visual_state_signature()
         panel_id = self.panel_id
-
         job_key = (
             f"visualisation:focus-row:"
             f"{dataset_id}:{record_id_col}:{row_id}"
@@ -616,22 +615,14 @@ class BaseVisualisationPanel(param.Parameterized):
 
             if self._disposed:
                 return
-
             if self.panel_id != panel_id:
                 return
-
             if self._dataset_id() != dataset_id:
-                return
-
-            if self._visual_state_signature() != request_signature:
-                # Axes/state changed while the job was running. Cache the row for
-                # later use, but do not force this stale panel refresh.
-                if row_df is not None and not getattr(row_df, "empty", True):
-                    self._shared_focus_row_set(row_key, row_df)
                 return
 
             if row_df is None or getattr(row_df, "empty", True):
                 self._shared_focus_row_set(failed_key, True)
+                self._clear_focus_marker()
                 return
 
             self._shared_focus_row_set(row_key, row_df)
@@ -643,23 +634,22 @@ class BaseVisualisationPanel(param.Parameterized):
                 flush=True,
             )
 
-            try:
-                self._interactive_sample_cache.clear()
-            except Exception:
-                pass
+            # If axes changed while the job was running, cache the row but do
+            # not force a stale marker/refresh.
+            if self._visual_state_signature() != request_signature:
+                return
 
-            try:
-                self._base_sample_cache.clear()
-            except Exception:
-                pass
+            # Preferred path: update only the one-point marker.
+            if self._update_focus_marker_from_row_df(row_df, row_id=row_id):
+                return
 
-            # Re-render now that the focus point can be resolved from cache.
-            self._schedule_refresh(reason="focus.async_resolved")
+            # Fallback path for panels that do not yet have a streamed marker.
+            self._schedule_refresh(reason="focus.async_resolved", delay_ms=25)
 
         def _on_error(exc):
             self._async_focus_pending.discard(row_key)
             self._shared_focus_row_set(failed_key, True)
-
+            self._clear_focus_marker()
             print(
                 "[AstronomicAL visualisation] async focus row failed "
                 f"panel={type(self).__name__} "
@@ -932,9 +922,13 @@ class BaseVisualisationPanel(param.Parameterized):
             _run()
 
     def _schedule_refresh(self, *, reason: str = "unknown", delay_ms: Optional[int] = None):
+        reason_str = str(reason or "unknown")
+
         if delay_ms is None:
-            if reason in {"state.x", "state.y", "state.color_by", "state.label_col"}:
+            if reason_str in {"state.x", "state.y", "state.color_by", "state.label_col"}:
                 delay_ms = 300
+            elif reason_str.startswith("selection."):
+                delay_ms = 150
             else:
                 delay_ms = 0
 
@@ -942,30 +936,214 @@ class BaseVisualisationPanel(param.Parameterized):
         now = time.perf_counter()
 
         if self._refresh_scheduled:
+            # Keep the latest reason for logging, but coalesce the actual work.
+            self._last_refresh_reason = reason_str
             print(
                 "[AstronomicAL visualisation] refresh already scheduled; "
-                f"skipping duplicate request reason={reason!r}",
+                f"coalescing duplicate request reason={reason_str!r}",
                 flush=True,
             )
             return
 
         self._refresh_scheduled = True
         self._last_refresh_requested_at = now
-        self._last_refresh_reason = reason
+        self._last_refresh_reason = reason_str
 
         print(
             "[AstronomicAL visualisation] scheduling refresh "
-            f"reason={reason!r} delay_ms={delay_ms}",
+            f"reason={reason_str!r} delay_ms={delay_ms}",
             flush=True,
         )
 
         try:
-            if delay_ms and delay_ms > 0:
-                pn.state.curdoc.add_timeout_callback(self._run_scheduled_refresh, int(delay_ms))
+            doc = pn.state.curdoc
+            if doc is not None:
+                if delay_ms and delay_ms > 0:
+                    doc.add_timeout_callback(self._run_scheduled_refresh, int(delay_ms))
+                else:
+                    doc.add_next_tick_callback(self._run_scheduled_refresh)
             else:
-                pn.state.curdoc.add_next_tick_callback(self._run_scheduled_refresh)
+                self._run_scheduled_refresh()
         except Exception:
             self._run_scheduled_refresh()
+
+    def _schedule_ui_callback(self, callback, *, delay_ms: int = 0) -> None:
+        """Schedule lightweight UI work outside the current event callback."""
+        if getattr(self, "_disposed", False):
+            return
+
+        def _run() -> None:
+            if getattr(self, "_disposed", False):
+                return
+            callback()
+
+        try:
+            doc = pn.state.curdoc
+            if doc is not None:
+                if delay_ms and delay_ms > 0:
+                    doc.add_timeout_callback(_run, int(delay_ms))
+                else:
+                    doc.add_next_tick_callback(_run)
+            else:
+                _run()
+        except Exception:
+            _run()
+
+    def _active_focus_state(self):
+        selection = getattr(self.context, "selection", None)
+        if selection is None:
+            return None
+        try:
+            focus = selection.get_focus()
+        except Exception:
+            return None
+        if focus is None:
+            return None
+        try:
+            if getattr(focus, "dataset_id", None) != self._dataset_id():
+                return None
+        except Exception:
+            return None
+        return focus
+
+    def _focus_point_from_row_df_for_current_axes(self, row_df, *, row_id=None):
+        """Resolve the current panel x/y focus point from a one-row dataframe."""
+        if row_df is None or getattr(row_df, "empty", True):
+            return None
+
+        x_col = getattr(self.state, "x", None)
+        y_col = getattr(self.state, "y", None)
+        if not x_col or not y_col:
+            return None
+
+        if x_col not in row_df.columns or y_col not in row_df.columns:
+            return None
+
+        row_id = "" if row_id is None else str(row_id)
+
+        x = self._focus_axis_value_from_row(
+            row_df,
+            x_col,
+            log_enabled=bool(getattr(self.state, "log_x", False)),
+            axis_name="x",
+            row_id=row_id,
+        )
+        y = self._focus_axis_value_from_row(
+            row_df,
+            y_col,
+            log_enabled=bool(getattr(self.state, "log_y", False)),
+            axis_name="y",
+            row_id=row_id,
+        )
+
+        if x is None or y is None:
+            return None
+
+        return float(x), float(y)
+
+    def _cached_focus_row_for_focus(self, focus):
+        dataset_id = self._dataset_id()
+        row_id = str(getattr(focus, "row_id", "") or "")
+        record_id_col = getattr(self.state, "record_id_col", None)
+
+        if not dataset_id or not row_id:
+            return None
+        if not record_id_col or record_id_col == "Use Index":
+            return None
+
+        row_key = (
+            "focus_row",
+            str(dataset_id),
+            str(record_id_col),
+            str(row_id),
+        )
+
+        try:
+            return self._shared_focus_row_get(row_key)
+        except Exception:
+            return None
+
+    def _supports_incremental_focus_marker(self) -> bool:
+        """Whether this panel can move the focus marker without a full redraw."""
+        return False
+
+    def _apply_focus_marker_point(self, *, row_id: str, point, clear: bool = False) -> bool:
+        """Subclass hook.
+
+        Scatter overrides this with a cheap HoloViews Pipe update. Panels that
+        do not implement an incremental focus marker return False and can fall
+        back to a normal refresh.
+        """
+        return False
+
+    def _clear_focus_marker(self) -> bool:
+        try:
+            return bool(
+                self._apply_focus_marker_point(
+                    row_id="",
+                    point=None,
+                    clear=True,
+                )
+            )
+        except Exception:
+            return False
+
+    def _update_focus_marker_from_focus_state(self, focus=None) -> bool:
+        """Try to update a focus marker without rebuilding the plot."""
+        focus = focus or self._active_focus_state()
+        if focus is None:
+            return self._clear_focus_marker()
+
+        row_id = str(getattr(focus, "row_id", "") or "")
+        if not row_id:
+            return self._clear_focus_marker()
+
+        point = None
+
+        try:
+            point = self._focus_point_from_metadata(focus)
+        except Exception:
+            point = None
+
+        if point is None:
+            row_df = self._cached_focus_row_for_focus(focus)
+            point = self._focus_point_from_row_df_for_current_axes(
+                row_df,
+                row_id=row_id,
+            )
+
+        if point is None:
+            return False
+
+        try:
+            return bool(
+                self._apply_focus_marker_point(
+                    row_id=row_id,
+                    point=point,
+                    clear=False,
+                )
+            )
+        except Exception:
+            return False
+
+    def _update_focus_marker_from_row_df(self, row_df, *, row_id: str) -> bool:
+        point = self._focus_point_from_row_df_for_current_axes(
+            row_df,
+            row_id=row_id,
+        )
+        if point is None:
+            return False
+
+        try:
+            return bool(
+                self._apply_focus_marker_point(
+                    row_id=str(row_id),
+                    point=point,
+                    clear=False,
+                )
+            )
+        except Exception:
+            return False
 
     def _run_scheduled_refresh(self) -> None:
 
@@ -2244,25 +2422,49 @@ class BaseVisualisationPanel(param.Parameterized):
                     return getattr(focus, name)
             return default
 
-        focus_x_col = _meta("x_col", "x_variable")
-        focus_y_col = _meta("y_col", "y_variable")
-        focus_log_x = bool(_meta("log_x", "x_log", default=False))
-        focus_log_y = bool(_meta("log_y", "y_log", default=False))
-
         current_x_col = str(getattr(self.state, "x", "") or "")
         current_y_col = str(getattr(self.state, "y", "") or "")
         current_log_x = bool(getattr(self.state, "log_x", False))
         current_log_y = bool(getattr(self.state, "log_y", False))
 
+        # Fast path 1:
+        # Record Browser can publish a small current-row snapshot. Use the
+        # current x/y column names directly from that payload.
+        row_values = None
+        if isinstance(metadata, dict):
+            row_values = (
+                metadata.get("row_values")
+                or metadata.get("values")
+                or metadata.get("row")
+            )
+
+        if isinstance(row_values, dict) and current_x_col and current_y_col:
+            if current_x_col in row_values and current_y_col in row_values:
+                try:
+                    x = float(row_values[current_x_col])
+                    y = float(row_values[current_y_col])
+                except Exception:
+                    x = None
+                    y = None
+
+                if x is not None and y is not None:
+                    if np.isfinite(x) and np.isfinite(y):
+                        if not (current_log_x and x <= 0) and not (current_log_y and y <= 0):
+                            return x, y
+
+        # Fast path 2:
+        # Existing same-axis metadata payload.
+        focus_x_col = _meta("x_col", "x_variable")
+        focus_y_col = _meta("y_col", "y_variable")
+        focus_log_x = bool(_meta("log_x", "x_log", default=False))
+        focus_log_y = bool(_meta("log_y", "y_log", default=False))
+
         if str(focus_x_col or "") != current_x_col:
             return None
-
         if str(focus_y_col or "") != current_y_col:
             return None
-
         if focus_log_x != current_log_x:
             return None
-
         if focus_log_y != current_log_y:
             return None
 
@@ -2274,10 +2476,8 @@ class BaseVisualisationPanel(param.Parameterized):
 
         if not np.isfinite(x) or not np.isfinite(y):
             return None
-
         if current_log_x and x <= 0:
             return None
-
         if current_log_y and y <= 0:
             return None
 
@@ -2852,34 +3052,90 @@ class BaseVisualisationPanel(param.Parameterized):
         ):
             return
 
-        topic_str = str(topic)
+        topic_str = str(topic or "")
 
         if topic_str.endswith("selection.focus.changed"):
-            self._seed_focus_cache_from_event_payload(payload)
+            self._last_focus_payload = payload
+
+            try:
+                self._seed_focus_cache_from_event_payload(payload)
+            except Exception:
+                pass
+
+            focus = self._active_focus_state()
+
+            # First try the cheap path: metadata or already-cached one-row data.
+            if self._update_focus_marker_from_focus_state(focus):
+                return
+
+            # If the row is not cached yet, resolve it asynchronously. The
+            # async completion will update only the focus marker for Scatter.
+            if focus is not None:
+                try:
+                    self._schedule_async_focus_lookup(focus, None)
+                except Exception as exc:
+                    print(
+                        "[AstronomicAL visualisation] focus async scheduling failed "
+                        f"panel={type(self).__name__} "
+                        f"{type(exc).__name__}: {exc}",
+                        flush=True,
+                    )
+
+            if not self._supports_incremental_focus_marker():
+                self._schedule_refresh(
+                    reason=f"selection.{topic}",
+                    delay_ms=150,
+                )
+            return
+
+        if topic_str.endswith("selection.focus.cleared"):
+            self._last_focus_payload = None
+            if self._clear_focus_marker():
+                return
+            self._schedule_refresh(
+                reason=f"selection.{topic}",
+                delay_ms=150,
+            )
+            return
 
         event_panel_id = self._payload_value(payload, "panel_id")
-
         if event_panel_id is not None and str(event_panel_id) == str(self.panel_id):
             return
 
         def _run():
-            if str(topic).endswith("selection.set.changed"):
-                clear_element_cache = getattr(self, "_selection_overlay_element_cache_clear", None)
+            if self._disposed:
+                return
+
+            if topic_str.endswith("selection.set.changed"):
+                clear_element_cache = getattr(
+                    self,
+                    "_selection_overlay_element_cache_clear",
+                    None,
+                )
                 if callable(clear_element_cache):
                     clear_element_cache()
 
-                clear_source_cache = getattr(self, "_selection_source_cache_clear", None)
+                clear_source_cache = getattr(
+                    self,
+                    "_selection_source_cache_clear",
+                    None,
+                )
                 if callable(clear_source_cache):
                     clear_source_cache()
 
                 self._last_selection_overlay_identity = None
 
-            # Focus updates should not clear the selection overlay cache.
-            self._schedule_refresh(reason=f"selection.{topic}")
+            self._schedule_refresh(
+                reason=f"selection.{topic}",
+                delay_ms=150 if topic_str.endswith("selection.set.changed") else 75,
+            )
 
         try:
-            import panel as pn
-            pn.state.curdoc.add_timeout_callback(_run, 50)
+            doc = pn.state.curdoc
+            if doc is not None:
+                doc.add_timeout_callback(_run, 50)
+            else:
+                _run()
         except Exception:
             _run()
 
