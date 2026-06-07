@@ -44,6 +44,9 @@ class DensityPanel(BaseVisualisationPanel):
         self._density_pending_bokeh_ranges = None
         self._density_range_syncing = False
 
+        self._density_active_range_ids = None
+        self._density_current_plot_extent = None
+
         self._density_focus_stream = None
         self._density_focus_dmap = None
         self._density_focus_signature = None
@@ -90,6 +93,8 @@ class DensityPanel(BaseVisualisationPanel):
             figure = plot.state
             x_range = figure.x_range
             y_range = figure.y_range
+            range_ids = (id(x_range), id(y_range))
+            self._density_active_range_ids = range_ids
         except Exception:
             return
 
@@ -104,7 +109,11 @@ class DensityPanel(BaseVisualisationPanel):
         self._density_range_hook_keys.add(key)
 
         def _changed(attr: str, old: Any, new: Any) -> None:
-            self._schedule_density_view_range_sync(x_range, y_range)
+            self._schedule_density_view_range_sync(
+                x_range,
+                y_range,
+                range_ids=range_ids,
+            )
 
         for range_obj in (x_range, y_range):
             for attr in ("start", "end"):
@@ -113,12 +122,23 @@ class DensityPanel(BaseVisualisationPanel):
                 except Exception:
                     pass
 
-    def _schedule_density_view_range_sync(self, x_range: Any, y_range: Any) -> None:
+    def _schedule_density_view_range_sync(
+        self,
+        x_range: Any,
+        y_range: Any,
+        *,
+        range_ids=None,
+    ) -> None:
         if getattr(self, "_disposed", False):
             return
 
         if getattr(self, "_density_range_syncing", False):
             return
+
+        if range_ids is not None:
+            active = getattr(self, "_density_active_range_ids", None)
+            if active is not None and range_ids != active:
+                return
 
         self._density_pending_bokeh_ranges = (x_range, y_range)
 
@@ -136,6 +156,12 @@ class DensityPanel(BaseVisualisationPanel):
                 return
 
             pending_x_range, pending_y_range = ranges
+
+            pending_ids = (id(pending_x_range), id(pending_y_range))
+            active = getattr(self, "_density_active_range_ids", None)
+            if active is not None and pending_ids != active:
+                return
+
             self._sync_density_limits_from_view(pending_x_range, pending_y_range)
 
         try:
@@ -267,7 +293,16 @@ class DensityPanel(BaseVisualisationPanel):
             }
         )
 
-    def _density_focus_stream_signature(self):
+    def _density_extent_signature(self, extent):
+        if extent is None:
+            return None
+        try:
+            return tuple(round(float(v), 12) for v in extent)
+        except Exception:
+            return None
+
+
+    def _density_focus_stream_signature(self, plot_extent=None):
         return (
             str(self._dataset_id()),
             str(getattr(self.state, "x", "") or ""),
@@ -275,6 +310,7 @@ class DensityPanel(BaseVisualisationPanel):
             str(getattr(self.state, "record_id_col", "") or ""),
             bool(getattr(self.state, "log_x", False)),
             bool(getattr(self.state, "log_y", False)),
+            self._density_extent_signature(plot_extent),
         )
 
     def _density_focus_marker_frame(
@@ -325,15 +361,17 @@ class DensityPanel(BaseVisualisationPanel):
             ]
         )
 
-    def _density_focus_marker_element(self, frame: pd.DataFrame, *, size: float):
+    def _density_focus_marker_element(
+        self,
+        frame: pd.DataFrame,
+        *,
+        size: float,
+        plot_extent: Optional[DensityExtent] = None,
+    ):
         if frame is None or frame.empty:
             frame = self._empty_density_focus_marker_frame()
 
-        return hv.Points(
-            frame,
-            kdims=[INTERNAL_X, INTERNAL_Y],
-            vdims=[INTERNAL_ROW_ID],
-        ).opts(
+        opts = dict(
             marker="circle",
             size=float(size),
             fill_alpha=0.0,
@@ -348,6 +386,17 @@ class DensityPanel(BaseVisualisationPanel):
             axiswise=True,
             framewise=True,
         )
+
+        if plot_extent is not None:
+            xmin, xmax, ymin, ymax = plot_extent
+            opts["xlim"] = (xmin, xmax)
+            opts["ylim"] = (ymin, ymax)
+
+        return hv.Points(
+            frame,
+            kdims=[INTERNAL_X, INTERNAL_Y],
+            vdims=[INTERNAL_ROW_ID],
+        ).opts(**opts)
 
     def _current_density_focus_marker_frame(
         self,
@@ -396,12 +445,14 @@ class DensityPanel(BaseVisualisationPanel):
         raw_data: PreparedFrame,
         raw_extent: DensityExtent,
         *,
+        plot_extent: DensityExtent,
         size: float = 14,
     ):
-        signature = self._density_focus_stream_signature()
+        signature = self._density_focus_stream_signature(plot_extent)
         size = float(size)
 
         self._density_current_raw_extent = raw_extent
+        self._density_current_plot_extent = plot_extent
 
         if (
             self._density_focus_stream is None
@@ -419,16 +470,15 @@ class DensityPanel(BaseVisualisationPanel):
             self._density_focus_size = size
 
             def _make_focus_marker(data):
-                return self._density_focus_marker_element(data, size=size)
+                return self._density_focus_marker_element(
+                    data,
+                    size=size,
+                    plot_extent=plot_extent,
+                )
 
             self._density_focus_dmap = hv.DynamicMap(
                 _make_focus_marker,
                 streams=[self._density_focus_stream],
-            )
-        else:
-            self._apply_density_focus_marker_from_current_state_without_rebuild(
-                raw_data=raw_data,
-                raw_extent=raw_extent,
             )
 
         return self._density_focus_dmap
@@ -551,7 +601,12 @@ class DensityPanel(BaseVisualisationPanel):
                 else ""
             )
         
-        focus = self._density_focus_dynamic_overlay(clipped_raw_data,raw_extent,size=14,)
+        focus = self._density_focus_dynamic_overlay(
+            clipped_raw_data,
+            raw_extent,
+            plot_extent=plot_extent,
+            size=14,
+        )
         items = [item for item in [base, focus] if item is not None]
 
         x_label, y_label = self._axis_labels()
