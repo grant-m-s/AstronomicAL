@@ -7,6 +7,7 @@ from astronomicAL.platform.artifacts import ArtifactStore
 from astronomicAL.platform.datasets import DatasetManager
 from astronomicAL.platform.events import EventBus
 from astronomicAL.platform.jobs import JobManager
+from astronomicAL.platform.runtime_status import RuntimeStatus
 from astronomicAL.platform.selection import SelectionManager
 from astronomicAL.platform.services import ServiceRegistry
 from astronomicAL.platform.workspace import WorkspaceManager
@@ -18,8 +19,8 @@ class AppContext:
     Runtime dependency object for platform services.
 
     config remains temporarily available during the transition, but new runtime
-    state should live in datasets, selection, artifacts, events, jobs, workspace,
-    services, plugins, or persistence.
+    state should live in datasets, selection, artifacts, events, jobs,
+    workspace, services, plugins, persistence, or runtime_status.
     """
 
     events: EventBus
@@ -29,6 +30,8 @@ class AppContext:
     workspace: WorkspaceManager
     selection: SelectionManager
     services: ServiceRegistry
+
     config: Optional[Any] = None
     plugins: Optional[Any] = None
     persistence: Optional[Any] = None
+    runtime_status: Optional[RuntimeStatus] = None

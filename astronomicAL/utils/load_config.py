@@ -15,7 +15,7 @@ from astronomicAL.extensions.dynamic_react_layout import DynamicReactGrid
 from astronomicAL.platform.dataset_header import DatasetHeaderController
 from astronomicAL.platform.mapping_header import MappingAlertController
 from astronomicAL.platform.modal_utils import ensure_template_modal_host
-
+from astronomicAL.platform.runtime_status_box import RuntimeStatusBox
 
 DEFAULT_BREAKPOINTS = {"lg": 1500, "md": 1050, "sm": 0}
 DEFAULT_COLS_BY_BREAKPOINT = {"lg": 12, "md": 12, "sm": 12}
@@ -172,9 +172,24 @@ def create_header(
 
     export_fits_file_button = _build_export_labelled_data_button(context)
 
+    old_runtime_status_box = getattr(react, "_runtime_status_box", None)
+    if old_runtime_status_box is not None and hasattr(old_runtime_status_box, "dispose"):
+        try:
+            old_runtime_status_box.dispose()
+        except Exception:
+            pass
+
+    runtime_status_box = RuntimeStatusBox(
+        context=context,
+        template=react,
+    )
+    react._runtime_status_box = runtime_status_box
+
+
     header_row = pn.Row(
         layout_controls,
         dataset_header.view,
+        runtime_status_box.view,
         pn.layout.HSpacer(),
         right_header_controls,
         sizing_mode="stretch_width",

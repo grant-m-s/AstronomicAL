@@ -5,49 +5,36 @@ from typing import Any, Dict, List, Tuple
 
 import panel as pn
 
-from astronomicAL.platform.modal_utils import open_template_modal
-
+from astronomicAL.platform.modal_utils import (
+    open_template_modal,
+    close_template_modal,
+)
 
 PendingKey = Tuple[str, str]
 CurrentKey = Tuple[str, str]
 
 SHEET_STYLES = {
-    "background": "#ffffff",
-    "border-radius": "16px",
-    "padding": "0px",
-    "border": "1px solid #e5e7eb",
-    "box-shadow": "0 8px 26px rgba(15, 23, 42, 0.12)",
     "box-sizing": "border-box",
     "overflow": "hidden",
 }
 
 ROOT_STYLES = {
     "box-sizing": "border-box",
-    "padding": "12px 0 36px 0",
     "overflow": "visible",
 }
 
 INTRO_STYLES = {
-    "color": "#475569",
+    "color": "#ffffff",
     "font-size": "0.96rem",
     "line-height": "1.45",
 }
 
 DATASET_SECTION_STYLES = {
-    "background": "#f8fafc",
-    "border-radius": "14px",
-    "padding": "16px",
-    "border": "1px solid #e2e8f0",
     "box-sizing": "border-box",
     "overflow": "visible",
 }
 
 FIELD_BLOCK_STYLES = {
-    "background": "#ffffff",
-    "border-radius": "10px",
-    "padding": "12px",
-    "border": "1px solid #e5e7eb",
-    "box-shadow": "0 1px 4px rgba(15, 23, 42, 0.04)",
     "box-sizing": "border-box",
     "overflow": "visible",
 }
@@ -62,10 +49,8 @@ CURRENT_ROW_STYLES = {
 }
 
 FOOTER_STYLES = {
-    "border-top": "1px solid #e5e7eb",
-    "padding": "14px 20px 16px 20px",
-    "background": "#ffffff",
     "box-sizing": "border-box",
+    "padding": "12px 0 0 0",
 }
 
 BADGE_REQUIRED = """
@@ -120,49 +105,46 @@ class MappingAlertController:
 
         self.modal_header = pn.Column(
             sizing_mode="stretch_width",
-            margin=(0, 0, 0, 0),
-            styles={"padding": "22px 24px 0 24px", "box-sizing": "border-box"},
+            height=76,
+            margin=(0, 0, 10, 0),
+            styles={"box-sizing": "border-box"},
         )
+
         self.modal_body = pn.Column(
             sizing_mode="stretch_width",
-            height=430,
+            height=470,
             scroll=True,
             margin=(0, 0, 0, 0),
             styles={
                 "overflow-y": "auto",
                 "overflow-x": "hidden",
-                "padding": "0 24px 10px 24px",
+                "padding": "12px",
                 "box-sizing": "border-box",
             },
+            css_classes=["al-modal-body"],
         )
+
         self.modal_footer = pn.Row(
             sizing_mode="stretch_width",
-            height=72,
-            margin=(0, 0, 0, 0),
+            height=58,
+            margin=(10, 0, 0, 0),
             styles=FOOTER_STYLES,
+            css_classes=["al-modal-footer"],
         )
+
         self.modal_sheet = pn.Column(
             self.modal_header,
             self.modal_body,
             self.modal_footer,
             sizing_mode="fixed",
             width=960,
-            height=622,
+            height=646,
             margin=(0, 0, 0, 0),
             styles=SHEET_STYLES,
+            css_classes=["al-modal-card", "al-mapping-modal-card"],
         )
-        self.modal_root = pn.Column(
-            pn.Row(
-                pn.layout.HSpacer(),
-                self.modal_sheet,
-                pn.layout.HSpacer(),
-                sizing_mode="stretch_width",
-                margin=(0, 0, 0, 0),
-            ),
-            sizing_mode="stretch_width",
-            margin=(0, 0, 0, 0),
-            styles=ROOT_STYLES,
-        )
+
+        self.modal_root = self.modal_sheet
 
         if getattr(self.context, "events", None) is not None:
             self._subs.append(
@@ -195,7 +177,7 @@ class MappingAlertController:
 
     def _on_mapping_open_requested(self, _topic: str, _payload: Any) -> None:
         self._rebuild_modal()
-        open_template_modal(self.template, self.modal_root)
+        open_template_modal(self.template, self.modal_root, close_on_backdrop=True)
 
     def _on_mapping_requested(self, _topic: str, payload: Any) -> None:
         if not payload:
@@ -395,7 +377,7 @@ class MappingAlertController:
 
     def _open_modal(self, _event=None) -> None:
         self._rebuild_modal()
-        open_template_modal(self.template, self.modal_root)
+        open_template_modal(self.template, self.modal_root, close_on_backdrop=True)
 
     def _rebuild_modal(self) -> None:
         self._capture_pending_selector_values()
@@ -405,14 +387,19 @@ class MappingAlertController:
         self.modal_header[:] = [
             pn.pane.HTML(
                 """
-<h2 style="margin:0 0 14px 0;color:#17202a;font-size:1.55rem;line-height:1.25;font-weight:700;">Resolve Dataset Requirements</h2>
-<div style="color:#475569;font-size:0.96rem;line-height:1.45;margin:0 0 18px 0;">
-Choose the dataset columns needed by active panels. Pending requirements are applied one at a time unless you use <strong>Apply all selected</strong>. Blank dropdowns are ignored and remain awaiting mapping.
-</div>
-""",
+                <div class="al-modal-titlebar">
+                    <div class="al-modal-heading">Resolve dataset requirements</div>
+                    <div class="al-modal-subtitle">
+                        Choose the dataset columns needed by active panels. Pending
+                        requirements are applied one at a time unless you use
+                        Apply all selected. Blank dropdowns are ignored and remain
+                        awaiting mapping.
+                    </div>
+                </div>
+                """,
                 margin=(0, 0, 0, 0),
                 sizing_mode="stretch_width",
-                styles=INTRO_STYLES,
+                height=76,
             ),
         ]
 
@@ -500,6 +487,7 @@ Choose the dataset columns needed by active panels. Pending requirements are app
                     styles=DATASET_SECTION_STYLES,
                     sizing_mode="stretch_width",
                     margin=(0, 0, 16, 0),
+                    css_classes=["al-modal-section"],
                 )
             )
         return blocks
@@ -556,7 +544,7 @@ Choose the dataset columns needed by active panels. Pending requirements are app
                 sizing_mode="stretch_width",
             ),
             pn.pane.HTML(
-                '<div style="font-weight:600;color:#334155;font-size:0.9rem;line-height:1.3;">Choose dataset column</div>',
+                '<div class="al-modal-muted">Choose dataset column</div>',
                 margin=(0, 0, 6, 0),
                 sizing_mode="stretch_width",
             ),
@@ -569,6 +557,7 @@ Choose the dataset columns needed by active panels. Pending requirements are app
             styles=FIELD_BLOCK_STYLES,
             sizing_mode="stretch_width",
             margin=(0, 0, 12, 0),
+            css_classes=["al-modal-field-card"],
         )
 
     def _current_mapping_header(self) -> pn.pane.HTML:
@@ -625,6 +614,7 @@ Choose the dataset columns needed by active panels. Pending requirements are app
                     styles=DATASET_SECTION_STYLES,
                     sizing_mode="stretch_width",
                     margin=(0, 0, 16, 0),
+                    css_classes=["al-modal-section"],
                 )
             )
 
@@ -685,7 +675,7 @@ Choose the dataset columns needed by active panels. Pending requirements are app
     def _close_modal(self, _event=None) -> None:
         if self._notice and self._notice.get("type") == "success":
             self._notice = None
-        self.template.close_modal()
+        close_template_modal(self.template)
 
     def _build_action_row(self):
         close_button = pn.widgets.Button(

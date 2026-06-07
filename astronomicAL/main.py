@@ -104,6 +104,8 @@ from astronomicAL.platform.selection import SelectionManager
 from astronomicAL.platform.services import ServiceRegistry
 from astronomicAL.platform.plugins import PluginManager
 from astronomicAL.platform.persistence import WorkspacePersistence
+from astronomicAL.platform.runtime_status import RuntimeStatus
+
 
 def _plugin_dirs() -> list[Path]:
     """Return plugin roots scanned by PluginManager.
@@ -209,13 +211,30 @@ react = pn.template.ReactTemplate(
 # Create empty layout/grid first.
 react, grid = load_config.create_layout_skeleton(react, return_grid=True)
 
-events = EventBus(trace=True, trace_limit=1000)
-jobs = JobManager(max_workers=16)
+runtime_status = RuntimeStatus(history_limit=1000)
+
+events = EventBus(
+    trace=True,
+    trace_limit=1000,
+    diagnostics_limit=1000,
+)
+jobs = JobManager(
+    max_workers=16,
+    history_limit=1000,
+)
 artifacts = ArtifactStore(cache_dir="data/cache_artifacts")
 datasets = DatasetManager()
 workspace = WorkspaceManager(react_template=react, grid=grid)
 selection = SelectionManager(events=events, artifacts=artifacts)
 services = ServiceRegistry()
+
+# Make the status service available both directly on context and through the
+# generic service registry for plugins that want to read diagnostics.
+services.set(
+    "platform.runtime_status",
+    runtime_status,
+    owner="platform",
+)
 
 boot_print("main.py: platform services created")
 boot_print(f"main.py: events={type(events).__name__}")
@@ -225,6 +244,8 @@ boot_print(f"main.py: datasets={type(datasets).__name__}")
 boot_print(f"main.py: workspace={type(workspace).__name__}")
 boot_print(f"main.py: selection={type(selection).__name__}")
 boot_print(f"main.py: services={type(services).__name__}")
+boot_print(f"main.py: runtime_status={type(runtime_status).__name__}")
+
 
 plugins = PluginManager(
     local_plugin_dirs=_plugin_dirs(),
@@ -246,6 +267,7 @@ context = AppContext(
     services=services,
     config=config,
     plugins=plugins,
+    runtime_status=runtime_status,
 )
 
 boot_print("main.py: AppContext created")
@@ -272,6 +294,7 @@ context.config.layout_directory = getattr(
 # Optional compatibility handles for older code that reaches into config.
 context.config.plugins = plugins
 context.config.app_context = context
+context.config.runtime_status = runtime_status
 
 react._app_context = context
 
@@ -286,6 +309,7 @@ required = [
     "services",
     "plugins",
     "persistence",
+    "runtime_status"
 ]
 
 missing = [name for name in required if getattr(context, name, None) is None]

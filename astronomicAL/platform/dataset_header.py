@@ -9,7 +9,11 @@ from typing import Any, Dict, Optional
 import pandas as pd
 import panel as pn
 
-from astronomicAL.platform.modal_utils import open_template_modal
+from astronomicAL.platform.modal_utils import (
+    open_template_modal,
+    close_template_modal,
+)
+
 from astronomicAL.settings.data_selection import DataSelection
 from astronomicAL.platform.fits_import import register_fits_table
 
@@ -67,7 +71,7 @@ class DatasetHeaderController:
             height=38,
             margin=(8, 20, 8, 20),
         )
-        self.close_button.on_click(lambda _event: self.template.close_modal())
+        self.close_button.on_click(lambda _event: close_template_modal(self.template))
 
         self.data_selection = HeaderDataSelection(
             src=self._legacy_source(),
@@ -210,7 +214,7 @@ class DatasetHeaderController:
     # ------------------------------------------------------------------
 
     def _open_modal(self, _event=None) -> None:
-        open_template_modal(self.template, self.modal_root)
+        open_template_modal(self.template, self.modal_root, close_on_backdrop=True)
 
     def _on_dataset_loaded_from_modal(
         self,
@@ -523,88 +527,95 @@ class DatasetHeaderController:
         except Exception:
             return None
 
-
     def _build_modal_root(self):
-        """Build a compact modal matching the old settings/data screen.
-
-        Important: the scroll shell needs an explicit height. Using only
-        max_height can collapse the modal body in Panel/Bokeh layouts.
         """
+        Build the Add Data modal using the shared AstronomicAL modal card styling.
 
+        The body is intentionally shorter than the card so the footer remains
+        visible and the Close button has room below it.
+        """
         close_settings_button = pn.widgets.Button(
             name="Close",
             button_type="default",
-            width=150,
+            width=130,
             height=36,
-            margin=(0, 0, 0, 0),
+            margin=(8, 20, 10, 0),
         )
-        close_settings_button.on_click(lambda _event: self.template.close_modal())
+        close_settings_button.on_click(lambda _event: close_template_modal(self.template))
 
         self.modal_close_button = close_settings_button
 
         try:
-            setattr(self.context, "_dataset_header_modal_close_button", self.modal_close_button)
+            setattr(
+                self.context,
+                "_dataset_header_modal_close_button",
+                self.modal_close_button,
+            )
         except Exception:
             pass
 
         data_selection_view = self.data_selection.panel()
         data_selection_view.margin = (0, 0, 0, 0)
 
-        card = pn.Column(
-            pn.Row(
-                pn.layout.HSpacer(),
-                self.modal_close_button,
-                sizing_mode="stretch_width",
-                margin=(0, 0, 12, 0),
-            ),
-            pn.pane.Markdown(
-                "## Select Your Data",
-                sizing_mode="stretch_width",
-                margin=(0, 0, 10, 0),
-                styles={
-                    "color": "#172B4D",
-                },
-            ),
-            data_selection_view,
+        header = pn.pane.HTML(
+            """
+            <div class="al-modal-titlebar">
+                <div class="al-modal-heading">Select your data</div>
+                <div class="al-modal-subtitle">
+                    Load a dataset into the platform, optionally using an existing
+                    configuration or layout.
+                </div>
+            </div>
+            """,
             sizing_mode="stretch_width",
-            width=620,
-            max_width=620,
-            margin=(0, 0, 0, 0),
-            styles={
-                "background": "#ffffff",
-                "padding": "24px 32px 28px 32px",
-                "box-sizing": "border-box",
-                "overflow": "visible",
-            },
+            height=58,
+            margin=(0, 0, 10, 0),
         )
 
-        scroll_shell = pn.Column(
-            card,
+        body = pn.Column(
+            data_selection_view,
             sizing_mode="fixed",
             width=660,
-            height=640,
+            height=390,
             scroll=True,
             margin=(0, 0, 0, 0),
             styles={
-                "background": "#ffffff",
-                "border-radius": "6px",
+                "padding": "16px 20px",
                 "box-sizing": "border-box",
                 "overflow-y": "auto",
                 "overflow-x": "hidden",
-                "box-shadow": "0 16px 48px rgba(15, 23, 42, 0.22)",
             },
+            css_classes=["al-modal-body", "al-dataset-modal-body"],
         )
 
-        return pn.Row(
+        footer = pn.Row(
             pn.layout.HSpacer(),
-            scroll_shell,
-            pn.layout.HSpacer(),
-            sizing_mode="stretch_width",
-            margin=(8, 0, 8, 0),
+            self.modal_close_button,
+            sizing_mode="fixed",
+            width=660,
+            height=64,
+            margin=(14, 0, 0, 0),
             styles={
+                "padding": "12px 20px 12px 0",
                 "box-sizing": "border-box",
                 "overflow": "visible",
             },
+            css_classes=["al-modal-footer"],
+        )
+
+        return pn.Column(
+            header,
+            body,
+            footer,
+            sizing_mode="fixed",
+            width=690,
+            height=558,
+            margin=(0, 0, 0, 0),
+            styles={
+                "box-sizing": "border-box",
+                "overflow": "hidden",
+            },
+            css_classes=["al-modal-card", "al-dataset-modal-card"],
         )
 
 
@@ -752,9 +763,11 @@ class HeaderDataSelection(DataSelection):
             dataset_block,
             pn.Spacer(height=10),
             button_block,
+            pn.Spacer(height=10),
             sizing_mode="fixed",
             width=380,
-            margin=(0, 20, 0, 20),
+            margin=(12, 20, 0, 20),
+            css_classes=["al-modal-footer"],
             styles={
                 "overflow": "visible",
             },

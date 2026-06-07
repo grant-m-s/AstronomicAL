@@ -521,6 +521,53 @@ class DuckDBParquetDatasetSource(DatasetSource):
         finally:
             con.close()
 
+    def _column_dtype_for_lookup(self, column: str) -> str:
+        cache = getattr(self, "_dtype_lookup_cache", None)
+        if cache is None:
+            try:
+                cache = self.dtypes()
+            except Exception:
+                cache = {}
+            try:
+                self._dtype_lookup_cache = cache
+            except Exception:
+                pass
+
+        return str(cache.get(str(column), "") or "").upper()
+
+    def _coerce_lookup_value_for_column(self, column: str, value: Any) -> tuple[Any, bool]:
+        """Return a value suitable for native DuckDB comparison.
+
+        The boolean says whether native comparison is safe. If coercion fails,
+        callers should fall back to CAST(column AS VARCHAR) = ?.
+        """
+        dtype = self._column_dtype_for_lookup(column)
+        raw = value
+
+        try:
+            if "INT" in dtype:
+                return int(raw), True
+
+            if any(token in dtype for token in ("DOUBLE", "FLOAT", "REAL", "DECIMAL", "NUMERIC")):
+                return float(raw), True
+
+            if "BOOL" in dtype:
+                if isinstance(raw, str):
+                    lowered = raw.strip().lower()
+                    if lowered in {"true", "1", "yes", "y"}:
+                        return True, True
+                    if lowered in {"false", "0", "no", "n"}:
+                        return False, True
+                    return raw, False
+                return bool(raw), True
+
+            # Strings and unknown object-like values can still use direct
+            # equality with a string parameter.
+            return str(raw), True
+
+        except Exception:
+            return str(raw), False
+
     def get_row_by_id(
         self,
         row_id: Any,
@@ -529,17 +576,34 @@ class DuckDBParquetDatasetSource(DatasetSource):
         columns: Optional[Sequence[str]] = None,
     ) -> pd.DataFrame:
         if id_column == "Use Index":
-            # A Parquet-backed dataset does not have a stable pandas index.
-            # Use a real record_id column for large datasets.
             return pd.DataFrame(columns=self.columns() if columns is None else columns)
 
         if id_column not in self.columns():
             return pd.DataFrame(columns=self.columns() if columns is None else columns)
 
+        quoted = _quote_identifier(id_column)
+        lookup_value, native_ok = self._coerce_lookup_value_for_column(id_column, row_id)
+
+        # Fast path: preserve the column's native type so DuckDB/Parquet can
+        # use predicate pushdown/statistics where possible.
+        if native_ok:
+            try:
+                result = self.to_pandas(
+                    columns=columns,
+                    limit=1,
+                    where_sql=f"{quoted} = ?",
+                    params=[lookup_value],
+                )
+                if result is not None and not result.empty:
+                    return result
+            except Exception:
+                pass
+
+        # Compatibility fallback for mixed/stringified IDs.
         return self.to_pandas(
             columns=columns,
             limit=1,
-            where_sql=f"CAST({_quote_identifier(id_column)} AS VARCHAR) = ?",
+            where_sql=f"CAST({quoted} AS VARCHAR) = ?",
             params=[str(row_id)],
         )
 
@@ -613,14 +677,36 @@ class DuckDBParquetDatasetSource(DatasetSource):
         if id_column == "Use Index" or id_column not in self.columns():
             return None
 
+        quoted = _quote_identifier(id_column)
+        lookup_value, native_ok = self._coerce_lookup_value_for_column(id_column, row_id)
+
         con = self._connect()
         try:
+            if native_ok:
+                try:
+                    result = con.execute(
+                        (
+                            "SELECT rn FROM ("
+                            " SELECT "
+                            f" ROW_NUMBER() OVER () - 1 AS rn, {quoted} AS rid "
+                            f" FROM {self._relation_sql()}"
+                            ") "
+                            "WHERE rid = ? "
+                            "LIMIT 1"
+                        ),
+                        [self._path_argument(), lookup_value],
+                    ).fetchone()
+                    if result is not None:
+                        return int(result[0])
+                except Exception:
+                    pass
+
             result = con.execute(
                 (
                     "SELECT rn FROM ("
-                    "  SELECT "
-                    f"    ROW_NUMBER() OVER () - 1 AS rn, {_quote_identifier(id_column)} AS rid "
-                    f"  FROM {self._relation_sql()}"
+                    " SELECT "
+                    f" ROW_NUMBER() OVER () - 1 AS rn, {quoted} AS rid "
+                    f" FROM {self._relation_sql()}"
                     ") "
                     "WHERE CAST(rid AS VARCHAR) = ? "
                     "LIMIT 1"
