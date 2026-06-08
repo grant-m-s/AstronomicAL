@@ -2761,14 +2761,27 @@ class ScatterPanel(BaseVisualisationPanel):
 
             t0 = time.perf_counter()
 
-            effective_x_range = x_range or self._last_x_range
-            effective_y_range = y_range or self._last_y_range
+            raw_x_range = x_range
+            raw_y_range = y_range
 
-            # Do not force the focused row into the sampled base point layer.
-            # The focus marker is already drawn separately by _focus_overlay().
-            #
-            # Keeping focus IDs out of this cache key prevents every focus change from
-            # invalidating the expensive interactive sample cache.
+            effective_x_range, effective_y_range = self._normalise_interactive_ranges(
+                data,
+                x_range=raw_x_range,
+                y_range=raw_y_range,
+            )
+
+            print(
+                "[AstronomicAL scatter] range state "
+                f"raw_x={raw_x_range!r} raw_y={raw_y_range!r} "
+                f"effective_x={effective_x_range!r} effective_y={effective_y_range!r} "
+                f"last_x={self._last_x_range!r} last_y={self._last_y_range!r}",
+                flush=True,
+            )
+
+            # Important: remember even when either value is None.
+            # None means full/unbounded and must clear stale remembered ranges.
+            self._remember_ranges(effective_x_range, effective_y_range)
+
             forced_ids: tuple[str, ...] = ()
 
             limit = int(self.state.interactive_sample_limit)
@@ -2824,12 +2837,12 @@ class ScatterPanel(BaseVisualisationPanel):
             #     or self._is_known_near_full_range(effective_x_range, effective_y_range)
             # )
 
-            if effective_x_range is None or effective_y_range is None:
+            if effective_x_range is None and effective_y_range is None:
                 visible = data
-            elif self._allow_one_full_range_skip and self._range_contains_extent(
-                data,
-                effective_x_range,
-                effective_y_range,
+            elif (
+                self._allow_one_full_range_skip
+                and effective_x_range is None
+                and effective_y_range is None
             ):
                 visible = data
                 self._allow_one_full_range_skip = False

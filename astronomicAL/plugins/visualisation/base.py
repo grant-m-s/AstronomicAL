@@ -3185,20 +3185,16 @@ class BaseVisualisationPanel(param.Parameterized):
         return (min(lo, hi), max(lo, hi))
 
     def _remember_ranges(self, x_range=None, y_range=None) -> bool:
-        """Remember the current plot ranges.
-
-        Returns True if either remembered range changed.
-        """
         changed = False
 
         x_range = self._normalise_range(x_range)
         y_range = self._normalise_range(y_range)
 
-        if x_range is not None and x_range != self._last_x_range:
+        if x_range != self._last_x_range:
             self._last_x_range = x_range
             changed = True
 
-        if y_range is not None and y_range != self._last_y_range:
+        if y_range != self._last_y_range:
             self._last_y_range = y_range
             changed = True
 
