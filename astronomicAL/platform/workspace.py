@@ -35,6 +35,32 @@ class PanelRecord:
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
+def _debug_layout_summary(layout):
+    out = []
+
+    for item in list(layout or []):
+        if not isinstance(item, dict):
+            continue
+
+        out.append(
+            {
+                "i": str(item.get("i")),
+                "x": item.get("x"),
+                "y": item.get("y"),
+                "w": item.get("w"),
+                "h": item.get("h"),
+            }
+        )
+
+    return out
+
+
+def _debug_layouts_summary(layouts):
+    return {
+        str(bp): _debug_layout_summary(layout)
+        for bp, layout in dict(layouts or {}).items()
+    }
+
 def workspace_panel_debug(label: str, **values) -> None:
     try:
         parts = " ".join(f"{key}={value!r}" for key, value in values.items())
@@ -72,8 +98,21 @@ class WorkspaceManager:
         self._close_watchers: list[tuple[Any, Any]] = []
         self._close_watched_grid: Any = None
 
+        self._skip_next_current_layout_merge = False
+        self._last_applied_layouts: Optional[dict[str, list[dict[str, Any]]]] = None
+
         self._normalize_grid_state()
         self._ensure_close_watcher()
+
+    def _cols_for_breakpoint(self, breakpoint: str) -> int:
+        cols_by_breakpoint = dict(
+            getattr(self.grid, "cols_by_breakpoint", None) or {}
+        )
+
+        try:
+            return max(1, int(cols_by_breakpoint.get(breakpoint, 12)))
+        except Exception:
+            return 12
 
     def _grid_titles(self) -> dict[str, str]:
         """Return visible tile titles keyed by stable panel id."""
@@ -141,21 +180,16 @@ class WorkspaceManager:
                 names.append(key)
 
         return names
-    
-    def _merge_current_layout_into_layouts(self) -> None:
 
-        current_layout = list(getattr(self.grid, "current_layout", None) or [])
-        if not current_layout:
-            return
+    def _layout_ids_for_keys(
+        self,
+        layout: list[dict[str, Any]],
+        keys: list[str],
+    ) -> set[str]:
+        key_set = set(str(key) for key in keys)
+        ids: set[str] = set()
 
-        keys = [str(key) for key in (getattr(self.grid, "keys", None) or [])]
-        if not keys:
-            return
-
-        key_set = set(keys)
-
-        cleaned_current = []
-        for item in current_layout:
+        for item in list(layout or []):
             if not isinstance(item, dict):
                 continue
 
@@ -164,35 +198,333 @@ class WorkspaceManager:
                 continue
 
             item_id = str(item_id)
+            if item_id in key_set:
+                ids.add(item_id)
+
+        return ids
+
+    def _merge_current_layout_into_layouts(self) -> None:
+        current_layout = list(getattr(self.grid, "current_layout", None) or [])
+        keys = [str(key) for key in (getattr(self.grid, "keys", None) or [])]
+
+        workspace_debug_print(
+            "merge_current_layout.enter",
+            {
+                "keys": keys,
+                "current_breakpoint": getattr(self.grid, "current_breakpoint", None),
+                "current_layout": _debug_layout_summary(current_layout),
+                "layouts": _debug_layouts_summary(
+                    getattr(self.grid, "layouts", None) or {}
+                ),
+                "skip_next": getattr(self, "_skip_next_current_layout_merge", None),
+                "last_applied_layouts": _debug_layouts_summary(
+                    getattr(self, "_last_applied_layouts", None) or {}
+                ),
+            },
+        )
+
+        if not keys:
+            workspace_debug_print(
+                "merge_current_layout.return.no_keys",
+                {},
+            )
+            return
+
+        key_set = set(keys)
+        breakpoint = str(getattr(self.grid, "current_breakpoint", None) or "lg")
+        layouts = deepcopy(dict(getattr(self.grid, "layouts", None) or {}))
+
+        active_layout = list(layouts.get(breakpoint, []) or [])
+        active_ids = self._layout_ids_for_keys(active_layout, keys)
+        current_ids_raw = self._layout_ids_for_keys(current_layout, keys)
+
+        if active_ids != key_set or current_ids_raw != key_set:
+            fallback_layouts = deepcopy(
+                getattr(self, "_last_applied_layouts", None) or {}
+            )
+
+            fallback_active = [
+                self._sanitize_layout_item(dict(item), breakpoint=breakpoint)
+                for item in list(fallback_layouts.get(breakpoint, []) or [])
+                if isinstance(item, dict) and str(item.get("i")) in key_set
+            ]
+
+            fallback_ids = {str(item.get("i")) for item in fallback_active}
+
+            workspace_debug_print(
+                "merge_current_layout.repair_check",
+                {
+                    "breakpoint": breakpoint,
+                    "key_set": sorted(key_set),
+                    "active_ids": sorted(active_ids),
+                    "current_ids_raw": sorted(current_ids_raw),
+                    "fallback_ids": sorted(fallback_ids),
+                    "active_layout": _debug_layout_summary(active_layout),
+                    "current_layout": _debug_layout_summary(current_layout),
+                    "fallback_active": _debug_layout_summary(fallback_active),
+                },
+            )
+
+            if fallback_ids == key_set:
+                workspace_debug_print(
+                    "merge_current_layout.repair_from_last_applied",
+                    {
+                        "breakpoint": breakpoint,
+                        "fallback_active": _debug_layout_summary(fallback_active),
+                    },
+                )
+
+                self.grid.param.update(
+                    layouts=fallback_layouts,
+                    current_layout=deepcopy(fallback_active),
+                )
+                return
+
+        workspace_debug_print(
+            "merge_current_layout.state_after_setup",
+            {
+                "breakpoint": breakpoint,
+                "key_set": sorted(key_set),
+                "active_layout_before": _debug_layout_summary(
+                    layouts.get(breakpoint, []) or []
+                ),
+                "all_layouts_before": _debug_layouts_summary(layouts),
+            },
+        )
+
+        # After loading/reconciling a saved layout, ReactGridLayout/Panel can briefly
+        # send back a generated/default current_layout. If we merge that here, the
+        # saved geometry is overwritten and the next add_panel collapses everything
+        # into the left column.
+        if getattr(self, "_skip_next_current_layout_merge", False):
+            workspace_debug_print(
+                "merge_current_layout.restore_guard.enter",
+                {
+                    "breakpoint": breakpoint,
+                    "current_layout_that_would_have_been_merged": _debug_layout_summary(
+                        current_layout
+                    ),
+                    "layouts_before_restore_guard": _debug_layouts_summary(layouts),
+                    "last_applied_layouts": _debug_layouts_summary(
+                        getattr(self, "_last_applied_layouts", None) or {}
+                    ),
+                },
+            )
+
+            self._skip_next_current_layout_merge = False
+
+            restored_layouts = deepcopy(
+                getattr(self, "_last_applied_layouts", None) or layouts or {}
+            )
+
+            restored_active = [
+                self._sanitize_layout_item(dict(item), breakpoint=breakpoint)
+                for item in list(restored_layouts.get(breakpoint, []) or [])
+                if isinstance(item, dict) and str(item.get("i")) in key_set
+            ]
+
+            restored_ids = {str(item.get("i")) for item in restored_active}
+
+            workspace_debug_print(
+                "merge_current_layout.restore_guard.computed",
+                {
+                    "breakpoint": breakpoint,
+                    "keys": keys,
+                    "key_set": sorted(key_set),
+                    "restored_ids": sorted(restored_ids),
+                    "restored_active": _debug_layout_summary(restored_active),
+                    "restored_layouts": _debug_layouts_summary(restored_layouts),
+                },
+            )
+
+            if restored_ids == key_set:
+                workspace_debug_print(
+                    "merge_current_layout.restore_guard.accepted.before_update",
+                    {
+                        "breakpoint": breakpoint,
+                        "restored_active": _debug_layout_summary(restored_active),
+                        "restored_layouts": _debug_layouts_summary(restored_layouts),
+                    },
+                )
+
+                self.grid.param.update(
+                    layouts=restored_layouts,
+                    current_layout=deepcopy(restored_active),
+                )
+
+                workspace_debug_print(
+                    "merge_current_layout.restore_guard.accepted.after_update",
+                    {
+                        "breakpoint": breakpoint,
+                        "grid_current_layout": _debug_layout_summary(
+                            getattr(self.grid, "current_layout", None) or []
+                        ),
+                        "grid_layouts": _debug_layouts_summary(
+                            getattr(self.grid, "layouts", None) or {}
+                        ),
+                        "skip_next": getattr(
+                            self,
+                            "_skip_next_current_layout_merge",
+                            None,
+                        ),
+                    },
+                )
+
+                return
+
+            workspace_debug_print(
+                "merge_current_layout.restore_guard.rejected",
+                {
+                    "breakpoint": breakpoint,
+                    "reason": "restored_ids_do_not_match_current_keys",
+                    "key_set": sorted(key_set),
+                    "restored_ids": sorted(restored_ids),
+                    "current_layout_will_now_be_considered": _debug_layout_summary(
+                        current_layout
+                    ),
+                },
+            )
+
+        if not current_layout:
+            workspace_debug_print(
+                "merge_current_layout.return.no_current_layout",
+                {
+                    "breakpoint": breakpoint,
+                    "keys": keys,
+                    "layouts": _debug_layouts_summary(layouts),
+                },
+            )
+            return
+
+        cleaned_current = []
+
+        for item in current_layout:
+            if not isinstance(item, dict):
+                workspace_debug_print(
+                    "merge_current_layout.skip_item.not_dict",
+                    {
+                        "item": repr(item),
+                    },
+                )
+                continue
+
+            item_id = item.get("i")
+            if item_id is None:
+                workspace_debug_print(
+                    "merge_current_layout.skip_item.no_id",
+                    {
+                        "item": item,
+                    },
+                )
+                continue
+
+            item_id = str(item_id)
             if item_id not in key_set:
+                workspace_debug_print(
+                    "merge_current_layout.skip_item.id_not_in_keys",
+                    {
+                        "item_id": item_id,
+                        "keys": keys,
+                        "item": item,
+                    },
+                )
                 continue
 
             cleaned_current.append(
                 self._sanitize_layout_item(
                     dict(item),
-                    breakpoint=str(getattr(self.grid, "current_breakpoint", None) or "lg"),
+                    breakpoint=breakpoint,
                 )
             )
 
         current_ids = {str(item.get("i")) for item in cleaned_current}
 
+        workspace_debug_print(
+            "merge_current_layout.cleaned_current",
+            {
+                "breakpoint": breakpoint,
+                "keys": keys,
+                "key_set": sorted(key_set),
+                "current_ids": sorted(current_ids),
+                "raw_current_layout": _debug_layout_summary(current_layout),
+                "cleaned_current": _debug_layout_summary(cleaned_current),
+                "active_layout_before_merge": _debug_layout_summary(
+                    layouts.get(breakpoint, []) or []
+                ),
+            },
+        )
+
         # Only merge when current_layout is a complete layout for the existing
         # open panels. This avoids partially replacing layouts during startup or
         # during transient key/object mismatch states.
         if current_ids != key_set:
+            workspace_debug_print(
+                "merge_current_layout.return.incomplete_current_layout",
+                {
+                    "breakpoint": breakpoint,
+                    "reason": "current_ids_do_not_match_keys",
+                    "key_set": sorted(key_set),
+                    "current_ids": sorted(current_ids),
+                    "cleaned_current": _debug_layout_summary(cleaned_current),
+                    "layouts_unchanged": _debug_layouts_summary(layouts),
+                },
+            )
             return
-
-        breakpoint = str(getattr(self.grid, "current_breakpoint", None) or "lg")
-        layouts = deepcopy(dict(getattr(self.grid, "layouts", None) or {}))
 
         if layouts.get(breakpoint) == cleaned_current:
+            workspace_debug_print(
+                "merge_current_layout.return.no_change",
+                {
+                    "breakpoint": breakpoint,
+                    "cleaned_current": _debug_layout_summary(cleaned_current),
+                    "active_layout_existing": _debug_layout_summary(
+                        layouts.get(breakpoint, []) or []
+                    ),
+                },
+            )
             return
 
+        workspace_debug_print(
+            "merge_current_layout.write.before_update",
+            {
+                "breakpoint": breakpoint,
+                "previous_active_layout": _debug_layout_summary(
+                    layouts.get(breakpoint, []) or []
+                ),
+                "next_active_layout": _debug_layout_summary(cleaned_current),
+                "previous_all_layouts": _debug_layouts_summary(layouts),
+            },
+        )
+
         layouts[breakpoint] = cleaned_current
+
+        workspace_debug_print(
+            "merge_current_layout.write.param_update",
+            {
+                "breakpoint": breakpoint,
+                "layouts_being_written": _debug_layouts_summary(layouts),
+                "current_layout_being_written": _debug_layout_summary(
+                    cleaned_current
+                ),
+            },
+        )
 
         self.grid.param.update(
             layouts=layouts,
             current_layout=deepcopy(cleaned_current),
+        )
+
+        workspace_debug_print(
+            "merge_current_layout.write.after_update",
+            {
+                "breakpoint": breakpoint,
+                "grid_current_layout": _debug_layout_summary(
+                    getattr(self.grid, "current_layout", None) or []
+                ),
+                "grid_layouts": _debug_layouts_summary(
+                    getattr(self.grid, "layouts", None) or {}
+                ),
+            },
         )
 
     def _current_breakpoint_layout(
@@ -209,12 +541,6 @@ class WorkspaceManager:
                 return deepcopy(layouts[fallback])
 
         return []
-
-    def _cols_for_breakpoint(self, breakpoint: str) -> int:
-        try:
-            return max(1, int((self.grid.cols_by_breakpoint or {}).get(breakpoint, 12)))
-        except Exception:
-            return 12
 
     @staticmethod
     def _layout_bottom_y(layout: list[dict[str, Any]]) -> int:
@@ -271,23 +597,45 @@ class WorkspaceManager:
             breakpoint=breakpoint,
         )
 
-        guard = 0
+        if not self._collides_with_layout(item, existing_layout):
+            return item
 
-        while self._collides_with_layout(item, existing_layout) and guard < 500:
-            item["y"] = self._layout_bottom_y(existing_layout)
-            item = self._sanitize_layout_item(
-                item,
-                breakpoint=breakpoint,
-            )
+        cols = self._cols_for_breakpoint(breakpoint)
+        width = max(1, min(int(item.get("w", 4) or 4), cols))
+        height = max(1, int(item.get("h", 4) or 4))
+        max_x = max(0, cols - width)
 
-            # If bottom_y still collides because of unusual saved layouts,
-            # nudge down one row and try again.
-            if self._collides_with_layout(item, existing_layout):
-                item["y"] = int(item.get("y", 0)) + 1
+        x_positions = list(range(0, max_x + 1, width))
+        if max_x not in x_positions:
+            x_positions.append(max_x)
 
-            guard += 1
+        bottom = self._layout_bottom_y(existing_layout)
 
-        return item
+        candidate = deepcopy(item)
+        candidate["w"] = width
+        candidate["h"] = height
+
+        # Important: once the requested/supplied position collides, do not scan
+        # from y=0. Append at or below the existing layout bottom so existing
+        # panels are not displaced by ReactGridLayout collision resolution.
+        for y in range(bottom, bottom + 500):
+            for x in x_positions:
+                candidate["x"] = x
+                candidate["y"] = y
+                candidate = self._sanitize_layout_item(
+                    candidate,
+                    breakpoint=breakpoint,
+                )
+
+                if not self._collides_with_layout(candidate, existing_layout):
+                    return candidate
+
+        candidate["x"] = 0
+        candidate["y"] = bottom
+        return self._sanitize_layout_item(
+            candidate,
+            breakpoint=breakpoint,
+        )
 
     def _sanitize_layout_item(
         self,
@@ -584,9 +932,20 @@ class WorkspaceManager:
                     supplied_item = layout_items.get(breakpoint)
 
                 if supplied_item is not None:
+                    collision_layout = [
+                        item for item in existing_layout
+                        if str(item.get("i")) != panel_id
+                    ]
+
                     item_copy = self._sanitize_layout_item(
                         dict(supplied_item),
                         panel_id=panel_id,
+                        breakpoint=breakpoint,
+                    )
+
+                    item_copy = self._place_item_without_colliding(
+                        item_copy,
+                        collision_layout,
                         breakpoint=breakpoint,
                     )
                 else:
@@ -669,7 +1028,37 @@ class WorkspaceManager:
     ) -> None:
 
         self._sync_grid()
+        workspace_debug_print(
+            "add_panel.before_merge",
+            {
+                "panel_id": panel_id,
+                "keys": list(getattr(self.grid, "keys", []) or []),
+                "current_breakpoint": getattr(self.grid, "current_breakpoint", None),
+                "current_layout": _debug_layout_summary(
+                    getattr(self.grid, "current_layout", None) or []
+                ),
+                "layouts": _debug_layouts_summary(
+                    getattr(self.grid, "layouts", None) or {}
+                ),
+            },
+        )
+        
         self._merge_current_layout_into_layouts()
+        workspace_debug_print(
+            "add_panel.after_merge",
+            {
+                "panel_id": panel_id,
+                "keys": list(getattr(self.grid, "keys", []) or []),
+                "current_breakpoint": getattr(self.grid, "current_breakpoint", None),
+                "current_layout": _debug_layout_summary(
+                    getattr(self.grid, "current_layout", None) or []
+                ),
+                "layouts": _debug_layouts_summary(
+                    getattr(self.grid, "layouts", None) or {}
+                ),
+            },
+        )
+
         self._normalize_grid_state()
 
         panel_id = str(panel_id)
@@ -757,6 +1146,12 @@ class WorkspaceManager:
                     panel_id=panel_id,
                     breakpoint=breakpoint,
                 )
+
+                item_copy = self._place_item_without_colliding(
+                    item_copy,
+                    breakpoint_layout,
+                    breakpoint=breakpoint,
+                )
             else:
 
                 item_copy = self._new_default_layout_item(
@@ -787,15 +1182,18 @@ class WorkspaceManager:
             new_titles[panel_id] = str(title)
             update["titles"] = new_titles
 
-        workspace_panel_debug(
-            "grid.update BEFORE",
-            panel_id=panel_id,
-            update_keys=list(update.keys()),
-            new_keys=[str(k) for k in update.get("keys", [])],
-            object_count=len(update.get("objects", []) or []),
+        workspace_debug_print(
+            "add_panel.before_grid_update",
+            {
+                "panel_id": panel_id,
+                "new_keys": new_keys,
+                "new_layouts": _debug_layouts_summary(new_layouts),
+                "new_current_layout": _debug_layout_summary(new_current_layout),
+            },
         )
 
         self.grid.param.update(**update)
+        self._last_applied_layouts = deepcopy(new_layouts)
 
         workspace_panel_debug(
             "grid.update AFTER",
@@ -1199,6 +1597,13 @@ class WorkspaceManager:
 
         if update:
             self.grid.param.update(**update)
+
+            if apply_layout and "layouts" in update:
+                # Make the freshly loaded layout authoritative for the next workspace
+                # mutation. Without this, add_panel/remove_panel can merge a stale
+                # current_layout back over the saved geometry.
+                self._skip_next_current_layout_merge = True
+                self._last_applied_layouts = deepcopy(update["layouts"])
 
         self._normalize_grid_state()
 

@@ -286,6 +286,39 @@ function stopPanelChromeEvent(event) {
   event.stopPropagation();
 }
 
+const DEBUG_RGL = false;
+
+function layoutSummary(layout) {
+  return (layout || []).map((item) => ({
+    i: String(item?.i),
+    x: item?.x,
+    y: item?.y,
+    w: item?.w,
+    h: item?.h,
+  }));
+}
+
+function layoutsSummary(layouts) {
+  const out = {};
+
+  for (const [bp, layout] of Object.entries(layouts || {})) {
+    out[bp] = layoutSummary(layout);
+  }
+
+  return out;
+}
+
+function debugRGL(label, payload = {}) {
+  if (!DEBUG_RGL) {
+    return;
+  }
+
+  console.log(
+    `[DynamicReactGrid] ${label}`,
+    JSON.stringify(payload, null, 2)
+  );
+}
+
 export function render({ model }) {
 
   const [keys] = model.useState("keys");
@@ -338,9 +371,36 @@ export function render({ model }) {
   const previousKeySignatureRef = React.useRef(keySignature);
   const suppressProgrammaticLayoutWriteRef = React.useRef(false);
 
+  const layoutSignature = JSON.stringify(layouts || {});
+  const previousLayoutSignatureRef = React.useRef(layoutSignature);
+  const lastClientLayoutSignatureRef = React.useRef(layoutSignature);
+
   if (previousKeySignatureRef.current !== keySignature) {
+      debugRGL("keySignature.changed", {
+      previous: previousKeySignatureRef.current,
+      next: keySignature,
+    });
     previousKeySignatureRef.current = keySignature;
     suppressProgrammaticLayoutWriteRef.current = true;
+  }
+
+  if (previousLayoutSignatureRef.current !== layoutSignature) {
+  
+    const cameFromThisComponent =
+      lastClientLayoutSignatureRef.current === layoutSignature;
+
+        debugRGL("layoutSignature.changed", {
+        cameFromThisComponent,
+        previous: previousLayoutSignatureRef.current,
+        next: layoutSignature,
+        layouts: layoutsSummary(layouts || {}),
+      });
+      
+    previousLayoutSignatureRef.current = layoutSignature;
+
+    if (!cameFromThisComponent) {
+      suppressProgrammaticLayoutWriteRef.current = true;
+    }
   }
 
   const contentByKey = {};
@@ -368,6 +428,16 @@ export function render({ model }) {
       JSON.stringify(colsByBp || {}),
     ]
   );
+
+debugRGL("render.state", {
+  stableKeys,
+  keySignature,
+  currentBp,
+  currentBpRef: currentBpRef.current,
+  suppressProgrammaticLayoutWrite: suppressProgrammaticLayoutWriteRef.current,
+  layouts: layoutsSummary(layouts || {}),
+  normalizedLayouts: layoutsSummary(normalizedLayouts || {}),
+});
 
   React.useEffect(() => {
     if (!sameJSON(layouts || {}, normalizedLayouts || {})) {
@@ -413,14 +483,21 @@ export function render({ model }) {
         onLayoutChange={(currentLayout) => {
           const bp = currentBpRef.current || "lg";
 
+          debugRGL("onLayoutChange.enter", {
+            bp,
+            stableKeys,
+            suppressProgrammaticLayoutWrite: suppressProgrammaticLayoutWriteRef.current,
+            rawCurrentLayout: layoutSummary(currentLayout || []),
+            incomingLayouts: layoutsSummary(layouts || {}),
+            normalizedLayouts: layoutsSummary(normalizedLayouts || {}),
+          });
+
           const cleanCur = sanitizeLayout(
             currentLayout || [],
             stableKeys,
             integerOr((colsByBp || {})[bp], 12)
           );
 
-          // Do not write ReactGridLayout's generated allLayouts back wholesale.
-          // It can rewrite untouched breakpoints and reflow unrelated panels.
           const cleanAll = mergeActiveBreakpointLayout(
             layouts || {},
             bp,
@@ -429,16 +506,30 @@ export function render({ model }) {
             colsByBp || {}
           );
 
+          debugRGL("onLayoutChange.cleaned", {
+            bp,
+            cleanCur: layoutSummary(cleanCur || []),
+            cleanAll: layoutsSummary(cleanAll || {}),
+            layoutsChanged: !sameJSON(layouts || {}, cleanAll || {}),
+          });
+
           if (suppressProgrammaticLayoutWriteRef.current) {
             suppressProgrammaticLayoutWriteRef.current = false;
 
-            // ReactGridLayout can emit a generated/default layout during programmatic
-            // key/object changes. Do not accept that temporary layout as user state.
             const expectedCurrent = sanitizeLayout(
               ((normalizedLayouts || layouts || {})[bp] || []),
               stableKeys,
               integerOr((colsByBp || {})[bp], 12)
             );
+
+            debugRGL("onLayoutChange.suppressed", {
+              bp,
+              rawCurrentLayout: layoutSummary(currentLayout || []),
+              cleanCur: layoutSummary(cleanCur || []),
+              expectedCurrent: layoutSummary(expectedCurrent || []),
+              layoutsBeforeReturn: layoutsSummary(layouts || {}),
+              normalizedLayoutsBeforeReturn: layoutsSummary(normalizedLayouts || {}),
+            });
 
             if (expectedCurrent.length > 0) {
               setCurrentLayout(expectedCurrent);
@@ -447,10 +538,26 @@ export function render({ model }) {
             return;
           }
 
+          debugRGL("onLayoutChange.acceptedCurrentLayout", {
+            bp,
+            cleanCur: layoutSummary(cleanCur || []),
+          });
+
           setCurrentLayout(cleanCur || []);
 
           if (!sameJSON(layouts || {}, cleanAll || {})) {
+            debugRGL("onLayoutChange.setLayouts", {
+              bp,
+              previousLayouts: layoutsSummary(layouts || {}),
+              nextLayouts: layoutsSummary(cleanAll || {}),
+            });
+
+            lastClientLayoutSignatureRef.current = JSON.stringify(cleanAll || {});
             setLayouts(cleanAll || {});
+          } else {
+            debugRGL("onLayoutChange.noLayoutsChange", {
+              bp,
+            });
           }
         }}
       >
