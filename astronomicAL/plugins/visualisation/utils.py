@@ -991,9 +991,14 @@ def _load_label_arrays(context, state):
     return raw, display, colours
 
 
-def prepare_plot_frame(context, state, *, require_y: bool) -> PreparedFrame:
+def prepare_plot_frame(
+    context,
+    state,
+    *,
+    require_y: bool,
+    include_row_ids: bool = True,
+) -> PreparedFrame:
     t_total = time.perf_counter()
-
     dataset_id = _active_dataset_id(context)
     total_rows = _dataset_row_count(context, dataset_id)
 
@@ -1026,7 +1031,6 @@ def prepare_plot_frame(context, state, *, require_y: bool) -> PreparedFrame:
     t_load = time.perf_counter()
 
     columns_to_load: List[Any] = [state.x]
-
     if require_y:
         columns_to_load.append(state.y)
 
@@ -1034,7 +1038,6 @@ def prepare_plot_frame(context, state, *, require_y: bool) -> PreparedFrame:
         _labels_needed_for_frame(state)
         and getattr(state, "label_col", None) in available_set
     )
-
     if labels_needed:
         columns_to_load.append(state.label_col)
 
@@ -1052,8 +1055,8 @@ def prepare_plot_frame(context, state, *, require_y: bool) -> PreparedFrame:
         return _empty_frame()
 
     load_seconds = time.perf_counter() - t_load
-
     n_rows = len(x_raw)
+
     if total_rows <= 0:
         total_rows = n_rows
 
@@ -1130,29 +1133,35 @@ def prepare_plot_frame(context, state, *, require_y: bool) -> PreparedFrame:
 
     # ------------------------------------------------------------------
     # 4. Row IDs.
+    #
+    # Density plots do not need row IDs for the first aggregate render. Skipping
+    # this avoids the ~1s row-id load shown in the 13M-row startup timings.
+    # Scatter still uses include_row_ids=True by default.
     # ------------------------------------------------------------------
     t_row_ids = time.perf_counter()
+    row_ids = None
 
-    try:
-        row_ids_all = _load_row_ids_array(context, state)
-    except Exception as exc:
-        print(
-            "[AstronomicAL visualisation] failed to load row ids: "
-            f"{type(exc).__name__}: {exc}",
-            flush=True,
-        )
-        row_ids_all = np.arange(len(mask))
+    if include_row_ids:
+        try:
+            row_ids_all = _load_row_ids_array(context, state)
+        except Exception as exc:
+            print(
+                "[AstronomicAL visualisation] failed to load row ids: "
+                f"{type(exc).__name__}: {exc}",
+                flush=True,
+            )
+            row_ids_all = np.arange(len(mask))
 
-    if len(row_ids_all) != len(mask):
-        print(
-            "[AstronomicAL visualisation] row-id length mismatch "
-            f"row_ids={len(row_ids_all):,} rows={len(mask):,}; "
-            "falling back to positional row ids",
-            flush=True,
-        )
-        row_ids_all = np.arange(len(mask))
+        if len(row_ids_all) != len(mask):
+            print(
+                "[AstronomicAL visualisation] row-id length mismatch "
+                f"row_ids={len(row_ids_all):,} rows={len(mask):,}; "
+                "falling back to positional row ids",
+                flush=True,
+            )
+            row_ids_all = np.arange(len(mask))
 
-    row_ids = row_ids_all[mask]
+        row_ids = row_ids_all[mask]
 
     row_ids_seconds = time.perf_counter() - t_row_ids
 
@@ -1163,22 +1172,23 @@ def prepare_plot_frame(context, state, *, require_y: bool) -> PreparedFrame:
 
     data: Dict[str, Any] = {
         INTERNAL_X: x[mask],
-        INTERNAL_ROW_ID: row_ids,
     }
+
+    if include_row_ids and row_ids is not None:
+        data[INTERNAL_ROW_ID] = row_ids
 
     if require_y and y is not None:
         data[INTERNAL_Y] = y[mask]
 
     if label_raw is not None:
         data[INTERNAL_LABEL_RAW] = label_raw
-
         if label_display is not None:
             data[INTERNAL_LABEL_DISPLAY] = label_display
         else:
             data[INTERNAL_LABEL_DISPLAY] = label_raw.astype(object, copy=False)
 
-        if label_colours is not None:
-            data[INTERNAL_LABEL_COLOUR] = label_colours
+    if label_colours is not None:
+        data[INTERNAL_LABEL_COLOUR] = label_colours
 
     data_seconds = time.perf_counter() - t_data
 
@@ -1187,7 +1197,6 @@ def prepare_plot_frame(context, state, *, require_y: bool) -> PreparedFrame:
     frame_seconds = time.perf_counter() - t_frame
 
     total_seconds = time.perf_counter() - t_total
-
     print(
         "[AstronomicAL visualisation] prepare_plot_frame total "
         f"{total_seconds:.3f}s "
@@ -1195,6 +1204,7 @@ def prepare_plot_frame(context, state, *, require_y: bool) -> PreparedFrame:
         f"arrays={arrays_seconds:.3f}s, "
         f"labels={labels_seconds:.3f}s, "
         f"row_ids={row_ids_seconds:.3f}s, "
+        f"include_row_ids={include_row_ids}, "
         f"data={data_seconds:.3f}s, "
         f"frame={frame_seconds:.3f}s, "
         f"rows={len(frame):,})",
@@ -1212,17 +1222,23 @@ def prepare_plot_frame(context, state, *, require_y: bool) -> PreparedFrame:
     )
 
 
-
-def prepared_cache_key(context, state, *, require_y: bool) -> Tuple[Any, ...]:
+def prepared_cache_key(
+    context,
+    state,
+    *,
+    require_y: bool,
+    include_row_ids: bool = True,
+) -> Tuple[Any, ...]:
     dataset_id = _active_dataset_id(context)
     fingerprint = _dataset_fingerprint(context, dataset_id)
 
     return (
-        dataset_id,  # keep top-level for reliable invalidation
+        dataset_id,
         fingerprint,
         state.x,
         state.y if require_y else None,
         require_y,
+        bool(include_row_ids),
         tuple(state.label_filter or []),
         state.color_by,
         state.log_x,

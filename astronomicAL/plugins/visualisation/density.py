@@ -628,6 +628,297 @@ class DensityPanel(BaseVisualisationPanel):
 
         return ok
 
+    def _active_density_label_filter(self) -> bool:
+        labels = getattr(self.state, "label_filter", None) or []
+        return bool(labels and "All" not in labels)
+
+
+    def _can_use_backend_density_aggregate(self) -> bool:
+        """Return True when density can use a source-backed 2D aggregate.
+
+        The aggregate path intentionally handles the common large-table case first:
+        unlabelled X/Y density over the active dataset. Label-filtered density can
+        be added later by teaching DatasetSource.aggregate_2d about label WHERE
+        clauses.
+        """
+        if self._active_density_label_filter():
+            return False
+
+        if not getattr(self.state, "x", None) or not getattr(self.state, "y", None):
+            return False
+
+        dataset_id = self._dataset_id()
+        datasets = getattr(self.context, "datasets", None)
+        if dataset_id is None or datasets is None:
+            return False
+
+        try:
+            source = datasets.get_source(dataset_id)
+        except Exception:
+            return False
+
+        method = getattr(source, "aggregate_2d", None)
+        if not callable(method):
+            return False
+
+        try:
+            rows = source.row_count()
+        except Exception:
+            rows = None
+
+        try:
+            threshold = int(getattr(self.state, "datashade_threshold", 100_000))
+        except Exception:
+            threshold = 100_000
+
+        render_mode = str(getattr(self.state, "render_mode", "") or "").lower()
+
+        # Use backend aggregation for explicitly raster/datashader modes, and for
+        # very large interactive density plots. Small tables can keep the existing
+        # HoloViews/HexTiles path.
+        if render_mode in {"datashader", "raster", "rasterized"}:
+            return True
+
+        if rows is not None and int(rows) >= max(1_000_000, threshold):
+            return True
+
+        return False
+
+
+    def _backend_density_ranges(self):
+        x_range = None
+        y_range = None
+
+        xmin = self._state_limit("x_min")
+        xmax = self._state_limit("x_max")
+        ymin = self._state_limit("y_min")
+        ymax = self._state_limit("y_max")
+
+        if xmin is not None and xmax is not None:
+            if xmax <= xmin:
+                raise ValueError("xmax must be greater than xmin")
+            x_range = (float(xmin), float(xmax))
+
+        if ymin is not None and ymax is not None:
+            if ymax <= ymin:
+                raise ValueError("ymax must be greater than ymin")
+            y_range = (float(ymin), float(ymax))
+
+        if bool(getattr(self.state, "log_x", False)) and x_range is not None:
+            if x_range[0] <= 0 or x_range[1] <= 0:
+                raise ValueError("xmin and xmax must be positive when Log X is enabled")
+
+        if bool(getattr(self.state, "log_y", False)) and y_range is not None:
+            if y_range[0] <= 0 or y_range[1] <= 0:
+                raise ValueError("ymin and ymax must be positive when Log Y is enabled")
+
+        return x_range, y_range
+
+
+    def _backend_density_aggregate(self):
+        dataset_id = self._dataset_id()
+        datasets = getattr(self.context, "datasets", None)
+        if dataset_id is None or datasets is None:
+            raise RuntimeError("No active dataset for backend density aggregate")
+
+        source = datasets.get_source(dataset_id)
+        method = getattr(source, "aggregate_2d", None)
+        if not callable(method):
+            raise NotImplementedError(
+                f"{type(source).__name__} does not implement aggregate_2d()"
+            )
+
+        x_range, y_range = self._backend_density_ranges()
+
+        return method(
+            x_col=str(self.state.x),
+            y_col=str(self.state.y),
+            bins=max(5, min(500, int(self.state.density_bins))),
+            x_range=x_range,
+            y_range=y_range,
+            log_x=bool(getattr(self.state, "log_x", False)),
+            log_y=bool(getattr(self.state, "log_y", False)),
+        )
+
+
+    def _density_image_from_backend_aggregate(self, aggregate: dict):
+        counts = np.asarray(aggregate.get("counts"), dtype="float64")
+        if counts.size == 0:
+            raise ValueError("Backend density aggregate returned no counts")
+
+        x_edges = np.asarray(aggregate.get("x_edges"), dtype=float)
+        y_edges = np.asarray(aggregate.get("y_edges"), dtype=float)
+
+        if len(x_edges) < 2 or len(y_edges) < 2:
+            raise ValueError("Backend density aggregate returned invalid edges")
+
+        x_centres = 0.5 * (x_edges[:-1] + x_edges[1:])
+        y_centres = 0.5 * (y_edges[:-1] + y_edges[1:])
+
+        if counts.shape != (len(y_centres), len(x_centres)):
+            try:
+                counts = counts.reshape((len(y_centres), len(x_centres)))
+            except Exception as exc:
+                raise ValueError(
+                    "Backend density aggregate shape does not match edges"
+                ) from exc
+
+        cnorm = "log" if bool(getattr(self.state, "log_density", False)) else "linear"
+        x_label, y_label = self._axis_labels()
+
+        return hv.Image(
+            (
+                x_centres,
+                y_centres,
+                counts,
+            ),
+            kdims=[INTERNAL_X, INTERNAL_Y],
+            vdims=["count"],
+        ).opts(
+            cmap=VISIBLE_DENSITY_CMAP,
+            colorbar=True,
+            cnorm=cnorm,
+            clipping_colors={"NaN": "white"},
+            bgcolor="white",
+            responsive=True,
+            min_height=PLOT_MIN_HEIGHT,
+            xlabel=x_label,
+            ylabel=y_label,
+            tools=["pan", "wheel_zoom", "box_zoom", "reset"],
+            active_tools=["wheel_zoom"],
+            hooks=[
+                force_wheel_zoom_hook,
+                self._density_view_range_hook,
+                renderer_name_hook(DENSITY_RENDERER),
+            ],
+            show_grid=True,
+            toolbar="right",
+            shared_axes=False,
+            axiswise=True,
+            framewise=True,
+        )
+
+
+    def _render_backend_density_aggregate(self, mark) -> bool:
+        """Render density from a backend 2D aggregate.
+
+        Returns True when rendering completed. Returns False to let _render() fall
+        back to the existing full-frame path.
+        """
+        if not self._can_use_backend_density_aggregate():
+            return False
+
+        stage = "backend_aggregate"
+        t0 = time.perf_counter()
+
+        try:
+            aggregate = self._backend_density_aggregate()
+        except NotImplementedError:
+            return False
+        except Exception as exc:
+            print(
+                "[AstronomicAL density] backend aggregate unavailable; "
+                "falling back to full-frame path "
+                f"panel_id={getattr(self, 'panel_id', None)} "
+                f"{type(exc).__name__}: {exc}",
+                flush=True,
+            )
+            return False
+
+        mark(
+            "backend_aggregate",
+            t0,
+            rows=int(aggregate.get("row_count", 0) or 0),
+            bins=getattr(self.state, "density_bins", None),
+            backend=aggregate.get("backend"),
+        )
+
+        row_count = int(aggregate.get("row_count", 0) or 0)
+        if row_count <= 0:
+            t0 = time.perf_counter()
+            self.plot_pane.object = self._empty("No finite X/Y data inside limits")
+            mark("plot_pane_empty_assign", t0, reason="backend_aggregate_empty")
+            t0 = time.perf_counter()
+            self.status_pane.object = "0 density rows inside limits"
+            mark("status_assign", t0, reason="backend_aggregate_empty")
+            return True
+
+        raw_x0, raw_x1 = aggregate["raw_x_range"]
+        raw_y0, raw_y1 = aggregate["raw_y_range"]
+        plot_x0, plot_x1 = aggregate["plot_x_range"]
+        plot_y0, plot_y1 = aggregate["plot_y_range"]
+
+        raw_extent = (float(raw_x0), float(raw_x1), float(raw_y0), float(raw_y1))
+        plot_extent = (float(plot_x0), float(plot_x1), float(plot_y0), float(plot_y1))
+
+        t0 = time.perf_counter()
+        base = self._density_image_from_backend_aggregate(aggregate)
+        mark(
+            "backend_density_image",
+            t0,
+            rows=row_count,
+            bins=getattr(self.state, "density_bins", None),
+        )
+
+        self._density_current_raw_extent = raw_extent
+        self._density_current_plot_extent = plot_extent
+        self._density_focus_pending_frame = self._current_density_focus_marker_frame(
+            raw_data=None,
+            raw_extent=raw_extent,
+        )
+
+        x_label, y_label = self._axis_labels()
+
+        t0 = time.perf_counter()
+        overlay = hv.Overlay([base]).collate().opts(
+            responsive=True,
+            min_height=PLOT_MIN_HEIGHT,
+            xlabel=x_label,
+            ylabel=y_label,
+            xlim=(plot_extent[0], plot_extent[1]),
+            ylim=(plot_extent[2], plot_extent[3]),
+            show_grid=True,
+            toolbar="right",
+            tools=["pan", "wheel_zoom", "box_zoom", "reset"],
+            active_tools=["wheel_zoom"],
+            hooks=[
+                force_wheel_zoom_hook,
+                self._density_view_range_hook,
+                self._density_focus_bokeh_hook,
+            ],
+            shared_axes=False,
+            axiswise=True,
+            framewise=True,
+        )
+        mark("overlay_build", t0, item_count=1, backend="aggregate")
+
+        t0 = time.perf_counter()
+        self.plot_pane.object = overlay
+        mark(
+            "plot_pane_assign",
+            t0,
+            item_count=1,
+            plotted_count=row_count,
+            render_label="backend aggregate grid",
+        )
+
+        t0 = time.perf_counter()
+        self.status_pane.object = (
+            f"{row_count:,} rows aggregated · "
+            f"{row_count:,} inside limits · "
+            "backend aggregate grid"
+        )
+        mark(
+            "status_assign",
+            t0,
+            full_count=row_count,
+            clipped_count=row_count,
+            plotted_count=row_count,
+            backend="aggregate",
+        )
+
+        return True
+
     def _render(self) -> None:
         total_t0 = time.perf_counter()
         stage = "start"
@@ -640,9 +931,13 @@ class DensityPanel(BaseVisualisationPanel):
             )
 
         try:
+            stage = "backend_aggregate"
+            if self._render_backend_density_aggregate(mark):
+                return
+
             stage = "plot_data"
             t0 = time.perf_counter()
-            raw_data = self._plot_data(require_y=True)
+            raw_data = self._plot_data(require_y=True, include_row_ids=False)
             mark(
                 "plot_data",
                 t0,
@@ -867,11 +1162,21 @@ class DensityPanel(BaseVisualisationPanel):
             )
 
     def _should_rasterize(self, data: PreparedFrame) -> bool:
+        rows = len(data.frame)
+
         if self.state.render_mode == "datashader":
             return True
+
+        # Safety override for huge density panels. Even if the user-facing render
+        # mode says "interactive", millions of rows should use aggregate/raster
+        # rendering.
+        # if rows > max(1_000_000, int(self.state.datashade_threshold)):
+        #     return True
+
         if self.state.render_mode == "interactive":
             return False
-        return len(data.frame) > int(self.state.datashade_threshold)
+
+        return rows > int(self.state.datashade_threshold)
 
     def _state_limit(self, name: str) -> Optional[float]:
         value = getattr(self.state, name, None)

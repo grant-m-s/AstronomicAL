@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import time
 from typing import Any, List, Optional, Sequence
+from collections import OrderedDict
 
 import datashader as ds
 import holoviews as hv
@@ -187,44 +188,6 @@ class ScatterPanel(BaseVisualisationPanel):
 
         return x_range, y_range
 
-    def _current_focus_forced_ids(self):
-        selection = getattr(self.context, "selection", None)
-
-        if selection is None:
-            return ()
-
-        try:
-            focus = selection.get_focus()
-        except Exception:
-            return ()
-
-        if focus is None:
-            return ()
-
-        dataset_id = self._dataset_id()
-
-        if getattr(focus, "dataset_id", None) != dataset_id:
-            return ()
-
-        row_id = str(getattr(focus, "row_id", "") or "")
-
-        if not row_id:
-            return ()
-
-        record_id_col = getattr(self.state, "record_id_col", None)
-
-        if not record_id_col or record_id_col == "Use Index":
-            return ()
-
-        # Only force if the cached row can be converted into a point for
-        # the current x/y/log settings.
-        point = self._focus_point_from_cached_focus_row(focus)
-
-        if point is None:
-            return ()
-
-        return (row_id,)
-
     def _range_coverage_fraction(self, range_value, data_min, data_max) -> float:
         if not range_value:
             return 1.0
@@ -286,123 +249,6 @@ class ScatterPanel(BaseVisualisationPanel):
 
         return sample_limit > 0 and n_rows > sample_limit
 
-
-    def _compose_interactive_density_layers(self, *, density, points):
-
-        if density is None:
-            return points
-
-        try:
-            return density * points
-        except Exception as exc:
-            print(
-                "[AstronomicAL scatter] density underlay composition failed; "
-                "falling back to sampled points only "
-                f"panel_id={self.panel_id} "
-                f"{type(exc).__name__}: {exc}",
-                flush=True,
-            )
-            return points
-
-    def _interactive_density_underlay(self, data):
-        """
-        Optional passive density underlay for large interactive sampled views.
-
-        This must never prevent the scatter panel from opening. If Datashader or
-        HoloViews cannot build the density layer for any reason, return None and
-        let the sampled scatter render normally.
-        """
-
-        if not self._use_interactive_density_underlay(data):
-            return None
-
-        try:
-            frame = data.frame[[INTERNAL_X, INTERNAL_Y]].copy(deep=False)
-        except Exception:
-            return None
-
-        if frame is None or frame.empty:
-            return None
-
-        try:
-            x = pd.to_numeric(frame[INTERNAL_X], errors="coerce")
-            y = pd.to_numeric(frame[INTERNAL_Y], errors="coerce")
-
-            finite = np.isfinite(x.to_numpy(copy=False)) & np.isfinite(
-                y.to_numpy(copy=False)
-            )
-
-            if bool(getattr(self.state, "log_x", False)):
-                finite &= x.to_numpy(copy=False) > 0
-
-            if bool(getattr(self.state, "log_y", False)):
-                finite &= y.to_numpy(copy=False) > 0
-
-            if not finite.any():
-                return None
-
-            frame = frame.loc[finite].copy()
-
-            # Datashader/HoloViews can behave badly on degenerate ranges.
-            if len(frame) < 2:
-                return None
-
-            x_min = float(frame[INTERNAL_X].min())
-            x_max = float(frame[INTERNAL_X].max())
-            y_min = float(frame[INTERNAL_Y].min())
-            y_max = float(frame[INTERNAL_Y].max())
-
-            if not all(np.isfinite(value) for value in (x_min, x_max, y_min, y_max)):
-                return None
-
-            if x_min == x_max or y_min == y_max:
-                return None
-        except Exception:
-            return None
-
-        try:
-            points = hv.Points(
-                frame,
-                kdims=[INTERNAL_X, INTERNAL_Y],
-            )
-
-            range_opts = self._current_range_opts(include_y=True)
-
-            return rasterize(
-                points,
-                aggregator=ds.count(),
-                pixel_ratio=1,
-            ).opts(
-                cmap=VISIBLE_DENSITY_CMAP,
-                cnorm="eq_hist",
-                colorbar=False,
-                alpha=float(INTERACTIVE_DENSITY_UNDERLAY_ALPHA),
-                bgcolor="white",
-                responsive=True,
-                min_height=PLOT_MIN_HEIGHT,
-                xlabel=str(self.state.x),
-                ylabel=str(self.state.y),
-                logx=self.state.log_x,
-                logy=self.state.log_y,
-                tools=[],
-                active_tools=[],
-                toolbar=None,
-                hooks=[renderer_name_hook(DENSITY_RENDERER)],
-                shared_axes=False,
-                axiswise=True,
-                framewise=True,
-                **range_opts,
-            )
-        except Exception as exc:
-            print(
-                "[AstronomicAL scatter] density underlay disabled after build failure "
-                f"panel_id={self.panel_id} "
-                f"{type(exc).__name__}: {exc}",
-                flush=True,
-            )
-            return None
-
-
     def _base_sample_cache_key(self, effective_limit: int):
         return (
             getattr(self, "_last_prepared_cache_key", None),
@@ -415,13 +261,59 @@ class ScatterPanel(BaseVisualisationPanel):
 
 
     def _base_sample_cache_get(self, key):
-        value = self._base_sample_cache.get(key)
+        shared = self._shared_visualisation_data_cache()
 
+        if shared is not None:
+            store = getattr(shared, "scatter_base_samples", None)
+            if store is None:
+                store = OrderedDict()
+                try:
+                    shared.scatter_base_samples = store
+                except Exception:
+                    store = None
+
+            if store is not None:
+                value = store.get(key)
+                if value is not None and hasattr(store, "move_to_end"):
+                    store.move_to_end(key)
+                if value is not None:
+                    print(
+                        "[AstronomicAL scatter] shared base sample cache HIT",
+                        flush=True,
+                    )
+                    return value
+
+        value = self._base_sample_cache.get(key)
+        if value is not None:
+            print(
+                "[AstronomicAL scatter] local base sample cache HIT",
+                flush=True,
+            )
         return value
 
 
     def _base_sample_cache_set(self, key, plot_data):
-        size_before = len(self._base_sample_cache)
+        shared = self._shared_visualisation_data_cache()
+
+        if shared is not None:
+            store = getattr(shared, "scatter_base_samples", None)
+            if store is None:
+                store = OrderedDict()
+                try:
+                    shared.scatter_base_samples = store
+                except Exception:
+                    store = None
+
+            if store is not None:
+                if key in store:
+                    store.pop(key, None)
+                store[key] = plot_data
+                while len(store) > int(getattr(self, "_base_sample_cache_max", 16)):
+                    try:
+                        store.popitem(last=False)
+                    except Exception:
+                        store.clear()
+                        break
 
         if key in self._base_sample_cache:
             self._base_sample_cache.pop(key, None)
@@ -454,24 +346,6 @@ class ScatterPanel(BaseVisualisationPanel):
 
         row_id = getattr(focus, "row_id", None)
         return None if row_id is None else str(row_id)
-
-
-    def _forced_row_ids_for_sampling(self):
-        """Rows that must be injected into the sampled cloud.
-
-        The current focus is excluded because it is drawn by the focus overlay.
-        """
-        forced = list(self._forced_row_ids() or [])
-        focus_row_id = self._current_focus_row_id()
-
-        if focus_row_id is None:
-            return tuple(str(value) for value in forced)
-
-        return tuple(
-            str(value)
-            for value in forced
-            if str(value) != focus_row_id
-        )
 
     def _near_full_range_key(self, x_range, y_range):
         return (
@@ -552,28 +426,6 @@ class ScatterPanel(BaseVisualisationPanel):
 
         return extent
 
-
-    def _range_contains_extent(self, data, x_range, y_range) -> bool:
-        extent = self._prepared_data_extent(data)
-
-        if extent is None:
-            return False
-
-        x_min, x_max, y_min, y_max = extent
-
-        try:
-            x0, x1 = x_range
-            y0, y1 = y_range
-
-            return (
-                min(float(x0), float(x1)) <= float(x_min)
-                and max(float(x0), float(x1)) >= float(x_max)
-                and min(float(y0), float(y1)) <= float(y_min)
-                and max(float(y0), float(y1)) >= float(y_max)
-            )
-        except Exception:
-            return False
-
     def _range_is_near_full_extent(self, data, x_range, y_range) -> bool:
         extent = self._prepared_data_extent(data)
 
@@ -615,8 +467,8 @@ class ScatterPanel(BaseVisualisationPanel):
 
         x_min, x_max, y_min, y_max = extent
 
-        x_full = self._range_contains_extent(x_range, x_min, x_max)
-        y_full = self._range_contains_extent(y_range, y_min, y_max)
+        x_full = self._range_covers_axis_extent(x_range, x_min, x_max)
+        y_full = self._range_covers_axis_extent(y_range, y_min, y_max)
 
         return x_full and y_full
 
@@ -822,45 +674,6 @@ class ScatterPanel(BaseVisualisationPanel):
             return None
 
         return x, y
-
-    def _row_id_lookup_for_frame(self, data):
-        """
-        Build a raw row-id -> integer position lookup for the current prepared frame.
-
-        This is only used when forced IDs need to be included in an interactive
-        sample.
-        """
-        if not hasattr(self, "_row_id_lookup_cache"):
-            self._row_id_lookup_cache = {}
-
-        cache_key = (id(data.frame), self._frame_len(data))
-
-        cached = self._row_id_lookup_cache.get(cache_key)
-        if cached is not None:
-            return cached
-
-        frame = data.frame
-
-        if INTERNAL_ROW_ID not in frame.columns:
-            lookup = {}
-        else:
-            values = frame[INTERNAL_ROW_ID].to_numpy(copy=False)
-
-            lookup = {}
-            for idx, value in enumerate(values):
-                lookup[value] = idx
-                lookup[str(value)] = idx
-
-        self._row_id_lookup_cache[cache_key] = lookup
-
-        if len(self._row_id_lookup_cache) > 4:
-            try:
-                first_key = next(iter(self._row_id_lookup_cache))
-                self._row_id_lookup_cache.pop(first_key, None)
-            except Exception:
-                self._row_id_lookup_cache.clear()
-
-        return lookup
 
     def _bokeh_safe_frame(self, frame: pd.DataFrame) -> pd.DataFrame:
         """
@@ -2121,11 +1934,26 @@ class ScatterPanel(BaseVisualisationPanel):
         )
 
 
+    def _scatter_data_for_render(self) -> PreparedFrame:
+        """Return scatter render data.
+
+        IMPORTANT:
+        Interactive scatter needs the full prepared frame so zoom/pan can resample
+        from the actual current x/y range.
+
+        A backend first-paint sample is not safe as the permanent DynamicMap data
+        universe, because zooming then filters/resamples only that initial sample
+        and hides real points from the current view.
+
+        Do not call backend sample_points() here.
+        """
+        return self._plot_data(require_y=True)
+
     def _render(self) -> None:
         t0 = time.perf_counter()
         self._clear_stream_watchers()
 
-        data = self._plot_data(require_y=True)
+        data = self._scatter_data_for_render()
         prepared_key = getattr(self, "_last_prepared_cache_key", None)
 
         last_key = getattr(self, "_last_interactive_prepared_key", None)
@@ -2647,60 +2475,90 @@ class ScatterPanel(BaseVisualisationPanel):
 
 
     def _density_underlay_element(self, data: PreparedFrame, x_range=None, y_range=None):
-        """
-        Build a passive density underlay as a concrete hv.Image.
-
-        This intentionally avoids HoloViews rasterize(...), because nested
-        DynamicMap/rasterize/Overlay composition was the source of earlier panel
-        creation failures.
-        """
 
         if not self._use_interactive_density_underlay(data):
             return self._empty_density_underlay(x_range=x_range, y_range=y_range)
+
+        cache_key = (
+            getattr(self, "_last_prepared_cache_key", None),
+            self._range_cache_key(x_range),
+            self._range_cache_key(y_range),
+            int(INTERACTIVE_DENSITY_CANVAS_WIDTH),
+            int(INTERACTIVE_DENSITY_CANVAS_HEIGHT),
+            bool(getattr(self.state, "log_x", False)),
+            bool(getattr(self.state, "log_y", False)),
+        )
+
+        cache = getattr(self, "_scatter_density_underlay_cache", None)
+        if cache is None:
+            self._scatter_density_underlay_cache = {}
+            cache = self._scatter_density_underlay_cache
+
+        cached = cache.get(cache_key)
+        if cached is not None:
+            print(
+                "[AstronomicAL scatter] density underlay cache HIT "
+                f"panel_id={self.panel_id} "
+                f"x_range={self._range_cache_key(x_range)} "
+                f"y_range={self._range_cache_key(y_range)}",
+                flush=True,
+            )
+            return cached
 
         try:
             frame = self._density_frame_for_ranges(data, x_range, y_range)
 
             if frame is None or frame.empty:
-                return self._empty_density_underlay(x_range=x_range, y_range=y_range)
+                element = self._empty_density_underlay(x_range=x_range, y_range=y_range)
+            elif INTERNAL_X not in frame.columns or INTERNAL_Y not in frame.columns:
+                element = self._empty_density_underlay(x_range=x_range, y_range=y_range)
+            else:
+                frame = frame[[INTERNAL_X, INTERNAL_Y]].copy(deep=False)
 
-            if INTERNAL_X not in frame.columns or INTERNAL_Y not in frame.columns:
-                return self._empty_density_underlay(x_range=x_range, y_range=y_range)
+                x_range_resolved, y_range_resolved = self._density_ranges_for_canvas(
+                    frame,
+                    x_range=x_range,
+                    y_range=y_range,
+                )
 
-            frame = frame[[INTERNAL_X, INTERNAL_Y]].copy(deep=False)
+                if x_range_resolved is None or y_range_resolved is None:
+                    element = self._empty_density_underlay(
+                        x_range=x_range,
+                        y_range=y_range,
+                    )
+                else:
+                    canvas = ds.Canvas(
+                        plot_width=int(INTERACTIVE_DENSITY_CANVAS_WIDTH),
+                        plot_height=int(INTERACTIVE_DENSITY_CANVAS_HEIGHT),
+                        x_range=x_range_resolved,
+                        y_range=y_range_resolved,
+                    )
+                    agg = canvas.points(
+                        frame,
+                        INTERNAL_X,
+                        INTERNAL_Y,
+                        agg=ds.count(),
+                    )
+                    density = self._density_rgba_element_from_aggregate(
+                        agg,
+                        x_range=x_range_resolved,
+                        y_range=y_range_resolved,
+                    )
+                    element = density.opts(
+                        **self._current_range_opts(include_y=True),
+                    )
 
-            x_range_resolved, y_range_resolved = self._density_ranges_for_canvas(
-                frame,
-                x_range=x_range,
-                y_range=y_range,
-            )
+            cache[cache_key] = element
+            max_size = int(getattr(self, "_scatter_density_underlay_cache_max", 12))
+            while len(cache) > max_size:
+                try:
+                    first_key = next(iter(cache))
+                    cache.pop(first_key, None)
+                except Exception:
+                    cache.clear()
+                    break
 
-            if x_range_resolved is None or y_range_resolved is None:
-                return self._empty_density_underlay(x_range=x_range, y_range=y_range)
-
-            canvas = ds.Canvas(
-                plot_width=int(INTERACTIVE_DENSITY_CANVAS_WIDTH),
-                plot_height=int(INTERACTIVE_DENSITY_CANVAS_HEIGHT),
-                x_range=x_range_resolved,
-                y_range=y_range_resolved,
-            )
-
-            agg = canvas.points(
-                frame,
-                INTERNAL_X,
-                INTERNAL_Y,
-                agg=ds.count(),
-            )
-
-            density = self._density_rgba_element_from_aggregate(
-                agg,
-                x_range=x_range_resolved,
-                y_range=y_range_resolved,
-            )
-
-            return density.opts(
-                **self._current_range_opts(include_y=True),
-            )
+            return element
 
         except Exception as exc:
             print(
@@ -2732,7 +2590,49 @@ class ScatterPanel(BaseVisualisationPanel):
             )
             return points_dmap
 
+    def _canonical_interactive_ranges_for_cache(self, data, x_range=None, y_range=None):
 
+        raw_x_range = x_range
+        raw_y_range = y_range
+
+        effective_x_range, effective_y_range = self._normalise_interactive_ranges(
+            data,
+            x_range=raw_x_range,
+            y_range=raw_y_range,
+        )
+
+        if effective_x_range is None and effective_y_range is None:
+            return None, None
+
+        try:
+            if self._is_known_near_full_range(effective_x_range, effective_y_range):
+                return None, None
+        except Exception:
+            pass
+
+        try:
+            if self._range_is_near_full_extent(
+                data,
+                effective_x_range,
+                effective_y_range,
+            ):
+                self._remember_near_full_range(effective_x_range, effective_y_range)
+                return None, None
+        except Exception:
+            pass
+
+        try:
+            if self._range_contains_extent(
+                data,
+                effective_x_range,
+                effective_y_range,
+            ):
+                self._remember_near_full_range(effective_x_range, effective_y_range)
+                return None, None
+        except Exception:
+            pass
+
+        return effective_x_range, effective_y_range
 
     def _scatter_interactive_dynamic(self, data: PreparedFrame):
         range_stream = streams.RangeXY(
@@ -2753,18 +2653,11 @@ class ScatterPanel(BaseVisualisationPanel):
             return unbounded(x_range) and unbounded(y_range)
 
         def make_points(x_range=None, y_range=None):
-            x_range, y_range = self._normalise_interactive_ranges(
-                data,
-                x_range=x_range,
-                y_range=y_range,
-            )
-
             t0 = time.perf_counter()
 
             raw_x_range = x_range
             raw_y_range = y_range
-
-            effective_x_range, effective_y_range = self._normalise_interactive_ranges(
+            effective_x_range, effective_y_range = self._canonical_interactive_ranges_for_cache(
                 data,
                 x_range=raw_x_range,
                 y_range=raw_y_range,
@@ -2809,33 +2702,25 @@ class ScatterPanel(BaseVisualisationPanel):
                 )
 
                 return element
-            else:
-                print(
-                    "[AstronomicAL scatter] interactive make_points cache miss "
-                    f"x_range={self._range_cache_key(effective_x_range)} "
-                    f"y_range={self._range_cache_key(effective_y_range)} "
-                    f"forced_ids={forced_ids}",
-                    flush=True,
-                )
+
+            print(
+                "[AstronomicAL scatter] interactive make_points cache miss "
+                f"x_range={self._range_cache_key(effective_x_range)} "
+                f"y_range={self._range_cache_key(effective_y_range)} "
+                f"forced_ids={forced_ids}",
+                flush=True,
+            )
 
             self._remember_ranges(effective_x_range, effective_y_range)
 
             t1 = time.perf_counter()
-            
+
             if self._is_known_near_full_range(effective_x_range, effective_y_range):
                 print(
                     "[AstronomicAL scatter] known near-full range; skipping filter "
                     f"panel_id={self.panel_id}",
                     flush=True,
                 )
-
-            # range_is_known_full = (
-            #     effective_x_range is None
-            #     or effective_y_range is None
-            #     or self._range_contains_extent(data, effective_x_range, effective_y_range)
-            #     or self._range_is_near_full_extent(data, effective_x_range, effective_y_range)
-            #     or self._is_known_near_full_range(effective_x_range, effective_y_range)
-            # )
 
             if effective_x_range is None and effective_y_range is None:
                 visible = data
@@ -2856,7 +2741,10 @@ class ScatterPanel(BaseVisualisationPanel):
 
                 try:
                     if len(visible.frame) == len(data.frame):
-                        self._remember_near_full_range(effective_x_range, effective_y_range)
+                        self._remember_near_full_range(
+                            effective_x_range,
+                            effective_y_range,
+                        )
                 except Exception:
                     pass
 
@@ -2909,7 +2797,10 @@ class ScatterPanel(BaseVisualisationPanel):
 
             self._interactive_current_frame = self._frame_for_cache(plot_data)
 
-            sample_strategy = self._coverage_sample_note(visible_len, effective_limit)
+            sample_strategy = self._coverage_sample_note(
+                visible_len,
+                effective_limit,
+            )
 
             sampled_note = (
                 f" · {sample_strategy} from {plot_data.sampled_from:,} visible"
@@ -2937,18 +2828,6 @@ class ScatterPanel(BaseVisualisationPanel):
             )
 
             self.status_pane.object = status_text
-
-            # points = self._scatter_points_element(plot_data)
-
-            # selection_overlay, focus_overlay = self._interactive_dynamic_overlays(data)
-
-            # element = self._compose_element_layers(
-            #     [
-            #         points,
-            #         selection_overlay,
-            #         focus_overlay,
-            #     ]
-            # )
 
             element = self._scatter_points_element(plot_data)
 
@@ -2978,7 +2857,7 @@ class ScatterPanel(BaseVisualisationPanel):
         points_dmap = hv.DynamicMap(make_points, streams=[range_stream])
 
         def make_density(x_range=None, y_range=None):
-            x_range, y_range = self._normalise_interactive_ranges(
+            x_range, y_range = self._canonical_interactive_ranges_for_cache(
                 data,
                 x_range=x_range,
                 y_range=y_range,
@@ -3192,7 +3071,6 @@ class ScatterPanel(BaseVisualisationPanel):
         self._publish_latest_selection_callback = publish_latest_selection
 
         def on_select(event):
-
             if time.monotonic() < getattr(self, "_ignore_selection_events_until", 0.0):
                 return
 
@@ -3229,7 +3107,7 @@ class ScatterPanel(BaseVisualisationPanel):
                 self.panel_id,
                 flush=True,
             )
-    
+
             self._schedule_selection_publish(seq, 450)
 
         self._watch_param(bounds_stream, on_bounds, "bounds", render_scoped=True)
@@ -3249,8 +3127,6 @@ class ScatterPanel(BaseVisualisationPanel):
             )
 
         return points_dmap
-
-
 
 
     def _scatter_points_element(self, data: PreparedFrame):

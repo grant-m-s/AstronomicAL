@@ -278,8 +278,11 @@ class MappingGatedPanel:
 
         self._subscriptions: list[Any] = []
         self._mapping_requests_sent: set[tuple[str, str, str]] = set()
+
         self._real_view: Any = None
         self._real_controller: Any = None
+        self._real_load_started = False
+        self._real_load_handle = None
         self._disposed = False
 
         self._subscribe()
@@ -480,13 +483,35 @@ class MappingGatedPanel:
         self._refresh()
 
     def _show_real_panel(self) -> None:
+        """Show the real panel after mappings are satisfied.
+
+        Important: do not construct Panel/Bokeh/HoloViews objects in worker threads.
+        The previous async version moved manager._create_panel_now() into
+        JobManager, which made mapping callbacks light but moved UI construction
+        into ThreadPoolExecutor threads.
+
+        Now we keep the useful behaviour:
+        - mapping callback returns quickly;
+        - placeholder appears immediately;
+        - real panel creation is delayed to a later UI tick.
+
+        Heavy data work must happen inside the panel's own JobManager-backed
+        loading/render path, not inside the panel factory.
+        """
         if self._real_view is not None:
             return
 
+        if bool(getattr(self, "_real_load_started", False)):
+            return
+
+        self._real_load_started = True
         self._show_loading()
 
-        def _finish() -> None:
-            if self._disposed or self._real_view is not None:
+        def _finish_on_ui() -> None:
+            if self._disposed:
+                return
+
+            if self._real_view is not None:
                 return
 
             try:
@@ -498,11 +523,8 @@ class MappingGatedPanel:
                     restore_metadata=self.restore_metadata,
                     **self.kwargs,
                 )
-                self._real_view = view
-                self._real_controller = controller
-                self.view[:] = [self._real_view]
-
-            except Exception as exc:
+            except BaseException as exc:
+                self._real_load_started = False
                 self.view[:] = [
                     pn.Column(
                         pn.pane.Alert(
@@ -512,13 +534,7 @@ class MappingGatedPanel:
                             margin=(0, 0, 8, 0),
                         ),
                         pn.pane.HTML(
-                            f"""
-                            <div style="font-size: 12px; color: #555; white-space: pre-wrap;
-                                        border: 1px solid #e1e1e1; border-radius: 6px;
-                                        padding: 8px; background: #fff;">
-                                {escape(str(exc))}
-                            </div>
-                            """,
+                            f"<pre style='white-space: pre-wrap'>{escape(str(exc))}</pre>",
                             sizing_mode="stretch_width",
                         ),
                         sizing_mode="stretch_both",
@@ -532,6 +548,19 @@ class MappingGatedPanel:
                         },
                     )
                 ]
+                return
+
+            if self._disposed:
+                try:
+                    if controller is not None and hasattr(controller, "dispose"):
+                        controller.dispose()
+                except Exception:
+                    pass
+                return
+
+            self._real_view = view
+            self._real_controller = controller
+            self.view[:] = [self._real_view]
 
         try:
             doc = pn.state.curdoc
@@ -540,16 +569,17 @@ class MappingGatedPanel:
 
         if doc is not None:
             try:
-                doc.add_timeout_callback(_finish, 50)
+                # Give the mapping modal / event callback a chance to finish first.
+                doc.add_timeout_callback(_finish_on_ui, 150)
                 return
             except Exception:
                 try:
-                    doc.add_next_tick_callback(_finish)
+                    doc.add_next_tick_callback(_finish_on_ui)
                     return
                 except Exception:
                     pass
 
-        _finish()
+        _finish_on_ui()
 
     def _on_dataset_mapping_updated(self, _topic: str, payload: Any) -> None:
         if not payload:
@@ -603,4 +633,13 @@ class MappingGatedPanel:
                     pass
 
         self._subscriptions.clear()
+
+        handle = getattr(self, "_real_load_handle", None)
+        if handle is not None and hasattr(handle, "cancel"):
+            try:
+                handle.cancel()
+            except Exception:
+                pass
+        self._real_load_handle = None
+
         self._dispose_real_controller()

@@ -1638,7 +1638,61 @@ class RecordBrowserPanel(param.Parameterized):
 
         return semantic_values
 
-    def _publish_focus_for_current_index(self):
+    def _publish_focus_for_current_index(self, *, _defer_if_restoring: bool = True):
+        """Publish focus for the current browser index.
+
+        During workspace restore/reconcile, defer the first focus event so linked
+        panels do not all start remote/data fetches while panels are still being
+        hydrated. Normal user-driven index changes still publish immediately.
+        """
+
+        def _workspace_restore_in_progress() -> bool:
+            try:
+                if bool(getattr(self.context, "_workspace_restore_in_progress", False)):
+                    return True
+            except Exception:
+                pass
+
+            workspace = getattr(self.context, "workspace", None)
+            try:
+                if workspace is not None and bool(getattr(workspace, "_restore_in_progress", False)):
+                    return True
+            except Exception:
+                pass
+
+            return False
+
+        if _defer_if_restoring and _workspace_restore_in_progress():
+            if bool(getattr(self, "_deferred_focus_publish_pending", False)):
+                return
+
+            self._deferred_focus_publish_pending = True
+
+            def _publish_later() -> None:
+                self._deferred_focus_publish_pending = False
+
+                if getattr(self, "_disposed", False):
+                    return
+
+                # Re-evaluate the current index when the callback fires. Do not
+                # publish a stale row captured during layout restore.
+                self._publish_focus_for_current_index(_defer_if_restoring=False)
+
+            try:
+                doc = pn.state.curdoc
+            except Exception:
+                doc = None
+
+            if doc is not None:
+                try:
+                    doc.add_timeout_callback(_publish_later, 750)
+                    return
+                except Exception:
+                    pass
+
+            _publish_later()
+            return
+
         selection = getattr(self.context, "selection", None)
         if selection is None:
             return

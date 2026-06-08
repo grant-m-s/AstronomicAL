@@ -2006,7 +2006,7 @@ class EuclidPlotClass(CustomPlotClass):
                 value=self.radius,
                 step=0.5,
                 start=1,
-                end=100,
+                end=80,
                 margin=0,
             )
         )

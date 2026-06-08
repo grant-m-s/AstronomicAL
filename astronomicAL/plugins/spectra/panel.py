@@ -277,7 +277,7 @@ class SpectraPanel:
 
         self.title_pane = pn.pane.HTML(
             f"<div style='font-size:14px;font-weight:700;padding-top:10px'>{self.source_label} Spectra</div>",
-            width=120,
+            width=100,
             height=44,
             sizing_mode="fixed",
             margin=(0, 2, 0, 0),
@@ -299,7 +299,7 @@ class SpectraPanel:
             value=1.0 if self.source != "EuclidSpec" else 0.5,
             start=0.01,
             step=0.5,
-            width=122,
+            width=80,
             height=44,
             sizing_mode="fixed",
             margin=(0, 2, 0, 0),
@@ -450,7 +450,7 @@ class SpectraPanel:
             margin=(0, 6, 0, 6),
             styles={
                 "display": "grid",
-                "grid-template-columns": "126px 216px 126px 78px 34px",
+                "grid-template-columns": "100px 215px 100px 75px 34px",
                 "gap": "4px",
                 "align-items": "start",
                 "box-sizing": "border-box",

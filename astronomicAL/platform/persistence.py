@@ -82,17 +82,10 @@ class WorkspacePersistence:
         *,
         strict: bool = False,
     ) -> list[dict[str, Any]]:
-        """
-        Destructive restore.
-
-        This is still useful for cold-start compatibility, tests, and explicit
-        reset-style workflows. User-driven layout loading should call
-        reconcile(...) instead.
-        """
-
+        """Destructive restore."""
         self._validate_snapshot(snapshot)
-
         issues: list[dict[str, Any]] = []
+        cleared_restore_flag = False
 
         persistence_debug_print(
             "restore start",
@@ -103,26 +96,36 @@ class WorkspacePersistence:
             },
         )
 
-        self._restore_datasets(snapshot.get("datasets", {}) or {})
-        issues.extend(self._restore_plugins(snapshot.get("plugins", {}) or {}, strict=strict))
-        issues.extend(
-            self._restore_workspace(
-                snapshot.get("workspace", {}) or {},
-                strict=strict,
+        self._set_workspace_restore_in_progress(True)
+
+        try:
+            self._restore_datasets(snapshot.get("datasets", {}) or {})
+            issues.extend(self._restore_plugins(snapshot.get("plugins", {}) or {}, strict=strict))
+            issues.extend(
+                self._restore_workspace(
+                    snapshot.get("workspace", {}) or {},
+                    strict=strict,
+                )
             )
-        )
-        self._restore_selection(snapshot.get("selection", {}) or {})
+            self._restore_selection(snapshot.get("selection", {}) or {})
 
-        self._publish_restore_completed(
-            topic="workspace.restore.completed",
-            snapshot=snapshot,
-            issues=issues,
-        )
+            self._set_workspace_restore_in_progress(False)
+            cleared_restore_flag = True
 
-        if strict and issues:
-            self._raise_strict_issues("Workspace restore completed with issues", issues)
+            self._publish_restore_completed(
+                topic="workspace.restore.completed",
+                snapshot=snapshot,
+                issues=issues,
+            )
 
-        return issues
+            if strict and issues:
+                self._raise_strict_issues("Workspace restore completed with issues", issues)
+
+            return issues
+
+        finally:
+            if not cleared_restore_flag:
+                self._set_workspace_restore_in_progress(False)
 
     def reconcile(
         self,
@@ -130,20 +133,10 @@ class WorkspacePersistence:
         *,
         strict: bool = False,
     ) -> list[dict[str, Any]]:
-        """
-        Reconcile the current workspace to match a saved layout.
-
-        Rules:
-        - panels not required by the layout are closed/disposed
-        - required panels already open are kept
-        - missing required panels are opened
-        - duplicate panel counts are matched by registration id
-        - saved grid geometry is applied after panel counts are correct
-        """
-
+        """Reconcile the current workspace to match a saved layout."""
         self._validate_snapshot(snapshot)
-
         issues: list[dict[str, Any]] = []
+        cleared_restore_flag = False
 
         persistence_debug_print(
             "reconcile start",
@@ -154,26 +147,51 @@ class WorkspacePersistence:
             },
         )
 
-        self._restore_datasets(snapshot.get("datasets", {}) or {})
-        issues.extend(self._restore_plugins(snapshot.get("plugins", {}) or {}, strict=strict))
-        issues.extend(
-            self._reconcile_workspace(
-                snapshot.get("workspace", {}) or {},
-                strict=strict,
+        self._set_workspace_restore_in_progress(True)
+
+        try:
+            self._restore_datasets(snapshot.get("datasets", {}) or {})
+            issues.extend(self._restore_plugins(snapshot.get("plugins", {}) or {}, strict=strict))
+            issues.extend(
+                self._reconcile_workspace(
+                    snapshot.get("workspace", {}) or {},
+                    strict=strict,
+                )
             )
-        )
-        self._restore_selection(snapshot.get("selection", {}) or {})
+            self._restore_selection(snapshot.get("selection", {}) or {})
 
-        self._publish_restore_completed(
-            topic="workspace.reconcile.completed",
-            snapshot=snapshot,
-            issues=issues,
-        )
+            self._set_workspace_restore_in_progress(False)
+            cleared_restore_flag = True
 
-        if strict and issues:
-            self._raise_strict_issues("Workspace reconcile completed with issues", issues)
+            self._publish_restore_completed(
+                topic="workspace.reconcile.completed",
+                snapshot=snapshot,
+                issues=issues,
+            )
 
-        return issues
+            if strict and issues:
+                self._raise_strict_issues("Workspace reconcile completed with issues", issues)
+
+            return issues
+
+        finally:
+            if not cleared_restore_flag:
+                self._set_workspace_restore_in_progress(False)
+
+    def _set_workspace_restore_in_progress(self, value: bool) -> None:
+        value = bool(value)
+
+        try:
+            setattr(self.context, "_workspace_restore_in_progress", value)
+        except Exception:
+            pass
+
+        workspace = getattr(self.context, "workspace", None)
+        if workspace is not None:
+            try:
+                setattr(workspace, "_restore_in_progress", value)
+            except Exception:
+                pass
 
     def _publish_restore_completed(
         self,

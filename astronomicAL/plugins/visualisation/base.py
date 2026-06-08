@@ -137,6 +137,11 @@ class BaseVisualisationPanel(param.Parameterized):
         self._has_completed_refresh = False
         self._last_completed_refresh_key = None
 
+        self._refresh_in_progress = False
+        self._refresh_again_after_current = False
+        self._workspace_restore_refresh_pending = False
+        self._restore_state_pending_refresh = False
+
         self.plot_pane = pn.pane.HoloViews(
             sizing_mode="stretch_both",
             height_policy="max",
@@ -204,6 +209,12 @@ class BaseVisualisationPanel(param.Parameterized):
             "selection.set.cleared",
         ):
             self._subscribe(topic, self._on_selection_event)
+
+        for topic in (
+            "workspace.restore.completed",
+            "workspace.reconcile.completed",
+        ):
+            self._subscribe(topic, self._on_workspace_restore_completed)
 
         self._watch_state(
             [
@@ -909,6 +920,7 @@ class BaseVisualisationPanel(param.Parameterized):
         )
 
     def _schedule_post_attach_rebind(self, delay_ms: int = 500) -> None:
+
         def _run():
             if getattr(self, "_disposed", False):
                 return
@@ -916,10 +928,24 @@ class BaseVisualisationPanel(param.Parameterized):
                 return
 
             self._post_attach_rebind_done = True
-            self._force_next_render_rebind = True
 
+            # If no render has completed yet, the normal panel.attach refresh will
+            # attach hooks. Do not create a duplicate render.
+            if not bool(getattr(self, "_has_completed_refresh", False)):
+                return
+
+            current_identity = self._current_refresh_identity()
+            if current_identity == getattr(self, "_last_completed_refresh_key", None):
+                print(
+                    "[AstronomicAL visualisation] skipping post-attach rebind "
+                    f"panel={type(self).__name__} identity_unchanged=True",
+                    flush=True,
+                )
+                return
+
+            self._force_next_render_rebind = True
             try:
-                self.refresh()
+                self._schedule_refresh(reason="panel.post_attach_rebind", delay_ms=0)
             finally:
                 self._force_next_render_rebind = False
 
@@ -943,11 +969,37 @@ class BaseVisualisationPanel(param.Parameterized):
             else:
                 delay_ms = 0
 
+        # During workspace restore/reconcile, do not let every restored panel start
+        # rendering immediately. Mark dirty and let workspace.*.completed trigger
+        # one refresh.
+        if self._workspace_restore_in_progress() and not reason_str.startswith("workspace."):
+            self._workspace_restore_refresh_pending = True
+            self._last_refresh_reason = reason_str
+            print(
+                "[AstronomicAL visualisation] deferring refresh during workspace restore "
+                f"panel={type(self).__name__} reason={reason_str!r}",
+                flush=True,
+            )
+            return
+
         self._refresh_request_count += 1
         now = time.perf_counter()
 
         if self._refresh_scheduled:
-            # Keep the latest reason for logging, but coalesce the actual work.
+            existing_reason = getattr(self, "_last_refresh_reason", None)
+
+            # Do not let restore_state rename/upgrade an already queued panel.attach
+            # render. In the updated timings the real refresh still appears as
+            # reason='restore_state' because restore_state coalesced over panel.attach.
+            if existing_reason == "panel.attach" and reason_str == "restore_state":
+                print(
+                    "[AstronomicAL visualisation] refresh already scheduled; "
+                    f"keeping existing reason={existing_reason!r}, "
+                    f"ignoring duplicate reason={reason_str!r}",
+                    flush=True,
+                )
+                return
+
             self._last_refresh_reason = reason_str
             print(
                 "[AstronomicAL visualisation] refresh already scheduled; "
@@ -1333,10 +1385,9 @@ class BaseVisualisationPanel(param.Parameterized):
         return result
 
     def _run_scheduled_refresh(self) -> None:
-
         reason = getattr(self, "_last_refresh_reason", None)
-        queued_for = 0.0
 
+        queued_for = 0.0
         try:
             requested_at = float(getattr(self, "_last_refresh_requested_at", 0.0) or 0.0)
             if requested_at:
@@ -1344,13 +1395,35 @@ class BaseVisualisationPanel(param.Parameterized):
         except Exception:
             queued_for = 0.0
 
+        self._refresh_scheduled = False
+        self._last_refresh_requested_at = None
+        self._last_refresh_reason = reason
+
+        if self._disposed:
+            return
+
+        # If an old attach/rebind callback finally fires after a completed render
+        # with the same state, skip it.
+        if (
+            reason in {"panel.attach", "panel.post_attach_rebind"}
+            and bool(getattr(self, "_has_completed_refresh", False))
+        ):
+            current_identity = self._current_refresh_identity()
+            if current_identity == getattr(self, "_last_completed_refresh_key", None):
+                print(
+                    "[AstronomicAL visualisation] skipping duplicate scheduled refresh "
+                    f"panel={type(self).__name__} "
+                    f"reason={reason!r} queued_for={queued_for:.2f}s",
+                    flush=True,
+                )
+                return
+
         if (
             reason == "panel.attach"
             and queued_for > float(STALE_ATTACH_REFRESH_SKIP_AFTER_SECONDS)
             and bool(getattr(self, "_has_completed_refresh", False))
         ):
             current_identity = self._current_refresh_identity()
-
             if current_identity == getattr(self, "_last_completed_refresh_key", None):
                 print(
                     "[AstronomicAL visualisation] skipping stale panel.attach refresh "
@@ -1358,21 +1431,13 @@ class BaseVisualisationPanel(param.Parameterized):
                     f"queued_for={queued_for:.2f}s",
                     flush=True,
                 )
-                self._refresh_scheduled = False
                 return
-
-        self._refresh_scheduled = False
-        self._last_refresh_requested_at = None
-        self._last_refresh_reason = None
 
         print(
             "[AstronomicAL visualisation] running scheduled refresh "
-            f"reason={reason!r} "
-            f"queued_for={queued_for:.2f}s" if queued_for is not None
-            else "[AstronomicAL visualisation] running scheduled refresh",
+            f"reason={reason!r} queued_for={queued_for:.2f}s",
             flush=True,
         )
-
         self.refresh()
 
     def _subscribe(self, topic: str, callback) -> None:
@@ -1488,12 +1553,41 @@ class BaseVisualisationPanel(param.Parameterized):
         return state
 
     def restore_state(self, state: Dict[str, Any]) -> None:
-        if isinstance(state, dict):
-            self.settings_visible = bool(state.get("settings_visible", False))
+        """Restore parameter state without rendering synchronously.
+
+        This is the critical startup fix. The previous implementation called
+        self.refresh() here, so PluginManager RESTORE_STATE_TIMING included full
+        13M-row density preparation/rendering.
+        """
+        if not isinstance(state, dict):
+            return
+
+        self.settings_visible = bool(state.get("settings_visible", False))
+
+        old_suppress = bool(getattr(self, "_suppress_state_refresh", False))
+        self._suppress_state_refresh = True
+        try:
             self.state.restore_state(state)
-            self._clear_prepared_cache()
-            self.refresh()
+        finally:
+            self._suppress_state_refresh = old_suppress
+
+        self._clear_prepared_cache()
+        self._restore_state_pending_refresh = True
+
+        try:
+            self.status_pane.object = "Restored; waiting to render…"
+        except Exception:
+            pass
+
+        try:
             self._apply_settings_visibility()
+        except Exception:
+            pass
+
+        # Do not force a restore_state render. panel() already schedules panel.attach.
+        # Keeping this as a dirty marker avoids an immediate heavy refresh from restore.
+        if not self._refresh_scheduled:
+            self._schedule_refresh(reason="restore_state", delay_ms=500)
 
     def _df(self):
         return _active_df(self.context)
@@ -1501,16 +1595,27 @@ class BaseVisualisationPanel(param.Parameterized):
     def _dataset_id(self) -> Optional[str]:
         return _active_dataset_id(self.context)
 
-    def _plot_data(self, *, require_y: bool) -> PreparedFrame:
+    def _plot_data(
+        self,
+        *,
+        require_y: bool,
+        include_row_ids: bool = True,
+    ) -> PreparedFrame:
         total_t0 = time.perf_counter()
 
         t0 = time.perf_counter()
-        key = prepared_cache_key(self.context, self.state, require_y=require_y)
+        key = prepared_cache_key(
+            self.context,
+            self.state,
+            require_y=require_y,
+            include_row_ids=include_row_ids,
+        )
         self._last_prepared_cache_key = key
         self._timing(
             "visualisation.plot_data.cache_key",
             time.perf_counter() - t0,
             require_y=require_y,
+            include_row_ids=include_row_ids,
         )
 
         print(
@@ -1526,6 +1631,7 @@ class BaseVisualisationPanel(param.Parameterized):
             "visualisation.plot_data.cache_lookup",
             time.perf_counter() - t0,
             require_y=require_y,
+            include_row_ids=include_row_ids,
             hit=cached is not None,
         )
 
@@ -1539,6 +1645,7 @@ class BaseVisualisationPanel(param.Parameterized):
                 "visualisation.plot_data.total",
                 time.perf_counter() - total_t0,
                 require_y=require_y,
+                include_row_ids=include_row_ids,
                 hit=True,
                 rows=len(cached.frame),
             )
@@ -1551,11 +1658,17 @@ class BaseVisualisationPanel(param.Parameterized):
         )
 
         t0 = time.perf_counter()
-        data = prepare_plot_frame(self.context, self.state, require_y=require_y)
+        data = prepare_plot_frame(
+            self.context,
+            self.state,
+            require_y=require_y,
+            include_row_ids=include_row_ids,
+        )
         self._timing(
             "visualisation.plot_data.prepare_plot_frame",
             time.perf_counter() - t0,
             require_y=require_y,
+            include_row_ids=include_row_ids,
             rows=len(data.frame),
         )
 
@@ -1565,6 +1678,7 @@ class BaseVisualisationPanel(param.Parameterized):
             "visualisation.plot_data.cache_set",
             time.perf_counter() - t0,
             require_y=require_y,
+            include_row_ids=include_row_ids,
             rows=len(data.frame),
         )
 
@@ -1572,6 +1686,7 @@ class BaseVisualisationPanel(param.Parameterized):
             "visualisation.plot_data.total",
             time.perf_counter() - total_t0,
             require_y=require_y,
+            include_row_ids=include_row_ids,
             hit=False,
             rows=len(data.frame),
         )
@@ -2929,6 +3044,41 @@ class BaseVisualisationPanel(param.Parameterized):
     def _event_topic(self, topic):
         return str(topic or "")
 
+    def _workspace_restore_in_progress(self) -> bool:
+        """Best-effort check used to defer heavy visualisation renders."""
+        try:
+            if bool(getattr(self.context, "_workspace_restore_in_progress", False)):
+                return True
+        except Exception:
+            pass
+
+        workspace = getattr(self.context, "workspace", None)
+        try:
+            if workspace is not None and bool(getattr(workspace, "_restore_in_progress", False)):
+                return True
+        except Exception:
+            pass
+
+        return False
+
+
+    def _on_workspace_restore_completed(self, topic, payload) -> None:
+        """Run one coalesced refresh after a workspace load/reconcile finishes."""
+        if self._disposed:
+            return
+
+        if not self._workspace_restore_refresh_pending and self._has_completed_refresh:
+            return
+
+        self._workspace_restore_refresh_pending = False
+        self._restore_state_pending_refresh = False
+
+        print(
+            "[AstronomicAL visualisation] workspace restore completed; "
+            f"scheduling one refresh panel={type(self).__name__} topic={topic!r}",
+            flush=True,
+        )
+        self._schedule_refresh(reason=f"{topic}.visualisation", delay_ms=100)
 
     def _uses_label_rendering(self) -> bool:
         color_by = str(getattr(self.state, "color_by", "") or "").strip().lower()
@@ -3411,11 +3561,27 @@ class BaseVisualisationPanel(param.Parameterized):
         self._schedule_refresh(reason=f"state.{name or 'unknown'}")
 
     def refresh(self) -> None:
+        if self._disposed:
+            return
+
+        if self._refresh_in_progress:
+            self._refresh_again_after_current = True
+            print(
+                "[AstronomicAL visualisation] refresh already in progress; "
+                f"coalescing follow-up panel={type(self).__name__}",
+                flush=True,
+            )
+            return
+
+        self._refresh_in_progress = True
+        self._refresh_again_after_current = False
+
         t0 = time.perf_counter()
         print(
             f"[AstronomicAL visualisation] refresh start panel={type(self).__name__}",
             flush=True,
         )
+
         try:
             render_t0 = time.perf_counter()
             self._render()
@@ -3431,6 +3597,8 @@ class BaseVisualisationPanel(param.Parameterized):
             )
         finally:
             total_dt = time.perf_counter() - t0
+            self._refresh_in_progress = False
+
             print(
                 f"[AstronomicAL visualisation] refresh end panel={type(self).__name__} "
                 f"duration={total_dt:.2f}s",
@@ -3441,6 +3609,10 @@ class BaseVisualisationPanel(param.Parameterized):
                 total_dt,
                 reason=getattr(self, "_last_refresh_reason", None),
             )
+
+        if self._refresh_again_after_current and not self._disposed:
+            self._refresh_again_after_current = False
+            self._schedule_refresh(reason="refresh.coalesced_followup", delay_ms=100)
 
     def _render(self) -> None:
         raise NotImplementedError
@@ -3571,7 +3743,7 @@ class BaseVisualisationPanel(param.Parameterized):
 
     def panel(self):
         if not self.show_header and not self.show_controls:
-            self._schedule_refresh(reason="panel.attach", delay_ms=50)
+            self._schedule_refresh(reason="panel.attach", delay_ms=350)
             return self.plot_pane
 
         self._ensure_settings_built()
@@ -3594,7 +3766,11 @@ class BaseVisualisationPanel(param.Parameterized):
             },
         )
 
-        self._schedule_refresh(reason="panel.attach", delay_ms=50)
+        # One initial render after attach. restore_state() is now state-only, so
+        # this is the first real render for restored panels.
+        self._schedule_refresh(reason="panel.attach", delay_ms=350)
+
+        # Keep the hook rebind path, but the method now skips duplicate renders.
         self._schedule_post_attach_rebind(delay_ms=500)
 
         return self._layout

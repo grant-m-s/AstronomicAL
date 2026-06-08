@@ -460,7 +460,7 @@ class EuclidCutoutPanel:
             value=5.0,
             start=0.1,
             step=0.5,
-            width=102,
+            width=100,
             height=42,
             sizing_mode="fixed",
             margin=(0, 2, 0, 0),
