@@ -254,40 +254,94 @@ class ImageVisualizationClass:
 
     @staticmethod
     def _clip_image(image, low, high, image_min=None, image_max=None):
-        if (low == 0) and (high == 1):
-            return image
+        arr = np.asarray(image, dtype=np.float32)
 
-        if image_min is None:
-            image_min = np.nanmin(image)
-        if image_max is None:
-            image_max = np.nanmax(image)
+        if (low == 0) and (high == 1):
+            return arr
+
+        image_min, image_max = ImageVisualizationClass._finite_min_max(
+            arr,
+            image_min=image_min,
+            image_max=image_max,
+        )
+
+        if image_min is None or image_max is None:
+            return np.zeros(arr.shape, dtype=np.float32)
 
         image_range = image_max - image_min
-        absolute_low = image_min + low * image_range
-        absolute_high = image_min + high * image_range
+        absolute_low = image_min + float(low) * image_range
+        absolute_high = image_min + float(high) * image_range
 
-        return np.clip(image, absolute_low, absolute_high)
+        return np.clip(arr, absolute_low, absolute_high)
+    
+    @staticmethod
+    def _finite_min_max(image, image_min=None, image_max=None):
+        arr = np.asarray(image, dtype=np.float32)
+        finite = arr[np.isfinite(arr)]
+
+        if finite.size == 0:
+            return None, None
+
+        if image_min is None:
+            image_min = float(finite.min())
+        else:
+            image_min = float(image_min)
+
+        if image_max is None:
+            image_max = float(finite.max())
+        else:
+            image_max = float(image_max)
+
+        if not np.isfinite(image_min) or not np.isfinite(image_max):
+            return None, None
+
+        if image_max <= image_min:
+            return None, None
+
+        return image_min, image_max
+
 
     @staticmethod
     def _scale_image(image, scale_method="minmax", image_min=None, image_max=None):
-        if scale_method.lower() == "minmax":
-            if image_min is None:
-                image_min = np.nanmin(image)
-            if image_max is None:
-                image_max = np.nanmax(image)
+        arr = np.asarray(image, dtype=np.float32)
+        scaled = np.zeros(arr.shape, dtype=np.float32)
+        finite_mask = np.isfinite(arr)
 
-            # BUG: RuntimeWarning: invalid value encountered in divide
-            scaled_image = (image - image_min) / (image_max - image_min)
-            scaled_image = np.clip(scaled_image, 0, 1)
+        if not finite_mask.any():
+            return scaled
 
-        elif scale_method.lower() == "expand":
-            mid_value = np.nanmedian(image)
-            sigma = np.nanstd(image)
-            scaled_image = np.where(image > mid_value + (1 * sigma), image * 2, image / 2)
-        else:
-            raise ValueError(f"Unknown scale_method: {scale_method}")
+        method = str(scale_method or "minmax").lower()
 
-        return scaled_image
+        if method == "minmax":
+            image_min, image_max = ImageVisualizationClass._finite_min_max(
+                arr,
+                image_min=image_min,
+                image_max=image_max,
+            )
+
+            if image_min is None or image_max is None:
+                return scaled
+
+            image_range = image_max - image_min
+
+            np.subtract(arr, image_min, out=scaled, where=finite_mask)
+            np.divide(scaled, image_range, out=scaled, where=finite_mask)
+            np.clip(scaled, 0.0, 1.0, out=scaled)
+            scaled[~finite_mask] = 0.0
+            return scaled
+
+        if method == "expand":
+            finite_values = arr[finite_mask]
+            mid_value = float(np.nanmedian(finite_values))
+            sigma = float(np.nanstd(finite_values))
+
+            if not np.isfinite(sigma) or sigma <= 0:
+                return ImageVisualizationClass._scale_image(arr, scale_method="minmax")
+
+            expanded = np.where(arr > mid_value + sigma, arr * 2.0, arr / 2.0)
+            return ImageVisualizationClass._scale_image(expanded, scale_method="minmax")
+
+        raise ValueError(f"Unknown scale_method: {scale_method}")
 
     @staticmethod
     def _unzip(value):

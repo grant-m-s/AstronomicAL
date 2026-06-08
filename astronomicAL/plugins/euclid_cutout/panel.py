@@ -21,44 +21,244 @@ from .service import DEFAULT_EUCLID_FILTERS, DEFAULT_SAVE_DIR, EuclidCutoutRunti
 PLUGIN_ID = "astro.euclid_cutout"
 RUNTIME_SERVICE_KEY = f"{PLUGIN_ID}.runtime"
 CUTOUT_ARTIFACT_TYPE = "astro.cutout.euclid"
-SETTINGS_HEIGHT = 118
+
+SETTINGS_HEIGHT = 210
+
+SETTING_INPUT_HEIGHT = 56
+SETTING_CHECKBOX_HEIGHT = 24
+SETTING_BUTTON_HEIGHT = 32
+SETTING_SLIDER_LABEL_HEIGHT = 16
+SETTING_SLIDER_HEIGHT = 30
+SETTING_SLIDER_BLOCK_HEIGHT = 50
+
+REQUEST_GROUP_HEIGHT = 202
+REQUEST_GROUP_HEIGHT_WITH_LOGIN = 380
+DISPLAY_GROUP_HEIGHT = 170
+CLIP_GROUP_HEIGHT = 310
+SETTINGS_CONTENT_HEIGHT = (
+    REQUEST_GROUP_HEIGHT
+    + DISPLAY_GROUP_HEIGHT
+    + CLIP_GROUP_HEIGHT
+    + 40
+)
+
+HEADER_HEIGHT = 52
+
+def _settings_overlay_styles(open_settings: bool) -> Dict[str, str]:
+    styles = {
+        "position": "absolute",
+        "top": "0px",
+        "left": "6px",
+        "right": "6px",
+        "height": f"{SETTINGS_HEIGHT}px",
+        "max-height": f"{SETTINGS_HEIGHT}px",
+        "overflow-y": "auto",
+        "overflow-x": "hidden",
+        "box-sizing": "border-box",
+        "padding": "0",
+        "margin": "0",
+        "background": "#FAFBFC",
+        "border": "1px solid #DFE1E6",
+        "border-radius": "6px",
+        "box-shadow": "0 6px 18px rgba(9, 30, 66, 0.18)",
+        "z-index": "30",
+        "transition": "none",
+    }
+
+    if open_settings:
+        styles.update(
+            {
+                "opacity": "1",
+                "visibility": "visible",
+                "pointer-events": "auto",
+                "transform": "translateY(0)",
+            }
+        )
+    else:
+        styles.update(
+            {
+                "opacity": "0",
+                "visibility": "hidden",
+                "pointer-events": "none",
+                "transform": "translateY(-4px)",
+            }
+        )
+
+    return styles
+
+def _set_fixed_height(widget: Any, height: int) -> None:
+    try:
+        widget.height = int(height)
+        widget.min_height = int(height)
+        widget.max_height = int(height)
+        widget.height_policy = "fixed"
+    except Exception:
+        pass
 
 
-def _style_widget(
+def _compact_input(
     widget: Any,
     *,
-    width: int = 145,
-    height: int = 40,
-    margin: Tuple[int, int, int, int] = (0, 6, 2, 6),
+    width: int = 120,
+    margin: Tuple[int, int, int, int] = (0, 6, 0, 0),
 ) -> Any:
-    """Apply compact settings-row styling used by plugin panels."""
     try:
         widget.width = width
-        widget.height = height
         widget.sizing_mode = "fixed"
         widget.margin = margin
+        _set_fixed_height(widget, SETTING_INPUT_HEIGHT)
     except Exception:
         pass
     return widget
 
 
-def _settings_box(*controls: Any) -> pn.FlexBox:
-    """Compact scrollable settings row matching the visualisation panels."""
-    return pn.FlexBox(
-        *controls,
+def _wide_input(
+    widget: Any,
+    *,
+    margin: Tuple[int, int, int, int] = (0, 0, 0, 0),
+) -> Any:
+    try:
+        widget.sizing_mode = "stretch_width"
+        widget.margin = margin
+        _set_fixed_height(widget, SETTING_INPUT_HEIGHT)
+    except Exception:
+        pass
+    return widget
+
+
+def _compact_checkbox(
+    widget: Any,
+    *,
+    width: int = 140,
+    margin: Tuple[int, int, int, int] = (0, 8, 0, 0),
+) -> Any:
+    try:
+        widget.width = width
+        widget.sizing_mode = "fixed"
+        widget.margin = margin
+        _set_fixed_height(widget, SETTING_CHECKBOX_HEIGHT)
+    except Exception:
+        pass
+    return widget
+
+
+def _compact_button(
+    widget: Any,
+    *,
+    width: int = 118,
+    margin: Tuple[int, int, int, int] = (0, 6, 0, 0),
+) -> Any:
+    try:
+        widget.width = width
+        widget.sizing_mode = "fixed"
+        widget.margin = margin
+        _set_fixed_height(widget, SETTING_BUTTON_HEIGHT)
+    except Exception:
+        pass
+    return widget
+
+
+def _section_title(text: str) -> pn.pane.HTML:
+    return pn.pane.HTML(
+        f"""
+        <div style="
+            font-size:11px;
+            font-weight:700;
+            text-transform:uppercase;
+            letter-spacing:0.04em;
+            color:#42526E;
+            line-height:14px;
+            white-space:nowrap;
+        ">{text}</div>
+        """,
         sizing_mode="stretch_width",
-        height_policy="fit",
-        margin=(0, 0, 0, 0),
+        height=18,
+        min_height=18,
+        max_height=18,
+        margin=(0, 0, 4, 0),
+    )
+
+
+def _settings_row(
+    *children: Any,
+    height: int,
+    margin: Tuple[int, int, int, int] = (0, 0, 6, 0),
+) -> pn.Row:
+    return pn.Row(
+        *children,
+        sizing_mode="stretch_width",
+        height=height,
+        min_height=height,
+        max_height=height,
+        height_policy="fixed",
+        margin=margin,
         styles={
-            "overflow": "visible",
-            "align-content": "flex-start",
-            "align-items": "flex-start",
-            "gap": "2px 6px",
-            "padding": "4px 6px 4px 6px",
-            "border-top": "1px solid #ddd",
-            "border-bottom": "1px solid #eee",
-            "background": "#fafafa",
             "box-sizing": "border-box",
+            "overflow": "hidden",
+        },
+    )
+
+
+def _settings_group(title: str, *children: Any, height: int) -> pn.Column:
+    return pn.Column(
+        _section_title(title),
+        *children,
+        sizing_mode="stretch_width",
+        height=height,
+        min_height=height,
+        max_height=height,
+        height_policy="fixed",
+        margin=(0, 0, 8, 0),
+        styles={
+            "border": "1px solid #DFE1E6",
+            "border-radius": "6px",
+            "background": "#FFFFFF",
+            "padding": "8px",
+            "box-sizing": "border-box",
+            "overflow": "hidden",
+        },
+    )
+
+
+def _slider_block(label: str, widget: Any) -> pn.Column:
+    # Use our own compact label. Bokeh RangeSlider's built-in label consumes
+    # too much vertical space in small plugin panels.
+    try:
+        widget.name = ""
+        widget.sizing_mode = "stretch_width"
+        widget.margin = (0, 0, 0, 0)
+        _set_fixed_height(widget, SETTING_SLIDER_HEIGHT)
+    except Exception:
+        pass
+
+    label_pane = pn.pane.HTML(
+        f"""
+        <div style="
+            font-size:12px;
+            line-height:14px;
+            color:#172B4D;
+            white-space:nowrap;
+        ">{label}: <b>0 .. 1</b></div>
+        """,
+        sizing_mode="stretch_width",
+        height=SETTING_SLIDER_LABEL_HEIGHT,
+        min_height=SETTING_SLIDER_LABEL_HEIGHT,
+        max_height=SETTING_SLIDER_LABEL_HEIGHT,
+        margin=(0, 0, 0, 0),
+    )
+
+    return pn.Column(
+        label_pane,
+        widget,
+        sizing_mode="stretch_width",
+        height=SETTING_SLIDER_BLOCK_HEIGHT,
+        min_height=SETTING_SLIDER_BLOCK_HEIGHT,
+        max_height=SETTING_SLIDER_BLOCK_HEIGHT,
+        height_policy="fixed",
+        margin=(0, 0, 4, 0),
+        styles={
+            "box-sizing": "border-box",
+            "overflow": "hidden",
         },
     )
 
@@ -76,17 +276,6 @@ def _fallback_spectrum_colour(index: int) -> str:
         "#999999",
     ]
     return colours[int(index) % len(colours)]
-
-
-def _small_label(text: str, *, width: int = 76) -> pn.pane.HTML:
-    return pn.pane.HTML(
-        f"<b style='font-size:11px; color:#555'>{text}</b>",
-        width=width,
-        height=34,
-        sizing_mode="fixed",
-        margin=(0, 2, 0, 6),
-    )
-
 
 @dataclass
 class _ResolvedTarget:
@@ -226,18 +415,19 @@ class EuclidCutoutPanel:
         self.status = pn.pane.Markdown(
             "",
             sizing_mode="stretch_width",
+            height_policy="fit",
             margin=(0, 8, 0, 8),
             styles={
                 "font-size": "12px",
                 "line-height": "1.25",
-                "max-height": "42px",
+                "max-height": "32px",
                 "overflow": "auto",
             },
         )
         self.target_status = pn.pane.HTML(
             "",
             sizing_mode="stretch_width",
-            height=34,
+            height=22,
             margin=(0, 8, 0, 8),
             styles={
                 "font-size": "12px",
@@ -259,36 +449,42 @@ class EuclidCutoutPanel:
             name="Filter",
             options=["Color", *DEFAULT_EUCLID_FILTERS],
             value="Color",
-            sizing_mode="stretch_width",
-            height=44,
+            width=116,
+            height=42,
+            sizing_mode="fixed",
             margin=(0, 2, 0, 0),
         )
+
         self.radius_input = pn.widgets.FloatInput(
             name="Radius [arcsec]",
             value=5.0,
             start=0.1,
             step=0.5,
-            width=118,
-            height=44,
+            width=102,
+            height=42,
             sizing_mode="fixed",
             margin=(0, 2, 0, 0),
         )
+
         self.stretch_input = pn.widgets.Select(
             name="Stretch",
             options=["Linear", "Sqrt", "Log", "Asinh", "PowerLaw"],
             value="Linear",
-            sizing_mode="stretch_width",
-            height=44,
+            width=116,
+            height=42,
+            sizing_mode="fixed",
             margin=(0, 2, 0, 0),
         )
+
         self.load_button = pn.widgets.Button(
             name="Load",
             button_type="primary",
-            width=74,
-            height=34,
+            width=66,
+            height=32,
             sizing_mode="fixed",
             margin=(14, 0, 0, 0),
         )
+
         self.settings_button = pn.widgets.Button(
             name="⚙",
             width=32,
@@ -298,111 +494,174 @@ class EuclidCutoutPanel:
             margin=(14, 0, 0, 0),
         )
 
-        self.environment = _style_widget(
+        self.environment = _compact_input(
             pn.widgets.Select(
                 name="Environment",
                 options=["PDR", "IDR", "OTF", "REG"],
                 value="PDR",
             ),
-            width=120,
+            width=104,
         )
-        self.user_input = _style_widget(pn.widgets.TextInput(name="Euclid username"), width=170)
-        self.password_input = _style_widget(pn.widgets.PasswordInput(name="Euclid password"), width=170)
-        self.credentials_file_input = _style_widget(
-            pn.widgets.TextInput(name="Credentials file", value="euclid_credentials.login"),
-            width=210,
+
+        self.user_input = _wide_input(
+            pn.widgets.TextInput(name="Euclid username"),
         )
-        self.login_column = pn.FlexBox(
+
+        self.password_input = _wide_input(
+            pn.widgets.PasswordInput(name="Euclid password"),
+        )
+
+        self.credentials_file_input = _wide_input(
+            pn.widgets.TextInput(
+                name="Credentials file",
+                value="euclid_credentials.login",
+            ),
+        )
+
+        self.login_column = pn.Column(
             self.user_input,
             self.password_input,
             self.credentials_file_input,
             sizing_mode="stretch_width",
-            height_policy="fit",
             visible=False,
-            margin=(0, 0, 0, 0),
-            styles={"gap": "2px 6px", "align-items": "flex-start"},
-        )
-        self.stretch_scale_input = _style_widget(
-            pn.widgets.FloatInput(name="Stretch scale", value=None, step=0.1, 
-                                  placeholder="default"),
-            width=120,
-        )
-        self.save_dir_input = _style_widget(
-            pn.widgets.TextInput(name="FITS cache directory", value=DEFAULT_SAVE_DIR),
-            width=210,
+            margin=(2, 0, 0, 0),
+            styles={
+                "gap": "2px",
+                "box-sizing": "border-box",
+            },
         )
 
-        self.show_source_coords = _style_widget(
+        self.stretch_scale_input = _compact_input(
+            pn.widgets.FloatInput(
+                name="Stretch scale",
+                value=None,
+                step=0.1,
+                placeholder="default",
+            ),
+            width=118,
+        )
+
+        self.save_dir_input = _wide_input(
+            pn.widgets.TextInput(
+                name="FITS cache directory",
+                value=DEFAULT_SAVE_DIR,
+            )
+        )
+
+        self.show_source_coords = _compact_checkbox(
             pn.widgets.Checkbox(name="Source marker", value=True),
-            width=120,
-            height=28,
-            margin=(10, 8, 0, 6),
+            width=126,
         )
-        self.show_scale = _style_widget(
+
+        self.show_scale = _compact_checkbox(
             pn.widgets.Checkbox(name="Scale bar", value=True),
-            width=95,
-            height=28,
-            margin=(10, 8, 0, 6),
+            width=96,
         )
-        self.show_spectrum_coords = _style_widget(
+
+        self.show_spectrum_coords = _compact_checkbox(
             pn.widgets.Checkbox(name="Spectrum markers", value=True),
-            width=145,
-            height=28,
-            margin=(10, 8, 0, 6),
+            width=142,
         )
-        self.auto_reload = _style_widget(
+
+        self.auto_reload = _compact_checkbox(
             pn.widgets.Checkbox(name="Auto reload", value=True),
-            width=105,
-            height=28,
-            margin=(10, 8, 0, 6),
+            width=112,
         )
 
-        self.contour_levels = _style_widget(
-            pn.widgets.IntInput(name="Contour levels", value=0, start=0, end=20),
-            width=125,
-        )
-        self.contour_base = _style_widget(
-            pn.widgets.FloatInput(name="Contour base", value=2.0, start=1.01, step=0.5),
-            width=125,
-        )
-        self.contour_exponent = _style_widget(
-            pn.widgets.FloatInput(name="Contour exponent", value=1.0, start=0.1, step=0.1),
-            width=145,
+        self.contour_levels = _compact_input(
+            pn.widgets.IntInput(
+                name="Contour levels",
+                value=0,
+                start=0,
+                end=20,
+            ),
+            width=112,
         )
 
-        self.clip_slider = _style_widget(
-            pn.widgets.RangeSlider(name="Clip", start=0, end=1, step=0.01, value=(0, 1)),
-            width=185,
+        self.contour_base = _compact_input(
+            pn.widgets.FloatInput(
+                name="Contour base",
+                value=2.0,
+                start=1.01,
+                step=0.5,
+            ),
+            width=112,
         )
-        self.rgb_clip_r = _style_widget(
-            pn.widgets.RangeSlider(name="Red clip", start=0, end=1, step=0.004, value=(0, 1), bar_color="red"),
-            width=185,
+
+        self.contour_exponent = _compact_input(
+            pn.widgets.FloatInput(
+                name="Contour exponent",
+                value=1.0,
+                start=0.1,
+                step=0.1,
+            ),
+            width=128,
         )
-        self.rgb_clip_g = _style_widget(
-            pn.widgets.RangeSlider(name="Green clip", start=0, end=1, step=0.004, value=(0, 1), bar_color="green"),
-            width=185,
+
+        self.clip_slider = pn.widgets.RangeSlider(
+            name="",
+            start=0,
+            end=1,
+            step=0.01,
+            value=(0, 1),
         )
-        self.rgb_clip_b = _style_widget(
-            pn.widgets.RangeSlider(name="Blue clip", start=0, end=1, step=0.004, value=(0, 1), bar_color="blue"),
-            width=185,
+
+        self.rgb_clip_r = pn.widgets.RangeSlider(
+            name="",
+            start=0,
+            end=1,
+            step=0.004,
+            value=(0, 1),
+            bar_color="red",
         )
-        self.gamma_r = _style_widget(pn.widgets.FloatInput(name="Gamma R", value=1.0, start=0.05, step=0.1), width=95)
-        self.gamma_g = _style_widget(pn.widgets.FloatInput(name="Gamma G", value=1.0, start=0.05, step=0.1), width=95)
-        self.gamma_b = _style_widget(pn.widgets.FloatInput(name="Gamma B", value=1.0, start=0.05, step=0.1), width=95)
-        
-        self.refresh_button = pn.widgets.Button(
-            name="Refresh display",
-            width=125,
-            height=34,
-            sizing_mode="fixed",
-            margin=(6, 6, 0, 6),
+
+        self.rgb_clip_g = pn.widgets.RangeSlider(
+            name="",
+            start=0,
+            end=1,
+            step=0.004,
+            value=(0, 1),
+            bar_color="green",
         )
-        self.clean_jobs_button = pn.widgets.Button(
-            name="Clean async jobs",
-            width=130,
-            height=34,
-            sizing_mode="fixed",
-            margin=(6, 6, 0, 6),
+
+        self.rgb_clip_b = pn.widgets.RangeSlider(
+            name="",
+            start=0,
+            end=1,
+            step=0.004,
+            value=(0, 1),
+            bar_color="blue",
+        )
+
+        self.gamma_r = _compact_input(
+            pn.widgets.FloatInput(name="Gamma R", value=1.0, start=0.05, step=0.1),
+            width=86,
+        )
+
+        self.gamma_g = _compact_input(
+            pn.widgets.FloatInput(name="Gamma G", value=1.0, start=0.05, step=0.1),
+            width=86,
+        )
+
+        self.gamma_b = _compact_input(
+            pn.widgets.FloatInput(name="Gamma B", value=1.0, start=0.05, step=0.1),
+            width=86,
+        )
+
+        self.refresh_button = _compact_button(
+            pn.widgets.Button(
+                name="Refresh display",
+                button_type="default",
+            ),
+            width=118,
+        )
+
+        self.clean_jobs_button = _compact_button(
+            pn.widgets.Button(
+                name="Clean async jobs",
+                button_type="default",
+            ),
+            width=124,
         )
 
         self.load_button.on_click(lambda _event: self.load_cutout(reason="button.load"))
@@ -431,94 +690,177 @@ class EuclidCutoutPanel:
         ]:
             widget.param.watch(lambda _event: self._refresh_display(), "value")
 
-    def _header(self) -> pn.GridBox:
-        return pn.GridBox(
+    def _header(self) -> pn.Row:
+        return pn.Row(
             self.filter_input,
             self.radius_input,
             self.stretch_input,
             self.load_button,
             self.settings_button,
-            ncols=5,
             sizing_mode="stretch_width",
-            height=48,
+            height=HEADER_HEIGHT,
+            min_height=HEADER_HEIGHT,
+            max_height=HEADER_HEIGHT,
+            height_policy="fixed",
             margin=(0, 6, 0, 6),
             styles={
-                "display": "grid",
-                "grid-template-columns": "minmax(100px, 1fr) 118px minmax(100px, 1fr) 78px 34px",
-                "gap": "4px",
-                "align-items": "start",
+                "height": f"{HEADER_HEIGHT}px",
+                "min-height": f"{HEADER_HEIGHT}px",
+                "max-height": f"{HEADER_HEIGHT}px",
+                "overflow": "hidden",
                 "box-sizing": "border-box",
+                "padding-top": "2px",
+                "background": "#ffffff",
+                "z-index": "2",
             },
         )
 
-    def _settings_controls(self) -> pn.FlexBox:
-        return _settings_box(
-            _small_label("Request", width=58),
-            self.environment,
-            self.stretch_scale_input,
-            self.save_dir_input,
+    def _settings_controls(self) -> pn.Column:
+        self.request_group = _settings_group(
+            "Request",
+            _settings_row(
+                self.environment,
+                self.stretch_scale_input,
+                height=SETTING_INPUT_HEIGHT,
+            ),
+            _settings_row(
+                self.save_dir_input,
+                height=SETTING_INPUT_HEIGHT,
+            ),
+            _settings_row(
+                self.refresh_button,
+                self.clean_jobs_button,
+                height=SETTING_BUTTON_HEIGHT,
+                margin=(0, 0, 0, 0),
+            ),
             self.login_column,
-            self.refresh_button,
-            self.clean_jobs_button,
-            _small_label("Display", width=58),
-            self.show_source_coords,
-            self.show_scale,
-            self.show_spectrum_coords,
-            self.auto_reload,
-            self.contour_levels,
-            self.contour_base,
-            self.contour_exponent,
-            _small_label("Clip", width=38),
-            self.clip_slider,
-            self.rgb_clip_r,
-            self.rgb_clip_g,
-            self.rgb_clip_b,
-            self.gamma_r,
-            self.gamma_g,
-            self.gamma_b,
+            height=(
+                REQUEST_GROUP_HEIGHT_WITH_LOGIN
+                if bool(getattr(self.login_column, "visible", False))
+                else REQUEST_GROUP_HEIGHT
+            ),
+        )
+
+        self.display_group = _settings_group(
+            "Display",
+            _settings_row(
+                self.show_source_coords,
+                self.show_scale,
+                height=SETTING_CHECKBOX_HEIGHT,
+                margin=(0, 0, 2, 0),
+            ),
+            _settings_row(
+                self.show_spectrum_coords,
+                self.auto_reload,
+                height=SETTING_CHECKBOX_HEIGHT,
+                margin=(0, 0, 8, 0),
+            ),
+            _settings_row(
+                self.contour_levels,
+                self.contour_base,
+                self.contour_exponent,
+                height=SETTING_INPUT_HEIGHT,
+                margin=(0, 0, 0, 0),
+            ),
+            height=DISPLAY_GROUP_HEIGHT,
+        )
+
+        self.clip_group = _settings_group(
+            "Colour / clip",
+            _slider_block("Clip", self.clip_slider),
+            _slider_block("Red clip", self.rgb_clip_r),
+            _slider_block("Green clip", self.rgb_clip_g),
+            _slider_block("Blue clip", self.rgb_clip_b),
+            _settings_row(
+                self.gamma_r,
+                self.gamma_g,
+                self.gamma_b,
+                height=SETTING_INPUT_HEIGHT,
+                margin=(0, 0, 0, 0),
+            ),
+            height=CLIP_GROUP_HEIGHT,
+        )
+
+
+        return pn.Tabs(
+            ("Request", self.request_group),
+            ("Display", self.display_group),
+            ("Colour", self.clip_group),
+            sizing_mode="stretch_width",
+            height=SETTINGS_CONTENT_HEIGHT,
+            dynamic=False,
+            margin=(0, 0, 0, 0),
         )
 
     def _ensure_settings_built(self) -> None:
         if self._settings_built:
             return
-        self.settings_pane[:] = [self._settings_controls()]
+
+        self._settings_view = self._settings_controls()
+        self.settings_pane.objects = [self._settings_view]
         self._settings_built = True
 
     def _apply_settings_visibility(self) -> None:
         self._ensure_settings_built()
-        self.settings_pane.visible = self.settings_visible
+
+        self.settings_pane.visible = True
+        self._settings_view.visible = True
+        self.settings_pane.styles = _settings_overlay_styles(bool(self.settings_visible))
+
         try:
-            self.settings_button.button_type = "primary" if self.settings_visible else "default"
+            self.settings_button.button_type = (
+                "primary" if self.settings_visible else "default"
+            )
         except Exception:
             pass
+
 
     def _toggle_settings(self, _event: Any = None) -> None:
         self.settings_visible = not self.settings_visible
         self._apply_settings_visibility()
 
     def _build_layout(self) -> None:
+        self.header = self._header()
+
         self.settings_pane = pn.Column(
             sizing_mode="stretch_width",
             height=SETTINGS_HEIGHT,
             min_height=SETTINGS_HEIGHT,
             max_height=SETTINGS_HEIGHT,
             height_policy="fixed",
-            visible=False,
+            visible=True,
             margin=(0, 0, 0, 0),
-            styles={
-                "height": f"{SETTINGS_HEIGHT}px",
-                "min-height": f"{SETTINGS_HEIGHT}px",
-                "max-height": f"{SETTINGS_HEIGHT}px",
-                "overflow-y": "auto",
-                "overflow-x": "hidden",
-                "box-sizing": "border-box",
-            },
+            styles=_settings_overlay_styles(False),
         )
+
+        self._settings_view = None
         self._ensure_settings_built()
         self._apply_settings_visibility()
-        self.layout = pn.Column(
-            self._header(),
+
+        self.settings_overlay_host = pn.Column(
             self.settings_pane,
+            sizing_mode="stretch_width",
+            height=0,
+            min_height=0,
+            max_height=0,
+            height_policy="fixed",
+            visible=True,
+            margin=(0, 0, 0, 0),
+            styles={
+                "position": "relative",
+                "height": "0px",
+                "min-height": "0px",
+                "max-height": "0px",
+                "overflow": "visible",
+                "z-index": "30",
+                "box-sizing": "border-box",
+                "padding": "0",
+                "margin": "0",
+            },
+        )
+
+        self.body = pn.Column(
+            self.settings_overlay_host,
             self.target_status,
             self.status,
             self.figure,
@@ -526,7 +868,26 @@ class EuclidCutoutPanel:
             height_policy="max",
             min_height=0,
             margin=(0, 0, 0, 0),
-            styles={"min-height": "0", "overflow": "hidden", "box-sizing": "border-box"},
+            styles={
+                "position": "relative",
+                "min-height": "0",
+                "overflow": "hidden",
+                "box-sizing": "border-box",
+            },
+        )
+
+        self.layout = pn.Column(
+            self.header,
+            self.body,
+            sizing_mode="stretch_both",
+            height_policy="max",
+            min_height=0,
+            margin=(0, 0, 0, 0),
+            styles={
+                "min-height": "0",
+                "overflow": "hidden",
+                "box-sizing": "border-box",
+            },
         )
 
     # ------------------------------------------------------------------
@@ -821,7 +1182,6 @@ class EuclidCutoutPanel:
         normalised = self._normalise_spectrum_coordinates(
             coords,
             fallback_source=str(source),
-            event_payload=payload,
         )
         if not normalised["ra"] or not normalised["dec"]:
             return
@@ -1440,9 +1800,20 @@ class EuclidCutoutPanel:
         reference_band = "VIS" if "VIS" in result.wcs else bands[0]
         target_wcs = result.wcs.get(reference_band)
 
-        preferred_color_bands = ["NIR_H", "NIR_Y", "VIS"]
-        color_bands = [band for band in preferred_color_bands if band in bands]
-        has_color = len(color_bands) == 3
+        preferred_color_band_sets = [
+            ["NIR_H", "NIR_Y", "VIS"], 
+            ["NIR_H", "NIR_J", "VIS"],
+            ["NIR_J", "NIR_Y", "VIS"],
+        ]
+
+        color_bands = None
+
+        for candidate in preferred_color_band_sets:
+            if all(band in bands for band in candidate):
+                color_bands = candidate
+                break
+
+        has_color = color_bands is not None
 
         self.image_container = ImageVisualizationClass(
             images=images,
@@ -1748,7 +2119,6 @@ class EuclidCutoutPanel:
         coords: Any,
         *,
         fallback_source: str,
-        event_payload: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, List[Any]]:
         if coords is None:
             coords = {}
@@ -1878,7 +2248,19 @@ class EuclidCutoutPanel:
 
     def _environment_changed(self, event: Any) -> None:
         try:
-            self.login_column.visible = self.environment.value != "PDR"
+            visible = self.environment.value != "PDR"
+            self.login_column.visible = visible
+
+            if hasattr(self, "request_group"):
+                height = (
+                    REQUEST_GROUP_HEIGHT_WITH_LOGIN
+                    if visible
+                    else REQUEST_GROUP_HEIGHT
+                )
+                self.request_group.height = height
+                self.request_group.min_height = height
+                self.request_group.max_height = height
+
         except Exception:
             pass
 
