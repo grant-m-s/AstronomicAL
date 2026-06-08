@@ -1731,6 +1731,58 @@ class PluginManager:
         )
         return self._normalise_panel_result(result)
 
+    def _load_local_package_plugin(self, package_name: str, package_dir: Path) -> ModuleType:
+        package_dir = package_dir.resolve()
+        plugin_path = package_dir / "plugin.py"
+
+        if not plugin_path.exists():
+            raise PluginLoadError(f"Local plugin package has no plugin.py: {package_dir}")
+
+        # Normalize defensively.
+        if package_name.endswith(".plugin"):
+            package_name = package_name.rsplit(".", 1)[0]
+
+        created_package = False
+
+        if package_name not in sys.modules:
+            package = ModuleType(package_name)
+            package.__file__ = str(package_dir / "__init__.py")
+            package.__package__ = package_name
+            package.__path__ = [str(package_dir)]
+
+            package_spec = importlib.machinery.ModuleSpec(
+                package_name,
+                loader=None,
+                is_package=True,
+            )
+            package_spec.submodule_search_locations = [str(package_dir)]
+            package.__spec__ = package_spec
+
+            sys.modules[package_name] = package
+            created_package = True
+
+        plugin_module_name = f"{package_name}.plugin"
+
+        spec = importlib.util.spec_from_file_location(
+            plugin_module_name,
+            str(plugin_path),
+        )
+        if spec is None or spec.loader is None:
+            raise PluginLoadError(f"Could not create import spec for {plugin_path}")
+
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[plugin_module_name] = module
+
+        try:
+            spec.loader.exec_module(module)
+        except Exception:
+            sys.modules.pop(plugin_module_name, None)
+            if created_package:
+                sys.modules.pop(package_name, None)
+            raise
+
+        return module
+
     def _load_module(self, candidate: PluginCandidate) -> ModuleType:
         if candidate.module is not None:
             return candidate.module
@@ -1744,19 +1796,26 @@ class PluginManager:
 
     def _load_module_from_path(self, module_name: str, path: Path) -> ModuleType:
         path = path.resolve()
+
         if not path.exists():
             raise PluginLoadError(f"Plugin file does not exist: {path}")
+
+        if path.name == "plugin.py" and path.parent.is_dir():
+            return self._load_local_package_plugin(module_name, path.parent)
+
         spec = importlib.util.spec_from_file_location(module_name, str(path))
         if spec is None or spec.loader is None:
             raise PluginLoadError(f"Could not create import spec for {path}")
 
         module = importlib.util.module_from_spec(spec)
         sys.modules[module_name] = module
+
         try:
             spec.loader.exec_module(module)
         except Exception:
             sys.modules.pop(module_name, None)
             raise
+
         return module
 
     def _read_manifest(
