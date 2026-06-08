@@ -67,6 +67,7 @@ def _load_layout_snapshot(
     issue_count = len(issues or [])
     if issue_count:
         notify_warning(f"Loaded layout with {issue_count} issue(s): {source_label}")
+        print(f"Loading Layout Issues: {issues}")
     else:
         notify_success(f"Loaded layout: {source_label}")
 

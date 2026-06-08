@@ -17,6 +17,72 @@ from astronomicAL.platform.modal_utils import (
 from astronomicAL.settings.data_selection import DataSelection
 from astronomicAL.platform.fits_import import register_fits_table
 
+_MODAL_SELECT_STYLESHEET = """
+:host {
+    color: #172B4D !important;
+}
+
+.bk-input-group {
+    margin: 0 !important;
+    color: #172B4D !important;
+}
+
+label {
+    color: #172B4D !important;
+}
+
+select,
+select.bk-input,
+.bk-input {
+    background-color: #ffffff !important;
+    color: #172B4D !important;
+    border: 1px solid #A6B1C2 !important;
+    border-radius: 4px !important;
+    box-shadow: none !important;
+    outline: none !important;
+    padding-right: 28px !important;
+}
+
+select:focus,
+select.bk-input:focus,
+.bk-input:focus {
+    background-color: #ffffff !important;
+    color: #172B4D !important;
+    border-color: #4C9AFF !important;
+    box-shadow: 0 0 0 2px rgba(76, 154, 255, 0.22) !important;
+}
+
+option {
+    background-color: #ffffff !important;
+    color: #172B4D !important;
+}
+"""
+
+_MODAL_CHECKBOX_STYLESHEET = """
+:host {
+    color: #172B4D !important;
+}
+
+.bk-input-group,
+label,
+span {
+    color: #172B4D !important;
+}
+
+input[type="checkbox"] {
+    background-color: #ffffff !important;
+}
+"""
+
+
+def _append_stylesheet(widget, stylesheet: str) -> None:
+    try:
+        stylesheets = list(getattr(widget, "stylesheets", []) or [])
+        if stylesheet not in stylesheets:
+            stylesheets.append(stylesheet)
+            widget.stylesheets = stylesheets
+    except Exception:
+        pass
 
 class DatasetHeaderController:
     """Global dataset header control.
@@ -39,7 +105,7 @@ class DatasetHeaderController:
             name="",
             options=OrderedDict({"No dataset loaded": ""}),
             value="",
-            width=260,
+            width=200,
             height=34,
             margin=(0, 4, 6, 8),
         )
@@ -767,9 +833,10 @@ class HeaderDataSelection(DataSelection):
             sizing_mode="fixed",
             width=380,
             margin=(12, 20, 0, 20),
-            css_classes=["al-modal-footer"],
+            css_classes=["al-dataset-modal-controls"],
             styles={
                 "overflow": "visible",
+                "color": "#172B4D",
             },
         )
     
@@ -789,11 +856,25 @@ class HeaderDataSelection(DataSelection):
         for widget in widgets:
             if widget is None:
                 continue
-
             try:
                 widget.margin = (0, 0, 0, 0)
             except Exception:
                 pass
+
+        for checkbox in (
+            getattr(self, "load_layout_widget", None),
+            getattr(self, "memory_optimisation_check", None),
+        ):
+            if checkbox is None:
+                continue
+            try:
+                checkbox.styles = {
+                    **dict(getattr(checkbox, "styles", {}) or {}),
+                    "color": "#172B4D",
+                }
+            except Exception:
+                pass
+            _append_stylesheet(checkbox, _MODAL_CHECKBOX_STYLESHEET)
 
         for select_widget in (
             getattr(self, "dataset_widget", None),
@@ -802,15 +883,20 @@ class HeaderDataSelection(DataSelection):
         ):
             if select_widget is None:
                 continue
-
             try:
                 select_widget.name = ""
                 select_widget.width = 320
                 select_widget.height = 34
                 select_widget.sizing_mode = "fixed"
                 select_widget.margin = (0, 0, 0, 0)
+                select_widget.styles = {
+                    **dict(getattr(select_widget, "styles", {}) or {}),
+                    "background": "#ffffff",
+                    "color": "#172B4D",
+                }
             except Exception:
                 pass
+            _append_stylesheet(select_widget, _MODAL_SELECT_STYLESHEET)
 
         for button in (
             getattr(self, "load_data_button", None),
@@ -818,7 +904,6 @@ class HeaderDataSelection(DataSelection):
         ):
             if button is None:
                 continue
-
             try:
                 button.height = 38
                 button.width = 220
