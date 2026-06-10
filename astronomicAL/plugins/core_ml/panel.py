@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional
 import pandas as pd
 import panel as pn
 
+from astronomicAL.platform.plugins.specs import ActionRequest
 
 def _load_sibling(stem: str):
     module_name = f"{__name__}.{stem}"
@@ -30,6 +31,7 @@ def _load_sibling(stem: str):
 
 _ml = _load_sibling("ml")
 _image_ml = _load_sibling("image_ml")
+_actions = _load_sibling("actions")
 
 TrainConfig = _ml.TrainConfig
 train_model = _ml.train_model
@@ -140,6 +142,17 @@ class MLWorkbenchPanel:
             height=260,
             sizing_mode="stretch_width",
         )
+
+        self.tuning_summary = pn.pane.Markdown(
+            "No tuning information yet.",
+            sizing_mode="stretch_width",
+        )
+        self.tuning_trials = pn.pane.DataFrame(
+            pd.DataFrame(),
+            height=260,
+            sizing_mode="stretch_width",
+        )
+
         self.artifacts = pn.pane.Markdown("")
 
         self.dataset.param.watch(lambda *_: self._load_columns(), "value")
@@ -149,8 +162,8 @@ class MLWorkbenchPanel:
         self.search.param.watch(lambda *_: self._update_feature_options(), "value")
         self.features.param.watch(lambda *_: self._update_feature_count(), "value")
 
-        self.refresh.on_click(lambda *_: self._load_columns())
-        self.refresh_models.on_click(lambda *_: self._load_models())
+        self.refresh.on_click(lambda *_: self._load_columns(prefer_active=True))
+        self.refresh_models.on_click(lambda *_: None if self._disposed else self._load_models())
         self.use_numeric.on_click(lambda *_: self._select_numeric())
         self.add_filtered.on_click(lambda *_: self._add_filtered())
         self.use_all.on_click(lambda *_: self._select_all())
@@ -166,7 +179,7 @@ class MLWorkbenchPanel:
             pass
 
         self._load_models()
-        self._load_columns()
+        self._load_columns(prefer_active=True)
         self._subscribe_to_model_definition_events()
 
         if restore_state:
@@ -255,7 +268,12 @@ class MLWorkbenchPanel:
         )
 
     def dispose(self) -> None:
-        """Called by WorkspaceManager when this panel/controller is closed."""
+        """Called by WorkspaceManager when this panel/controller is closed.
+
+        Keep context/registry references intact. Panel/Bokeh can still deliver
+        late widget events after disposal or during layout restore, so callbacks
+        must be able to fail safely instead of hitting None.list_models.
+        """
 
         self._disposed = True
 
@@ -264,6 +282,8 @@ class MLWorkbenchPanel:
             cancel = getattr(handle, "cancel", None)
             if callable(cancel):
                 cancel()
+            else:
+                self._cancel_active_job()
         except Exception:
             pass
 
@@ -278,9 +298,15 @@ class MLWorkbenchPanel:
         try:
             events = getattr(self.context, "events", None)
             unsubscribe = getattr(events, "unsubscribe", None)
-
             if callable(unsubscribe) and self._model_definition_subscription is not None:
-                unsubscribe(self._model_definition_subscription)
+                subs = self._model_definition_subscription
+                if not isinstance(subs, list):
+                    subs = [subs]
+                for sub in subs:
+                    try:
+                        unsubscribe(sub)
+                    except Exception:
+                        pass
         except Exception:
             pass
 
@@ -296,10 +322,6 @@ class MLWorkbenchPanel:
             self.artifacts.object = ""
         except Exception:
             pass
-
-        self.registry = None
-        self.context = None
-
 
     def _cancel_active_job(self) -> None:
         jobs = getattr(self.context, "jobs", None)
@@ -381,6 +403,14 @@ class MLWorkbenchPanel:
             pn.Tabs(
                 ("Metrics", pn.Column(self.metrics, sizing_mode="stretch_width")),
                 ("Prediction preview", pn.Column(self.predictions, sizing_mode="stretch_width")),
+                (
+                    "Optuna tuning",
+                    pn.Column(
+                        self.tuning_summary,
+                        self.tuning_trials,
+                        sizing_mode="stretch_width",
+                    ),
+                ),
                 ("Artifacts", pn.Column(self.artifacts, sizing_mode="stretch_width")),
                 dynamic=True,
                 sizing_mode="stretch_width",
@@ -405,7 +435,6 @@ class MLWorkbenchPanel:
 
     def get_state(self) -> Dict[str, Any]:
         return {
-            "dataset": self.dataset.value,
             "task": self.task.value,
             "target": self.target.value,
             "model": self.model.value,
@@ -416,19 +445,18 @@ class MLWorkbenchPanel:
             "test_size": self.test_size.value,
             "random_state": self.random_state.value,
             "stratify": self.stratify.value,
+            "follow_active_dataset": True,
         }
 
     def restore_state(self, state: Dict[str, Any]) -> None:
         if not isinstance(state, dict):
             return
 
-        if state.get("dataset") in self.dataset.options:
-            self.dataset.value = state["dataset"]
 
         if state.get("task") in self.task.options:
             self.task.value = state["task"]
 
-        self._load_columns()
+        self._load_columns(prefer_active=True)
 
         if state.get("target") in self.target.options:
             self.target.value = state["target"]
@@ -531,6 +559,44 @@ class MLWorkbenchPanel:
         self.predictions.height = 280
         self.artifacts.sizing_mode = "stretch_width"
 
+        self.tuning_summary.sizing_mode = "stretch_width"
+        self.tuning_trials.sizing_mode = "stretch_width"
+        self.tuning_trials.height = 280
+
+    def _active_dataset_id(self) -> Optional[str]:
+        try:
+            active_id = self.context.datasets.active_id()
+            return str(active_id) if active_id is not None else None
+        except Exception:
+            return None
+
+    def _choose_dataset_value(
+        self,
+        *,
+        options: List[str],
+        prefer_active: bool = False,
+        fallback: Optional[str] = None,
+    ) -> Optional[str]:
+        if not options:
+            return None
+
+        active_id = self._active_dataset_id()
+        current = self.dataset.value
+
+        if prefer_active and active_id in options:
+            return active_id
+
+        if current in options:
+            return current
+
+        if fallback in options:
+            return fallback
+
+        if active_id in options:
+            return active_id
+
+        return options[0]
+
     def _dataset_options(self) -> List[str]:
         try:
             return list(self.context.datasets.list_ids())
@@ -542,18 +608,19 @@ class MLWorkbenchPanel:
             return str(self.dataset.value)
         return str(self.context.datasets.active_id())
 
-    def _load_columns(self) -> None:
-        self.dataset.options = self._dataset_options()
+    def _load_columns(self, *, prefer_active: bool = False) -> None:
+        options = self._dataset_options()
+        self.dataset.options = options
 
-        if not self.dataset.value and self.dataset.options:
-            try:
-                active_id = self.context.datasets.active_id()
-                self.dataset.value = active_id if active_id in self.dataset.options else self.dataset.options[0]
-            except Exception:
-                self.dataset.value = self.dataset.options[0]
+        chosen = self._choose_dataset_value(
+            options=options,
+            prefer_active=prefer_active,
+        )
+
+        if chosen != self.dataset.value:
+            self.dataset.value = chosen
 
         columns = self._columns()
-
         self.target.options = columns
         self.image_column.options = columns
         self.mask_column.options = columns
@@ -643,16 +710,64 @@ class MLWorkbenchPanel:
         self._update_model_note()
         self._refresh_inputs_panel()
 
+    def _get_registry(self):
+        """Return the ML registry, reacquiring it from services if needed."""
+
+        if getattr(self, "registry", None) is not None:
+            return self.registry
+
+        context = getattr(self, "context", None)
+        services = getattr(context, "services", None)
+        get = getattr(services, "get", None)
+
+        if callable(get):
+            try:
+                self.registry = get("core.ml.registry")
+            except Exception:
+                self.registry = None
+
+        return self.registry
+
     def _load_models(self) -> None:
+        if getattr(self, "_disposed", False):
+            return
+
+        registry = self._get_registry()
+        if registry is None:
+            self.model.options = {}
+            self.model.value = None
+            self.model_note.object = (
+                "<div style='font-size:12px;color:#b00020'>"
+                "ML registry service is not available. Try closing and reopening "
+                "the ML Workbench, or check that the core.ml plugin registered "
+                "the core.ml.registry service."
+                "</div>"
+            )
+            return
+
         try:
-            _ml.sync_model_definitions_from_artifacts(self.context, self.registry)
-        except Exception:
-            pass
+            _ml.sync_model_definitions_from_artifacts(self.context, registry)
+        except Exception as exc:
+            self.model_note.object = (
+                "<div style='font-size:12px;color:#b00020'>"
+                f"Could not sync saved model definitions from artifacts: {exc}"
+                "</div>"
+            )
 
         previous = self.model.value
-        models = self.registry.list_models(task=self.task.value)
 
-        # The unified workbench currently trains tabular models and image classification models.
+        try:
+            models = registry.list_models(task=self.task.value)
+        except Exception as exc:
+            self.model.options = {}
+            self.model.value = None
+            self.model_note.object = (
+                "<div style='font-size:12px;color:#b00020'>"
+                f"Could not load model definitions: {exc}"
+                "</div>"
+            )
+            return
+
         supported = []
         for model in models:
             modality = getattr(model, "modality", "tabular")
@@ -661,17 +776,18 @@ class MLWorkbenchPanel:
             elif modality == "image" and model.task == "classification":
                 supported.append(model)
 
-        self.model.options = {
-            f"{model.title} [{model.framework}/{getattr(model, 'modality', 'tabular')}]": model.id
+        options = {
+            f"{model.title} [{model.framework}/{getattr(model, 'modality', 'tabular')}]: {model.id}": model.id
             for model in supported
         }
 
-        model_ids = [model.id for model in supported]
+        self.model.options = options
 
+        model_ids = list(options.values())
         if previous in model_ids:
             self.model.value = previous
-        elif supported:
-            self.model.value = supported[0].id
+        elif model_ids:
+            self.model.value = model_ids[0]
         else:
             self.model.value = None
 
@@ -679,8 +795,17 @@ class MLWorkbenchPanel:
         self._refresh_inputs_panel()
 
     def _selected_model(self):
+        if getattr(self, "_disposed", False):
+            return None
+
+        registry = self._get_registry()
+        if registry is None:
+            return None
+
         try:
-            return self.registry.get_model(str(self.model.value))
+            if not self.model.value:
+                return None
+            return registry.get_model(str(self.model.value))
         except Exception:
             return None
 
@@ -690,30 +815,59 @@ class MLWorkbenchPanel:
 
     def _update_model_note(self) -> None:
         model = self._selected_model()
-
         if model is None:
             self.model_note.object = (
-                "<div style='font-size:12px;opacity:0.75;margin-bottom:8px;'>"
+                "<div style='font-size:12px;color:#777'>"
                 "No compatible model definitions available. Create one in "
-                "<b>ML Model Builder</b>, then click refresh."
+                "ML Model Builder, then click refresh."
                 "</div>"
             )
             return
 
         params = getattr(model, "default_params", {}) or {}
         params_preview = ", ".join(f"{k}={v}" for k, v in list(params.items())[:8])
-
         if len(params) > 8:
             params_preview += ", ..."
 
+        tuning = self._selected_tuning(model)
+        if tuning:
+            search_space = tuning.get("search_space") or {}
+            tuned_params = ", ".join(search_space.keys()) or "none"
+            tuning_line = (
+                f"<br><b>Optuna:</b> enabled &nbsp; "
+                f"metric={tuning.get('metric', 'unknown')} &nbsp; "
+                f"trials={tuning.get('n_trials', 'unknown')} &nbsp; "
+                f"params={tuned_params}"
+            )
+        else:
+            tuning_line = "<br><b>Optuna:</b> disabled"
+
         self.model_note.object = (
-            "<div style='font-size:12px;opacity:0.8;margin:0 0 8px 0;'>"
-            f"<b>Framework:</b> {model.framework} &nbsp; "
-            f"<b>Task:</b> {model.task} &nbsp; "
-            f"<b>Modality:</b> {getattr(model, 'modality', 'tabular')}<br>"
-            f"<b>Hyperparameters:</b> {params_preview or 'defaults'}"
+            "<div style='font-size:12px;color:#555'>"
+            f"Framework: {model.framework} &nbsp; "
+            f"Task: {model.task} &nbsp; "
+            f"Modality: {getattr(model, 'modality', 'tabular')}<br>"
+            f"Hyperparameters: {params_preview or 'defaults'}"
+            f"{tuning_line}"
             "</div>"
         )
+
+    def _selected_tuning(self, model: Any = None) -> Dict[str, Any]:
+        model = model or self._selected_model()
+        if model is None:
+            return {}
+
+        metadata = getattr(model, "metadata", {}) or {}
+        tuning = metadata.get("tuning") or {}
+
+        if not isinstance(tuning, dict):
+            return {}
+        if not tuning.get("enabled"):
+            return {}
+        if not tuning.get("search_space"):
+            return {}
+
+        return dict(tuning)
 
     def _inputs_panel(self):
         modality = self._selected_modality()
@@ -828,6 +982,90 @@ class MLWorkbenchPanel:
             "</div>"
         )
 
+    def _submit_training_action(
+        self,
+        *,
+        action_fn: Any,
+        request: ActionRequest,
+        title: str,
+        key: str,
+    ) -> None:
+        jobs = getattr(self.context, "jobs", None)
+        submit = getattr(jobs, "submit", None)
+
+        if callable(submit):
+            self._active_job_key = key
+            submitted = submit(
+                action_fn,
+                title=title,
+                key=key,
+                on_done=self._on_train_done,
+                on_error=self._on_train_error,
+                context=self.context,
+                request=request,
+            )
+            self._active_job_handle = submitted
+            self._active_job_id = (
+                getattr(submitted, "job_id", None)
+                or getattr(submitted, "id", None)
+            )
+            return
+
+        result = action_fn(context=self.context, request=request)
+        self._on_train_done(result)
+
+    def _tabular_action_job_key(self, request: ActionRequest) -> str:
+        params = request.params or {}
+        features_key = ",".join(params.get("feature_columns") or request.columns or [])
+        return (
+            f"core.ml.action.train_tabular:{params.get('dataset_id')}:{params.get('task')}:"
+            f"{params.get('target_column')}:{features_key}:{params.get('model_id')}:"
+            f"{params.get('validation_size')}:{params.get('test_size')}:{params.get('random_state')}"
+        )
+
+    def _image_action_job_key(self, request: ActionRequest) -> str:
+        params = request.params or {}
+        return (
+            f"core.ml.action.train_image:{params.get('dataset_id')}:classification:"
+            f"{params.get('image_column')}:{params.get('target_column')}:{params.get('model_id')}:"
+            f"{params.get('validation_size')}:{params.get('test_size')}:{params.get('random_state')}"
+        )
+
+    def _format_tuning_summary(self, tuning: Dict[str, Any]) -> str:
+        if not tuning or not tuning.get("enabled"):
+            return "Optuna tuning was not enabled for this run."
+
+        trials = list(tuning.get("trials") or [])
+        completed = [
+            trial for trial in trials
+            if trial.get("value") is not None
+            and str(trial.get("state", "complete")).lower() == "complete"
+        ]
+
+        best_params = tuning.get("best_params") or {}
+        best_value = tuning.get("best_value")
+
+        lines = [
+            "### Optuna tuning",
+            f"- **Backend:** `{tuning.get('backend', 'optuna')}`",
+            f"- **Metric:** `{tuning.get('metric', '')}`",
+            f"- **Trials completed:** `{len(completed)}` / `{tuning.get('n_trials') or len(trials)}`",
+        ]
+
+        if best_value is not None:
+            lines.append(f"- **Best value:** `{best_value}`")
+
+        if best_params:
+            lines.append("- **Best parameters:**")
+            for key, value in best_params.items():
+                lines.append(f"  - `{key}` = `{value}`")
+
+        message = tuning.get("message")
+        if message:
+            lines.append(f"- **Latest message:** {message}")
+
+        return "\n".join(lines)
+
     def _train(self, *_: Any) -> None:
         try:
             model = self._selected_model()
@@ -835,89 +1073,88 @@ class MLWorkbenchPanel:
                 raise ValueError("Choose a model definition.")
 
             modality = str(getattr(model, "modality", "tabular"))
-
             run_id = uuid.uuid4().hex
             training_log_artifact_id = self._create_training_log_stub(run_id, model)
-            self._active_training_log_artifact_id = training_log_artifact_id
 
+            self._active_training_log_artifact_id = training_log_artifact_id
             self._set_training_running(True)
             self.status.alert_type = "info"
-            self.status.object = "Training started..."
+
+            tuning = self._selected_tuning(model)
+            if tuning:
+                self.status.object = (
+                    "Training started. Optuna tuning is enabled; the Training Curves "
+                    "panel will update as trials finish."
+                )
+            else:
+                self.status.object = "Training started..."
 
             if modality == "tabular":
-                result_fn = train_model
-                config = TrainConfig(
-                    dataset_id=self._dataset_id(),
-                    task=str(self.task.value),
-                    target_column=str(self.target.value),
-                    feature_columns=list(self.features.value or []),
-                    model_id=str(self.model.value),
-                    test_size=float(self.test_size.value),
-                    validation_size=float(self.validation_size.value),
-                    random_state=int(self.random_state.value),
-                    stratify=bool(self.stratify.value),
-                    run_id=run_id,
-                    training_log_artifact_id=training_log_artifact_id,
-                )
-                job_title = "Train tabular ML model"
-                job_key = self._tabular_job_key(config)
+                feature_columns = list(self.features.value or [])
+                if not feature_columns:
+                    raise ValueError("Choose at least one feature column.")
 
-            elif modality == "image" and model.task == "classification":
+                request = ActionRequest(
+                    dataset_id=self._dataset_id(),
+                    columns=feature_columns,
+                    params={
+                        "dataset_id": self._dataset_id(),
+                        "target_column": str(self.target.value),
+                        "feature_columns": feature_columns,
+                        "model_id": str(self.model.value),
+                        "task": str(self.task.value),
+                        "test_size": float(self.test_size.value),
+                        "validation_size": float(self.validation_size.value),
+                        "random_state": int(self.random_state.value),
+                        "stratify": bool(self.stratify.value),
+                        "run_id": run_id,
+                        "training_log_artifact_id": training_log_artifact_id,
+                    },
+                    origin="core.ml.workbench",
+                )
+
+                self._submit_training_action(
+                    action_fn=_actions.train_tabular_action,
+                    request=request,
+                    title="Train tabular ML model",
+                    key=self._tabular_action_job_key(request),
+                )
+                return
+
+            if modality == "image" and model.task == "classification":
                 if not self.image_column.value:
                     raise ValueError("Choose an image column.")
 
-                result_fn = train_image_model
-                config = ImageTrainConfig(
+                request = ActionRequest(
                     dataset_id=self._dataset_id(),
-                    image_column=str(self.image_column.value),
-                    target_column=str(self.target.value),
-                    model_id=str(self.model.value),
-                    validation_size=float(self.validation_size.value),
-                    test_size=float(self.test_size.value),
-                    random_state=int(self.random_state.value),
-                    stratify=bool(self.stratify.value),
-                    run_id=run_id,
-                    training_log_artifact_id=training_log_artifact_id,
-                )
-                job_title = "Train image ML model"
-                job_key = self._image_job_key(config)
-
-            else:
-                raise ValueError(
-                    f"Training is not implemented yet for modality `{modality}` "
-                    f"and task `{model.task}`."
+                    columns=[str(self.image_column.value), str(self.target.value)],
+                    params={
+                        "dataset_id": self._dataset_id(),
+                        "image_column": str(self.image_column.value),
+                        "target_column": str(self.target.value),
+                        "model_id": str(self.model.value),
+                        "test_size": float(self.test_size.value),
+                        "validation_size": float(self.validation_size.value),
+                        "random_state": int(self.random_state.value),
+                        "stratify": bool(self.stratify.value),
+                        "run_id": run_id,
+                        "training_log_artifact_id": training_log_artifact_id,
+                    },
+                    origin="core.ml.workbench",
                 )
 
-            jobs = getattr(self.context, "jobs", None)
-            submit = getattr(jobs, "submit", None)
-
-            if callable(submit):
-                self._active_job_key = job_key
-
-                submitted = submit(
-                    result_fn,
-                    title=job_title,
-                    key=job_key,
-                    on_done=self._on_train_done,
-                    on_error=self._on_train_error,
-                    context=self.context,
-                    registry=self.registry,
-                    config=config,
+                self._submit_training_action(
+                    action_fn=_actions.train_image_classifier_action,
+                    request=request,
+                    title="Train image ML model",
+                    key=self._image_action_job_key(request),
                 )
+                return
 
-                self._active_job_handle = submitted
-                self._active_job_id = (
-                    getattr(submitted, "job_id", None)
-                    or getattr(submitted, "id", None)
-                )
-
-            else:
-                result = result_fn(
-                    context=self.context,
-                    registry=self.registry,
-                    config=config,
-                )
-                self._on_train_done(result)
+            raise ValueError(
+                f"Training is not implemented yet for modality `{modality}` "
+                f"and task `{model.task}`."
+            )
 
         except Exception as exc:
             self._on_train_error(exc)
@@ -940,11 +1177,22 @@ class MLWorkbenchPanel:
     def _create_training_log_stub(self, run_id: str, model: Any) -> Optional[str]:
         params = getattr(model, "default_params", {}) or {}
         modality = str(getattr(model, "modality", "tabular"))
+        tuning = self._selected_tuning(model)
+
+        if tuning:
+            message = (
+                "Training queued. Optuna tuning will run before the final model "
+                "is trained with the best parameters."
+            )
+            status = "queued"
+        else:
+            message = "Training queued. Waiting for worker..."
+            status = "queued"
 
         payload = {
             "run_id": run_id,
-            "status": "queued",
-            "message": "Training queued. Waiting for worker...",
+            "status": status,
+            "message": message,
             "task": str(model.task),
             "modality": modality,
             "model_id": str(self.model.value),
@@ -955,7 +1203,11 @@ class MLWorkbenchPanel:
             "feature_columns": list(self.features.value or []) if modality == "tabular" else [],
             "image_column": str(self.image_column.value) if modality == "image" else None,
             "params": params,
-            "optimize_metric": params.get("optimize_metric", "val_loss"),
+            "tuning": tuning,
+            "tuning_trials": [],
+            "tuning_best_params": {},
+            "tuning_best_value": None,
+            "optimize_metric": tuning.get("metric") or params.get("optimize_metric", "val_loss"),
             "best_epoch": None,
             "last_epoch": None,
             "epochs": [],
@@ -964,7 +1216,6 @@ class MLWorkbenchPanel:
         }
 
         artifact_id = None
-
         try:
             artifact_id = self.context.artifacts.put(
                 "ml.training_log",
@@ -981,8 +1232,9 @@ class MLWorkbenchPanel:
                 {
                     "artifact_id": artifact_id,
                     "run_id": run_id,
-                    "status": "queued",
-                    "message": payload["message"],
+                    "status": status,
+                    "message": message,
+                    "tuning_enabled": bool(tuning),
                 },
             )
 
@@ -995,42 +1247,120 @@ class MLWorkbenchPanel:
         if callable(publish):
             publish(topic, payload)
 
+    def _schedule_ui_update(self, callback) -> None:
+        """Run a UI update safely on the next Bokeh/Panel tick when available."""
+
+        try:
+            doc = pn.state.curdoc
+            if doc is not None:
+                doc.add_next_tick_callback(callback)
+                return
+        except Exception:
+            pass
+
+        callback()
+
     def _subscribe_to_model_definition_events(self) -> None:
         events = getattr(self.context, "events", None)
         subscribe = getattr(events, "subscribe", None)
-
         if not callable(subscribe):
             return
 
-        try:
-            self._model_definition_subscription = subscribe(
-                "ml.model_definition.created",
-                self._on_model_definition_event,
-                owner_label="ML Workbench",
-                owner_kind="panel",
-            )
-        except Exception:
-            self._model_definition_subscription = None
+        self._model_definition_subscription = []
+
+        for topic in [
+            "ml.model_definition.created",
+            "ml.model_definition.updated",
+            "ml.registry.changed",
+        ]:
+            try:
+                sub = subscribe(
+                    topic,
+                    self._on_model_definition_event,
+                    owner_label="ML Workbench",
+                    owner_kind="panel",
+                )
+                self._model_definition_subscription.append(sub)
+            except Exception:
+                pass
 
     def _on_model_definition_event(self, topic: str, payload: Any) -> None:
-        self._load_models()
+        if getattr(self, "_disposed", False):
+            return
+
+        payload = payload if isinstance(payload, dict) else {}
+        model_definition_id = payload.get("model_definition_id")
+        task = payload.get("task")
+
+        def refresh_and_select() -> None:
+            if getattr(self, "_disposed", False):
+                return
+
+            # If the new model belongs to a different task, switch the workbench
+            # to that task before refreshing. Otherwise list_models(task=...)
+            # will hide the newly saved model.
+            if task and task in self.task.options and self.task.value != task:
+                self.task.value = task
+                return  # task watcher will call _load_models()
+
+            self._load_models()
+
+            if model_definition_id:
+                try:
+                    valid_ids = set(self.model.options.values())
+                    if model_definition_id in valid_ids:
+                        self.model.value = model_definition_id
+                        self._update_model_note()
+                except Exception:
+                    pass
+
+        self._schedule_ui_update(refresh_and_select)
 
     def _on_train_done(self, result: Dict[str, Any]) -> None:
         if self._disposed:
             return
 
+        result = result or {}
         self._clear_active_training_state()
 
         self.status.alert_type = "success"
         self.status.object = f"Training complete. Run `{result.get('run_id')}`."
 
-        self.metrics.object = result.get("metrics", {})
+        tuning = result.get("tuning") or {}
+        self.metrics.object = {
+            "metrics": result.get("metrics", {}),
+            "tuning": {
+                key: value
+                for key, value in tuning.items()
+                if key != "trials"
+            },
+        }
+
         self.predictions.object = pd.DataFrame(result.get("prediction_preview", []))
 
-        artifact_ids = result.get("artifact_ids", {})
+        self.tuning_summary.object = self._format_tuning_summary(tuning)
+        self.tuning_trials.object = pd.DataFrame(tuning.get("trials") or [])
+
+        artifact_ids = result.get("artifact_ids", {}) or {}
+        model_artifact_id = result.get("model_artifact_id")
+        if model_artifact_id and "model" not in artifact_ids:
+            artifact_ids["model"] = model_artifact_id
+
         lines = ["### Created artifacts"]
-        for name, artifact_id in artifact_ids.items():
-            lines.append(f"- `{name}`: `{artifact_id}`")
+        if artifact_ids:
+            for name, artifact_id in artifact_ids.items():
+                lines.append(f"- `{name}`: `{artifact_id}`")
+        else:
+            lines.append("No artifact ids were returned.")
+
+        if result.get("durable_model"):
+            lines.append("")
+            lines.append("Durable model sidecar saved for the `ml.model` artifact.")
+
+        if tuning.get("enabled"):
+            lines.append("")
+            lines.append("Optuna tuning details are available in the **Optuna tuning** tab and the **ML Training Curves** panel.")
+
         self.artifacts.object = "\n".join(lines)
 
         if self.root_tabs is not None:

@@ -280,6 +280,110 @@ def train_image_model(
         "artifact_ids": artifact_ids,
     }
 
+def _make_torch_optimizer(torch_module: Any, parameters: Any, params: Dict[str, Any]):
+    """Create an optimizer from image-model params."""
+
+    trainable_params = [p for p in parameters if getattr(p, "requires_grad", True)]
+
+    if not trainable_params:
+        raise ValueError("No trainable parameters are available for the optimizer.")
+
+    optimizer_name = str(params.get("optimizer", "adamw") or "adamw").lower()
+    learning_rate = float(params.get("learning_rate", 3e-4))
+    weight_decay = float(params.get("weight_decay", 1e-4))
+    momentum = float(params.get("momentum", 0.9))
+
+    if optimizer_name == "adamw":
+        return torch_module.optim.AdamW(
+            trainable_params,
+            lr=learning_rate,
+            weight_decay=weight_decay,
+        )
+
+    if optimizer_name == "adam":
+        return torch_module.optim.Adam(
+            trainable_params,
+            lr=learning_rate,
+            weight_decay=weight_decay,
+        )
+
+    if optimizer_name == "sgd":
+        return torch_module.optim.SGD(
+            trainable_params,
+            lr=learning_rate,
+            momentum=momentum,
+            nesterov=bool(params.get("nesterov", True)),
+            weight_decay=weight_decay,
+        )
+
+    if optimizer_name == "rmsprop":
+        return torch_module.optim.RMSprop(
+            trainable_params,
+            lr=learning_rate,
+            momentum=momentum,
+            weight_decay=weight_decay,
+        )
+
+    raise ValueError(
+        f"Unsupported optimizer `{optimizer_name}`. "
+        "Use adamw, adam, sgd, or rmsprop."
+    )
+
+
+def _make_classification_loss(nn_module: Any, params: Dict[str, Any]):
+    """Create a classification loss from image-model params."""
+
+    loss_name = str(params.get("loss_function", "cross_entropy") or "cross_entropy").lower()
+    label_smoothing = float(params.get("label_smoothing", 0.0) or 0.0)
+    focal_gamma = float(params.get("focal_gamma", 2.0) or 2.0)
+
+    if loss_name in {"cross_entropy", "ce"}:
+        return nn_module.CrossEntropyLoss()
+
+    if loss_name in {
+        "label_smoothing_cross_entropy",
+        "label_smoothing",
+        "smooth_ce",
+    }:
+        try:
+            return nn_module.CrossEntropyLoss(label_smoothing=label_smoothing)
+        except TypeError:
+            # Older torch versions may not expose label_smoothing.
+            return nn_module.CrossEntropyLoss()
+
+    if loss_name in {"focal_loss", "focal"}:
+        return _FocalLoss(gamma=focal_gamma, label_smoothing=label_smoothing)
+
+    raise ValueError(
+        f"Unsupported image classification loss `{loss_name}`. "
+        "Use cross_entropy, label_smoothing_cross_entropy, or focal_loss."
+    )
+
+
+class _FocalLoss:
+    """Small focal-loss callable for classification.
+
+    Kept dependency-light and local to this plugin. It behaves like an nn.Module
+    for the training loop's purposes.
+    """
+
+    def __init__(self, *, gamma: float = 2.0, label_smoothing: float = 0.0) -> None:
+        self.gamma = float(gamma)
+        self.label_smoothing = float(label_smoothing)
+
+    def __call__(self, logits: Any, targets: Any):
+        import torch
+        import torch.nn.functional as F
+
+        cross_entropy = F.cross_entropy(
+            logits,
+            targets,
+            reduction="none",
+            label_smoothing=self.label_smoothing,
+        )
+        pt = torch.exp(-cross_entropy)
+        loss = ((1.0 - pt) ** self.gamma) * cross_entropy
+        return loss.mean()
 
 def _train_resnet_classifier(
     *,
@@ -405,12 +509,8 @@ def _train_resnet_classifier(
         )
         model.to(device)
 
-        criterion = nn.CrossEntropyLoss()
-        optimizer = torch.optim.AdamW(
-            [p for p in model.parameters() if p.requires_grad],
-            lr=learning_rate,
-            weight_decay=weight_decay,
-        )
+        criterion = _make_classification_loss(nn, params)
+        optimizer = _make_torch_optimizer(torch, model.parameters(), params)
 
         best_score = None
         best_epoch = 0
@@ -560,7 +660,7 @@ def _train_resnet_classifier(
                 "image_size": image_size,
                 "class_names": class_names,
                 "device": str(device),
-                "pretrained_requested": bool(params.get("pretrained", True)),
+                "pretrained_requested": bool(params.get("pretrained", False)),
                 "pretrained_loaded": bool(pretrained_loaded),
             },
         }
@@ -625,7 +725,7 @@ def _build_resnet_model(
     import torch.nn as nn
     from torchvision import models
 
-    pretrained = bool(params.get("pretrained", True))
+    pretrained = bool(params.get("pretrained", False))
     freeze_backbone = bool(params.get("freeze_backbone", False))
 
     arch = "resnet50" if "resnet50" in template_id else "resnet18"
@@ -676,7 +776,15 @@ def _build_resnet_model(
                 param.requires_grad = False
 
     in_features = model.fc.in_features
-    model.fc = nn.Linear(in_features, num_classes)
+    dropout = float(params.get("dropout", 0.0) or 0.0)
+
+    if dropout > 0:
+        model.fc = nn.Sequential(
+            nn.Dropout(p=max(0.0, min(0.95, dropout))),
+            nn.Linear(in_features, num_classes),
+        )
+    else:
+        model.fc = nn.Linear(in_features, num_classes)
 
     return model, pretrained_loaded
 
@@ -1430,12 +1538,8 @@ def _train_resnet_trial(
         )
         model.to(device)
 
-        criterion = nn.CrossEntropyLoss()
-        optimizer = torch.optim.AdamW(
-            [p for p in model.parameters() if p.requires_grad],
-            lr=learning_rate,
-            weight_decay=weight_decay,
-        )
+        criterion = _make_classification_loss(nn, params)
+        optimizer = _make_torch_optimizer(torch, model.parameters(), params)
 
         best_score = None
         best_metrics: Dict[str, float] = {}
