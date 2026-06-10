@@ -891,15 +891,11 @@ class HuggingFaceDatasetService:
             return ""
 
         with PILImage.open(BytesIO(raw)) as image:
-            image = ImageOps.exif_transpose(image)
-            if image.mode not in {"RGB", "L"}:
-                image = image.convert("RGB")
-            image.thumbnail((int(max_size), int(max_size)))
-
-            buffer = BytesIO()
-            image.save(buffer, format="JPEG")
-            encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
-            return f"data:image/jpeg;base64,{encoded}"
+            return self.image_to_preview_data_uri(
+                image,
+                size=int(max_size or 180),
+                fill=True,
+            )
 
     def get_dataset_details(
         self,
@@ -1345,6 +1341,58 @@ class HuggingFaceDatasetService:
 
             raise
 
+    def image_to_preview_data_uri(
+        self,
+        image,
+        *,
+        size: int = 180,
+        fill: bool = True,
+    ) -> str:
+        """Convert a PIL image to a consistently sized preview data URI.
+
+        Unlike PIL.thumbnail(), this also upscales tiny images such as CIFAR-10
+        32x32 samples so they fill the preview card.
+        """
+
+        from PIL import Image as PILImage
+        from PIL import ImageOps
+
+        size = max(32, int(size or 180))
+
+        image = ImageOps.exif_transpose(image)
+
+        if image.mode not in {"RGB", "L"}:
+            image = image.convert("RGB")
+
+        if fill:
+            # Fill the full square preview area. This may crop non-square images.
+            image = ImageOps.fit(
+                image,
+                (size, size),
+                method=PILImage.Resampling.NEAREST,
+                centering=(0.5, 0.5),
+            )
+        else:
+            # Preserve full image without cropping, but still upscale tiny images.
+            image.thumbnail(
+                (size, size),
+                resample=PILImage.Resampling.LANCZOS,
+            )
+
+            canvas = PILImage.new("RGB", (size, size), (17, 17, 17))
+            if image.mode != "RGB":
+                image = image.convert("RGB")
+
+            x = (size - image.width) // 2
+            y = (size - image.height) // 2
+            canvas.paste(image, (x, y))
+            image = canvas
+
+        buffer = BytesIO()
+        image.save(buffer, format="JPEG", quality=90)
+        encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+        return f"data:image/jpeg;base64,{encoded}"
+
     def local_image_to_data_uri(self, path: str | Path, *, max_size: int = 180) -> str:
         from PIL import Image as PILImage
         from PIL import ImageOps
@@ -1354,15 +1402,11 @@ class HuggingFaceDatasetService:
             return ""
 
         with PILImage.open(path) as image:
-            image = ImageOps.exif_transpose(image)
-            if image.mode not in {"RGB", "L"}:
-                image = image.convert("RGB")
-            image.thumbnail((int(max_size), int(max_size)))
-
-            buffer = BytesIO()
-            image.save(buffer, format="JPEG")
-            encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
-            return f"data:image/jpeg;base64,{encoded}"
+            return self.image_to_preview_data_uri(
+                image,
+                size=int(max_size or 180),
+                fill=True,
+            )
 
     # ------------------------------------------------------------------
     # Legacy Datasets API helpers
