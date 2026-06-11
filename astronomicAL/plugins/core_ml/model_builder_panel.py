@@ -467,6 +467,52 @@ class MLModelBuilderPanel:
 
         return None
 
+    def _canonical_registry(self):
+        """Return the canonical core.ml.registry service when available.
+
+        The builder keeps a registry reference from panel construction time, but
+        during plugin reloads/layout restores it is possible for another panel to
+        hold a different/stale registry instance. Saved model definitions must
+        always be registered into the canonical service registry so the Workbench
+        sees them immediately.
+        """
+
+        services = getattr(self.context, "services", None)
+        get = getattr(services, "get", None)
+        if callable(get):
+            try:
+                registry = get("core.ml.registry")
+                if registry is not None:
+                    self.registry = registry
+                    return registry
+            except Exception:
+                pass
+        return self.registry
+
+    def _register_definition_everywhere(self, definition: Dict[str, Any]) -> None:
+        """Register a saved model definition into all reachable registry handles."""
+
+        registries = []
+
+        canonical = self._canonical_registry()
+        if canonical is not None:
+            registries.append(canonical)
+
+        if self.registry is not None and self.registry not in registries:
+            registries.append(self.registry)
+
+        errors = []
+        for registry in registries:
+            try:
+                _ml.register_model_definition(registry, definition)
+            except Exception as exc:
+                errors.append(exc)
+
+        if errors and not registries:
+            raise errors[0]
+        if errors and len(errors) == len(registries):
+            raise errors[0]
+
     def _render_params(self) -> None:
         self.param_widgets = {}
         self.tune_widgets = {}
@@ -979,7 +1025,7 @@ class MLModelBuilderPanel:
         }
 
         try:
-            _ml.register_model_definition(self.registry, definition)
+            self._register_definition_everywhere(definition)
         except Exception as exc:
             self.status.alert_type = "danger"
             self.status.object = f"Could not register model definition: `{exc}`"
@@ -1014,6 +1060,7 @@ class MLModelBuilderPanel:
                 }
 
                 publish("ml.model_definition.created", event_payload)
+                publish("ml.model_definition.saved", event_payload)
                 publish("ml.registry.changed", event_payload)
         except Exception:
             pass

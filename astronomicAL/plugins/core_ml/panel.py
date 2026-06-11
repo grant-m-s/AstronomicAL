@@ -72,7 +72,7 @@ class MLWorkbenchPanel:
 
         self.task = pn.widgets.Select(
             name="",
-            options=["classification", "regression"],
+            options=["classification", "regression", "segmentation"],
             value="classification",
         )
         self.target = pn.widgets.Select(name="", options=[])
@@ -710,10 +710,16 @@ class MLWorkbenchPanel:
         self._update_model_note()
         self._refresh_inputs_panel()
 
-    def _get_registry(self):
-        """Return the ML registry, reacquiring it from services if needed."""
+    def _get_registry(self, *, force_reacquire: bool = False):
+        """Return the canonical ML registry service.
 
-        if getattr(self, "registry", None) is not None:
+        The Workbench should not permanently trust an old registry reference.
+        Plugin reloads, workspace restore, or panel construction order can leave
+        the builder and workbench with different handles. Reacquire from
+        core.ml.registry whenever a refresh/save event happens.
+        """
+
+        if not force_reacquire and getattr(self, "registry", None) is not None:
             return self.registry
 
         context = getattr(self, "context", None)
@@ -722,37 +728,37 @@ class MLWorkbenchPanel:
 
         if callable(get):
             try:
-                self.registry = get("core.ml.registry")
+                registry = get("core.ml.registry")
+                if registry is not None:
+                    self.registry = registry
+                    return registry
             except Exception:
-                self.registry = None
+                pass
 
-        return self.registry
+        return getattr(self, "registry", None)
 
-    def _load_models(self) -> None:
+    def _load_models(self, *, force_reacquire_registry: bool = False) -> None:
         if getattr(self, "_disposed", False):
             return
 
-        registry = self._get_registry()
+        registry = self._get_registry(force_reacquire=force_reacquire_registry)
         if registry is None:
             self.model.options = {}
             self.model.value = None
             self.model_note.object = (
-                "<div style='font-size:12px;color:#b00020'>"
+                "<p>"
                 "ML registry service is not available. Try closing and reopening "
                 "the ML Workbench, or check that the core.ml plugin registered "
                 "the core.ml.registry service."
-                "</div>"
+                "</p>"
             )
             return
 
+        sync_error = None
         try:
             _ml.sync_model_definitions_from_artifacts(self.context, registry)
         except Exception as exc:
-            self.model_note.object = (
-                "<div style='font-size:12px;color:#b00020'>"
-                f"Could not sync saved model definitions from artifacts: {exc}"
-                "</div>"
-            )
+            sync_error = exc
 
         previous = self.model.value
 
@@ -762,18 +768,24 @@ class MLWorkbenchPanel:
             self.model.options = {}
             self.model.value = None
             self.model_note.object = (
-                "<div style='font-size:12px;color:#b00020'>"
+                "<p>"
                 f"Could not load model definitions: {exc}"
-                "</div>"
+                "</p>"
             )
             return
 
         supported = []
         for model in models:
             modality = getattr(model, "modality", "tabular")
+            task = getattr(model, "task", None)
+
             if modality == "tabular":
                 supported.append(model)
-            elif modality == "image" and model.task == "classification":
+            elif modality == "image" and task == "classification":
+                supported.append(model)
+            elif modality == "image" and task == "segmentation":
+                # Keep segmentation definitions visible, but _train still blocks
+                # with the existing "not implemented" message.
                 supported.append(model)
 
         options = {
@@ -782,8 +794,8 @@ class MLWorkbenchPanel:
         }
 
         self.model.options = options
-
         model_ids = list(options.values())
+
         if previous in model_ids:
             self.model.value = previous
         elif model_ids:
@@ -793,6 +805,13 @@ class MLWorkbenchPanel:
 
         self._update_model_note()
         self._refresh_inputs_panel()
+
+        if sync_error is not None and not supported:
+            self.model_note.object = (
+                "<p>"
+                f"Could not sync saved model definitions from artifacts: {sync_error}"
+                "</p>"
+            )
 
     def _selected_model(self):
         if getattr(self, "_disposed", False):
@@ -1270,8 +1289,11 @@ class MLWorkbenchPanel:
 
         for topic in [
             "ml.model_definition.created",
+            "ml.model_definition.saved",
             "ml.model_definition.updated",
             "ml.registry.changed",
+            "artifact.created",
+            "workspace.restored",
         ]:
             try:
                 sub = subscribe(
@@ -1289,6 +1311,11 @@ class MLWorkbenchPanel:
             return
 
         payload = payload if isinstance(payload, dict) else {}
+
+        # Ignore unrelated artifact.created events.
+        if topic == "artifact.created" and payload.get("type") != "ml.model_definition":
+            return
+
         model_definition_id = payload.get("model_definition_id")
         task = payload.get("task")
 
@@ -1296,14 +1323,13 @@ class MLWorkbenchPanel:
             if getattr(self, "_disposed", False):
                 return
 
-            # If the new model belongs to a different task, switch the workbench
-            # to that task before refreshing. Otherwise list_models(task=...)
-            # will hide the newly saved model.
+            # If a newly saved model belongs to a different visible task, switch
+            # first. The task watcher will call _load_models().
             if task and task in self.task.options and self.task.value != task:
                 self.task.value = task
-                return  # task watcher will call _load_models()
+                return
 
-            self._load_models()
+            self._load_models(force_reacquire_registry=True)
 
             if model_definition_id:
                 try:

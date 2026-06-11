@@ -10,9 +10,25 @@ from typing import Any, Dict, Iterable, Mapping, Optional
 import numpy as np
 import pandas as pd
 
+import importlib.util
+import sys
 
 ML_ARTIFACT_SCHEMA_VERSION = 1
 
+def _load_sibling_module(stem: str):
+    module_name = f"{__name__}.{stem}"
+    if module_name in sys.modules:
+        return sys.modules[module_name]
+
+    path = Path(__file__).with_name(f"{stem}.py")
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Could not load sibling module {stem!r} from {path}")
+
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
 
 @dataclass(frozen=True)
 class StoredModelRef:
@@ -121,7 +137,6 @@ def ml_storage_dir(context: Any, *, kind: str = "models") -> Path:
     path.mkdir(parents=True, exist_ok=True)
     return path
 
-
 def save_model_sidecar(
     *,
     context: Any,
@@ -133,15 +148,45 @@ def save_model_sidecar(
 ) -> StoredModelRef:
     """Persist a live model object and return a JSON-safe reference.
 
-    Supported now:
+    Supported:
     - sklearn objects via joblib
-    - torch modules/state dictionaries via torch.save
-
-    The reference is intentionally plain JSON so workspace/artifact snapshots can
-    survive reloads without carrying live Python objects.
+    - generic torch modules/state dictionaries via torch.save
+    - torch image classifiers via architecture + state_dict + class metadata
     """
 
     framework = str(framework or "").lower()
+    metadata = dict(metadata or {})
+
+    image_sidecar = None
+    if framework == "torch":
+        try:
+            image_sidecar = _load_sibling_module("image_sidecar")
+        except Exception:
+            image_sidecar = None
+
+    if (
+        framework == "torch"
+        and image_sidecar is not None
+        and image_sidecar.is_torch_image_bundle(model, metadata)
+    ):
+        filename = f"{run_id}-{_safe_filename(model_id)}-{uuid.uuid4().hex[:8]}.pt"
+        path = ml_storage_dir(context, kind="models") / filename
+        image_metadata = image_sidecar.save_torch_image_sidecar_file(
+            path=path,
+            model=model,
+            metadata=metadata,
+        )
+        combined_metadata = dict(metadata)
+        combined_metadata.update(image_metadata)
+        return StoredModelRef(
+            storage="local_file",
+            uri=str(path),
+            format=image_sidecar.TORCH_IMAGE_CLASSIFIER_FORMAT,
+            framework=framework,
+            created_at=time.time(),
+            metadata=json_safe(combined_metadata),
+        )
+
     suffix = "joblib" if framework == "sklearn" else "pt"
     filename = f"{run_id}-{_safe_filename(model_id)}-{uuid.uuid4().hex[:8]}.{suffix}"
     path = ml_storage_dir(context, kind="models") / filename
@@ -152,6 +197,7 @@ def save_model_sidecar(
         joblib.dump(model, path)
         fmt = "joblib"
         extra = {"python_type": f"{type(model).__module__}.{type(model).__name__}"}
+
     elif framework == "torch":
         import torch
 
@@ -162,13 +208,15 @@ def save_model_sidecar(
             }
         else:
             payload = model
+
         torch.save(payload, path)
         fmt = "torch"
         extra = {"python_type": f"{type(model).__module__}.{type(model).__name__}"}
+
     else:
         raise ValueError(f"Cannot persist unsupported ML framework {framework!r}.")
 
-    combined_metadata = dict(metadata or {})
+    combined_metadata = dict(metadata)
     combined_metadata.update(extra)
 
     return StoredModelRef(
@@ -179,6 +227,7 @@ def save_model_sidecar(
         created_at=time.time(),
         metadata=json_safe(combined_metadata),
     )
+
 
 
 def load_model_sidecar(model_ref: Mapping[str, Any]) -> Any:
@@ -202,6 +251,14 @@ def load_model_sidecar(model_ref: Mapping[str, Any]) -> Any:
         import torch
 
         return torch.load(path, map_location="cpu")
+
+    if fmt == "torch_image_classifier":
+        image_sidecar = _load_sibling_module("image_sidecar")
+        return image_sidecar.load_torch_image_sidecar_file(
+            path=path,
+            metadata=model_ref.get("metadata") or {},
+            map_location="cpu",
+        )
 
     raise ValueError(f"Unsupported model sidecar format {fmt!r}.")
 

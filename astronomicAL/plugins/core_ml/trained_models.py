@@ -1,0 +1,259 @@
+from __future__ import annotations
+
+import importlib.util
+import sys
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+from typing import Any, Dict, List, Mapping, Optional
+
+
+def _load_sibling_module(stem: str):
+    module_name = f"{__name__}.{stem}"
+    if module_name in sys.modules:
+        return sys.modules[module_name]
+    path = Path(__file__).with_name(f"{stem}.py")
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Could not load sibling module {stem!r} from {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+@dataclass(frozen=True)
+class TrainedModelDescriptor:
+    artifact_id: str
+    title: str
+    task: str
+    modality: str
+    framework: str
+    model_id: Optional[str] = None
+    run_id: Optional[str] = None
+    trained_dataset_id: Optional[str] = None
+    target_column: Optional[str] = None
+    input_summary: Dict[str, Any] = field(default_factory=dict)
+    output_summary: Dict[str, Any] = field(default_factory=dict)
+    metrics: Dict[str, Any] = field(default_factory=dict)
+    created_at: Optional[float] = None
+    model_ref: Optional[Dict[str, Any]] = None
+    al_strategy: Optional[str] = None
+    hyperparameter_summary: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        contract = _load_sibling_module("model_contract")
+        return contract.json_safe(asdict(self))
+
+
+class TrainedModelCatalog:
+    """Indexes durable ml.model artifacts for reuse in prediction workflows."""
+
+    def __init__(self, context: Any) -> None:
+        self.context = context
+        self._models: Dict[str, TrainedModelDescriptor] = {}
+        self.refresh()
+        self._subscriptions: List[Any] = []
+        self._subscribe()
+
+    def dispose(self) -> None:
+        events = getattr(self.context, "events", None)
+        unsubscribe = getattr(events, "unsubscribe", None)
+        if callable(unsubscribe):
+            for sub in list(self._subscriptions):
+                try:
+                    unsubscribe(sub)
+                except Exception:
+                    pass
+        self._subscriptions.clear()
+
+    def refresh(self) -> int:
+        contract_utils = _load_sibling_module("model_contract")
+        artifacts = getattr(self.context, "artifacts", None)
+        find = getattr(artifacts, "find", None)
+        get = getattr(artifacts, "get", None)
+        if not callable(find) or not callable(get):
+            self._models = {}
+            return 0
+        descriptors: Dict[str, TrainedModelDescriptor] = {}
+        try:
+            refs = find(type="ml.model")
+        except Exception:
+            refs = []
+        for ref in refs:
+            artifact_id = getattr(ref, "artifact_id", None)
+            if not artifact_id:
+                continue
+            try:
+                payload = get(artifact_id)
+                if not isinstance(payload, Mapping):
+                    continue
+                contract = contract_utils.ensure_model_contract(
+                    context=self.context,
+                    model_artifact_id=str(artifact_id),
+                    model_payload=payload,
+                    persist=True,
+                )
+                descriptors[str(artifact_id)] = self._descriptor_from_payload(
+                    artifact_id=str(artifact_id),
+                    payload=payload,
+                    contract=contract,
+                    ref=ref,
+                )
+            except Exception:
+                continue
+        self._models = descriptors
+        return len(descriptors)
+
+    def list_models(
+        self,
+        *,
+        task: Optional[str] = None,
+        modality: Optional[str] = None,
+        framework: Optional[str] = None,
+        dataset_id: Optional[str] = None,
+    ) -> List[TrainedModelDescriptor]:
+        models = list(self._models.values())
+        if task:
+            models = [m for m in models if m.task == task]
+        if modality:
+            models = [m for m in models if m.modality == modality]
+        if framework:
+            models = [m for m in models if m.framework == framework]
+        if dataset_id:
+            models = [m for m in models if m.trained_dataset_id == dataset_id]
+        return sorted(models, key=lambda m: (-(m.created_at or 0), m.title, m.artifact_id))
+
+    def get(self, artifact_id: str) -> TrainedModelDescriptor:
+        if artifact_id not in self._models:
+            self.refresh()
+        return self._models[artifact_id]
+
+    def as_options(self, *, task: Optional[str] = None, modality: Optional[str] = None) -> Dict[str, str]:
+        """Return Panel-friendly {label: artifact_id} options."""
+
+        options: Dict[str, str] = {}
+        for model in self.list_models(task=task, modality=modality):
+            label_bits = [model.title]
+            label_bits.append(f"{model.modality}/{model.task}")
+            if model.output_summary.get("classes"):
+                label_bits.append(f"{len(model.output_summary.get('classes') or [])} classes")
+            if model.target_column:
+                label_bits.append(f"target={model.target_column}")
+            options[" — ".join(label_bits)] = model.artifact_id
+        return options
+
+    def compatibility(self, artifact_id: str, dataset_id: str, **kwargs: Any) -> Dict[str, Any]:
+        contract_utils = _load_sibling_module("model_contract")
+        report = contract_utils.validate_model_for_dataset(
+            context=self.context,
+            model_artifact_id=artifact_id,
+            dataset_id=dataset_id,
+            **kwargs,
+        )
+        return report.to_dict()
+
+    def _descriptor_from_payload(
+        self,
+        *,
+        artifact_id: str,
+        payload: Mapping[str, Any],
+        contract: Mapping[str, Any],
+        ref: Any,
+    ) -> TrainedModelDescriptor:
+        output = dict(contract.get("output_schema") or {})
+        trained_on = dict(contract.get("trained_on") or {})
+        input_schema = dict(contract.get("input_schema") or {})
+        training_context = dict(contract.get("training_context") or {})
+        metrics = self._find_metrics_for_run(payload.get("run_id"), artifact_id)
+        return TrainedModelDescriptor(
+            artifact_id=artifact_id,
+            title=str(contract.get("model_title") or payload.get("model_title") or artifact_id),
+            task=str(contract.get("task") or payload.get("task") or "classification"),
+            modality=str(contract.get("modality") or payload.get("modality") or "tabular"),
+            framework=str(contract.get("framework") or payload.get("framework") or ""),
+            model_id=payload.get("model_id"),
+            run_id=payload.get("run_id"),
+            trained_dataset_id=trained_on.get("dataset_id") or payload.get("dataset_id"),
+            target_column=trained_on.get("target_column") or payload.get("target_column"),
+            input_summary={
+                "kind": input_schema.get("kind"),
+                "feature_columns": input_schema.get("feature_columns"),
+                "image_column": input_schema.get("image_column"),
+                "feature_schema_hash": training_context.get("feature_schema_hash"),
+            },
+            output_summary={
+                "kind": output.get("kind"),
+                "classes": output.get("classes"),
+                "n_classes": output.get("n_classes"),
+                "has_probabilities": output.get("has_probabilities"),
+            },
+            metrics=metrics,
+            created_at=payload.get("created_at") or getattr(ref, "created_at", None),
+            model_ref=payload.get("model_ref"),
+            al_strategy=training_context.get("active_learning_strategy"),
+            hyperparameter_summary=_summarise_hyperparameters(training_context.get("hyperparameters") or {}),
+        )
+
+    def _find_metrics_for_run(self, run_id: Any, model_artifact_id: str) -> Dict[str, Any]:
+        artifacts = getattr(self.context, "artifacts", None)
+        find = getattr(artifacts, "find", None)
+        get = getattr(artifacts, "get", None)
+        if not callable(find) or not callable(get):
+            return {}
+        refs = []
+        if run_id:
+            try:
+                refs = find(type="ml.evaluation_report", params_subset={"run_id": run_id})
+            except Exception:
+                refs = []
+        if not refs:
+            try:
+                refs = find(type="ml.evaluation_report")
+            except Exception:
+                refs = []
+        for ref in refs:
+            try:
+                payload = get(ref.artifact_id)
+            except Exception:
+                continue
+            if not isinstance(payload, Mapping):
+                continue
+            if run_id and payload.get("run_id") != run_id:
+                continue
+            metrics = payload.get("metrics")
+            if isinstance(metrics, Mapping):
+                return dict(metrics)
+        return {}
+
+    def _subscribe(self) -> None:
+        events = getattr(self.context, "events", None)
+        subscribe = getattr(events, "subscribe", None)
+        if not callable(subscribe):
+            return
+        for topic in ("ml.model.saved", "ml.run.finished", "artifact.created", "workspace.restored"):
+            try:
+                self._subscriptions.append(subscribe(topic, self._on_event))
+            except Exception:
+                pass
+
+    def _on_event(self, *_: Any, **__: Any) -> None:
+        try:
+            self.refresh()
+        except Exception:
+            pass
+
+
+def create_trained_model_catalog(context: Any) -> TrainedModelCatalog:
+    return TrainedModelCatalog(context)
+
+
+def _summarise_hyperparameters(params: Mapping[str, Any], *, max_items: int = 6) -> str:
+    if not isinstance(params, Mapping) or not params:
+        return ""
+    bits = []
+    for idx, (key, value) in enumerate(params.items()):
+        if idx >= max_items:
+            bits.append("...")
+            break
+        bits.append(f"{key}={value}")
+    return ", ".join(bits)

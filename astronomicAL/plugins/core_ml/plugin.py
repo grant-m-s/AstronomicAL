@@ -51,6 +51,9 @@ def _load_sibling_module(stem: str):
 
 def register(api) -> None:
     actions = _load_sibling_module("actions")
+    prediction = _load_sibling_module("prediction")
+    trained_models = _load_sibling_module("trained_models")
+    predict_panel = _load_sibling_module("predict_panel")
 
     api.register_service(
         key="registry",
@@ -58,6 +61,14 @@ def register(api) -> None:
         lazy=True,
         replace=True,
         description="ML registry for model/provider specs.",
+    )
+
+    api.register_service(
+        key="trained_model_catalog",
+        factory=lambda context: trained_models.create_trained_model_catalog(context),
+        lazy=True,
+        replace=True,
+        description="Indexes trained ml.model artifacts and validates model/dataset compatibility.",
     )
 
     api.register_action(
@@ -195,9 +206,58 @@ def register(api) -> None:
     )
 
     api.register_action(
+        id="predict",
+        title="Predict with Trained Model",
+        handler=prediction.predict_action,
+        description=(
+            "Run compatibility-checked inference using any durable ml.model artifact. "
+            "Creates an ml.predictions artifact and, by default, a prediction-table "
+            "dataset that can be used for plotting and colouring."
+        ),
+        category="Machine Learning",
+        icon="batch_prediction",
+        tags=["ml", "prediction", "inference", "trained-model", "visualisation"],
+        inputs={
+            "dataset": True,
+            "selection": "optional",
+            "columns": "optional",
+            "numeric_columns": "none",
+            "required_mappings": ["record_id"],
+            "accepts_artifact_types": ["ml.model"],
+        },
+        outputs=[
+            {
+                "type": "ml.predictions",
+                "description": "Self-describing predictions, probabilities, uncertainty scores, and visualisation hints.",
+            },
+            {
+                "type": "dataset",
+                "description": "Optional row-id keyed prediction table dataset for visualisation/colouring.",
+            },
+        ],
+        params_schema={
+            "type": "object",
+            "required": ["model_artifact_id"],
+            "properties": {
+                "dataset_id": {"type": "string"},
+                "model_artifact_id": {"type": "string", "minLength": 1},
+                "target_column": {"type": "string"},
+                "image_column": {"type": "string"},
+                "feature_column_mapping": {"type": "object"},
+                "require_target_compatible": {"type": "boolean", "default": False},
+                "register_prediction_dataset": {"type": "boolean", "default": True},
+                "run_id": {"type": "string"},
+            },
+        },
+        run_in_job=True,
+        requires=["scikit-learn>=1.2"],
+        optional_requires=["torch", "joblib", "pillow"],
+    )
+
+    api.register_action(
         id="predict_tabular",
         title="Predict with Tabular Model",
-        handler=actions.predict_tabular_action,
+        handler=prediction.predict_tabular_action,
         description=(
             "Run inference over a dataset or selection using a durable sklearn "
             "tabular ml.model artifact."
@@ -324,6 +384,24 @@ def register(api) -> None:
     )
 
     api.register_panel(
+        id="predictor",
+        title="ML Predictor",
+        factory=create_ml_predict_panel,
+        description=(
+            "Choose any trained model artifact, validate it against a dataset, "
+            "run prediction, and expose prediction outputs for visualisation."
+        ),
+        category="Machine Learning",
+        icon="batch_prediction",
+        tags=["ml", "prediction", "inference", "trained-model", "visualisation"],
+        required_mappings=["record_id"],
+        optional_mappings=["target_label", "image.path", "image.uri"],
+        uses_services=["core.ml.trained_model_catalog"],
+        produces=["ml.predictions", "dataset"],
+        default_layout={"x": 5, "y": 7, "w": 5, "h": 5},
+    )
+
+    api.register_panel(
         id="training_curves",
         title="ML Training Curves",
         factory=create_training_curves_panel,
@@ -376,3 +454,7 @@ def create_training_curves_panel(context, **kwargs):
     )
 
     return controller.panel(), controller
+
+def create_ml_predict_panel(context, **kwargs):
+    predict_panel_module = _load_sibling_module("predict_panel")
+    return predict_panel_module.create_predict_panel(context=context, **kwargs)

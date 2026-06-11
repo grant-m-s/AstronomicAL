@@ -290,9 +290,26 @@ def _publish_tuning_update(
     run_id: str,
     message: str,
     trials: List[Dict[str, Any]],
+    current_trial: Optional[Dict[str, Any]] = None,
+    current_trial_epochs: Optional[List[Dict[str, Any]]] = None,
+    status: str = "tuning",
+    clear_current_trial: bool = False,
 ) -> None:
+    """Publish Optuna progress into the ml.training_log artifact.
+
+    `tuning_trials` contains completed/failed trial summaries.
+
+    `tuning_current_trial` and `tuning_current_trial_epochs` are intentionally
+    separate so the Curves panel can show progress before the first trial has
+    completed. For warm-start sklearn estimators this will include validation
+    metrics as the estimator grows. For opaque estimators it still reports that
+    the current trial is fitting.
+    """
+
     if not artifact_id:
         return
+
+    now = time.time()
 
     try:
         payload = context.artifacts.get(artifact_id)
@@ -300,25 +317,374 @@ def _publish_tuning_update(
         payload = None
 
     if isinstance(payload, dict):
-        payload.update(
+        update = {
+            "status": status,
+            "message": message,
+            "tuning_trials": list(trials),
+            "updated_at": now,
+        }
+
+        if current_trial is not None:
+            update["tuning_current_trial"] = dict(current_trial)
+
+        if current_trial_epochs is not None:
+            epochs = list(current_trial_epochs)
+            update["tuning_current_trial_epochs"] = epochs
+            if current_trial and current_trial.get("state") in {"complete", "finished"}:
+                update["tuning_last_trial_epochs"] = epochs
+
+        if clear_current_trial:
+            update["tuning_current_trial"] = None
+            update["tuning_current_trial_epochs"] = []
+
+        payload.update(update)
+
+    event_payload = {
+        "artifact_id": artifact_id,
+        "run_id": run_id,
+        "status": status,
+        "message": message,
+        "tuning_trial_count": len(trials),
+    }
+
+    if current_trial is not None:
+        event_payload["current_trial"] = {
+            "number": current_trial.get("number"),
+            "state": current_trial.get("state"),
+            "metric": current_trial.get("metric"),
+            "value": current_trial.get("value"),
+        }
+
+    if current_trial_epochs is not None:
+        event_payload["current_trial_epoch_count"] = len(current_trial_epochs)
+
+    _publish(context, "ml.training_log.updated", event_payload)
+
+def _fit_sklearn_trial_with_epoch_progress(
+    *,
+    context: Any,
+    config: TrainConfig,
+    model_spec: ModelSpec,
+    split: Dict[str, Any],
+    run_id: str,
+    artifact_id: Optional[str],
+    trial: Any,
+    trial_params: Dict[str, Any],
+    metric: str,
+    n_trials: int,
+    trial_records: List[Dict[str, Any]],
+    cancel_token: Any = None,
+) -> Tuple[Any, Dict[str, Any], Dict[str, float], float, List[Dict[str, Any]]]:
+    """Fit one Optuna sklearn trial and publish live progress when possible.
+
+    For sklearn estimators with `n_estimators` and `warm_start`, this trains in
+    chunks and evaluates the validation set after each chunk. This gives the UI
+    a live performance-vs-epoch/step plot while a trial is still running.
+
+    For opaque estimators, sklearn exposes no safe intermediate state. In that
+    case we still publish a current-trial heartbeat before and after fit.
+    """
+
+    from sklearn.pipeline import Pipeline
+
+    _check_cancelled(cancel_token)
+
+    started_at = time.time()
+    current_trial = {
+        "number": int(trial.number),
+        "display_number": int(trial.number) + 1,
+        "total_trials": int(n_trials),
+        "state": "running",
+        "metric": metric,
+        "params": dict(trial_params),
+        "started_at": started_at,
+        "message": f"Running Optuna trial {int(trial.number) + 1}/{int(n_trials)}.",
+    }
+
+    _publish_tuning_update(
+        context,
+        artifact_id=artifact_id,
+        run_id=run_id,
+        message=current_trial["message"],
+        trials=trial_records,
+        current_trial=current_trial,
+        current_trial_epochs=[],
+    )
+
+    preprocessor = _make_preprocessor(split["X_train"])
+    estimator = model_spec.factory(trial_params)
+
+    if _supports_warm_start_progress(estimator):
+        return _fit_warm_start_estimator_with_progress(
+            context=context,
+            config=config,
+            split=split,
+            run_id=run_id,
+            artifact_id=artifact_id,
+            trial=trial,
+            estimator=estimator,
+            preprocessor=preprocessor,
+            metric=metric,
+            n_trials=n_trials,
+            trial_records=trial_records,
+            trial_params=trial_params,
+            current_trial=current_trial,
+            cancel_token=cancel_token,
+        )
+
+    candidate = Pipeline(
+        [
+            ("preprocess", preprocessor),
+            ("model", estimator),
+        ]
+    )
+
+    current_trial["message"] = (
+        f"Fitting Optuna trial {int(trial.number) + 1}/{int(n_trials)}. "
+        "This estimator does not expose epoch-level progress, so the plot will "
+        "update when the fit call returns."
+    )
+
+    _publish_tuning_update(
+        context,
+        artifact_id=artifact_id,
+        run_id=run_id,
+        message=current_trial["message"],
+        trials=trial_records,
+        current_trial=current_trial,
+        current_trial_epochs=[],
+    )
+
+    candidate.fit(split["X_train"], split["y_train"])
+    _check_cancelled(cancel_token)
+
+    val_eval = _evaluate_estimator(
+        task=config.task,
+        estimator=candidate,
+        X=split["X_val"],
+        y=split["y_val"],
+        rows=split["rows_val"],
+    )
+    prefixed_metrics = _prefix_metrics("val", val_eval["metrics"])
+    value = _extract_objective_value(prefixed_metrics, metric)
+
+    epoch_record = _trial_epoch_record(
+        trial=trial,
+        epoch=1,
+        step=1,
+        metric=metric,
+        value=value,
+        prefixed_metrics=prefixed_metrics,
+        state="complete",
+    )
+
+    current_trial.update(
+        {
+            "state": "complete",
+            "value": float(value),
+            "finished_at": time.time(),
+            "message": f"Finished Optuna trial {int(trial.number) + 1}/{int(n_trials)}.",
+        }
+    )
+
+    _publish_tuning_update(
+        context,
+        artifact_id=artifact_id,
+        run_id=run_id,
+        message=current_trial["message"],
+        trials=trial_records,
+        current_trial=current_trial,
+        current_trial_epochs=[epoch_record],
+    )
+
+    return candidate, val_eval, prefixed_metrics, float(value), [epoch_record]
+
+
+def _supports_warm_start_progress(estimator: Any) -> bool:
+    """Return True for sklearn estimators that can be grown incrementally."""
+
+    if not hasattr(estimator, "get_params") or not hasattr(estimator, "set_params"):
+        return False
+
+    try:
+        params = estimator.get_params(deep=False)
+    except Exception:
+        return False
+
+    if "n_estimators" not in params:
+        return False
+
+    # RandomForest, ExtraTrees, GradientBoosting, etc. expose warm_start.
+    if "warm_start" in params:
+        return True
+
+    return False
+
+
+def _fit_warm_start_estimator_with_progress(
+    *,
+    context: Any,
+    config: TrainConfig,
+    split: Dict[str, Any],
+    run_id: str,
+    artifact_id: Optional[str],
+    trial: Any,
+    estimator: Any,
+    preprocessor: Any,
+    metric: str,
+    n_trials: int,
+    trial_records: List[Dict[str, Any]],
+    trial_params: Dict[str, Any],
+    current_trial: Dict[str, Any],
+    cancel_token: Any = None,
+) -> Tuple[Any, Dict[str, Any], Dict[str, float], float, List[Dict[str, Any]]]:
+    """Warm-start an n_estimators-based sklearn model and publish checkpoints."""
+
+    from sklearn.pipeline import Pipeline
+
+    _check_cancelled(cancel_token)
+
+    final_n_estimators = int(estimator.get_params(deep=False).get("n_estimators") or 1)
+    final_n_estimators = max(1, final_n_estimators)
+
+    # About 10 plotted points by default. This keeps the UI useful without
+    # making Optuna trials far slower through excessive validation calls.
+    max_points = int((trial_params or {}).get("progress_points", 10) or 10)
+    max_points = max(2, min(50, max_points))
+
+    chunk = max(1, int(round(final_n_estimators / max_points)))
+    steps = list(range(chunk, final_n_estimators + 1, chunk))
+    if steps[-1] != final_n_estimators:
+        steps.append(final_n_estimators)
+
+    X_train_t = preprocessor.fit_transform(split["X_train"])
+    X_val_original = split["X_val"]
+
+    candidate = Pipeline(
+        [
+            ("preprocess", preprocessor),
+            ("model", estimator),
+        ]
+    )
+
+    # Some sklearn estimators require the first fit to start from 1 estimator
+    # and then grow from there. Setting warm_start up-front is the key.
+    try:
+        estimator.set_params(warm_start=True)
+    except Exception:
+        pass
+
+    epoch_records: List[Dict[str, Any]] = []
+    latest_val_eval: Optional[Dict[str, Any]] = None
+    latest_prefixed_metrics: Dict[str, float] = {}
+    latest_value: Optional[float] = None
+
+    for epoch, n_estimators in enumerate(steps, start=1):
+        _check_cancelled(cancel_token)
+
+        try:
+            estimator.set_params(n_estimators=int(n_estimators))
+        except Exception:
+            pass
+
+        estimator.fit(X_train_t, split["y_train"])
+
+        latest_val_eval = _evaluate_estimator(
+            task=config.task,
+            estimator=candidate,
+            X=X_val_original,
+            y=split["y_val"],
+            rows=split["rows_val"],
+        )
+        latest_prefixed_metrics = _prefix_metrics("val", latest_val_eval["metrics"])
+        latest_value = _extract_objective_value(latest_prefixed_metrics, metric)
+
+        record = _trial_epoch_record(
+            trial=trial,
+            epoch=epoch,
+            step=int(n_estimators),
+            metric=metric,
+            value=latest_value,
+            prefixed_metrics=latest_prefixed_metrics,
+            state="running" if n_estimators != final_n_estimators else "complete",
+        )
+        epoch_records.append(record)
+
+        current_trial.update(
             {
-                "status": "tuning",
-                "message": message,
-                "tuning_trials": list(trials),
-                "updated_at": time.time(),
+                "state": "running" if n_estimators != final_n_estimators else "complete",
+                "value": float(latest_value),
+                "epoch": int(epoch),
+                "step": int(n_estimators),
+                "total_steps": int(final_n_estimators),
+                "message": (
+                    f"Optuna trial {int(trial.number) + 1}/{int(n_trials)}: "
+                    f"trained {int(n_estimators)}/{int(final_n_estimators)} estimators."
+                ),
             }
         )
 
-    _publish(
-        context,
-        "ml.training_log.updated",
+        _publish_tuning_update(
+            context,
+            artifact_id=artifact_id,
+            run_id=run_id,
+            message=current_trial["message"],
+            trials=trial_records,
+            current_trial=current_trial,
+            current_trial_epochs=epoch_records,
+        )
+
+    if latest_val_eval is None or latest_value is None:
+        raise RuntimeError("Warm-start Optuna trial produced no validation metrics.")
+
+    current_trial.update(
         {
-            "artifact_id": artifact_id,
-            "run_id": run_id,
-            "status": "tuning",
-            "message": message,
-        },
+            "state": "complete",
+            "value": float(latest_value),
+            "finished_at": time.time(),
+            "message": f"Finished Optuna trial {int(trial.number) + 1}/{int(n_trials)}.",
+        }
     )
+
+    _publish_tuning_update(
+        context,
+        artifact_id=artifact_id,
+        run_id=run_id,
+        message=current_trial["message"],
+        trials=trial_records,
+        current_trial=current_trial,
+        current_trial_epochs=epoch_records,
+    )
+
+    return candidate, latest_val_eval, latest_prefixed_metrics, float(latest_value), epoch_records
+
+
+def _trial_epoch_record(
+    *,
+    trial: Any,
+    epoch: int,
+    step: int,
+    metric: str,
+    value: float,
+    prefixed_metrics: Dict[str, Any],
+    state: str,
+) -> Dict[str, Any]:
+    record = {
+        "trial_number": int(trial.number),
+        "trial_display_number": int(trial.number) + 1,
+        "epoch": int(epoch),
+        "step": int(step),
+        "metric": str(metric),
+        "value": float(value),
+        "state": str(state),
+        "updated_at": time.time(),
+    }
+
+    for key, metric_value in prefixed_metrics.items():
+        if isinstance(metric_value, (int, float, np.integer, np.floating)):
+            record[key] = float(metric_value)
+
+    return record
 
 def _optuna_tune_sklearn_model(
     *,
@@ -365,47 +731,101 @@ def _optuna_tune_sklearn_model(
         _check_cancelled(cancel_token)
 
         trial_params = _sample_optuna_params(trial, search_space)
+        trial_epoch_records: List[Dict[str, Any]] = []
 
-        preprocessor = _make_preprocessor(split["X_train"])
-        estimator = model_spec.factory(trial_params)
-        candidate = Pipeline(
-            [
-                ("preprocess", preprocessor),
-                ("model", estimator),
-            ]
-        )
+        try:
+            (
+                candidate,
+                val_eval,
+                prefixed_metrics,
+                value,
+                trial_epoch_records,
+            ) = _fit_sklearn_trial_with_epoch_progress(
+                context=context,
+                config=config,
+                model_spec=model_spec,
+                split=split,
+                run_id=run_id,
+                artifact_id=config.training_log_artifact_id,
+                trial=trial,
+                trial_params=trial_params,
+                metric=metric,
+                n_trials=n_trials,
+                trial_records=trial_records,
+                cancel_token=cancel_token,
+            )
 
-        candidate.fit(split["X_train"], split["y_train"])
+            record = {
+                "number": int(trial.number),
+                "value": float(value),
+                "metric": metric,
+                "params": dict(trial_params),
+                "state": "complete",
+                "epochs": list(trial_epoch_records),
+                "started_at": trial_epoch_records[0]["updated_at"] if trial_epoch_records else None,
+                "finished_at": time.time(),
+            }
 
-        val_eval = _evaluate_estimator(
-            task=config.task,
-            estimator=candidate,
-            X=split["X_val"],
-            y=split["y_val"],
-            rows=split["rows_val"],
-        )
+            trial_records.append(record)
 
-        prefixed_metrics = _prefix_metrics("val", val_eval["metrics"])
-        value = _extract_objective_value(prefixed_metrics, metric)
+            _publish_tuning_update(
+                context,
+                artifact_id=config.training_log_artifact_id,
+                run_id=run_id,
+                message=f"Finished Optuna trial {trial.number + 1}/{n_trials}.",
+                trials=trial_records,
+                current_trial={
+                    "number": int(trial.number),
+                    "display_number": int(trial.number) + 1,
+                    "total_trials": int(n_trials),
+                    "state": "complete",
+                    "metric": metric,
+                    "value": float(value),
+                    "params": dict(trial_params),
+                    "finished_at": time.time(),
+                    "message": f"Finished Optuna trial {trial.number + 1}/{n_trials}.",
+                },
+                current_trial_epochs=trial_epoch_records,
+            )
 
-        record = {
-            "number": int(trial.number),
-            "value": float(value),
-            "metric": metric,
-            "params": dict(trial_params),
-            "state": "complete",
-        }
-        trial_records.append(record)
+            return float(value)
 
-        _publish_tuning_update(
-            context,
-            artifact_id=config.training_log_artifact_id,
-            run_id=run_id,
-            message=f"Finished Optuna trial {trial.number + 1}/{n_trials}.",
-            trials=trial_records,
-        )
+        except Exception as exc:
+            record = {
+                "number": int(trial.number),
+                "value": None,
+                "metric": metric,
+                "params": dict(trial_params),
+                "state": "failed",
+                "error": str(exc),
+                "epochs": list(trial_epoch_records),
+                "finished_at": time.time(),
+            }
+            trial_records.append(record)
 
-        return float(value)
+            _publish_tuning_update(
+                context,
+                artifact_id=config.training_log_artifact_id,
+                run_id=run_id,
+                message=f"Optuna trial {trial.number + 1}/{n_trials} failed: {exc}",
+                trials=trial_records,
+                current_trial={
+                    "number": int(trial.number),
+                    "display_number": int(trial.number) + 1,
+                    "total_trials": int(n_trials),
+                    "state": "failed",
+                    "metric": metric,
+                    "params": dict(trial_params),
+                    "error": str(exc),
+                    "finished_at": time.time(),
+                    "message": f"Optuna trial {trial.number + 1}/{n_trials} failed.",
+                },
+                current_trial_epochs=trial_epoch_records,
+            )
+
+            raise
+
+
 
     study.optimize(
         objective,
@@ -428,6 +848,8 @@ def _optuna_tune_sklearn_model(
         run_id=run_id,
         message=f"Optuna tuning complete. Best {metric}={best_value:.6g}.",
         trials=trial_records,
+        status="tuning_complete",
+        clear_current_trial=True,
     )
 
     return {
@@ -824,6 +1246,22 @@ def train_model(
     }
 
     artifact_ids["run"] = _put(context, "ml.run", run_payload, config.dataset_id)
+
+    _publish(
+        context,
+        "ml.model.saved",
+        {
+            "artifact_id": artifact_ids.get("model"),
+            "model_artifact_id": artifact_ids.get("model"),
+            "run_id": run_id,
+            "dataset_id": config.dataset_id,
+            "model_id": model_spec.id,
+            "model_title": model_spec.title,
+            "framework": model_spec.framework,
+            "modality": "image",
+            "task": "classification",
+        },
+    )
 
     _publish(
         context,

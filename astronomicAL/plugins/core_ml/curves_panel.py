@@ -30,6 +30,16 @@ class MLTrainingCurvesPanel:
             "No tuning information for the selected run.",
             sizing_mode="stretch_width",
         )
+        self.current_trial_summary = pn.pane.Markdown(
+            "No current Optuna trial.",
+            sizing_mode="stretch_width",
+        )
+        self.current_trial_plot = pn.Column(sizing_mode="stretch_width")
+        self.current_trial_table = pn.pane.DataFrame(
+            pd.DataFrame(),
+            height=220,
+            sizing_mode="stretch_width",
+        )
         self.tuning_plot = pn.Column(sizing_mode="stretch_width")
         self.tuning_table = pn.pane.DataFrame(
             pd.DataFrame(),
@@ -151,6 +161,13 @@ class MLTrainingCurvesPanel:
 
         optuna_tab = pn.Column(
             self.tuning_summary,
+            pn.layout.Divider(),
+            pn.pane.Markdown("### Current Optuna trial"),
+            self.current_trial_summary,
+            self.current_trial_plot,
+            self.current_trial_table,
+            pn.layout.Divider(),
+            pn.pane.Markdown("### Completed trials"),
             self.tuning_plot,
             self.tuning_table,
             sizing_mode="stretch_width",
@@ -283,6 +300,9 @@ class MLTrainingCurvesPanel:
             self.loss_plot.objects = []
             self.metric_plot.objects = []
             self.tuning_plot.objects = []
+            self.current_trial_plot.objects = []
+            self.current_trial_summary.object = "No current Optuna trial."
+            self.current_trial_table.object = pd.DataFrame()
             self.epoch_table.object = pd.DataFrame()
             self.tuning_table.object = pd.DataFrame()
             return
@@ -373,7 +393,22 @@ class MLTrainingCurvesPanel:
         return "  \n".join(lines)
 
     def _render_tuning(self, payload: Dict[str, Any], tuning: Dict[str, Any], tuning_df: pd.DataFrame) -> None:
-        if not tuning and tuning_df.empty:
+        current_trial = payload.get("tuning_current_trial") or {}
+        current_trial_epochs = (
+            payload.get("tuning_current_trial_epochs")
+            or payload.get("tuning_last_trial_epochs")
+            or []
+        )
+        current_trial_df = pd.DataFrame(current_trial_epochs)
+
+        self._render_current_optuna_trial(
+            payload=payload,
+            tuning=tuning,
+            current_trial=current_trial,
+            current_trial_df=current_trial_df,
+        )
+
+        if not tuning and tuning_df.empty and not current_trial:
             self.tuning_summary.object = "Optuna tuning was not enabled for this run."
             self.tuning_plot.objects = [
                 pn.pane.Alert("No Optuna trials are available.", alert_type="info")
@@ -432,6 +467,90 @@ class MLTrainingCurvesPanel:
             )
         ]
 
+    def _render_current_optuna_trial(
+        self,
+        *,
+        payload: Dict[str, Any],
+        tuning: Dict[str, Any],
+        current_trial: Dict[str, Any],
+        current_trial_df: pd.DataFrame,
+    ) -> None:
+        status = str(payload.get("status", "unknown"))
+        message = str(payload.get("message", ""))
+
+        if not current_trial and current_trial_df.empty:
+            if status in {"tuning", "running", "queued"}:
+                self.current_trial_summary.object = (
+                    f"**Status:** `{status}`  \n"
+                    f"**Message:** {message or 'Waiting for Optuna trial progress...'}"
+                )
+                self.current_trial_plot.objects = [
+                    pn.pane.Alert(
+                        "Waiting for current-trial epoch metrics. "
+                        "For ResNet tuning, this should update after each trial epoch. "
+                        "If it does not, the image tuning code is not publishing "
+                        "`tuning_current_trial_epochs` yet.",
+                        alert_type="warning",
+                    )
+                ]
+            else:
+                self.current_trial_summary.object = "No current Optuna trial."
+                self.current_trial_plot.objects = [
+                    pn.pane.Alert("No current-trial epoch data.", alert_type="info")
+                ]
+
+            self.current_trial_table.object = pd.DataFrame()
+            return
+
+        lines = [
+            f"**Trial:** `{current_trial.get('display_number', current_trial.get('number', ''))}`"
+            + (
+                f" / `{current_trial.get('total_trials')}`"
+                if current_trial.get("total_trials") is not None
+                else ""
+            ),
+            f"**State:** `{current_trial.get('state', status)}`",
+            f"**Metric:** `{current_trial.get('metric', tuning.get('metric', ''))}`",
+        ]
+
+        if current_trial.get("epoch") is not None and current_trial.get("total_epochs") is not None:
+            lines.append(
+                f"**Epoch progress:** `{current_trial.get('epoch')}` / `{current_trial.get('total_epochs')}`"
+            )
+
+        if current_trial.get("value") is not None:
+            lines.append(f"**Latest objective value:** `{current_trial.get('value')}`")
+
+        if current_trial.get("message"):
+            lines.append(f"**Message:** {current_trial.get('message')}")
+        elif message:
+            lines.append(f"**Message:** {message}")
+
+        params = current_trial.get("params") or {}
+        if isinstance(params, dict) and params:
+            lines.append("**Trial parameters:**")
+            for key, value in params.items():
+                lines.append(f"- `{key}` = `{value}`")
+
+        self.current_trial_summary.object = "  \n".join(lines)
+        self.current_trial_table.object = current_trial_df
+
+        if current_trial_df.empty:
+            self.current_trial_plot.objects = [
+                pn.pane.Alert(
+                    "Current trial is running. Waiting for the first epoch to finish...",
+                    alert_type="info",
+                )
+            ]
+            return
+
+        self.current_trial_plot.objects = [
+            self._plot_current_trial_epochs(
+                current_trial_df,
+                metric=str(current_trial.get("metric") or tuning.get("metric") or "objective"),
+            )
+        ]
+
     def _plot(self, df: pd.DataFrame, *, keys: List[str], title: str, ylabel: str):
         try:
             from matplotlib.figure import Figure
@@ -456,6 +575,82 @@ class MLTrainingCurvesPanel:
 
         try:
             y_values = pd.concat([df[key] for key in available], ignore_index=True).dropna()
+            if not y_values.empty and y_values.min() > 0 and y_values.min() < 0.01:
+                ax.set_yscale("log")
+        except Exception:
+            pass
+
+        fig.tight_layout()
+        return pn.pane.Matplotlib(fig, tight=True, sizing_mode="stretch_width", height=330)
+
+    def _plot_current_trial_epochs(self, df: pd.DataFrame, *, metric: str):
+        try:
+            from matplotlib.figure import Figure
+        except Exception as exc:
+            return pn.pane.Alert(f"Matplotlib is not available: {exc}", alert_type="danger")
+
+        if df.empty:
+            return pn.pane.Alert("No current-trial epoch metrics to plot.", alert_type="info")
+
+        x_key = "epoch" if "epoch" in df.columns else "step" if "step" in df.columns else None
+        if not x_key:
+            return pn.pane.Alert("Current-trial rows do not include epoch or step columns.", alert_type="warning")
+
+        preferred = [
+            "value",
+            metric,
+            "train_loss",
+            "val_loss",
+            "train_accuracy",
+            "val_accuracy",
+            "val_balanced_accuracy",
+            "val_f1_macro",
+            "val_roc_auc",
+            "val_roc_auc_ovr_macro",
+            "val_r2",
+            "val_mae",
+            "val_rmse",
+        ]
+
+        available = []
+        for key in preferred:
+            if key in df.columns and key not in available:
+                try:
+                    series = pd.to_numeric(df[key], errors="coerce")
+                    if series.notna().any():
+                        available.append(key)
+                except Exception:
+                    pass
+
+        if not available:
+            return pn.pane.Alert("No numeric current-trial metric columns found.", alert_type="warning")
+
+        work = df.copy()
+        fig = Figure(figsize=(7, 3.2))
+        ax = fig.subplots()
+
+        for key in available:
+            y = pd.to_numeric(work[key], errors="coerce")
+            ax.plot(work[x_key], y, marker="o", linewidth=1.5, label=key)
+
+        title = "Current Optuna trial performance"
+        if "trial_display_number" in work.columns and work["trial_display_number"].notna().any():
+            try:
+                title += f" — trial {int(work['trial_display_number'].dropna().iloc[-1])}"
+            except Exception:
+                pass
+
+        ax.set_title(title)
+        ax.set_xlabel("Epoch" if x_key == "epoch" else "Step")
+        ax.set_ylabel(metric or "Objective")
+        ax.grid(True, alpha=0.3)
+        ax.legend(loc="best")
+
+        try:
+            y_values = pd.concat(
+                [pd.to_numeric(work[key], errors="coerce") for key in available],
+                ignore_index=True,
+            ).dropna()
             if not y_values.empty and y_values.min() > 0 and y_values.min() < 0.01:
                 ax.set_yscale("log")
         except Exception:

@@ -253,6 +253,22 @@ def train_image_model(
 
     _publish(
         context,
+        "ml.model.saved",
+        {
+            "artifact_id": artifact_ids.get("model"),
+            "model_artifact_id": artifact_ids.get("model"),
+            "run_id": run_id,
+            "dataset_id": config.dataset_id,
+            "model_id": model_spec.id,
+            "model_title": model_spec.title,
+            "framework": model_spec.framework,
+            "modality": "image",
+            "task": "classification",
+        },
+    )
+
+    _publish(
+        context,
         "ml.training_log.updated",
         {
             "artifact_id": training_log_artifact_id,
@@ -644,6 +660,14 @@ def _train_resnet_classifier(
                 "class_names": class_names,
                 "image_size": image_size,
                 "template_id": template_id,
+                "architecture": "resnet50" if "resnet50" in template_id else "resnet18",
+                "normalization": {
+                    "mean": [0.485, 0.456, 0.406],
+                    "std": [0.229, 0.224, 0.225],
+                },
+                "channels": 3,
+                "modality": "image",
+                "task": "classification",
             },
             "metrics": metrics,
             "extra": {
@@ -656,9 +680,17 @@ def _train_resnet_classifier(
             "model_metadata": {
                 "framework": "torch",
                 "modality": "image",
+                "task": "classification",
                 "template_id": template_id,
+                "architecture": "resnet50" if "resnet50" in template_id else "resnet18",
                 "image_size": image_size,
+                "channels": 3,
+                "normalization": {
+                    "mean": [0.485, 0.456, 0.406],
+                    "std": [0.229, 0.224, 0.225],
+                },
                 "class_names": class_names,
+                "num_classes": len(class_names),
                 "device": str(device),
                 "pretrained_requested": bool(params.get("pretrained", False)),
                 "pretrained_loaded": bool(pretrained_loaded),
@@ -1243,9 +1275,24 @@ def _publish_tuning_update(
     trials: List[Dict[str, Any]],
     best_params: Optional[Dict[str, Any]] = None,
     best_value: Optional[float] = None,
+    current_trial: Optional[Dict[str, Any]] = None,
+    current_trial_epochs: Optional[List[Dict[str, Any]]] = None,
+    status: str = "tuning",
+    clear_current_trial: bool = False,
 ) -> None:
+    """Publish Optuna progress for image/ResNet tuning.
+
+    `tuning_trials` is completed trials.
+
+    `tuning_current_trial` and `tuning_current_trial_epochs` are live progress
+    for the currently running trial. This is what lets the Curves panel show
+    epoch-by-epoch progress before the first Optuna trial has completed.
+    """
+
     if not artifact_id:
         return
+
+    now = time.time()
 
     try:
         payload = context.artifacts.get(artifact_id)
@@ -1253,27 +1300,52 @@ def _publish_tuning_update(
         payload = None
 
     if isinstance(payload, dict):
-        payload.update(
-            {
-                "status": "tuning",
-                "message": message,
-                "tuning_trials": list(trials),
-                "tuning_best_params": dict(best_params or {}),
-                "tuning_best_value": best_value,
-                "updated_at": time.time(),
-            }
-        )
-
-    _publish(
-        context,
-        "ml.training_log.updated",
-        {
-            "artifact_id": artifact_id,
-            "run_id": run_id,
-            "status": "tuning",
+        update = {
+            "status": status,
             "message": message,
-        },
-    )
+            "tuning_trials": list(trials),
+            "tuning_best_params": dict(best_params or {}),
+            "tuning_best_value": best_value,
+            "updated_at": now,
+        }
+
+        if current_trial is not None:
+            update["tuning_current_trial"] = dict(current_trial)
+
+        if current_trial_epochs is not None:
+            epochs = list(current_trial_epochs)
+            update["tuning_current_trial_epochs"] = epochs
+            if current_trial and current_trial.get("state") in {"complete", "finished"}:
+                update["tuning_last_trial_epochs"] = epochs
+
+        if clear_current_trial:
+            update["tuning_current_trial"] = None
+            update["tuning_current_trial_epochs"] = []
+
+        payload.update(update)
+
+    event_payload = {
+        "artifact_id": artifact_id,
+        "run_id": run_id,
+        "status": status,
+        "message": message,
+        "tuning_trial_count": len(trials),
+    }
+
+    if current_trial is not None:
+        event_payload["current_trial"] = {
+            "number": current_trial.get("number"),
+            "state": current_trial.get("state"),
+            "metric": current_trial.get("metric"),
+            "value": current_trial.get("value"),
+            "epoch": current_trial.get("epoch"),
+            "total_epochs": current_trial.get("total_epochs"),
+        }
+
+    if current_trial_epochs is not None:
+        event_payload["current_trial_epoch_count"] = len(current_trial_epochs)
+
+    _publish(context, "ml.training_log.updated", event_payload)
 
 
 def _optuna_tune_resnet_classifier(
@@ -1338,8 +1410,37 @@ def _optuna_tune_resnet_classifier(
             "epochs": trial_epochs,
         }
 
+        current_trial = {
+            "number": int(trial.number),
+            "display_number": int(trial.number) + 1,
+            "total_trials": int(n_trials),
+            "state": "running",
+            "metric": metric,
+            "params": dict(trial_params),
+            "epoch": 0,
+            "total_epochs": int(trial_epochs),
+            "value": None,
+            "message": (
+                f"Starting Optuna image trial {int(trial.number) + 1}/{int(n_trials)} "
+                f"for {int(trial_epochs)} epoch(s)."
+            ),
+            "started_at": time.time(),
+        }
+
+        trial_epoch_records: List[Dict[str, Any]] = []
+
+        _publish_tuning_update(
+            context,
+            artifact_id=config.training_log_artifact_id,
+            run_id=run_id,
+            message=current_trial["message"],
+            trials=trial_records,
+            current_trial=current_trial,
+            current_trial_epochs=trial_epoch_records,
+        )
+
         try:
-            metrics = _train_resnet_trial(
+            metrics, trial_epoch_records = _train_resnet_trial(
                 context=context,
                 config=config,
                 params=params,
@@ -1348,6 +1449,10 @@ def _optuna_tune_resnet_classifier(
                 run_id=run_id,
                 trial_number=int(trial.number),
                 objective_metric=metric,
+                total_trials=int(n_trials),
+                trial_records=trial_records,
+                current_trial=current_trial,
+                current_trial_epochs=trial_epoch_records,
                 cancel_token=cancel_token,
             )
 
@@ -1360,15 +1465,32 @@ def _optuna_tune_resnet_classifier(
                 "metric": metric,
                 "params": dict(trial_params),
                 "metrics": dict(metrics),
+                "epochs": list(trial_epoch_records),
+                "finished_at": time.time(),
             }
             trial_records.append(record)
+
+            current_trial.update(
+                {
+                    "state": "complete",
+                    "value": float(value),
+                    "epoch": int(trial_epochs),
+                    "total_epochs": int(trial_epochs),
+                    "message": f"Finished Optuna image trial {trial.number + 1}/{n_trials}.",
+                    "finished_at": time.time(),
+                }
+            )
 
             _publish_tuning_update(
                 context,
                 artifact_id=config.training_log_artifact_id,
                 run_id=run_id,
-                message=f"Finished Optuna image trial {trial.number + 1}/{n_trials}.",
+                message=current_trial["message"],
                 trials=trial_records,
+                best_params=study.best_trial.params if len(study.trials) else None,
+                best_value=float(study.best_value) if len(study.trials) and study.best_trial.value is not None else None,
+                current_trial=current_trial,
+                current_trial_epochs=trial_epoch_records,
             )
 
             return float(value)
@@ -1384,15 +1506,28 @@ def _optuna_tune_resnet_classifier(
                 "metric": metric,
                 "params": dict(trial_params),
                 "error": str(exc),
+                "epochs": list(trial_epoch_records),
+                "finished_at": time.time(),
             }
             trial_records.append(record)
+
+            current_trial.update(
+                {
+                    "state": "failed",
+                    "error": str(exc),
+                    "message": f"Optuna image trial {trial.number + 1}/{n_trials} failed: {exc}",
+                    "finished_at": time.time(),
+                }
+            )
 
             _publish_tuning_update(
                 context,
                 artifact_id=config.training_log_artifact_id,
                 run_id=run_id,
-                message=f"Optuna image trial {trial.number + 1}/{n_trials} failed: {exc}",
+                message=current_trial["message"],
                 trials=trial_records,
+                current_trial=current_trial,
+                current_trial_epochs=trial_epoch_records,
             )
 
             raise optuna.TrialPruned()
@@ -1423,6 +1558,8 @@ def _optuna_tune_resnet_classifier(
         trials=trial_records,
         best_params=best_params,
         best_value=best_value,
+        status="tuning_complete",
+        clear_current_trial=True,
     )
 
     return {
@@ -1447,8 +1584,12 @@ def _train_resnet_trial(
     run_id: str,
     trial_number: int,
     objective_metric: str,
+    total_trials: int,
+    trial_records: List[Dict[str, Any]],
+    current_trial: Dict[str, Any],
+    current_trial_epochs: List[Dict[str, Any]],
     cancel_token: Any = None,
-) -> Dict[str, float]:
+) -> tuple[Dict[str, float], List[Dict[str, Any]]]:
     model = None
 
     try:
@@ -1585,19 +1726,56 @@ def _train_resnet_trial(
             )
 
             row = {
+                "trial_number": int(trial_number),
+                "trial_display_number": int(trial_number) + 1,
+                "epoch": int(epoch),
+                "trial_epoch": int(epoch),
+                "total_epochs": int(epochs),
+                "metric": str(objective_metric),
                 "val_loss": float(val_eval["loss"]),
                 "val_accuracy": float(val_eval["metrics"]["accuracy"]),
                 "val_balanced_accuracy": float(val_eval["metrics"].get("balanced_accuracy", float("nan"))),
                 "val_f1_macro": float(val_eval["metrics"]["f1_macro"]),
                 "train_loss": train_loss,
                 "train_accuracy": train_accuracy,
-                "trial_epoch": float(epoch),
+                "state": "running" if epoch < epochs else "complete",
+                "updated_at": time.time(),
             }
 
             if "roc_auc" in val_eval["metrics"]:
                 row["val_roc_auc"] = float(val_eval["metrics"]["roc_auc"])
             if "roc_auc_ovr_macro" in val_eval["metrics"]:
                 row["val_roc_auc_ovr_macro"] = float(val_eval["metrics"]["roc_auc_ovr_macro"])
+
+            current_value = _score_for_optimisation(row, objective_metric)
+            if current_value is not None:
+                row["value"] = float(current_value)
+
+            current_trial_epochs.append(dict(row))
+
+            current_trial.update(
+                {
+                    "state": "running" if epoch < epochs else "complete",
+                    "epoch": int(epoch),
+                    "total_epochs": int(epochs),
+                    "value": float(current_value) if current_value is not None else None,
+                    "message": (
+                        f"Optuna image trial {int(trial_number) + 1}/{int(total_trials)}: "
+                        f"finished epoch {int(epoch)}/{int(epochs)}."
+                    ),
+                    "updated_at": time.time(),
+                }
+            )
+
+            _publish_tuning_update(
+                context,
+                artifact_id=config.training_log_artifact_id,
+                run_id=run_id,
+                message=current_trial["message"],
+                trials=trial_records,
+                current_trial=current_trial,
+                current_trial_epochs=current_trial_epochs,
+            )
 
             score = _score_for_optimisation(row, optimize_metric)
 
@@ -1607,9 +1785,7 @@ def _train_resnet_trial(
 
         if not best_metrics:
             raise RuntimeError("Trial produced no validation metrics.")
-
-        return best_metrics
-
+        return best_metrics, current_trial_epochs
     finally:
         _release_torch_cuda(model)
 
