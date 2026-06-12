@@ -44,6 +44,7 @@ class MLRecipeLauncherPanel:
         self.context = context
         self.registry = registry
         self.param_widgets: Dict[str, Any] = {}
+        self.param_fields: Dict[str, Any] = {}
         self._active_thread: Optional[threading.Thread] = None
         self._cancel_token: Any = None
 
@@ -226,6 +227,8 @@ class MLRecipeLauncherPanel:
                     except Exception:
                         pass
 
+        self._sync_split_visibility()
+
     def refresh(self) -> None:
         recipes = self.registry.list()
         self.recipe.options = {recipe.title: recipe.id for recipe in recipes}
@@ -255,6 +258,7 @@ class MLRecipeLauncherPanel:
 
     def _on_recipe_change(self) -> None:
         self.param_widgets = {}
+        self.param_fields = {}
         self.params_area.objects = []
 
         recipe_id = self.recipe.value
@@ -264,8 +268,8 @@ class MLRecipeLauncherPanel:
 
         spec = self.registry.get(recipe_id)
         self.recipe_card.object = (
-            f"**{spec.title}**  \n"
-            f"`{spec.id}` v{spec.version}  \n\n"
+            f"**{spec.title}** \n"
+            f"`{spec.id}` v{spec.version} \n\n"
             f"{spec.description}\n\n"
             f"- Task: `{spec.task}`\n"
             f"- Modality: `{spec.modality}`\n"
@@ -278,11 +282,80 @@ class MLRecipeLauncherPanel:
         properties = schema.get("properties", {}) or {}
 
         for name, param_schema in properties.items():
-            widget = self._widget_for_schema(str(name), param_schema)
-            self.param_widgets[str(name)] = widget
-            self.params_area.append(self._field(str(param_schema.get("title") or name), widget))
+            name = str(name)
+            widget = self._widget_for_schema(name, param_schema)
+            field = self._field(str(param_schema.get("title") or name), widget)
+
+            self.param_widgets[name] = widget
+            self.param_fields[name] = field
+            self.params_area.append(field)
+
+            if name == "split_mode":
+                try:
+                    widget.param.watch(self._on_split_mode_change, "value")
+                except Exception:
+                    pass
 
         self._apply_inferred_defaults()
+        self._sync_split_visibility()
+
+
+    def _on_split_mode_change(self, *_: Any) -> None:
+        self._sync_split_visibility()
+        self._apply_inferred_defaults()
+
+
+    def _sync_split_visibility(self) -> None:
+        split_widget = self.param_widgets.get("split_mode")
+        split_mode = str(getattr(split_widget, "value", "") or "random_size").strip()
+        explicit = split_mode == "explicit_datasets"
+
+        explicit_fields = (
+            "train_dataset_id",
+            "validation_dataset_id",
+            "test_dataset_id",
+        )
+
+        random_fields = (
+            "test_size",
+            "validation_size",
+            "random_state",
+        )
+
+        for name in explicit_fields:
+            field = self.param_fields.get(name)
+            widget = self.param_widgets.get(name)
+
+            if field is not None:
+                field.visible = explicit
+
+            if widget is not None and hasattr(widget, "disabled"):
+                try:
+                    widget.disabled = not explicit
+                except Exception:
+                    pass
+
+        for name in random_fields:
+            field = self.param_fields.get(name)
+            widget = self.param_widgets.get(name)
+
+            if field is not None:
+                field.visible = not explicit
+
+            if widget is not None and hasattr(widget, "disabled"):
+                try:
+                    widget.disabled = explicit
+                except Exception:
+                    pass
+
+        if explicit:
+            train_dataset_widget = self.param_widgets.get("train_dataset_id")
+            if train_dataset_widget is not None and self.dataset.value:
+                try:
+                    if self._empty_widget_value(train_dataset_widget.value):
+                        train_dataset_widget.value = self.dataset.value
+                except Exception:
+                    pass
 
     def _empty_widget_value(self, value: Any) -> bool:
         return value is None or value == "" or value == [] or value == {}
@@ -300,37 +373,42 @@ class MLRecipeLauncherPanel:
         except Exception:
             inferred = {}
 
-        if not inferred:
-            return
-
         applied = []
-        for name, value in inferred.items():
-            widget = self.param_widgets.get(name)
-            if widget is None:
-                continue
 
-            try:
-                current = widget.value
-            except Exception:
-                continue
+        if inferred:
+            for name, value in inferred.items():
+                widget = self.param_widgets.get(name)
+                if widget is None:
+                    continue
 
-            if not self._empty_widget_value(current):
-                continue
+                try:
+                    current = widget.value
+                except Exception:
+                    continue
 
-            try:
-                widget.value = value
-                applied.append(f"`{name}` = `{value}`")
-            except Exception:
-                pass
+                if not self._empty_widget_value(current):
+                    continue
 
-        train_dataset_widget = self.param_widgets.get("train_dataset_id")
-        if train_dataset_widget is not None and dataset_id:
-            try:
-                if self._empty_widget_value(train_dataset_widget.value):
-                    train_dataset_widget.value = dataset_id
-                    applied.append(f"`train_dataset_id` = `{dataset_id}`")
-            except Exception:
-                pass
+                try:
+                    widget.value = value
+                    applied.append(f"`{name}` = `{value}`")
+                except Exception:
+                    pass
+
+        split_widget = self.param_widgets.get("split_mode")
+        split_mode = str(getattr(split_widget, "value", "") or "random_size").strip()
+
+        if split_mode == "explicit_datasets":
+            train_dataset_widget = self.param_widgets.get("train_dataset_id")
+            if train_dataset_widget is not None and dataset_id:
+                try:
+                    if self._empty_widget_value(train_dataset_widget.value):
+                        train_dataset_widget.value = dataset_id
+                        applied.append(f"`train_dataset_id` = `{dataset_id}`")
+                except Exception:
+                    pass
+
+        self._sync_split_visibility()
 
         if applied:
             self.status.alert_type = "info"
@@ -410,6 +488,7 @@ class MLRecipeLauncherPanel:
 
     def _params(self) -> Dict[str, Any]:
         params: Dict[str, Any] = {}
+
         spec = self.registry.get(self.recipe.value)
         properties = (spec.params_schema or {}).get("properties", {}) or {}
 
@@ -426,6 +505,18 @@ class MLRecipeLauncherPanel:
                     pass
 
             params[name] = value
+
+        split_mode = str(params.get("split_mode") or "random_size").strip()
+
+        # Hidden widgets keep their values in Panel. Do not let stale explicit-dataset
+        # values leak into random-size recipe runs.
+        if split_mode != "explicit_datasets":
+            params["train_dataset_id"] = ""
+            params["validation_dataset_id"] = ""
+            params["test_dataset_id"] = ""
+        else:
+            if self._empty_widget_value(params.get("train_dataset_id")) and self.dataset.value:
+                params["train_dataset_id"] = self.dataset.value
 
         params["recipe_id"] = self.recipe.value
         params["dataset_id"] = self.dataset.value

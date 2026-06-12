@@ -74,7 +74,18 @@ def run_ml_recipe_action(context: Any, request: Any, cancel_token: Any = None) -
     # Infer bindings from the active/current dataset before user params are applied.
     # Mappings win inside infer_recipe_params(); user-supplied params then win over
     # all inferred/default values.
+    submitted_params = dict(params)
     inferred_params = _registry_mod.infer_recipe_params(context, dataset_id, spec)
+
+    # Track only values that came from inference because the submitted UI value was
+    # blank/missing. Recipes can then avoid reusing these inferred bindings for
+    # explicit validation/test datasets that may need their own mappings.
+    inferred_param_keys = {
+        str(key)
+        for key in inferred_params
+        if _registry_mod.is_empty_param_value(submitted_params.get(key))
+    }
+
     merged_params.update(inferred_params)
     merged_params.update(params)
 
@@ -82,7 +93,10 @@ def run_ml_recipe_action(context: Any, request: Any, cancel_token: Any = None) -
     for key, value in inferred_params.items():
         if _registry_mod.is_empty_param_value(merged_params.get(key)):
             merged_params[key] = value
+            inferred_param_keys.add(str(key))
 
+    merged_params["_inferred_param_keys"] = sorted(inferred_param_keys)
+    merged_params["_inferred_dataset_id"] = dataset_id
     merged_params["recipe_id"] = recipe_id
     merged_params["dataset_id"] = dataset_id
 

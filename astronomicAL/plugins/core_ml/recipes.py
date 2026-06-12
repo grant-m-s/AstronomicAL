@@ -333,7 +333,12 @@ class CIFARStyleImageClassifierRecipe(MLRecipe):
             "amp": {
                 "type": "boolean",
                 "title": "Use automatic mixed precision when available",
-                "default": True,
+                "default": False,
+                "description": (
+                    "Disabled by default because AMP can produce non-finite losses for "
+                    "some recipe/model/device combinations. Enable only after fp32 "
+                    "training produces stable losses."
+                ),
             },
             "data_parallel": {
                 "type": "boolean",
@@ -445,49 +450,106 @@ class CIFARStyleImageClassifierRecipe(MLRecipe):
                 "random_state": int(params.get("random_state", 42)),
             }
 
-        all_label_frames = [
-            frame
-            for frame in (train_df, val_df, test_df)
-            if frame is not None and not frame.empty
-        ]
+        if train_df is None or train_df.empty:
+            raise ValueError("The training split is empty.")
 
-        if not all_label_frames:
-            raise ValueError("No usable image/label rows found.")
+        for frame in (train_df, val_df, test_df):
+            if frame is not None and not frame.empty:
+                frame["__label_value__"] = (
+                    frame["__label_value__"]
+                    .astype(str)
+                    .str.strip()
+                )
+                frame = frame[frame["__label_value__"] != ""]
 
-        all_labels_df = pd.concat(all_label_frames, ignore_index=True)
-        class_names = sorted(str(v) for v in all_labels_df["__label_value__"].dropna().unique())
+        def _label_counts(frame):
+            if frame is None or frame.empty or "__label_value__" not in frame.columns:
+                return {}
+            labels = (
+                frame["__label_value__"]
+                .dropna()
+                .astype(str)
+                .str.strip()
+            )
+            labels = labels[labels != ""]
+            return {str(k): int(v) for k, v in labels.value_counts().to_dict().items()}
+
+        train_label_counts = _label_counts(train_df)
+        val_label_counts = _label_counts(val_df)
+        test_label_counts = _label_counts(test_df)
+
+        if not train_label_counts:
+            raise ValueError("The training split has no usable labels.")
+
+        class_names = sorted(train_label_counts)
         class_to_idx = {name: idx for idx, name in enumerate(class_names)}
 
         if len(class_names) < 2:
-            raise ValueError("Image classification requires at least two classes.")
+            raise ValueError(
+                "Image classification requires at least two classes in the training split. "
+                f"Training labels found: {class_names}"
+            )
+
+        val_only = sorted(set(val_label_counts) - set(train_label_counts))
+        test_only = sorted(set(test_label_counts) - set(train_label_counts))
+
+        if val_only or test_only:
+            raise ValueError(
+                "Validation/test labels are not a subset of training labels. "
+                f"Training labels: {class_names}. "
+                f"Validation-only labels: {val_only}. "
+                f"Test-only labels: {test_only}. "
+                "This usually means the explicit datasets are using different target "
+                "columns, different label encodings, or labels with different formatting."
+            )
 
         for frame in (train_df, val_df, test_df):
             if frame is not None and not frame.empty:
                 frame["__target_idx__"] = frame["__label_value__"].map(
-                    lambda value: class_to_idx[str(value)]
+                    lambda value: class_to_idx[str(value).strip()]
                 )
 
-        if train_df.empty:
-            raise ValueError("The training split is empty.")
+        split_source_meta = (
+            split_metadata.get("train")
+            or split_metadata.get("source")
+            or {}
+        )
 
-        image_column = split_metadata.get("train", split_metadata.get("source", {})).get(
-            "image_column",
-            params.get("image_column", ""),
-        )
-        target_column = split_metadata.get("train", split_metadata.get("source", {})).get(
-            "target_column",
-            params.get("target_column", ""),
-        )
-        record_id_column = split_metadata.get("train", split_metadata.get("source", {})).get(
-            "record_id_column",
-            params.get("record_id_column", ""),
-        )
+        image_column = str(
+            split_source_meta.get("image_column")
+            or params.get("image_column")
+            or ""
+        ).strip()
+
+        target_column = str(
+            split_source_meta.get("target_column")
+            or params.get("target_column")
+            or ""
+        ).strip()
+
+        record_id_column = str(
+            split_source_meta.get("record_id_column")
+            or params.get("record_id_column")
+            or ""
+        ).strip()
+
+        if not image_column:
+            raise ValueError(
+                "Could not resolve the image column used for this recipe run. "
+                "Check image_column, dataset mappings, or explicit split dataset metadata."
+            )
+
+        if not target_column:
+            raise ValueError(
+                "Could not resolve the target column used for this recipe run. "
+                "Check target_column, dataset mappings, or explicit split dataset metadata."
+            )
 
         run.log(
             message=(
                 f"Loaded splits: train={len(train_df)}, "
                 f"validation={len(val_df)}, test={len(test_df)} "
-                f"across {len(class_names)} classes."
+                f"across {len(class_names)} training classes."
             ),
             extra={
                 "classes": class_names,
@@ -495,6 +557,12 @@ class CIFARStyleImageClassifierRecipe(MLRecipe):
                 "train_rows": len(train_df),
                 "validation_rows": len(val_df),
                 "test_rows": len(test_df),
+                "train_label_counts": train_label_counts,
+                "validation_label_counts": val_label_counts,
+                "test_label_counts": test_label_counts,
+                "validation_only_labels": val_only,
+                "test_only_labels": test_only,
+                "split_metadata": split_metadata,
             },
         )
 
@@ -529,12 +597,15 @@ class CIFARStyleImageClassifierRecipe(MLRecipe):
         batch_size = int(params.get("batch_size", 128))
         num_workers = int(params.get("num_workers", 2))
 
+        device = self._resolve_device(torch, str(params.get("device", "auto")))
+        pin_memory = str(device).startswith("cuda")
+
         train_loader = DataLoader(
             ManifestImageDataset(train_df, train_tf),
             batch_size=batch_size,
             shuffle=True,
             num_workers=num_workers,
-            pin_memory=True,
+            pin_memory=pin_memory,
         )
 
         val_loader = None
@@ -544,7 +615,7 @@ class CIFARStyleImageClassifierRecipe(MLRecipe):
                 batch_size=batch_size,
                 shuffle=False,
                 num_workers=num_workers,
-                pin_memory=True,
+                pin_memory=pin_memory,
             )
 
         test_loader = None
@@ -554,10 +625,24 @@ class CIFARStyleImageClassifierRecipe(MLRecipe):
                 batch_size=batch_size,
                 shuffle=False,
                 num_workers=num_workers,
-                pin_memory=True,
+                pin_memory=pin_memory,
             )
 
-        device = self._resolve_device(torch, str(params.get("device", "auto")))
+        train_eval_df = train_df
+        if len(train_eval_df) > 2048:
+            train_eval_df = train_eval_df.sample(
+                n=2048,
+                random_state=int(params.get("random_state", 42)),
+            )
+
+        train_eval_loader = DataLoader(
+            ManifestImageDataset(train_eval_df, eval_tf),
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+        )
+
         model = self._build_model(
             torch=torch,
             nn=nn,
@@ -594,7 +679,15 @@ class CIFARStyleImageClassifierRecipe(MLRecipe):
             gamma=float(params.get("gamma", 0.2)),
         )
 
-        use_amp = bool(params.get("amp", True)) and str(device).startswith("cuda")
+        requested_amp = bool(params.get("amp", False))
+        use_amp = requested_amp and str(device).startswith("cuda")
+
+        if requested_amp and not use_amp:
+            run.log(
+                "AMP was requested but is only enabled for CUDA devices in this recipe.",
+                extra={"device": str(device)},
+            )        
+
         scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
 
         best_val_acc = -1.0
@@ -667,26 +760,46 @@ class CIFARStyleImageClassifierRecipe(MLRecipe):
                 run=run,
             )
 
+            train_eval_metrics, _, _, _ = self._evaluate(
+                torch=torch,
+                model=model,
+                loader=train_eval_loader,
+                criterion=criterion,
+                device=device,
+                run=run,
+            )
+
             val_metrics = None
             if val_loader is not None:
-                val_metrics, _, _, _ = self._evaluate(
+                val_metrics, val_predictions, _, val_record_ids = self._evaluate(
                     torch=torch,
                     model=model,
                     loader=val_loader,
                     criterion=criterion,
                     device=device,
+                    return_predictions=True,
                     run=run,
                 )
+
+                val_prediction_counts = {}
+                for pred_idx in val_predictions:
+                    label = class_names[int(pred_idx)]
+                    val_prediction_counts[label] = val_prediction_counts.get(label, 0) + 1
 
             if scheduler is not None:
                 scheduler.step()
 
-            row = {
-                "epoch": epoch,
-                "train_loss": train_metrics["loss"],
-                "train_accuracy": train_metrics["accuracy"],
-                "learning_rate": float(optimizer.param_groups[0]["lr"]),
-            }
+        row = {
+            "epoch": epoch,
+
+            # User-facing training metrics:
+            # evaluate the final model for this epoch on training rows using eval mode
+            # and eval transforms, so this is directly comparable with validation/test.
+            "train_loss": train_eval_metrics["loss"],
+            "train_accuracy": train_eval_metrics["accuracy"],
+
+            "learning_rate": float(optimizer.param_groups[0]["lr"]),
+        }
 
             if val_metrics is not None:
                 row["val_loss"] = val_metrics["loss"]
@@ -715,7 +828,10 @@ class CIFARStyleImageClassifierRecipe(MLRecipe):
                 step=epoch,
                 total=epochs,
                 metrics=row,
-                extra={"epoch": epoch},
+                extra={
+                    "epoch": epoch,
+                    "val_prediction_counts": val_prediction_counts if epoch <= 5 or epoch % 10 == 0 else None,
+                }
             )
 
             if score_value > best_val_acc:
@@ -955,6 +1071,45 @@ class CIFARStyleImageClassifierRecipe(MLRecipe):
         )
 
 
+    def _label_counts(self, frame: Optional[pd.DataFrame]) -> Dict[str, int]:
+        if frame is None or frame.empty or "__label_value__" not in frame.columns:
+            return {}
+
+        labels = (
+            frame["__label_value__"]
+            .dropna()
+            .astype(str)
+            .str.strip()
+        )
+
+        labels = labels[labels != ""]
+        counts = labels.value_counts().to_dict()
+        return {str(label): int(count) for label, count in counts.items()}
+
+
+    def _param_for_dataset(
+        self,
+        *,
+        params: Mapping[str, Any],
+        key: str,
+        dataset_id: str,
+    ) -> str:
+        value = params.get(key)
+
+        inferred_keys = {
+            str(item)
+            for item in (params.get("_inferred_param_keys") or [])
+        }
+        inferred_dataset_id = str(params.get("_inferred_dataset_id") or "").strip()
+
+        # If image_column/target_column/record_id_column was inferred from the
+        # launcher-selected dataset, do not blindly reuse it for another explicit
+        # split dataset. Let that dataset resolve from its own mappings/inference.
+        if key in inferred_keys and inferred_dataset_id and dataset_id != inferred_dataset_id:
+            return ""
+
+        return str(value or "").strip()
+
     def _resolve_image_columns_for_dataset(
         self,
         *,
@@ -964,8 +1119,24 @@ class CIFARStyleImageClassifierRecipe(MLRecipe):
     ) -> Dict[str, str]:
         inferred = infer_recipe_params(run.context, dataset_id, self.spec())
 
+        image_param = self._param_for_dataset(
+            params=params,
+            key="image_column",
+            dataset_id=dataset_id,
+        )
+        target_param = self._param_for_dataset(
+            params=params,
+            key="target_column",
+            dataset_id=dataset_id,
+        )
+        record_id_param = self._param_for_dataset(
+            params=params,
+            key="record_id_column",
+            dataset_id=dataset_id,
+        )
+
         image_column = str(
-            params.get("image_column")
+            image_param
             or inferred.get("image_column")
             or mapped_column(run.context, dataset_id, "image.path")
             or mapped_column(run.context, dataset_id, "image.uri")
@@ -973,14 +1144,14 @@ class CIFARStyleImageClassifierRecipe(MLRecipe):
         ).strip()
 
         target_column = str(
-            params.get("target_column")
+            target_param
             or inferred.get("target_column")
             or mapped_column(run.context, dataset_id, "target_label")
             or ""
         ).strip()
 
         record_id_column = str(
-            params.get("record_id_column")
+            record_id_param
             or inferred.get("record_id_column")
             or mapped_column(run.context, dataset_id, "record_id")
             or ""
@@ -1037,19 +1208,28 @@ class CIFARStyleImageClassifierRecipe(MLRecipe):
 
         raw = raw.dropna(subset=[image_column, target_column]).reset_index(drop=True)
 
+        if not raw.empty:
+            raw[image_column] = raw[image_column].astype(str).str.strip()
+            raw[target_column] = raw[target_column].astype(str).str.strip()
+
+            raw = raw[
+                (raw[image_column] != "")
+                & (raw[target_column] != "")
+            ].reset_index(drop=True)
+
         if raw.empty:
             frame = self._empty_split_frame()
         else:
             if record_id_column:
-                record_ids = raw[record_id_column].astype(str).tolist()
+                record_ids = raw[record_id_column].astype(str).str.strip().tolist()
             else:
                 record_id_column = "__rowid__"
                 record_ids = [f"{dataset_id}:{i}" for i in range(len(raw))]
 
             frame = pd.DataFrame(
                 {
-                    "__image_value__": raw[image_column].astype(str).tolist(),
-                    "__label_value__": raw[target_column].astype(str).tolist(),
+                    "__image_value__": raw[image_column].astype(str).str.strip().tolist(),
+                    "__label_value__": raw[target_column].astype(str).str.strip().tolist(),
                     "__record_id_value__": record_ids,
                     "__source_dataset_id__": dataset_id,
                     "__source_image_column__": image_column,
@@ -1127,9 +1307,11 @@ class CIFARStyleImageClassifierRecipe(MLRecipe):
         eval_ops = []
 
         if augmentation_preset == "cifar_standard":
+            if image_size != 32:
+                train_ops.append(transforms.Resize((image_size, image_size)))
+
             train_ops.extend(
                 [
-                    transforms.Resize((image_size, image_size)),
                     transforms.RandomCrop(image_size, padding=4),
                     transforms.RandomHorizontalFlip(),
                 ]
@@ -1137,7 +1319,8 @@ class CIFARStyleImageClassifierRecipe(MLRecipe):
         else:
             train_ops.append(transforms.Resize((image_size, image_size)))
 
-        eval_ops.append(transforms.Resize((image_size, image_size)))
+        if image_size != 32:
+            eval_ops.append(transforms.Resize((image_size, image_size)))
 
         train_ops.append(transforms.ToTensor())
         eval_ops.append(transforms.ToTensor())
@@ -1294,37 +1477,73 @@ class CIFARStyleImageClassifierRecipe(MLRecipe):
         device: Any,
         use_amp: bool,
         run: MLRunContext,
-    ) -> Dict[str, float]:
+    ) -> Dict[str, Any]:
         model.train()
+
         total_loss = 0.0
-        correct = 0
-        count = 0
+        total_correct = 0
+        total_seen = 0
 
         for images, targets, _record_ids in loader:
             run.check_cancelled()
 
             images = images.to(device, non_blocking=True)
-            targets = targets.to(device, non_blocking=True)
+            targets = targets.to(device, non_blocking=True).long()
 
             optimizer.zero_grad(set_to_none=True)
 
-            with torch.cuda.amp.autocast(enabled=use_amp):
-                logits = model(images)
-                loss = criterion(logits, targets)
+            if use_amp:
+                with torch.cuda.amp.autocast(enabled=True):
+                    outputs = model(images)
+                    loss = criterion(outputs, targets)
+                    if not bool(torch.isfinite(outputs.detach()).all().item()):
+                        raise FloatingPointError(
+                            "Non-finite train logits detected. Disable AMP, lower the learning rate, "
+                            "or inspect image normalization."
+                        )
 
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
+                    if not bool(torch.isfinite(loss.detach()).item()):
+                        raise FloatingPointError(
+                            "Non-finite train loss detected. Disable AMP, lower the learning rate, "
+                            "or inspect labels/images."
+                        )
+
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                outputs = model(images)
+                loss = criterion(outputs, targets)
+
+                if not bool(torch.isfinite(outputs.detach()).all().item()):
+                    raise FloatingPointError(
+                        "Non-finite train logits detected. Disable AMP, lower the learning rate, "
+                        "or inspect image normalization."
+                    )
+
+                if not bool(torch.isfinite(loss.detach()).item()):
+                    raise FloatingPointError(
+                        "Non-finite train loss detected. Disable AMP, lower the learning rate, "
+                        "or inspect labels/images."
+                    )
+
+                loss.backward()
+                optimizer.step()
+
+            
 
             batch_size = int(targets.size(0))
-            total_loss += float(loss.detach().cpu()) * batch_size
-            predictions = logits.argmax(dim=1)
-            correct += int((predictions == targets).sum().item())
-            count += batch_size
+            total_seen += batch_size
+            total_loss += float(loss.detach().item()) * batch_size
+
+            predicted = outputs.detach().argmax(dim=1)
+            total_correct += int(predicted.eq(targets).sum().item())
 
         return {
-            "loss": total_loss / max(1, count),
-            "accuracy": correct / max(1, count),
+            "loss": None if total_seen <= 0 else total_loss / float(total_seen),
+            "accuracy": None if total_seen <= 0 else total_correct / float(total_seen),
+            "correct": total_correct,
+            "total": total_seen,
         }
 
     def _evaluate(
@@ -1337,11 +1556,13 @@ class CIFARStyleImageClassifierRecipe(MLRecipe):
         device: Any,
         return_predictions: bool = False,
         run: Optional[MLRunContext] = None,
-    ):
+    ) -> Tuple[Dict[str, Any], List[int], List[List[float]], List[str]]:
         model.eval()
+
         total_loss = 0.0
-        correct = 0
-        count = 0
+        total_correct = 0
+        total_seen = 0
+
         all_predictions: List[int] = []
         all_probabilities: List[List[float]] = []
         all_record_ids: List[str] = []
@@ -1352,29 +1573,46 @@ class CIFARStyleImageClassifierRecipe(MLRecipe):
                     run.check_cancelled()
 
                 images = images.to(device, non_blocking=True)
-                targets = targets.to(device, non_blocking=True)
+                targets = targets.to(device, non_blocking=True).long()
 
-                logits = model(images)
-                loss = criterion(logits, targets)
-                probs = torch.softmax(logits, dim=1)
-                predictions = logits.argmax(dim=1)
+                outputs = model(images)
+                loss = criterion(outputs, targets)
+                if not bool(torch.isfinite(outputs.detach()).all().item()):
+                    raise FloatingPointError(
+                        "Non-finite evaluation logits detected. The model is numerically unstable."
+                    )
+
+                if not bool(torch.isfinite(loss.detach()).item()):
+                    raise FloatingPointError(
+                        "Non-finite evaluation loss detected. The model is numerically unstable."
+                    )
 
                 batch_size = int(targets.size(0))
-                total_loss += float(loss.detach().cpu()) * batch_size
-                correct += int((predictions == targets).sum().item())
-                count += batch_size
+                total_seen += batch_size
+                total_loss += float(loss.detach().item()) * batch_size
+
+                probabilities = torch.softmax(outputs.detach(), dim=1)
+                predicted = probabilities.argmax(dim=1)
+
+                total_correct += int(predicted.eq(targets).sum().item())
 
                 if return_predictions:
-                    all_predictions.extend(int(v) for v in predictions.detach().cpu().tolist())
+                    all_predictions.extend(int(value) for value in predicted.cpu().tolist())
                     all_probabilities.extend(
-                        [[float(x) for x in row] for row in probs.detach().cpu().tolist()]
+                        [
+                            [float(item) for item in row]
+                            for row in probabilities.cpu().tolist()
+                        ]
                     )
-                    all_record_ids.extend(str(v) for v in record_ids)
+                    all_record_ids.extend(str(value) for value in record_ids)
 
         metrics = {
-            "loss": total_loss / max(1, count),
-            "accuracy": correct / max(1, count),
+            "loss": None if total_seen <= 0 else total_loss / float(total_seen),
+            "accuracy": None if total_seen <= 0 else total_correct / float(total_seen),
+            "correct": total_correct,
+            "total": total_seen,
         }
+
         return metrics, all_predictions, all_probabilities, all_record_ids
 
     def _module_state_dict(self, model: Any):
