@@ -166,36 +166,63 @@ class CIFARStyleImageClassifierRecipe(MLRecipe):
                 "default": "",
                 "description": "Blank means infer from dataset mappings/columns.",
             },
-            "split_mode": {
+            "validation_source": {
                 "type": "string",
-                "title": "Split mode",
-                "enum": ["random_size", "explicit_datasets"],
-                "default": "random_size",
+                "title": "Validation source",
+                "enum": ["split", "dataset"],
+                "default": "split",
                 "description": (
-                    "random_size splits the selected dataset by percentages. "
-                    "explicit_datasets uses separate train/validation/test datasets."
+                    "How to provide validation data. "
+                    "`split` reserves validation_size from the selected training dataset. "
+                    "`dataset` uses validation_dataset_id."
                 ),
             },
-            "train_dataset_id": {
-                "type": "string",
-                "title": "Train dataset",
-                "default": "",
-                "x-widget": "dataset_select",
-                "description": "Used when split_mode=explicit_datasets. Blank falls back to the selected dataset.",
+            "validation_size": {
+                "type": "number",
+                "title": "Validation split",
+                "default": 0.1,
+                "minimum": 0.01,
+                "maximum": 0.5,
+                "description": (
+                    "Fraction of the selected training dataset to reserve for validation. "
+                    "Used only when Validation source = split. Must be > 0 and <= 0.5."
+                ),
             },
             "validation_dataset_id": {
                 "type": "string",
                 "title": "Validation dataset",
                 "default": "",
                 "x-widget": "dataset_select",
-                "description": "Optional. Used when split_mode=explicit_datasets.",
+                "description": "Required when Validation source = dataset.",
+            },
+            "test_source": {
+                "type": "string",
+                "title": "Test source",
+                "enum": ["none", "split", "dataset"],
+                "default": "none",
+                "description": (
+                    "Optional test data. `none` skips test evaluation. "
+                    "`split` reserves test_size from the selected training dataset. "
+                    "`dataset` uses test_dataset_id."
+                ),
+            },
+            "test_size": {
+                "type": "number",
+                "title": "Test split",
+                "default": 0.0,
+                "minimum": 0.0,
+                "maximum": 0.3,
+                "description": (
+                    "Fraction of the selected training dataset to reserve for test. "
+                    "Used only when Test source = split. Must be > 0 and <= 0.3."
+                ),
             },
             "test_dataset_id": {
                 "type": "string",
                 "title": "Test dataset",
                 "default": "",
                 "x-widget": "dataset_select",
-                "description": "Optional. Used when split_mode=explicit_datasets.",
+                "description": "Required when Test source = dataset.",
             },
             "architecture": {
                 "type": "string",
@@ -305,20 +332,6 @@ class CIFARStyleImageClassifierRecipe(MLRecipe):
                 "enum": ["cifar10", "imagenet", "none"],
                 "default": "cifar10",
             },
-            "test_size": {
-                "type": "number",
-                "title": "Test size",
-                "default": 0.2,
-                "minimum": 0.01,
-                "maximum": 0.8,
-            },
-            "validation_size": {
-                "type": "number",
-                "title": "Validation size",
-                "default": 0.1,
-                "minimum": 0.0,
-                "maximum": 0.8,
-            },
             "random_state": {
                 "type": "integer",
                 "title": "Random seed",
@@ -364,91 +377,142 @@ class CIFARStyleImageClassifierRecipe(MLRecipe):
         params.setdefault("optimize_metric", "val_accuracy")
         run.params.update(params)
 
-        split_mode = str(params.get("split_mode") or "random_size").strip()
+        validation_source = str(params.get("validation_source") or "split").strip()
+        test_source = str(params.get("test_source") or "none").strip()
 
+        if validation_source not in {"split", "dataset"}:
+            raise ValueError(
+                "validation_source must be either `split` or `dataset`."
+            )
+
+        if test_source not in {"none", "split", "dataset"}:
+            raise ValueError(
+                "test_source must be one of `none`, `split`, or `dataset`."
+            )
+
+        validation_size = float(params.get("validation_size", 0.1) or 0.0)
+        test_size = float(params.get("test_size", 0.0) or 0.0)
+        random_state = int(params.get("random_state", 42))
         limit = int(params.get("limit_rows") or 0) or None
 
-        if split_mode == "explicit_datasets":
-            train_dataset_id = str(params.get("train_dataset_id") or run.dataset_id).strip()
+        if validation_source == "split" and not (0.0 < validation_size <= 0.5):
+            raise ValueError(
+                "Validation split must be > 0 and <= 0.5 when validation_source=split."
+            )
+
+        if validation_source == "dataset":
+            validation_size = 0.0
             validation_dataset_id = str(params.get("validation_dataset_id") or "").strip()
-            test_dataset_id = str(params.get("test_dataset_id") or "").strip()
-
-            if not train_dataset_id:
+            if not validation_dataset_id:
                 raise ValueError(
-                    "split_mode=explicit_datasets requires train_dataset_id or a selected dataset."
+                    "A validation dataset is required when validation_source=dataset."
                 )
-
-            train_df, train_meta = self._load_image_split_frame(
-                run=run,
-                dataset_id=train_dataset_id,
-                params=params,
-                split_name="train",
-                limit=limit,
-            )
-
-            if validation_dataset_id:
-                val_df, val_meta = self._load_image_split_frame(
-                    run=run,
-                    dataset_id=validation_dataset_id,
-                    params=params,
-                    split_name="validation",
-                    limit=limit,
-                )
-            else:
-                val_df = self._empty_split_frame()
-                val_meta = None
-
-            if test_dataset_id:
-                test_df, test_meta = self._load_image_split_frame(
-                    run=run,
-                    dataset_id=test_dataset_id,
-                    params=params,
-                    split_name="test",
-                    limit=limit,
-                )
-            else:
-                test_df = self._empty_split_frame()
-                test_meta = None
-
-            split_metadata = {
-                "mode": "explicit_datasets",
-                "train": train_meta,
-                "validation": val_meta,
-                "test": test_meta,
-            }
-
         else:
-            df, source_meta = self._load_image_split_frame(
+            validation_dataset_id = ""
+
+        if test_source == "none":
+            test_size = 0.0
+            test_dataset_id = ""
+        elif test_source == "split":
+            test_dataset_id = ""
+            if not (0.0 < test_size <= 0.3):
+                raise ValueError(
+                    "Test split must be > 0 and <= 0.3 when test_source=split. "
+                    "Use test_source=none if no test set is needed."
+                )
+        elif test_source == "dataset":
+            test_size = 0.0
+            test_dataset_id = str(params.get("test_dataset_id") or "").strip()
+            if not test_dataset_id:
+                raise ValueError(
+                    "A test dataset is required when test_source=dataset."
+                )
+
+        if validation_source == "split" and test_source == "split":
+            if validation_size + test_size >= 0.9:
+                raise ValueError(
+                    "validation_size + test_size is too large. "
+                    "Leave enough rows for training."
+                )
+
+        train_dataset_id = str(run.dataset_id or "").strip()
+        if not train_dataset_id:
+            raise ValueError("A selected training dataset is required.")
+
+        source_df, source_meta = self._load_image_split_frame(
+            run=run,
+            dataset_id=train_dataset_id,
+            params=params,
+            split_name="source",
+            limit=limit,
+        )
+
+        train_df, split_val_df, split_test_df = self._split_dataframe(
+            source_df,
+            label_column="__label_value__",
+            test_size=test_size if test_source == "split" else 0.0,
+            validation_size=validation_size if validation_source == "split" else 0.0,
+            random_state=random_state,
+        )
+
+        train_df = train_df.copy()
+        train_df["__split__"] = "train"
+
+        if validation_source == "split":
+            val_df = split_val_df.copy()
+            val_df["__split__"] = "validation"
+            val_meta = {
+                **source_meta,
+                "source": "split",
+                "rows": len(val_df),
+                "validation_size": validation_size,
+            }
+        else:
+            val_df, val_meta = self._load_image_split_frame(
                 run=run,
-                dataset_id=run.dataset_id,
+                dataset_id=validation_dataset_id,
                 params=params,
-                split_name="all",
+                split_name="validation",
                 limit=limit,
             )
 
-            train_df, val_df, test_df = self._split_dataframe(
-                df,
-                label_column="__label_value__",
-                test_size=float(params.get("test_size", 0.2)),
-                validation_size=float(params.get("validation_size", 0.1)),
-                random_state=int(params.get("random_state", 42)),
+        if test_source == "none":
+            test_df = self._empty_split_frame()
+            test_meta = None
+        elif test_source == "split":
+            test_df = split_test_df.copy()
+            test_df["__split__"] = "test"
+            test_meta = {
+                **source_meta,
+                "source": "split",
+                "rows": len(test_df),
+                "test_size": test_size,
+            }
+        else:
+            test_df, test_meta = self._load_image_split_frame(
+                run=run,
+                dataset_id=test_dataset_id,
+                params=params,
+                split_name="test",
+                limit=limit,
             )
 
-            train_df = train_df.copy()
-            val_df = val_df.copy()
-            test_df = test_df.copy()
-
-            train_df["__split__"] = "train"
-            val_df["__split__"] = "validation"
-            test_df["__split__"] = "test"
-
-            split_metadata = {
-                "mode": "random_size",
-                "source": source_meta,
-                "test_size": float(params.get("test_size", 0.2)),
-                "validation_size": float(params.get("validation_size", 0.1)),
-                "random_state": int(params.get("random_state", 42)),
-            }
+        split_mode = "hybrid"
+        split_metadata = {
+            "mode": split_mode,
+            "train": {
+                **source_meta,
+                "source": "selected_dataset",
+                "rows": len(train_df),
+            },
+            "validation": val_meta,
+            "test": test_meta,
+            "validation_source": validation_source,
+            "test_source": test_source,
+            "validation_size": validation_size,
+            "test_size": test_size,
+            "random_state": random_state,
+        }
 
         if train_df is None or train_df.empty:
             raise ValueError("The training split is empty.")
@@ -477,6 +541,18 @@ class CIFARStyleImageClassifierRecipe(MLRecipe):
         train_label_counts = _label_counts(train_df)
         val_label_counts = _label_counts(val_df)
         test_label_counts = _label_counts(test_df)
+
+        if val_df is None or val_df.empty:
+            raise ValueError(
+                "A validation set is required for training. "
+                "Set Validation source to `split` with validation_size > 0, "
+                "or set Validation source to `dataset` and choose a validation dataset."
+            )
+
+        if not val_label_counts:
+            raise ValueError(
+                "The validation set has no usable labels."
+            )
 
         if not train_label_counts:
             raise ValueError("The training split has no usable labels.")
@@ -1260,30 +1336,71 @@ class CIFARStyleImageClassifierRecipe(MLRecipe):
     ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
         from sklearn.model_selection import train_test_split
 
-        stratify = df[label_column] if df[label_column].nunique() > 1 else None
+        test_size = float(test_size or 0.0)
+        validation_size = float(validation_size or 0.0)
 
-        train_val, test = train_test_split(
-            df,
-            test_size=test_size,
-            random_state=random_state,
-            stratify=stratify,
+        if test_size < 0.0 or test_size >= 1.0:
+            raise ValueError("test_size must be >= 0 and < 1.")
+
+        if validation_size < 0.0 or validation_size >= 1.0:
+            raise ValueError("validation_size must be >= 0 and < 1.")
+
+        if test_size + validation_size >= 1.0:
+            raise ValueError("test_size + validation_size must be < 1.")
+
+        if df.empty:
+            return df.copy(), df.copy(), df.copy()
+
+        train_pool = df.copy()
+        test = df.iloc[0:0].copy()
+
+        if test_size > 0.0:
+            stratify = (
+                df[label_column]
+                if label_column in df.columns and df[label_column].nunique() > 1
+                else None
+            )
+
+            train_pool, test = train_test_split(
+                df,
+                test_size=test_size,
+                random_state=random_state,
+                stratify=stratify,
+            )
+
+        val = df.iloc[0:0].copy()
+
+        if validation_size > 0.0:
+            # validation_size is expressed as a fraction of the original selected
+            # training dataset, not a fraction of the post-test remainder.
+            relative_val_size = validation_size / max(1e-9, 1.0 - test_size)
+
+            if relative_val_size <= 0.0 or relative_val_size >= 1.0:
+                raise ValueError(
+                    "Validation split leaves no training rows. "
+                    "Reduce validation_size and/or test_size."
+                )
+
+            val_stratify = (
+                train_pool[label_column]
+                if label_column in train_pool.columns and train_pool[label_column].nunique() > 1
+                else None
+            )
+
+            train, val = train_test_split(
+                train_pool,
+                test_size=relative_val_size,
+                random_state=random_state,
+                stratify=val_stratify,
+            )
+        else:
+            train = train_pool
+
+        return (
+            train.reset_index(drop=True),
+            val.reset_index(drop=True),
+            test.reset_index(drop=True),
         )
-
-        if validation_size <= 0:
-            return train_val, test.iloc[0:0].copy(), test
-
-        relative_val = validation_size / max(1e-9, 1.0 - test_size)
-        val_stratify = (
-            train_val[label_column] if train_val[label_column].nunique() > 1 else None
-        )
-
-        train, val = train_test_split(
-            train_val,
-            test_size=relative_val,
-            random_state=random_state,
-            stratify=val_stratify,
-        )
-        return train, val, test
 
     def _build_transforms(
         self,

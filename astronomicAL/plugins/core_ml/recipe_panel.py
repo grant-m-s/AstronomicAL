@@ -290,15 +290,17 @@ class MLRecipeLauncherPanel:
             self.param_fields[name] = field
             self.params_area.append(field)
 
-            if name == "split_mode":
+            if name in {"validation_source", "test_source"}:
                 try:
-                    widget.param.watch(self._on_split_mode_change, "value")
+                    widget.param.watch(self._on_split_control_change, "value")
                 except Exception:
                     pass
 
         self._apply_inferred_defaults()
         self._sync_split_visibility()
 
+    def _on_split_control_change(self, *_: Any) -> None:
+        self._sync_split_visibility()
 
     def _on_split_mode_change(self, *_: Any) -> None:
         self._sync_split_visibility()
@@ -306,56 +308,41 @@ class MLRecipeLauncherPanel:
 
 
     def _sync_split_visibility(self) -> None:
-        split_widget = self.param_widgets.get("split_mode")
-        split_mode = str(getattr(split_widget, "value", "") or "random_size").strip()
-        explicit = split_mode == "explicit_datasets"
+        validation_source_widget = self.param_widgets.get("validation_source")
+        test_source_widget = self.param_widgets.get("test_source")
 
-        explicit_fields = (
-            "train_dataset_id",
-            "validation_dataset_id",
-            "test_dataset_id",
-        )
+        validation_source = str(
+            getattr(validation_source_widget, "value", "") or "split"
+        ).strip()
 
-        random_fields = (
-            "test_size",
-            "validation_size",
-            "random_state",
-        )
+        test_source = str(
+            getattr(test_source_widget, "value", "") or "none"
+        ).strip()
 
-        for name in explicit_fields:
+        def _show(name: str, visible: bool) -> None:
             field = self.param_fields.get(name)
             widget = self.param_widgets.get(name)
 
             if field is not None:
-                field.visible = explicit
+                field.visible = visible
 
             if widget is not None and hasattr(widget, "disabled"):
                 try:
-                    widget.disabled = not explicit
+                    widget.disabled = not visible
                 except Exception:
                     pass
 
-        for name in random_fields:
-            field = self.param_fields.get(name)
-            widget = self.param_widgets.get(name)
+        _show("validation_size", validation_source == "split")
+        _show("validation_dataset_id", validation_source == "dataset")
 
-            if field is not None:
-                field.visible = not explicit
+        _show("test_size", test_source == "split")
+        _show("test_dataset_id", test_source == "dataset")
 
-            if widget is not None and hasattr(widget, "disabled"):
-                try:
-                    widget.disabled = explicit
-                except Exception:
-                    pass
-
-        if explicit:
-            train_dataset_widget = self.param_widgets.get("train_dataset_id")
-            if train_dataset_widget is not None and self.dataset.value:
-                try:
-                    if self._empty_widget_value(train_dataset_widget.value):
-                        train_dataset_widget.value = self.dataset.value
-                except Exception:
-                    pass
+        random_state_visible = (
+            validation_source == "split"
+            or test_source == "split"
+        )
+        _show("random_state", random_state_visible)
 
     def _empty_widget_value(self, value: Any) -> bool:
         return value is None or value == "" or value == [] or value == {}
@@ -506,17 +493,34 @@ class MLRecipeLauncherPanel:
 
             params[name] = value
 
-        split_mode = str(params.get("split_mode") or "random_size").strip()
+        validation_source = str(params.get("validation_source") or "split").strip()
+        test_source = str(params.get("test_source") or "none").strip()
 
-        # Hidden widgets keep their values in Panel. Do not let stale explicit-dataset
-        # values leak into random-size recipe runs.
-        if split_mode != "explicit_datasets":
-            params["train_dataset_id"] = ""
+        if validation_source not in {"split", "dataset"}:
+            validation_source = "split"
+
+        if test_source not in {"none", "split", "dataset"}:
+            test_source = "none"
+
+        params["validation_source"] = validation_source
+        params["test_source"] = test_source
+
+        if validation_source == "split":
             params["validation_dataset_id"] = ""
-            params["test_dataset_id"] = ""
         else:
-            if self._empty_widget_value(params.get("train_dataset_id")) and self.dataset.value:
-                params["train_dataset_id"] = self.dataset.value
+            params["validation_size"] = 0.0
+
+        if test_source == "none":
+            params["test_size"] = 0.0
+            params["test_dataset_id"] = ""
+        elif test_source == "split":
+            params["test_dataset_id"] = ""
+        elif test_source == "dataset":
+            params["test_size"] = 0.0
+
+        # Remove legacy fields so stale hidden widgets cannot affect the run.
+        params.pop("split_mode", None)
+        params.pop("train_dataset_id", None)
 
         params["recipe_id"] = self.recipe.value
         params["dataset_id"] = self.dataset.value
