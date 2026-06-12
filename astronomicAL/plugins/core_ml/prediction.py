@@ -200,6 +200,9 @@ def predict_action(context: Any, request: Any, cancel_token: Any = None) -> Dict
             "compatibility_report": compatibility.to_dict(),
             "recommended_color_columns": payload.get("visualisation", {}).get("recommended_color_columns", []),
             "prediction_preview": payload.get("prediction_table", {}).get("rows", [])[:25],
+            "prediction_table_columns": payload.get("prediction_table", {}).get("columns", []),
+            "failed_image_row_count": int((input_binding or {}).get("failed_image_row_count") or 0),
+            "failed_image_rows": list((input_binding or {}).get("failed_image_rows") or [])[:25],
         }
     )
 
@@ -526,17 +529,36 @@ def _dataset_id(context: Any, request: ActionRequest, params: Mapping[str, Any])
 
 
 def _filter_rows(df: pd.DataFrame, request: ActionRequest, record_id_column: Optional[str]) -> pd.DataFrame:
+    params = dict(getattr(request, "params", {}) or {})
+
     row_ids = list(request.row_ids or [])
-    if not row_ids:
-        return df
-    if record_id_column and record_id_column in df.columns:
-        wanted = {str(row_id) for row_id in row_ids}
-        return df[df[record_id_column].astype(str).isin(wanted)]
+    if row_ids:
+        if record_id_column and record_id_column in df.columns:
+            wanted = {str(row_id) for row_id in row_ids}
+            df = df[df[record_id_column].astype(str).isin(wanted)]
+        else:
+            try:
+                df = df.loc[row_ids]
+            except Exception:
+                wanted = {str(row_id) for row_id in row_ids}
+                df = df[df.index.astype(str).isin(wanted)]
+
+    row_limit = (
+        params.get("max_rows")
+        or params.get("row_limit")
+        or params.get("limit_rows")
+        or 0
+    )
+
     try:
-        return df.loc[row_ids]
+        row_limit = int(row_limit or 0)
     except Exception:
-        wanted = {str(row_id) for row_id in row_ids}
-        return df[df.index.astype(str).isin(wanted)]
+        row_limit = 0
+
+    if row_limit > 0:
+        df = df.head(row_limit)
+
+    return df
 
 
 def _row_ids(df: pd.DataFrame, record_id_column: Optional[str]) -> List[str]:

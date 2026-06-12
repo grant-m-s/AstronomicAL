@@ -73,6 +73,44 @@ def json_safe(value: Any) -> Any:
     return str(value)
 
 
+def _as_mapping(value: Any) -> Dict[str, Any]:
+    if isinstance(value, Mapping):
+        return dict(value)
+    return {}
+
+
+def _metadata_with_input_contract(model_payload: Mapping[str, Any]) -> Dict[str, Any]:
+    """Merge recipe input_contract into metadata-like lookup state.
+
+    Older generic model artifacts put most fields directly under metadata.
+    Recipe artifacts put image/target/normalisation fields under input_contract.
+    Contract building should support both.
+    """
+    input_contract = _as_mapping(model_payload.get("input_contract"))
+    metadata = _as_mapping(model_payload.get("metadata"))
+
+    # Metadata wins if both exist, but input_contract provides the important
+    # recipe defaults.
+    merged = {**input_contract, **metadata}
+
+    training = _as_mapping(model_payload.get("training"))
+    if training:
+        merged.setdefault("training", training)
+
+    metrics = _as_mapping(model_payload.get("metrics"))
+    if metrics:
+        merged.setdefault("metrics", metrics)
+
+    return merged
+
+
+def _first_non_empty(*values: Any) -> Optional[str]:
+    for value in values:
+        text = _none_if_empty(value)
+        if text:
+            return text
+    return None
+
 def ensure_model_contract(
     *,
     context: Any,
@@ -119,17 +157,60 @@ def build_model_contract(
 ) -> Dict[str, Any]:
     """Build the portable model contract from a trained-model artifact."""
 
-    metadata = dict(model_payload.get("metadata") or {})
-    framework = str(model_payload.get("framework") or metadata.get("framework") or "").lower()
+    input_contract = _as_mapping(model_payload.get("input_contract"))
+    metadata = _metadata_with_input_contract(model_payload)
+    training = _as_mapping(model_payload.get("training"))
+    metrics = _as_mapping(model_payload.get("metrics"))
+
+    framework = str(
+        model_payload.get("framework")
+        or metadata.get("framework")
+        or ""
+    ).lower()
+
     modality = str(
         model_payload.get("modality")
         or metadata.get("modality")
-        or ("image" if model_payload.get("image_column") else "tabular")
+        or (
+            "image"
+            if _first_non_empty(
+                model_payload.get("image_column"),
+                input_contract.get("image_column"),
+                metadata.get("image_column"),
+            )
+            else "tabular"
+        )
     ).lower()
-    task = str(model_payload.get("task") or metadata.get("task") or "classification").lower()
-    training_dataset_id = str(model_payload.get("dataset_id") or "")
-    target_column = _none_if_empty(model_payload.get("target_column"))
-    record_id_column = _mapped_column(context, training_dataset_id, "record_id") if training_dataset_id else None
+
+    task = str(
+        model_payload.get("task")
+        or metadata.get("task")
+        or "classification"
+    ).lower()
+
+    training_dataset_id = str(
+        model_payload.get("dataset_id")
+        or input_contract.get("dataset_id")
+        or training.get("dataset_id")
+        or ""
+    )
+
+    target_column = _first_non_empty(
+        model_payload.get("target_column"),
+        input_contract.get("target_column"),
+        training.get("target_column"),
+        metadata.get("target_column"),
+    )
+
+    record_id_column = _first_non_empty(
+        model_payload.get("record_id_column"),
+        input_contract.get("record_id_column"),
+        training.get("record_id_column"),
+        metadata.get("record_id_column"),
+    )
+
+    if not record_id_column and training_dataset_id:
+        record_id_column = _mapped_column(context, training_dataset_id, "record_id")
 
     if modality == "image":
         input_schema = _image_input_schema(
@@ -147,26 +228,48 @@ def build_model_contract(
         )
 
     classes = _classes_from_payload_or_model(model_payload, model_object)
+
     output_schema = _output_schema(
         task=task,
         classes=classes,
         metadata=metadata,
     )
 
+    hyperparameters = {}
+    if isinstance(model_payload.get("params"), Mapping):
+        hyperparameters.update(dict(model_payload.get("params") or {}))
+    if training:
+        hyperparameters.update(training)
+
     contract = {
         "schema_version": MODEL_CONTRACT_SCHEMA_VERSION,
         "created_at": time.time(),
         "model_artifact_id": model_artifact_id,
         "run_id": model_payload.get("run_id"),
+        "recipe_id": model_payload.get("recipe_id"),
+        "recipe_version": model_payload.get("recipe_version"),
         "model_definition_id": model_payload.get("model_id"),
-        "model_title": model_payload.get("model_title") or model_payload.get("model_id") or model_artifact_id,
+        "model_title": (
+            model_payload.get("model_title")
+            or model_payload.get("model_id")
+            or model_payload.get("recipe_id")
+            or model_artifact_id
+        ),
         "framework": framework,
         "task": task,
         "modality": modality,
         "trained_on": {
             "dataset_id": training_dataset_id,
-            "dataset_fingerprint": dataset_fingerprint(context, training_dataset_id) if training_dataset_id else None,
-            "row_count": _row_count(context, training_dataset_id) if training_dataset_id else None,
+            "dataset_fingerprint": (
+                dataset_fingerprint(context, training_dataset_id)
+                if training_dataset_id
+                else None
+            ),
+            "row_count": (
+                _row_count(context, training_dataset_id)
+                if training_dataset_id
+                else None
+            ),
             "target_column": target_column,
             "target_semantic": "target_label" if target_column else None,
             "record_id_column": record_id_column,
@@ -175,7 +278,8 @@ def build_model_contract(
         "input_schema": input_schema,
         "output_schema": output_schema,
         "training_context": {
-            "hyperparameters": model_payload.get("params") or metadata.get("params") or {},
+            "hyperparameters": hyperparameters,
+            "metrics": metrics,
             "tuning": metadata.get("tuning") or model_payload.get("tuning") or {},
             "active_learning_strategy": metadata.get("active_learning_strategy"),
             "label_schema_hash": _stable_hash(output_schema.get("classes") or []),
@@ -189,10 +293,16 @@ def build_model_contract(
             "warn_on_target_class_mismatch": True,
         },
         "source_payload_summary": {
+            "kind": model_payload.get("kind"),
             "model_ref": model_payload.get("model_ref"),
+            "architecture": model_payload.get("architecture"),
+            "custom_model_import": model_payload.get("custom_model_import"),
+            "input_contract": input_contract,
+            "metrics": metrics,
             "created_at": model_payload.get("created_at"),
         },
     }
+
     return json_safe(contract)
 
 
@@ -576,7 +686,6 @@ def _tabular_input_schema(
         },
     }
 
-
 def _image_input_schema(
     *,
     context: Any,
@@ -584,23 +693,75 @@ def _image_input_schema(
     metadata: Mapping[str, Any],
     training_dataset_id: str,
 ) -> Dict[str, Any]:
-    image_column = model_payload.get("image_column") or metadata.get("image_column")
-    image_size = metadata.get("image_size") or metadata.get("input_size")
-    if image_size is None:
-        image_size = 224
+    image_column = _first_non_empty(
+        model_payload.get("image_column"),
+        metadata.get("image_column"),
+    )
+
+    target_column = _first_non_empty(
+        model_payload.get("target_column"),
+        metadata.get("target_column"),
+    )
+
+    record_id_column = _first_non_empty(
+        model_payload.get("record_id_column"),
+        metadata.get("record_id_column"),
+    )
+
+    if not record_id_column and training_dataset_id:
+        record_id_column = _mapped_column(context, training_dataset_id, "record_id")
+
+    image_size = (
+        metadata.get("image_size")
+        or metadata.get("input_size")
+        or model_payload.get("image_size")
+        or 224
+    )
+
+    channels = (
+        metadata.get("channels")
+        or model_payload.get("channels")
+        or 3
+    )
+
+    normalization = (
+        metadata.get("normalization")
+        or model_payload.get("normalization")
+        or {"mean": [0.485, 0.456, 0.406], "std": [0.229, 0.224, 0.225]}
+    )
+
+    transform = (
+        metadata.get("transform")
+        or metadata.get("transforms")
+        or model_payload.get("transform")
+        or model_payload.get("transforms")
+        or {}
+    )
+
+    try:
+        image_size = int(image_size)
+    except Exception:
+        pass
+
+    try:
+        channels = int(channels)
+    except Exception:
+        channels = 3
+
     return {
         "kind": "image",
         "image_column": image_column,
+        "target_column": target_column,
+        "record_id_column": record_id_column,
         "image_semantic": "image.path",
         "required_semantics": ["image.path"],
-        "image_size": int(image_size) if str(image_size).isdigit() else image_size,
-        "channels": int(metadata.get("channels", 3) or 3),
-        "normalization": metadata.get(
-            "normalization",
-            {"mean": [0.485, 0.456, 0.406], "std": [0.229, 0.224, 0.225]},
-        ),
+        "image_size": image_size,
+        "channels": channels,
+        "normalization": normalization,
+        "transform": transform,
         "accepted_uri_schemes": ["file", "http", "https", "s3", "gs"],
     }
+
 
 
 def _output_schema(*, task: str, classes: Sequence[str], metadata: Mapping[str, Any]) -> Dict[str, Any]:
@@ -629,24 +790,42 @@ def _output_schema(*, task: str, classes: Sequence[str], metadata: Mapping[str, 
 
 
 def _classes_from_payload_or_model(model_payload: Mapping[str, Any], model_object: Any = None) -> List[str]:
+    # Recipe artifacts save class_names at the top level.
+    for key in ("class_order", "class_names", "classes"):
+        value = model_payload.get(key)
+        if value:
+            return [str(c) for c in value]
+
     output_schema = model_payload.get("output_schema")
     if isinstance(output_schema, Mapping):
-        for key in ("class_order", "classes"):
+        for key in ("class_order", "class_names", "classes"):
             if output_schema.get(key):
                 return [str(c) for c in output_schema[key]]
+
+    prediction_contract = model_payload.get("prediction_contract")
+    if isinstance(prediction_contract, Mapping):
+        contract_output = prediction_contract.get("output_schema")
+        if isinstance(contract_output, Mapping):
+            for key in ("class_order", "class_names", "classes"):
+                if contract_output.get(key):
+                    return [str(c) for c in contract_output[key]]
+
     metadata = dict(model_payload.get("metadata") or {})
     for key in ("class_order", "class_names", "classes"):
         if metadata.get(key):
             return [str(c) for c in metadata[key]]
+
     if model_object is not None:
         classes = _classes_from_model_object(model_object)
         if classes:
             return classes
+
     model = model_payload.get("model")
     if model is not None:
         classes = _classes_from_model_object(model)
         if classes:
             return classes
+
     return []
 
 

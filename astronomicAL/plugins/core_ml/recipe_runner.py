@@ -167,16 +167,48 @@ def run_ml_recipe_action(context: Any, request: Any, cancel_token: Any = None) -
         result["run_artifact_id"] = run_artifact_id
 
         run.log(message=f"Recipe `{spec.title}` complete.", status="complete")
+
+        model_artifact_id = result.get("model_artifact_id")
+        predictions_artifact_id = result.get("predictions_artifact_id")
+        evaluation_report_artifact_id = result.get("evaluation_report_artifact_id")
+
+        artifact_ids = {
+            "run": run_artifact_id,
+            "model": model_artifact_id,
+            "predictions": predictions_artifact_id,
+            "evaluation_report": evaluation_report_artifact_id,
+            "training_log": result.get("training_log_artifact_id"),
+        }
+
         run.publish(
             "ml.recipe_run.finished",
             {
                 "run_id": run.run_id,
                 "dataset_id": dataset_id,
                 "recipe_id": spec.id,
+                "recipe_version": spec.version,
                 "run_artifact_id": run_artifact_id,
+                "model_artifact_id": model_artifact_id,
+                "predictions_artifact_id": predictions_artifact_id,
+                "evaluation_report_artifact_id": evaluation_report_artifact_id,
+                "artifact_ids": artifact_ids,
                 "status": "complete",
             },
         )
+
+        if model_artifact_id:
+            run.publish(
+                "ml.model.saved",
+                {
+                    "artifact_id": model_artifact_id,
+                    "model_artifact_id": model_artifact_id,
+                    "run_id": run.run_id,
+                    "dataset_id": dataset_id,
+                    "recipe_id": spec.id,
+                    "recipe_version": spec.version,
+                    "source": "ml.recipe",
+                },
+            )
         return _registry_mod.json_safe(result)
 
     except _registry_mod.MLRecipeCancelled as exc:

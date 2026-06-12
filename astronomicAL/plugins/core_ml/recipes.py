@@ -966,6 +966,87 @@ class CIFARStyleImageClassifierRecipe(MLRecipe):
         model_path = model_dir / "model.pt"
         shutil.copy2(best_checkpoint if best_checkpoint.exists() else last_checkpoint, model_path)
 
+        def _probability_column_name(label: str) -> str:
+            token = "".join(
+                ch.lower() if ch.isalnum() else "_"
+                for ch in str(label)
+            ).strip("_")
+            while "__" in token:
+                token = token.replace("__", "_")
+            return f"prob_{token or 'class'}"
+
+
+        probability_columns = {
+            str(class_name): _probability_column_name(str(class_name))
+            for class_name in class_names
+        }
+
+        prediction_contract = {
+            "schema_version": 1,
+            "model_artifact_id": None,  # filled by contract builder/catalog later
+            "run_id": run.run_id,
+            "recipe_id": run.recipe_id,
+            "recipe_version": run.recipe_version,
+            "framework": "torch",
+            "task": "classification",
+            "modality": "image",
+            "model_title": str(params.get("architecture", "torchvision.resnet18")),
+            "trained_on": {
+                "dataset_id": run.dataset_id,
+                "target_column": target_column,
+                "record_id_column": record_id_column,
+            },
+            "input_schema": {
+                "kind": "image",
+                "image_column": image_column,
+                "target_column": target_column,
+                "record_id_column": record_id_column,
+                "image_size": image_size,
+                "channels": 3,
+                "normalization": str(params.get("normalization", "cifar10")),
+                "transform": transform_metadata,
+                "required_semantics": ["image.path"],
+                "accepted_uri_schemes": ["file", "http", "https", "s3", "gs"],
+            },
+            "output_schema": {
+                "kind": "classification",
+                "task": "classification",
+                "classes": list(class_names),
+                "class_order": list(class_names),
+                "n_classes": len(class_names),
+                "has_probabilities": True,
+                "prediction_column": "predicted_label",
+                "confidence_column": "prediction_confidence",
+                "uncertainty_columns": [
+                    "least_confidence",
+                    "margin_uncertainty",
+                    "entropy",
+                ],
+                "probability_columns": probability_columns,
+            },
+            "training_context": {
+                "hyperparameters": {
+                    "epochs": epochs,
+                    "batch_size": batch_size,
+                    "optimizer": str(params.get("optimizer", "sgd")),
+                    "learning_rate": float(params.get("learning_rate", 0.1)),
+                    "momentum": float(params.get("momentum", 0.9)),
+                    "weight_decay": float(params.get("weight_decay", 0.0005)),
+                    "scheduler": str(params.get("scheduler", "cosine")),
+                    "augmentation_preset": str(params.get("augmentation_preset", "cifar_standard")),
+                    "amp": use_amp,
+                    "validation_source": str(params.get("validation_source") or ""),
+                    "test_source": str(params.get("test_source") or ""),
+                },
+                "metrics": {
+                    "best_score": best_val_acc,
+                    "best_val_accuracy": best_val_acc if val_loader is not None else None,
+                    "test_loss": test_metrics.get("loss"),
+                    "test_accuracy": test_metrics.get("accuracy"),
+                },
+            },
+        }
+
         model_artifact_id = run.put_artifact(
             "ml.model",
             {
@@ -979,9 +1060,21 @@ class CIFARStyleImageClassifierRecipe(MLRecipe):
                 "recipe_id": run.recipe_id,
                 "recipe_version": run.recipe_version,
                 "model_ref": {
-                    "storage": "file",
-                    "path": str(model_path),
+                    "storage": "local_file",
+                    "uri": str(model_path),
+                    "path": str(model_path),  # backward-compatible alias
                     "format": "torch_checkpoint",
+                    "framework": "torch",
+                    "metadata": {
+                        "architecture": str(params.get("architecture", "torchvision.resnet18")),
+                        "custom_model_import": str(params.get("custom_model_import") or "").strip(),
+                        "class_names": list(class_names),
+                        "image_size": int(image_size),
+                        "normalization": transform_metadata,
+                        "transform": transform_metadata,
+                        "task": "classification",
+                        "modality": "image",
+                    },
                 },
                 "architecture": str(params.get("architecture", "torchvision.resnet18")),
                 "custom_model_import": str(params.get("custom_model_import") or "").strip(),
@@ -994,6 +1087,7 @@ class CIFARStyleImageClassifierRecipe(MLRecipe):
                     "normalization": str(params.get("normalization", "cifar10")),
                     "transform": transform_metadata,
                 },
+                "prediction_contract": prediction_contract,
                 "training": {
                     "epochs": epochs,
                     "batch_size": batch_size,

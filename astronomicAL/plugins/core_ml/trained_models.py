@@ -130,16 +130,34 @@ class TrainedModelCatalog:
 
     def as_options(self, *, task: Optional[str] = None, modality: Optional[str] = None) -> Dict[str, str]:
         """Return Panel-friendly {label: artifact_id} options."""
-
         options: Dict[str, str] = {}
+
         for model in self.list_models(task=task, modality=modality):
             label_bits = [model.title]
+
             label_bits.append(f"{model.modality}/{model.task}")
-            if model.output_summary.get("classes"):
-                label_bits.append(f"{len(model.output_summary.get('classes') or [])} classes")
+
+            classes = model.output_summary.get("classes") or []
+            if classes:
+                label_bits.append(f"{len(classes)} classes")
+
             if model.target_column:
                 label_bits.append(f"target={model.target_column}")
-            options[" — ".join(label_bits)] = model.artifact_id
+
+            best_metric = (
+                model.metrics.get("best_val_accuracy")
+                or model.metrics.get("best_score")
+                or model.metrics.get("test_accuracy")
+            )
+
+            if isinstance(best_metric, (int, float)):
+                label_bits.append(f"best={best_metric:.3f}")
+
+            if model.run_id:
+                label_bits.append(f"run={str(model.run_id)[:8]}")
+
+            options[" — ".join(str(bit) for bit in label_bits if bit)] = model.artifact_id
+
         return options
 
     def compatibility(self, artifact_id: str, dataset_id: str, **kwargs: Any) -> Dict[str, Any]:
@@ -179,13 +197,23 @@ class TrainedModelCatalog:
                 "kind": input_schema.get("kind"),
                 "feature_columns": input_schema.get("feature_columns"),
                 "image_column": input_schema.get("image_column"),
+                "target_column": input_schema.get("target_column"),
+                "record_id_column": input_schema.get("record_id_column"),
+                "image_size": input_schema.get("image_size"),
+                "normalization": input_schema.get("normalization"),
+                "transform": input_schema.get("transform"),
                 "feature_schema_hash": training_context.get("feature_schema_hash"),
             },
             output_summary={
                 "kind": output.get("kind"),
                 "classes": output.get("classes"),
+                "class_order": output.get("class_order"),
                 "n_classes": output.get("n_classes"),
                 "has_probabilities": output.get("has_probabilities"),
+                "prediction_column": output.get("prediction_column"),
+                "confidence_column": output.get("confidence_column"),
+                "uncertainty_columns": output.get("uncertainty_columns"),
+                "probability_columns": output.get("probability_columns"),
             },
             metrics=metrics,
             created_at=payload.get("created_at") or getattr(ref, "created_at", None),

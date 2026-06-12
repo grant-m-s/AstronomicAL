@@ -232,11 +232,12 @@ def save_model_sidecar(
 
 def load_model_sidecar(model_ref: Mapping[str, Any]) -> Any:
     """Load a persisted model sidecar referenced by an ml.model payload."""
-
     fmt = str(model_ref.get("format") or "").lower()
-    uri = model_ref.get("uri")
+
+    # Older recipe artifacts used `path`; durable model refs use `uri`.
+    uri = model_ref.get("uri") or model_ref.get("path")
     if not uri:
-        raise ValueError("Model reference is missing `uri`.")
+        raise ValueError("Model reference is missing `uri` or legacy `path`.")
 
     path = Path(str(uri)).expanduser()
     if not path.exists():
@@ -260,7 +261,152 @@ def load_model_sidecar(model_ref: Mapping[str, Any]) -> Any:
             map_location="cpu",
         )
 
+    if fmt in {"torch_checkpoint", "recipe_torch_checkpoint", "recipe_torch_image_checkpoint"}:
+        return _load_recipe_torch_image_checkpoint(path=path, model_ref=model_ref)
+
     raise ValueError(f"Unsupported model sidecar format {fmt!r}.")
+
+def _load_recipe_torch_image_checkpoint(*, path: Path, model_ref: Mapping[str, Any]) -> Dict[str, Any]:
+    """Load image-classifier checkpoints written by the recipe system.
+
+    These checkpoints are not the same as image_sidecar.TORCH_IMAGE_CLASSIFIER_FORMAT.
+    They contain a raw state_dict plus recipe metadata.
+    """
+    import torch
+
+    checkpoint = torch.load(path, map_location="cpu")
+    if not isinstance(checkpoint, Mapping):
+        raise TypeError(f"Torch checkpoint {path} did not contain a mapping payload.")
+
+    metadata = dict(model_ref.get("metadata") or {})
+
+    architecture = str(
+        checkpoint.get("architecture")
+        or metadata.get("architecture")
+        or "torchvision.resnet18"
+    )
+
+    custom_model_import = str(
+        checkpoint.get("custom_model_import")
+        or metadata.get("custom_model_import")
+        or ""
+    ).strip()
+
+    class_names = [
+        str(value)
+        for value in (
+            checkpoint.get("class_names")
+            or metadata.get("class_names")
+            or []
+        )
+    ]
+
+    if not class_names:
+        raise ValueError(f"Torch checkpoint {path} is missing class_names.")
+
+    state_dict = checkpoint.get("state_dict")
+    if state_dict is None:
+        raise ValueError(f"Torch checkpoint {path} is missing state_dict.")
+
+    model = _build_recipe_image_model(
+        architecture=architecture,
+        custom_model_import=custom_model_import,
+        num_classes=len(class_names),
+    )
+
+    model.load_state_dict(state_dict)
+    model.eval()
+
+    transform = dict(
+        checkpoint.get("transform")
+        or metadata.get("transform")
+        or metadata.get("normalization")
+        or {}
+    )
+
+    normalization = {
+        "mean": transform.get("mean") or [0.4914, 0.4822, 0.4465],
+        "std": transform.get("std") or [0.2023, 0.1994, 0.2010],
+    }
+
+    image_size = int(
+        transform.get("image_size")
+        or metadata.get("image_size")
+        or 32
+    )
+
+    return {
+        "torch_model": model,
+        "class_names": class_names,
+        "image_size": image_size,
+        "normalization": normalization,
+        "architecture": architecture,
+        "custom_model_import": custom_model_import,
+        "checkpoint": {
+            "path": str(path),
+            "epoch": checkpoint.get("epoch"),
+            "metrics": json_safe(checkpoint.get("metrics") or {}),
+            "params": json_safe(checkpoint.get("params") or {}),
+            "transform": json_safe(transform),
+        },
+    }
+
+def _build_recipe_image_model(
+    *,
+    architecture: str,
+    custom_model_import: str,
+    num_classes: int,
+) -> Any:
+    """Rebuild the image model architectures supported by core_ml.recipes."""
+    import importlib
+
+    import torch.nn as nn
+    from torchvision import models
+
+    architecture = str(architecture or "torchvision.resnet18").strip()
+
+    if architecture == "custom_import":
+        if not custom_model_import:
+            raise ValueError("custom_model_import is required for custom_import checkpoints.")
+
+        module_name, object_name = custom_model_import.rsplit(".", 1)
+        factory = getattr(importlib.import_module(module_name), object_name)
+
+        try:
+            return factory(num_classes=num_classes)
+        except TypeError:
+            return factory()
+
+    if architecture in {"torchvision.resnet18", "resnet18"}:
+        model = models.resnet18(weights=None, num_classes=num_classes)
+        model.conv1 = nn.Conv2d(
+            3,
+            64,
+            kernel_size=3,
+            stride=1,
+            padding=1,
+            bias=False,
+        )
+        model.maxpool = nn.Identity()
+        return model
+
+    if architecture in {"torchvision.resnet34", "resnet34"}:
+        model = models.resnet34(weights=None, num_classes=num_classes)
+        model.conv1 = nn.Conv2d(
+            3,
+            64,
+            kernel_size=3,
+            stride=1,
+            padding=1,
+            bias=False,
+        )
+        model.maxpool = nn.Identity()
+        return model
+
+    if architecture in {"torchvision.mobilenet_v3_small", "mobilenet_v3_small"}:
+        return models.mobilenet_v3_small(weights=None, num_classes=num_classes)
+
+    raise ValueError(f"Unsupported recipe image architecture: {architecture!r}")
 
 
 def normalize_model_artifact_payload(
