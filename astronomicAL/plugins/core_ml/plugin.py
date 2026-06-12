@@ -54,6 +54,7 @@ def register(api) -> None:
     prediction = _load_sibling_module("prediction")
     trained_models = _load_sibling_module("trained_models")
     predict_panel = _load_sibling_module("predict_panel")
+    recipe_runner = _load_sibling_module("recipe_runner")
 
     api.register_service(
         key="registry",
@@ -69,6 +70,17 @@ def register(api) -> None:
         lazy=True,
         replace=True,
         description="Indexes trained ml.model artifacts and validates model/dataset compatibility.",
+    )
+
+    api.register_service(
+        key="recipe_registry",
+        factory=create_ml_recipe_registry,
+        lazy=True,
+        replace=True,
+        description=(
+            "Registry of code-backed ML recipes. Recipes expose typed UI parameters "
+            "but keep expert dataloaders/training loops in Python."
+        ),
     )
 
     api.register_action(
@@ -203,6 +215,47 @@ def register(api) -> None:
         run_in_job=True,
         requires=[],
         optional_requires=["torch", "torchvision", "pillow", "optuna"],
+    )
+
+    api.register_action(
+        id="run_ml_recipe",
+        title="Run ML Recipe",
+        handler=recipe_runner.run_ml_recipe_action,
+        description=(
+            "Run a code-backed ML recipe. This is the extension point for expert "
+            "training loops with custom transforms, dataloaders, schedulers, losses, "
+            "callbacks, checkpointing, and prediction logic."
+        ),
+        category="Machine Learning",
+        icon="integration_instructions",
+        tags=["ml", "recipe", "training", "expert", "torch", "workflow"],
+        inputs={
+            "dataset": True,
+            "selection": "optional",
+            "columns": "optional",
+            "numeric_columns": "none",
+            "required_mappings": ["record_id"],
+            "optional_mappings": ["target_label", "image.path", "image.uri"],
+        },
+        outputs=[
+            {"type": "ml.training_log", "description": "Live recipe progress and metrics."},
+            {"type": "ml.model", "description": "Optional durable trained model artifact."},
+            {"type": "ml.predictions", "description": "Optional prediction artifact."},
+            {"type": "ml.evaluation_report", "description": "Optional evaluation report."},
+            {"type": "ml.run", "description": "Run summary and provenance."},
+        ],
+        params_schema={
+            "type": "object",
+            "required": ["recipe_id"],
+            "properties": {
+                "dataset_id": {"type": "string"},
+                "recipe_id": {"type": "string", "minLength": 1},
+                "run_id": {"type": "string"},
+            },
+        },
+        run_in_job=True,
+        requires=[],
+        optional_requires=["torch", "torchvision", "pillow", "scikit-learn"],
     )
 
     api.register_action(
@@ -384,6 +437,34 @@ def register(api) -> None:
     )
 
     api.register_panel(
+        id="recipe_launcher",
+        title="ML Recipe Launcher",
+        factory=create_ml_recipe_launcher_panel,
+        description=(
+            "Launch code-backed ML recipes. Use this for high-performance setups "
+            "that need real Python dataloaders, transforms, schedulers, callbacks, "
+            "checkpointing, or custom training loops."
+        ),
+        category="Machine Learning",
+        icon="integration_instructions",
+        tags=["ml", "recipes", "training", "torch", "expert", "no-code"],
+        required_mappings=["record_id"],
+        optional_mappings=["target_label", "image.path", "image.uri"],
+        uses_services=["core.ml.recipe_registry"],
+        produces=[
+            "ml.training_log",
+            "ml.model",
+            "ml.predictions",
+            "ml.evaluation_report",
+            "ml.run",
+            "ml.recipe_run.started",
+            "ml.recipe_run.progress",
+            "ml.recipe_run.finished",
+        ],
+        default_layout={"x": 10, "y": 0, "w": 5, "h": 7},
+    )
+
+    api.register_panel(
         id="predictor",
         title="ML Predictor",
         factory=create_ml_predict_panel,
@@ -458,3 +539,17 @@ def create_training_curves_panel(context, **kwargs):
 def create_ml_predict_panel(context, **kwargs):
     predict_panel_module = _load_sibling_module("predict_panel")
     return predict_panel_module.create_predict_panel(context=context, **kwargs)
+
+def create_ml_recipe_registry(context=None):
+    registry_module = _load_sibling_module("recipe_registry")
+    recipes_module = _load_sibling_module("recipes")
+
+    registry = registry_module.MLRecipeRegistry()
+    registry.register(recipes_module.ExternalPythonRecipe)
+    registry.register(recipes_module.CIFARStyleImageClassifierRecipe)
+    return registry
+
+
+def create_ml_recipe_launcher_panel(context, **kwargs):
+    recipe_panel_module = _load_sibling_module("recipe_panel")
+    return recipe_panel_module.create_recipe_launcher_panel(context=context, **kwargs)
