@@ -789,17 +789,17 @@ class CIFARStyleImageClassifierRecipe(MLRecipe):
             if scheduler is not None:
                 scheduler.step()
 
-        row = {
-            "epoch": epoch,
+            row = {
+                "epoch": epoch,
 
-            # User-facing training metrics:
-            # evaluate the final model for this epoch on training rows using eval mode
-            # and eval transforms, so this is directly comparable with validation/test.
-            "train_loss": train_eval_metrics["loss"],
-            "train_accuracy": train_eval_metrics["accuracy"],
+                # User-facing training metrics:
+                # evaluate the final model for this epoch on training rows using eval mode
+                # and eval transforms, so this is directly comparable with validation/test.
+                "train_loss": train_eval_metrics["loss"],
+                "train_accuracy": train_eval_metrics["accuracy"],
 
-            "learning_rate": float(optimizer.param_groups[0]["lr"]),
-        }
+                "learning_rate": float(optimizer.param_groups[0]["lr"]),
+            }
 
             if val_metrics is not None:
                 row["val_loss"] = val_metrics["loss"]
