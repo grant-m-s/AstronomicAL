@@ -27,81 +27,7 @@ DEFAULT_TASKS = [
 ]
 
 
-_HF_BROWSER_FRONTEND_GUARD_INSTALLED = False
 _HF_BROWSER_CSS_INSTALLED = False
-
-
-def _install_hf_browser_frontend_guard_once() -> None:
-    """Keep body-level platform menus clickable while this panel is open."""
-
-    global _HF_BROWSER_FRONTEND_GUARD_INSTALLED
-    if _HF_BROWSER_FRONTEND_GUARD_INSTALLED:
-        return
-
-    pn.config.raw_css.append(
-        """
-        .al-hf-browser-root {
-            position: relative !important;
-            z-index: 0 !important;
-            isolation: isolate !important;
-            overflow: auto !important;
-            box-sizing: border-box !important;
-        }
-
-        body:has(.al-hmenu-body-popover) .al-hf-browser-root,
-        body:has(.al-hmenu-body-popover) .al-hf-browser-root *,
-        body.al-hmenu-open-from-hf .al-hf-browser-root,
-        body.al-hmenu-open-from-hf .al-hf-browser-root * {
-            pointer-events: none !important;
-        }
-        """
-    )
-
-    _HF_BROWSER_FRONTEND_GUARD_INSTALLED = True
-
-
-def _make_hf_menu_pointer_guard_pane():
-    """Fallback observer for browsers/environments where CSS :has is unreliable."""
-
-    html_text = """
-    <script>
-    (function () {
-        if (window.__astronomical_hf_menu_guard_installed__) {
-            return;
-        }
-        window.__astronomical_hf_menu_guard_installed__ = true;
-
-        const update = function () {
-            try {
-                const open = !!document.querySelector('.al-hmenu-body-popover');
-                document.body.classList.toggle('al-hmenu-open-from-hf', open);
-            } catch (err) {
-                /* best-effort only */
-            }
-        };
-
-        const observer = new MutationObserver(update);
-        observer.observe(document.body, { childList: true, subtree: true });
-        update();
-    })();
-    </script>
-    """
-
-    try:
-        return pn.pane.HTML(
-            html_text,
-            sanitize_html=False,
-            width=0,
-            height=0,
-            margin=0,
-        )
-    except TypeError:
-        return pn.pane.HTML(
-            html_text,
-            width=0,
-            height=0,
-            margin=0,
-        )
 
 
 def _install_hf_browser_css_once() -> None:
@@ -272,11 +198,6 @@ def _install_hf_browser_css_once() -> None:
             background: #f0fff4;
         }
 
-        .al-hf-browser-root .bk-Column,
-        .al-hf-browser-root .bk-Row,
-        .al-hf-browser-root .bk-panel-models-esm-ReactComponent {
-            z-index: auto !important;
-        }
         """
     )
 
@@ -298,10 +219,8 @@ class HuggingFaceBrowserPanel:
     def __init__(self, context: Any) -> None:
         self.context = context
 
-        _install_hf_browser_frontend_guard_once()
         _install_hf_browser_css_once()
 
-        self._menu_pointer_guard = _make_hf_menu_pointer_guard_pane()
         self._disposed = False
         self._doc = pn.state.curdoc
         self._job_handles: list[Any] = []
@@ -738,7 +657,6 @@ class HuggingFaceBrowserPanel:
         )
 
         self._view = pn.Column(
-            self._menu_pointer_guard,
             self.header,
             self.step_body,
             sizing_mode="stretch_both",
@@ -754,14 +672,8 @@ class HuggingFaceBrowserPanel:
             },
         )
 
-        try:
-            self._progress_periodic = pn.state.add_periodic_callback(
-                self._sync_progress_ui,
-                period=250,
-                start=True,
-            )
-        except Exception:
-            self._progress_periodic = None
+
+        self._progress_periodic = None
 
     # This is never called. It only prevents type checkers/static tools from
     # complaining in environments where Panel's Button.from_param branch above is
@@ -773,6 +685,23 @@ class HuggingFaceBrowserPanel:
     # ------------------------------------------------------------------
     # Panel lifecycle/state
     # ------------------------------------------------------------------
+
+    def _ensure_progress_ticker(self, running: bool) -> None:
+            if running:
+                if getattr(self, "_progress_periodic", None) is None:
+                    try:
+                        self._progress_periodic = pn.state.add_periodic_callback(
+                            self._sync_progress_ui, period=250, start=True,
+                        )
+                    except Exception:
+                        self._progress_periodic = None
+            else:
+                try:
+                    if getattr(self, "_progress_periodic", None) is not None:
+                        self._progress_periodic.stop()
+                except Exception:
+                    pass
+                self._progress_periodic = None
 
     def _on_step_nav_changed(self, event: Any) -> None:
         try:
@@ -1806,6 +1735,7 @@ class HuggingFaceBrowserPanel:
         self._set_busy(True, title)
         self._set_loading(title + "…")
         self._start_progress(title + "…")
+        self._ensure_progress_ticker(True)
 
         jobs = getattr(self.context, "jobs", None)
         if jobs is None:
@@ -1849,14 +1779,20 @@ class HuggingFaceBrowserPanel:
 
     def _job_done_on_ui(self, on_done):
         def _wrapped(result):
-            self._schedule_ui(on_done, result)
-
+            def _finish():
+                on_done(result)
+                self._sync_progress_ui()      # flush the final frame
+                self._ensure_progress_ticker(False)
+            self._schedule_ui(_finish)
         return _wrapped
 
     def _job_error_on_ui(self, on_error):
         def _wrapped(exc):
-            self._schedule_ui(on_error, exc)
-
+            def _finish():
+                on_error(exc)
+                self._sync_progress_ui()
+                self._ensure_progress_ticker(False)
+            self._schedule_ui(_finish)
         return _wrapped
 
     def _set_progress_from_worker(self, payload: dict[str, Any]) -> None:
@@ -1911,10 +1847,17 @@ class HuggingFaceBrowserPanel:
             )
 
     def _sync_progress_ui(self) -> None:
+        if getattr(self, "_disposed", False):
+            return
+
         with self._progress_lock:
             state = dict(self._progress_state)
 
         active = bool(state.get("active", False))
+
+        if not active and not self.progress_bar.visible and not self.progress_text.visible:
+            return
+
         percent = max(0, min(100, int(state.get("percent", 0) or 0)))
         completed = int(state.get("completed", 0) or 0)
         total = int(state.get("total", 0) or 0)
@@ -1922,31 +1865,31 @@ class HuggingFaceBrowserPanel:
         current_file = str(state.get("current_file", "") or "")
         phase = str(state.get("phase", "") or "")
 
-        self.progress_bar.visible = active
-        self.progress_text.visible = active
+        if self.progress_bar.visible != active:
+            self.progress_bar.visible = active
+        if self.progress_text.visible != active:
+            self.progress_text.visible = active
 
         if not active:
-            self.progress_text.object = ""
+            if self.progress_text.object:
+                self.progress_text.object = ""
             return
 
-        self.progress_bar.value = percent
+        if self.progress_bar.value != percent:
+            self.progress_bar.value = percent
 
-        count_text = ""
-        if total > 0:
-            count_text = f" ({completed}/{total})"
-
+        count_text = f" ({completed}/{total})" if total > 0 else ""
         file_text = ""
         if current_file:
-            short_file = current_file
-            if len(short_file) > 90:
-                short_file = "…" + short_file[-89:]
+            short_file = current_file if len(current_file) <= 90 else "…" + current_file[-89:]
             file_text = f"\n`{self._escape(short_file)}`"
 
-        self.progress_text.object = (
+        new_text = (
             f"**{percent}%** — `{self._escape(phase)}`{count_text}: "
-            f"{self._escape(message)}"
-            f"{file_text}"
+            f"{self._escape(message)}{file_text}"
         )
+        if self.progress_text.object != new_text:
+            self.progress_text.object = new_text
 
     # ------------------------------------------------------------------
     # General helpers
