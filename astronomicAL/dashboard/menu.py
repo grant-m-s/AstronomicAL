@@ -27,24 +27,18 @@ class MenuEntry:
 
 
 class MenuDashboard:
-    """Dashboard used to dynamically choose which view to display.
+    """Hierarchical 'Add Panel' menu.
 
-    Compact HTML/CSS hierarchical menu.
-
-    Behaviour:
-
-    - top-level Panel menu opens on click, not hover
-    - visible menu is appended to document.body to avoid ReactGrid clipping
-    - top-level menu stays open until outside click, Escape, refresh, or selection
-    - submenus open on hover
-    - selected panels open through Dashboard.set_contents(...)
-    - plugin panels continue to open through the current plugin/custom-plot bridge
+    The popover lives INSIDE the menu root as an absolutely-positioned child of
+    the trigger button. It therefore moves with the button when the ReactGrid
+    reflows the tile -- there is no body portal, no manual positioning, no
+    backdrop, and no host registry to lose. ReactGrid clipping is handled by
+    temporarily setting overflow:visible up the ancestor chain while the menu is
+    open, and by raising the enclosing grid item's z-index.
     """
 
-    NATIVE_ENTRIES: Tuple[MenuEntry, ...] = (
-    )
+    NATIVE_ENTRIES: Tuple[MenuEntry, ...] = ()
 
-    # Transitional grouping while these panels still live in legacy custom_plots.
     LEGACY_HINTS: Dict[str, Tuple[str, str]] = {
         "SAMP Send": ("Astro", "Interop"),
         "SAMP Receive": ("Astro", "Interop"),
@@ -56,7 +50,7 @@ class MenuDashboard:
         "ML": 2,
         "Astro": 3,
         "Integration": 4,
-        "Integrations": 4,  # optional backward-compatible alias
+        "Integrations": 4,
         "Extensions": 8,
         "Legacy": 9,
         "Plugins": 10,
@@ -73,9 +67,6 @@ class MenuDashboard:
 
         self._token = uuid.uuid4().hex[:10]
         self._root_class = f"al-hmenu-root-{self._token}"
-
-        # Real Bokeh model name. JS finds this through Bokeh.documents and
-        # updates its value. Python receives the change through on_change.
         self._target_name = f"al_hmenu_target_{self._token}"
 
         self._target = TextInput(
@@ -110,7 +101,6 @@ class MenuDashboard:
     def dispose(self) -> None:
         if self._disposed:
             return
-
         self._disposed = True
 
         events = getattr(self.context, "events", None)
@@ -120,7 +110,6 @@ class MenuDashboard:
                     events.unsubscribe(sub)
                 except Exception:
                     pass
-
         self._subscriptions.clear()
 
     # ------------------------------------------------------------------
@@ -143,7 +132,6 @@ class MenuDashboard:
                 )
             except TypeError:
                 sub = events.subscribe(topic, self._on_plugin_registry_changed)
-
             self._subscriptions.append(sub)
 
     def _on_plugin_registry_changed(self, topic: str, payload: Any) -> None:
@@ -170,51 +158,35 @@ class MenuDashboard:
         return getattr(workspace, "grid", None)
 
     def _current_workspace_panel_id(self) -> Optional[str]:
-        """
-        Return the workspace tile id that contains this MenuDashboard.
-
-        self.main is the parent Dashboard controller created in add_menu_panel().
-        """
         panel_id = getattr(self.main, "_al_panel_id", None)
         if panel_id:
             return str(panel_id)
 
-        # Fallback: try to find this Dashboard controller in workspace records.
         workspace = getattr(self.context, "workspace", None)
         if workspace is None:
             return None
-
         try:
             for candidate_id, record in workspace.list_panels().items():
                 if record.controller is self.main:
                     return str(candidate_id)
         except Exception:
             return None
-
         return None
 
     def _layout_items_for_existing_tile(self, panel_id: str) -> Dict[str, Dict[str, Any]]:
-        """
-        Capture the current tile position for every breakpoint.
-
-        The replacement plugin panel will reuse these layout items.
-        """
         grid = self._workspace_grid()
         if grid is None:
             return {}
 
         layout_items: Dict[str, Dict[str, Any]] = {}
-
         for breakpoint, breakpoint_layout in (getattr(grid, "layouts", None) or {}).items():
             for item in breakpoint_layout or []:
                 if str(item.get("i")) != str(panel_id):
                     continue
-
                 item_copy = dict(item)
                 item_copy["i"] = str(panel_id)
                 layout_items[str(breakpoint)] = item_copy
                 break
-
         return layout_items
 
     @staticmethod
@@ -228,7 +200,6 @@ class MenuDashboard:
 
     def _find_first_fit(self, layout_items, *, cols: int, w: int, h: int):
         items = []
-
         for item in layout_items or []:
             try:
                 items.append(
@@ -251,71 +222,44 @@ class MenuDashboard:
                 candidate = {"x": x, "y": y, "w": w, "h": h}
                 if not any(self._rects_overlap(candidate, item) for item in items):
                     return x, y
-
         return 0, max_y
 
     def _new_panel_layout_items(self, *, default_w=6, default_h=8):
-        """
-        Fallback only.
-
-        Used if the menu is somehow not inside a tracked workspace tile.
-        Normal menu behaviour should replace the existing menu tile.
-        """
         grid = self._workspace_grid()
         if grid is None:
             return None
 
         layouts = dict(getattr(grid, "layouts", None) or {})
         cols_by_breakpoint = dict(
-            getattr(grid, "cols_by_breakpoint", None)
-            or {"lg": 12, "md": 12, "sm": 12}
+            getattr(grid, "cols_by_breakpoint", None) or {"lg": 12, "md": 12, "sm": 12}
         )
 
         layout_items = {}
-
         for breakpoint, cols in cols_by_breakpoint.items():
             cols = int(cols)
             w = min(int(default_w), cols)
             h = int(default_h)
-
             if breakpoint == "sm":
                 w = cols
-
             existing = list(layouts.get(breakpoint, []))
             x, y = self._find_first_fit(existing, cols=cols, w=w, h=h)
-
-            layout_items[breakpoint] = {
-                "x": x,
-                "y": y,
-                "w": w,
-                "h": h,
-            }
-
+            layout_items[breakpoint] = {"x": x, "y": y, "w": w, "h": h}
         return layout_items
 
     def _open_plugin_panel(self, registration_id: str) -> None:
-        """
-        Replace this Menu tile with the selected plugin panel.
-
-        This intentionally reuses the menu tile's workspace panel id so the
-        selected panel appears exactly where the menu was.
-        """
         manager = getattr(self.context, "plugins", None)
         if manager is None:
             print("[MenuDashboard] Cannot open plugin panel: context.plugins is unavailable")
             return
 
         current_panel_id = self._current_workspace_panel_id()
-
         if current_panel_id:
             layout_items = self._layout_items_for_existing_tile(current_panel_id)
-
             print(
                 "[MenuDashboard] replacing menu tile "
                 f"panel_id={current_panel_id} with plugin panel "
                 f"registration_id={registration_id}"
             )
-
             manager.open_panel(
                 registration_id,
                 context=self.context,
@@ -324,12 +268,10 @@ class MenuDashboard:
             )
             return
 
-        # Defensive fallback. This should rarely happen.
         print(
             "[MenuDashboard] menu tile id unavailable; opening plugin panel "
             f"as a new tile registration_id={registration_id}"
         )
-
         manager.open_panel(
             registration_id,
             context=self.context,
@@ -346,7 +288,6 @@ class MenuDashboard:
         except Exception:
             value = new
 
-        # Reset immediately so choosing the same item again still fires later.
         try:
             self._target.value = ""
         except Exception:
@@ -364,11 +305,7 @@ class MenuDashboard:
                 registration_id = value.split("plugin:", 1)[1]
                 self._open_plugin_panel(registration_id)
                 return
-
-            # Non-plugin entries retain the old behaviour for now: replace
-            # this Dashboard's internal contents.
             self.main.set_contents(value)
-
         except Exception:
             traceback.print_exc()
 
@@ -410,12 +347,7 @@ class MenuDashboard:
         for title in legacy_dict.keys():
             if title in plugin_titles:
                 continue
-
-            domain, category = self.LEGACY_HINTS.get(
-                title,
-                ("Legacy", "Custom Panels"),
-            )
-
+            domain, category = self.LEGACY_HINTS.get(title, ("Legacy", "Custom Panels"))
             entries.append(
                 MenuEntry(
                     title=title,
@@ -427,32 +359,18 @@ class MenuDashboard:
             )
 
         try:
-            extension_dict = extension_plots.get_plot_dict()
+            extension_plots.get_plot_dict()
         except Exception:
             traceback.print_exc()
-            extension_dict = {}
-
-        # for title in extension_dict.keys():
-        #     entries.append(
-        #         MenuEntry(
-        #             title=title,
-        #             value=title,
-        #             source="Extension",
-        #             domain="Extensions",
-        #             category="Extension Plots",
-        #         )
-        #     )
 
         entries.extend(plugin_entries)
 
         seen = set()
         deduped: List[MenuEntry] = []
-
         for entry in entries:
             key = (entry.value, entry.source)
             if key in seen:
                 continue
-
             seen.add(key)
             deduped.append(entry)
 
@@ -479,17 +397,11 @@ class MenuDashboard:
             plugin_info_by_id = {}
 
         panel_regs: List[Any] = []
-
         try:
             panel_regs.extend(list(manager.list_panels()))
         except Exception:
             traceback.print_exc()
 
-        # Defensive fallback: if the public list_panels() view misses a panel
-        # registration for any reason, also read the registry directly.
-        #
-        # This is intentionally tolerant because the panel menu is transitional
-        # bridge code while plugin-driven menus settle.
         try:
             raw_panels = getattr(manager, "_panels", {}) or {}
             for reg in raw_panels.values():
@@ -498,7 +410,6 @@ class MenuDashboard:
         except Exception:
             pass
 
-        # Deduplicate by registration id while preserving first-seen order.
         deduped_regs: List[Any] = []
         seen_ids = set()
         for reg in panel_regs:
@@ -512,11 +423,9 @@ class MenuDashboard:
         for reg in deduped_regs:
             plugin_id = getattr(reg, "plugin_id", "") or ""
             info = plugin_info_by_id.get(plugin_id)
-
             title = getattr(reg, "title", None) or getattr(reg, "id", "Plugin Panel")
             category = getattr(reg, "category", None) or "Panels"
             registration_id = getattr(reg, "id", "") or title
-
             entries.append(
                 MenuEntry(
                     title=title,
@@ -528,20 +437,13 @@ class MenuDashboard:
                     plugin_name=getattr(info, "name", None) if info is not None else plugin_id,
                 )
             )
-
         return entries
 
     def _domain_for_plugin(self, reg: Any, info: Any) -> str:
         plugin_id = (getattr(reg, "plugin_id", "") or "").lower()
         tags = {str(t).lower() for t in (getattr(reg, "tags", None) or [])}
-        capabilities = {
-            str(c).lower()
-            for c in (getattr(info, "capabilities", None) or [])
-        }
-        required_mappings = {
-            str(m).lower()
-            for m in (getattr(reg, "required_mappings", None) or [])
-        }
+        capabilities = {str(c).lower() for c in (getattr(info, "capabilities", None) or [])}
+        required_mappings = {str(m).lower() for m in (getattr(reg, "required_mappings", None) or [])}
 
         prefix = plugin_id.split(".", 1)[0] if plugin_id else ""
 
@@ -568,43 +470,31 @@ class MenuDashboard:
             return "Core"
         if prefix in {"integration", "integrations"}:
             return "Integration"
-
         if prefix:
             return prefix.replace("_", " ").replace("-", " ").title()
-
         return "Plugins"
 
     def _render_html(self, entries: List[MenuEntry]) -> str:
         grouped: Dict[str, Dict[str, List[MenuEntry]]] = {}
-
         for entry in entries:
             grouped.setdefault(entry.domain, {}).setdefault(entry.category, []).append(entry)
 
         domain_names = sorted(
             grouped.keys(),
-            key=lambda d: (
-                self.DOMAIN_ORDER.get(d, 50),
-                d.casefold(),
-            ),
+            key=lambda d: (self.DOMAIN_ORDER.get(d, 50), d.casefold()),
         )
 
         menu_items = []
-
         for domain in domain_names:
             category_html = []
-
             for category in sorted(grouped[domain].keys(), key=str.casefold):
-                panel_html = []
-
-                for entry in grouped[domain][category]:
-                    panel_html.append(self._render_leaf(entry))
-
+                panel_html = [self._render_leaf(e) for e in grouped[domain][category]]
                 category_html.append(
                     f"""
                     <li class="al-hmenu-item al-hmenu-has-submenu">
                         <div class="al-hmenu-row">
                             <span>{self._esc(category)}</span>
-                            <span class="al-hmenu-arrow">›</span>
+                            <span class="al-hmenu-arrow">&rsaquo;</span>
                         </div>
                         <ul class="al-hmenu-menu al-hmenu-submenu">
                             {''.join(panel_html)}
@@ -612,13 +502,12 @@ class MenuDashboard:
                     </li>
                     """
                 )
-
             menu_items.append(
                 f"""
                 <li class="al-hmenu-item al-hmenu-has-submenu">
                     <div class="al-hmenu-row">
                         <span>{self._esc(domain)}</span>
-                        <span class="al-hmenu-arrow">›</span>
+                        <span class="al-hmenu-arrow">&rsaquo;</span>
                     </div>
                     <ul class="al-hmenu-menu al-hmenu-submenu">
                         {''.join(category_html)}
@@ -629,18 +518,16 @@ class MenuDashboard:
 
         total = len(entries)
 
-        menu_markup = f"""
-        <ul class="al-hmenu-menu al-hmenu-body-popover" data-menu-token="{self._token}">
-            {''.join(menu_items) if menu_items else '<li class="al-hmenu-empty">No panels available</li>'}
-        </ul>
-        """
+        popover = (
+            f'<ul class="al-hmenu-menu al-hmenu-body-popover" data-menu-token="{self._token}">'
+            f"{''.join(menu_items) if menu_items else '<li class=\"al-hmenu-empty\">No panels available</li>'}"
+            f"</ul>"
+        )
 
         return f"""
         <style>
             .{self._root_class},
-            .{self._root_class} * {{
-                box-sizing: border-box;
-            }}
+            .{self._root_class} * {{ box-sizing: border-box; }}
 
             .{self._root_class} {{
                 position: relative;
@@ -663,6 +550,11 @@ class MenuDashboard:
                 align-items: center;
                 gap: 6px;
                 overflow: visible;
+            }}
+
+            .{self._root_class} .al-hmenu-anchor {{
+                position: relative;
+                display: inline-block;
             }}
 
             .{self._root_class} .al-hmenu-button,
@@ -691,23 +583,135 @@ class MenuDashboard:
                 margin-left: 2px;
                 white-space: nowrap;
             }}
+
+            /* ---- in-root popover ---- */
+            .al-hmenu-body-popover,
+            .al-hmenu-body-popover * {{ box-sizing: border-box; }}
+
+            .al-hmenu-body-popover {{
+                display: none;
+                position: absolute;
+                top: calc(100% + 3px);
+                left: 0;
+                z-index: 1000;
+                list-style: none;
+                margin: 0;
+                padding: 4px 0;
+                min-width: 210px;
+                background: #fff;
+                border: 1px solid rgba(0,0,0,0.24);
+                border-radius: 4px;
+                box-shadow: 0 6px 18px rgba(0,0,0,0.18);
+                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+                font-size: 13px;
+                line-height: 1.25;
+                color: #222;
+            }}
+
+            .al-hmenu-body-popover .al-hmenu-menu {{
+                list-style: none;
+                margin: 0;
+                padding: 4px 0;
+                min-width: 210px;
+                background: #fff;
+                border: 1px solid rgba(0,0,0,0.24);
+                border-radius: 4px;
+                box-shadow: 0 6px 18px rgba(0,0,0,0.18);
+            }}
+
+            .al-hmenu-body-popover .al-hmenu-item {{
+                position: relative;
+                margin: 0;
+                padding: 0;
+                min-height: 26px;
+                white-space: nowrap;
+                list-style: none;
+            }}
+
+            .al-hmenu-body-popover .al-hmenu-row {{
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 18px;
+                padding: 6px 10px;
+                min-height: 26px;
+                cursor: default;
+            }}
+
+            .al-hmenu-body-popover .al-hmenu-item:hover > .al-hmenu-row {{
+                background: #e9f2ff;
+            }}
+
+            .al-hmenu-body-popover .al-hmenu-submenu {{
+                display: none;
+                position: absolute;
+                top: -5px;
+                left: calc(100% - 1px);
+                margin: 0;
+                z-index: 1001;
+            }}
+
+            .al-hmenu-body-popover .al-hmenu-item:hover > .al-hmenu-submenu,
+            .al-hmenu-body-popover .al-hmenu-item:focus-within > .al-hmenu-submenu {{
+                display: block;
+            }}
+
+            .al-hmenu-body-popover .al-hmenu-has-submenu.al-hmenu-flip > .al-hmenu-submenu {{
+                left: auto;
+                right: calc(100% - 1px);
+            }}
+
+            .al-hmenu-body-popover .al-hmenu-arrow {{
+                color: #777;
+                font-size: 16px;
+                line-height: 1;
+            }}
+
+            .al-hmenu-body-popover .al-hmenu-leaf-button {{
+                appearance: none;
+                border: 0;
+                background: transparent;
+                width: 100%;
+                min-height: 26px;
+                padding: 6px 10px;
+                text-align: left;
+                color: #222;
+                font: inherit;
+                cursor: default;
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 14px;
+            }}
+
+            .al-hmenu-body-popover .al-hmenu-leaf-button:hover,
+            .al-hmenu-body-popover .al-hmenu-leaf-button:focus {{
+                outline: none;
+                background: #e9f2ff;
+            }}
+
+            .al-hmenu-body-popover .al-hmenu-source {{
+                color: #777;
+                font-size: 11px;
+                font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+            }}
+
+            .al-hmenu-body-popover .al-hmenu-empty {{
+                padding: 8px 10px;
+                color: #777;
+            }}
         </style>
 
-        <div
-            class="al-hmenu-root {self._root_class}"
-            data-menu-token="{self._token}"
-            data-menu-html="{self._attr(menu_markup)}"
-        >
+        <div class="al-hmenu-root {self._root_class}" data-menu-token="{self._token}">
             <div class="al-hmenu-title">Add Panel</div>
 
             <div class="al-hmenu-bar">
-                <button
-                    type="button"
-                    class="al-hmenu-button"
-                    onclick="{self._toggle_js()}"
-                >
-                    Panel ▾
-                </button>
+                <div class="al-hmenu-anchor">
+                    <button type="button" class="al-hmenu-button" onclick="{self._toggle_js()}">
+                        Panel &#9662;
+                    </button>
+                    {popover}
+                </div>
 
                 <button
                     type="button"
@@ -716,7 +720,7 @@ class MenuDashboard:
                     data-value="__refresh__"
                     onclick="{self._click_js()}"
                 >
-                    ↻
+                    &#8635;
                 </button>
 
                 <span class="al-hmenu-count">{total} available</span>
@@ -750,170 +754,214 @@ class MenuDashboard:
         """
 
     def _toggle_js(self) -> str:
-        token = self._js_string(self._token)
-        body_css = self._js_string(self._body_menu_css())
-
-        js = f"""
+        js = """
         event.preventDefault();
         event.stopPropagation();
 
-        const token = {token};
-        const css = {body_css};
         const root = this.closest('.al-hmenu-root');
+        if (!root) { return; }
 
-        if (!root) {{
-            return;
-        }}
+        const popover = root.querySelector('.al-hmenu-body-popover');
+        if (!popover) { return; }
 
-        function ensureBodyMenuCss() {{
-            const styleId = 'astronomical-hmenu-body-css';
-            let style = document.getElementById(styleId);
+        function restoreFor(pop) {
+            const fixes = pop.__alFixes;
+            if (fixes) {
+                for (let i = 0; i < fixes.length; i++) {
+                    const f = fixes[i];
+                    try {
+                        f.el.style.overflow = f.overflow;
+                        f.el.style.overflowX = f.overflowX;
+                        f.el.style.overflowY = f.overflowY;
+                    } catch (e) {}
+                }
+                pop.__alFixes = null;
+            }
+            const zlifts = pop.__alZLifts;
+            if (zlifts) {
+                for (let i = 0; i < zlifts.length; i++) {
+                    const z = zlifts[i];
+                    try {
+                        z.el.style.zIndex = z.zIndex;
+                        z.el.style.position = z.position;
+                    } catch (e) {}
+                }
+                pop.__alZLifts = null;
+            }
+        }
 
-            if (!style) {{
-                style = document.createElement('style');
-                style.id = styleId;
-                document.head.appendChild(style);
-            }}
+        function closeMenu(pop) {
+            console.log('[hmenu] closeMenu called');
+            restoreFor(pop);
+            pop.style.display = 'none';
+            const r = pop.closest('.al-hmenu-root');
+            if (r) { r.classList.remove('al-hmenu-open'); }
+        }
 
-            style.textContent = css;
-        }}
+        function closeAllMenus() {
+            document.querySelectorAll('.al-hmenu-body-popover').forEach(function(pop) {
+                if (pop.style.display === 'block') { closeMenu(pop); }
+            });
+        }
 
-        function closeAllMenus() {{
-            document.querySelectorAll('.al-hmenu-body-popover').forEach((menu) => {{
-                menu.remove();
-            }});
+        function openMenu(pop, r) {
+            console.log('[hmenu] openMenu called');
+            // Lift overflow clipping up the ancestor chain so the in-root popover
+            // is not cropped by the ReactGrid tile or any scroll container.
+            const fixes = [];
+            let node = pop.parentElement;
+            while (node && node !== document.documentElement) {
+                const cs = window.getComputedStyle(node);
+                if (cs.overflow !== 'visible' ||
+                    cs.overflowX !== 'visible' ||
+                    cs.overflowY !== 'visible') {
+                    fixes.push({
+                        el: node,
+                        overflow: node.style.overflow,
+                        overflowX: node.style.overflowX,
+                        overflowY: node.style.overflowY
+                    });
+                    node.style.overflow = 'visible';
+                    node.style.overflowX = 'visible';
+                    node.style.overflowY = 'visible';
+                }
+                node = node.parentElement;
+            }
+            pop.__alFixes = fixes;
 
-            document.querySelectorAll('.al-hmenu-root.al-hmenu-open').forEach((menuRoot) => {{
-                menuRoot.classList.remove('al-hmenu-open');
-            }});
-        }}
+            const zlifts = [];
+            let zn = pop.parentElement;
+            while (zn && zn !== document.body && zn !== document.documentElement) {
+                zlifts.push({ el: zn, zIndex: zn.style.zIndex, position: zn.style.position });
+                const zcs = window.getComputedStyle(zn);
+                if (zcs.position === 'static') {
+                    zn.style.position = 'relative';
+                }
+                zn.style.zIndex = '2147483000';
+                zn = zn.parentElement;
+            }
+            pop.__alZLifts = zlifts;
 
-        function installGlobalHandlers() {{
-            if (window.__astronomicalHMenuBodyHandlersInstalled) {{
-                return;
-            }}
+            pop.style.display = 'block';
 
-            window.__astronomicalHMenuBodyHandlersInstalled = true;
+            r.classList.add('al-hmenu-open');
 
-            document.addEventListener('click', function(evt) {{
-                if (
-                    evt.target.closest('.al-hmenu-body-popover') ||
-                    evt.target.closest('.al-hmenu-root')
-                ) {{
-                    return;
-                }}
+            window.requestAnimationFrame(function() {
+                const pr = pop.getBoundingClientRect();
+                const anchor = pop.parentElement;
+                const ar = anchor.getBoundingClientRect();
+                const gi = pop.closest('.react-grid-item');
+                const gr = gi ? gi.getBoundingClientRect() : null;
 
-                closeAllMenus();
-            }}, true);
+                const cx = pr.left + pr.width / 2;
+                const cy = pr.top + pr.height / 2;
+                const topEl = document.elementFromPoint(cx, cy);
+                console.log('[hmenu] topAtCenter=', topEl,
+                    'isLeafOrPopover=', !!(topEl && topEl.closest &&
+                        topEl.closest('.al-hmenu-body-popover')));
+                
+                console.log('[hmenu] OPEN geom:',
+                    'popover=', JSON.stringify(pr),
+                    'anchor=', JSON.stringify(ar),
+                    'gridItem=', gr ? JSON.stringify(gr) : 'none',
+                    'popDisplay=', getComputedStyle(pop).display,
+                    'popVisible=', (pr.width > 0 && pr.height > 0),
+                    'fixesApplied=', (pop.__alFixes ? pop.__alFixes.length : 0));
+            });
 
-            document.addEventListener('keydown', function(evt) {{
-                if (evt.key !== 'Escape') {{
-                    return;
-                }}
+        }
 
-                closeAllMenus();
-            }}, true);
-        }}
-
-        function firstDirectSubmenu(item) {{
-            for (let i = 0; i < item.children.length; i++) {{
-                const child = item.children[i];
-                if (child.classList && child.classList.contains('al-hmenu-submenu')) {{
-                    return child;
-                }}
-            }}
-
-            return null;
-        }}
-
-        function installSubmenuFlipHandlers(menu) {{
-            const items = menu.querySelectorAll('.al-hmenu-has-submenu');
-
-            for (let i = 0; i < items.length; i++) {{
+        function installSubmenuFlipHandlers(scope) {
+            const items = scope.querySelectorAll('.al-hmenu-has-submenu');
+            for (let i = 0; i < items.length; i++) {
                 const item = items[i];
-
-                item.addEventListener('mouseenter', function() {{
+                if (item.__alFlipBound) { continue; }
+                item.__alFlipBound = true;
+                item.addEventListener('mouseenter', function() {
                     item.classList.remove('al-hmenu-flip');
-
-                    window.requestAnimationFrame(function() {{
-                        const submenu = firstDirectSubmenu(item);
-                        if (!submenu) {{
-                            return;
-                        }}
-
+                    window.requestAnimationFrame(function() {
+                        let submenu = null;
+                        for (let k = 0; k < item.children.length; k++) {
+                            const c = item.children[k];
+                            if (c.classList && c.classList.contains('al-hmenu-submenu')) {
+                                submenu = c; break;
+                            }
+                        }
+                        if (!submenu) { return; }
                         const rect = submenu.getBoundingClientRect();
-                        const pad = 8;
-
-                        if (rect.right > window.innerWidth - pad) {{
+                        if (rect.right > window.innerWidth - 8) {
                             item.classList.add('al-hmenu-flip');
-                        }}
-                    }});
-                }});
-            }}
-        }}
+                        }
+                    });
+                });
+            }
+        }
 
-        function positionMenu(menu, button) {{
-            const rect = button.getBoundingClientRect();
-            const pad = 8;
+        function installGlobalHandlers() {
+            if (window.__alHmenuGlobal) { return; }
+            window.__alHmenuGlobal = true;
 
-            menu.style.visibility = 'hidden';
-            document.body.appendChild(menu);
+            document.addEventListener('click', function(evt) {
+                console.log('[hmenu] GLOBAL capture click. target=', evt.target,
+                    'cls=', evt.target && evt.target.className,
+                    'closestRoot=', evt.target.closest('.al-hmenu-root'),
+                    'closestLeaf=', evt.target.closest('.al-hmenu-leaf-button'),
+                    'sinceOpen=', Date.now() - (window.__alHmenuOpenedAt || 0));
+                if (Date.now() - (window.__alHmenuOpenedAt || 0) < 150) { return; }
+                if (evt.target.closest('.al-hmenu-root')) { return; }
+                document.querySelectorAll('.al-hmenu-body-popover').forEach(function(pop) {
+                    if (pop.style.display !== 'block') { return; }
+                    const fixes = pop.__alFixes;
+                    if (fixes) {
+                        for (let i = 0; i < fixes.length; i++) {
+                            const f = fixes[i];
+                            try {
+                                f.el.style.overflow = f.overflow;
+                                f.el.style.overflowX = f.overflowX;
+                                f.el.style.overflowY = f.overflowY;
+                            } catch (e) {}
+                        }
+                        pop.__alFixes = null;
+                    }
+                    const zlifts = pop.__alZLifts;
+                    if (zlifts) {
+                        for (let i = 0; i < zlifts.length; i++) {
+                            const z = zlifts[i];
+                            try {
+                                z.el.style.zIndex = z.zIndex;
+                                z.el.style.position = z.position;
+                            } catch (e) {}
+                        }
+                        pop.__alZLifts = null;
+                    }
+                    pop.style.display = 'none';
+                    const r = pop.closest('.al-hmenu-root');
+                    if (r) { r.classList.remove('al-hmenu-open'); }
+                });
+            }, true);
 
-            const menuRect = menu.getBoundingClientRect();
+            document.addEventListener('keydown', function(evt) {
+                if (evt.key !== 'Escape') { return; }
+                document.querySelectorAll('.al-hmenu-body-popover').forEach(function(pop) {
+                    if (pop.style.display === 'block') {
+                        const ev = new MouseEvent('click', { bubbles: true });
+                        document.body.dispatchEvent(ev);
+                    }
+                });
+            }, true);
+        }
 
-            let left = rect.left;
-            let top = rect.bottom + 3;
-
-            if (left + menuRect.width > window.innerWidth - pad) {{
-                left = window.innerWidth - menuRect.width - pad;
-            }}
-
-            if (left < pad) {{
-                left = pad;
-            }}
-
-            if (top + menuRect.height > window.innerHeight - pad) {{
-                const above = rect.top - menuRect.height - 3;
-                if (above > pad) {{
-                    top = above;
-                }}
-            }}
-
-            menu.style.left = left + 'px';
-            menu.style.top = top + 'px';
-            menu.style.visibility = '';
-        }}
-
-        ensureBodyMenuCss();
         installGlobalHandlers();
 
-        const existing = document.querySelector(
-            '.al-hmenu-body-popover[data-menu-token="' + token + '"]'
-        );
-
-        if (existing) {{
-            closeAllMenus();
+        if (popover.style.display === 'block') {
+            closeMenu(popover);
             return;
-        }}
+        }
 
         closeAllMenus();
-
-        const menuHTML = root.getAttribute('data-menu-html') || '';
-        const wrapper = document.createElement('div');
-        wrapper.innerHTML = menuHTML.trim();
-
-        const menu = wrapper.querySelector(
-            '.al-hmenu-body-popover[data-menu-token="' + token + '"]'
-        );
-
-        if (!menu) {{
-            return;
-        }}
-
-        installSubmenuFlipHandlers(menu);
-        positionMenu(menu, this);
-
-        root.classList.add('al-hmenu-open');
+        installSubmenuFlipHandlers(popover);
+        window.__alHmenuOpenedAt = Date.now();
+        openMenu(popover, root);
         """
         return self._attr(js)
 
@@ -925,6 +973,9 @@ class MenuDashboard:
         event.stopPropagation();
 
         const selectedValue = this.getAttribute('data-value') || '';
+        console.log('[hmenu] LEAF onclick:', selectedValue,
+            'inRoot=', !!this.closest('.al-hmenu-root'),
+            'popoverFound=', !!this.closest('.al-hmenu-body-popover'));
         const payload = JSON.stringify({{
             value: selectedValue,
             event_id: Date.now().toString() + ':' + Math.random().toString()
@@ -933,28 +984,18 @@ class MenuDashboard:
         const targetName = {target_name};
         let updated = false;
 
-        /*
-         * Bokeh 3.x reliable path: find the hidden Bokeh TextInput model by
-         * model.name and set its value directly.
-         */
         if (window.Bokeh && Array.isArray(window.Bokeh.documents)) {{
             for (const doc of window.Bokeh.documents) {{
-                if (!doc) {{
-                    continue;
-                }}
-
+                if (!doc) {{ continue; }}
                 let model = null;
-
                 if (typeof doc.get_model_by_name === 'function') {{
                     model = doc.get_model_by_name(targetName);
                 }}
-
                 if (!model && doc._all_models) {{
                     const models = doc._all_models;
                     const values = typeof models.values === 'function'
                         ? Array.from(models.values())
                         : Object.values(models);
-
                     for (const candidate of values) {{
                         if (candidate && candidate.name === targetName) {{
                             model = candidate;
@@ -962,33 +1003,26 @@ class MenuDashboard:
                         }}
                     }}
                 }}
-
                 if (model) {{
                     if (typeof model.setv === 'function') {{
                         model.setv({{ value: payload }});
                     }} else {{
                         model.value = payload;
                     }}
-
                     if (model.change && typeof model.change.emit === 'function') {{
                         model.change.emit();
                     }}
-
                     updated = true;
                     break;
                 }}
             }}
         }}
 
-        /*
-         * Fallback for non-shadow DOM render paths.
-         */
         if (!updated) {{
             const selector =
                 'input[name="' + targetName + '"], ' +
                 '[name="' + targetName + '"] input, ' +
                 '[name="' + targetName + '"] textarea';
-
             const target = document.querySelector(selector);
             if (target) {{
                 target.value = payload;
@@ -998,139 +1032,42 @@ class MenuDashboard:
             }}
         }}
 
-        if (updated) {{
-            document.querySelectorAll('.al-hmenu-body-popover').forEach((menu) => {{
-                menu.remove();
-            }});
+        // Close this menu and restore the overflow/z-index fixes it applied.
+        const pop = this.closest('.al-hmenu-body-popover');
+        if (pop) {{
+            const fixes = pop.__alFixes;
+            if (fixes) {{
+                for (let i = 0; i < fixes.length; i++) {{
+                    const f = fixes[i];
+                    try {{
+                        f.el.style.overflow = f.overflow;
+                        f.el.style.overflowX = f.overflowX;
+                        f.el.style.overflowY = f.overflowY;
+                    }} catch (e) {{}}
+                }}
+                pop.__alFixes = null;
+            }}
+            const zlifts = pop.__alZLifts;
+            if (zlifts) {{
+                for (let i = 0; i < zlifts.length; i++) {{
+                    const z = zlifts[i];
+                    try {{
+                        z.el.style.zIndex = z.zIndex;
+                        z.el.style.position = z.position;
+                    }} catch (e) {{}}
+                }}
+                pop.__alZLifts = null;
+            }}
+            pop.style.display = 'none';
+            const r = pop.closest('.al-hmenu-root');
+            if (r) {{ r.classList.remove('al-hmenu-open'); }}
+        }}
 
-            document.querySelectorAll('.al-hmenu-root.al-hmenu-open').forEach((menuRoot) => {{
-                menuRoot.classList.remove('al-hmenu-open');
-            }});
-        }} else if (window.console) {{
+        if (!updated && window.console) {{
             console.error('AstronomicAL menu could not find hidden Bokeh target model:', targetName);
         }}
         """
         return self._attr(js)
-
-    def _body_menu_css(self) -> str:
-        return """
-        .al-hmenu-body-popover,
-        .al-hmenu-body-popover * {
-            box-sizing: border-box;
-        }
-
-        .al-hmenu-body-popover {
-            position: fixed;
-            z-index: 2147483000;
-            list-style: none;
-            margin: 0;
-            padding: 4px 0;
-            min-width: 210px;
-            background: #fff;
-            border: 1px solid rgba(0, 0, 0, 0.24);
-            border-radius: 4px;
-            box-shadow: 0 6px 18px rgba(0, 0, 0, 0.18);
-            overflow: visible;
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-            font-size: 13px;
-            line-height: 1.25;
-            color: #222;
-        }
-
-        .al-hmenu-body-popover .al-hmenu-menu {
-            list-style: none;
-            margin: 0;
-            padding: 4px 0;
-            min-width: 210px;
-            background: #fff;
-            border: 1px solid rgba(0, 0, 0, 0.24);
-            border-radius: 4px;
-            box-shadow: 0 6px 18px rgba(0, 0, 0, 0.18);
-            overflow: visible;
-        }
-
-        .al-hmenu-body-popover .al-hmenu-item {
-            position: relative;
-            margin: 0;
-            padding: 0;
-            min-height: 26px;
-            white-space: nowrap;
-            list-style: none;
-        }
-
-        .al-hmenu-body-popover .al-hmenu-row {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            gap: 18px;
-            padding: 6px 10px;
-            min-height: 26px;
-            cursor: default;
-        }
-
-        .al-hmenu-body-popover .al-hmenu-item:hover > .al-hmenu-row {
-            background: #e9f2ff;
-        }
-
-        .al-hmenu-body-popover .al-hmenu-submenu {
-            display: none;
-            position: absolute;
-            top: -5px;
-            left: calc(100% - 1px);
-            margin: 0;
-            z-index: 2147483001;
-        }
-
-        .al-hmenu-body-popover .al-hmenu-item:hover > .al-hmenu-submenu,
-        .al-hmenu-body-popover .al-hmenu-item:focus-within > .al-hmenu-submenu {
-            display: block;
-        }
-
-        .al-hmenu-body-popover .al-hmenu-has-submenu.al-hmenu-flip > .al-hmenu-submenu {
-            left: auto;
-            right: calc(100% - 1px);
-        }
-
-        .al-hmenu-body-popover .al-hmenu-arrow {
-            color: #777;
-            font-size: 16px;
-            line-height: 1;
-        }
-
-        .al-hmenu-body-popover .al-hmenu-leaf-button {
-            appearance: none;
-            border: 0;
-            background: transparent;
-            width: 100%;
-            min-height: 26px;
-            padding: 6px 10px;
-            text-align: left;
-            color: #222;
-            font: inherit;
-            cursor: default;
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            gap: 14px;
-        }
-
-        .al-hmenu-body-popover .al-hmenu-leaf-button:hover,
-        .al-hmenu-body-popover .al-hmenu-leaf-button:focus {
-            outline: none;
-            background: #e9f2ff;
-        }
-
-        .al-hmenu-body-popover .al-hmenu-source {
-            color: #777;
-            font-size: 11px;
-            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-        }
-
-        .al-hmenu-body-popover .al-hmenu-empty {
-            padding: 8px 10px;
-            color: #777;
-        }
-        """
 
     # ------------------------------------------------------------------
     # Escaping helpers
