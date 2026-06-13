@@ -33,6 +33,38 @@ _registry_mod = _load_sibling("recipe_registry")
 _runner = _load_sibling("recipe_runner")
 
 
+# Protocol controls the panel owns for every MANAGED recipe. These are NOT
+# recipe params — they are the experiment protocol, collected at the run level
+# and enforced by the harness. Keys match ProtocolConfig.from_params().
+_PROTOCOL_KEYS = (
+    "protocol_split_strategy",
+    "protocol_validation_source",
+    "protocol_validation_dataset_id",
+    "protocol_test_source",
+    "protocol_test_dataset_id",
+    "protocol_group_column",
+    "protocol_split_column",
+    "protocol_validation_size",
+    "protocol_test_size",
+    "protocol_selection_metric",
+    "protocol_random_state",
+)
+
+_PROTOCOL_LABELS = {
+    "protocol_split_strategy": "Split method for selected dataset",
+    "protocol_validation_source": "Validation source",
+    "protocol_validation_dataset_id": "Validation dataset",
+    "protocol_test_source": "Test source",
+    "protocol_test_dataset_id": "Test dataset",
+    "protocol_group_column": "Group/time column",
+    "protocol_split_column": "Predefined split column",
+    "protocol_validation_size": "Validation fraction",
+    "protocol_test_size": "Test fraction",
+    "protocol_selection_metric": "Best-epoch metric",
+    "protocol_random_state": "Random seed",
+}
+
+
 class MLRecipeLauncherPanel:
     def __init__(
         self,
@@ -45,6 +77,9 @@ class MLRecipeLauncherPanel:
         self.registry = registry
         self.param_widgets: Dict[str, Any] = {}
         self.param_fields: Dict[str, Any] = {}
+        # Protocol section (managed recipes only). Empty for freeform recipes.
+        self.protocol_widgets: Dict[str, Any] = {}
+        self.protocol_fields: Dict[str, Any] = {}
         self._active_thread: Optional[threading.Thread] = None
         self._cancel_token: Any = None
 
@@ -85,7 +120,7 @@ class MLRecipeLauncherPanel:
         )
 
         self.recipe.param.watch(lambda *_: self._on_recipe_change(), "value")
-        self.dataset.param.watch(lambda *_: self._apply_inferred_defaults(), "value")
+        self.dataset.param.watch(lambda *_: self._on_dataset_change(), "value")
         self.refresh_button.on_click(lambda *_: self.refresh())
         self.run_button.on_click(self._run_clicked)
         self.cancel_button.on_click(self._cancel_clicked)
@@ -220,14 +255,17 @@ class MLRecipeLauncherPanel:
         params = state.get("params") or {}
         if isinstance(params, dict):
             for name, value in params.items():
-                widget = self.param_widgets.get(name)
+                widget = (
+                    self.param_widgets.get(name)
+                    or self.protocol_widgets.get(name)
+                )
                 if widget is not None:
                     try:
                         widget.value = value
                     except Exception:
                         pass
 
-        self._sync_split_visibility()
+        self._sync_protocol_visibility()
 
     def refresh(self) -> None:
         recipes = self.registry.list()
@@ -259,6 +297,8 @@ class MLRecipeLauncherPanel:
     def _on_recipe_change(self) -> None:
         self.param_widgets = {}
         self.param_fields = {}
+        self.protocol_widgets = {}
+        self.protocol_fields = {}
         self.params_area.objects = []
 
         recipe_id = self.recipe.value
@@ -267,6 +307,14 @@ class MLRecipeLauncherPanel:
             return
 
         spec = self.registry.get(recipe_id)
+        managed = str(getattr(spec.recipe_cls, "execution_mode", "freeform")) == "managed"
+        protocol_note = (
+            "Validation, best-epoch selection and test evaluation are enforced "
+            "by AstronomicAL's protocol (below)."
+            if managed
+            else "Freeform recipe: manages its own splits and evaluation; no "
+            "protocol is enforced."
+        )
         self.recipe_card.object = (
             f"**{spec.title}** \n"
             f"`{spec.id}` v{spec.version} \n\n"
@@ -274,6 +322,7 @@ class MLRecipeLauncherPanel:
             f"- Task: `{spec.task}`\n"
             f"- Modality: `{spec.modality}`\n"
             f"- Complexity: `{spec.complexity}`\n"
+            f"- Mode: `{'managed' if managed else 'freeform'}` — {protocol_note}\n"
             f"- Required mappings: `{', '.join(spec.required_mappings) or 'none'}`\n"
             f"- Produces: `{', '.join(spec.produces) or 'none'}`"
         )
@@ -281,6 +330,8 @@ class MLRecipeLauncherPanel:
         schema = spec.params_schema or {"type": "object", "properties": {}}
         properties = schema.get("properties", {}) or {}
 
+        if properties:
+            self.params_area.append(pn.pane.Markdown("#### Recipe parameters"))
         for name, param_schema in properties.items():
             name = str(name)
             widget = self._widget_for_schema(name, param_schema)
@@ -290,59 +341,253 @@ class MLRecipeLauncherPanel:
             self.param_fields[name] = field
             self.params_area.append(field)
 
-            if name in {"validation_source", "test_source"}:
-                try:
-                    widget.param.watch(self._on_split_control_change, "value")
-                except Exception:
-                    pass
+        # Protocol section is panel-owned and shown only for managed recipes.
+        self._build_protocol_section(spec)
 
         self._apply_inferred_defaults()
-        self._sync_split_visibility()
 
-    def _on_split_control_change(self, *_: Any) -> None:
-        self._sync_split_visibility()
+    # ------------------------------------------------------------------
+    # Protocol section (managed recipes only)
+    # ------------------------------------------------------------------
 
-    def _on_split_mode_change(self, *_: Any) -> None:
-        self._sync_split_visibility()
-        self._apply_inferred_defaults()
+    def _build_protocol_section(self, spec: Any) -> None:
+        self.protocol_widgets = {}
+        self.protocol_fields = {}
+
+        if str(getattr(spec.recipe_cls, "execution_mode", "freeform")) != "managed":
+            return
+
+        cols = [""] + _registry_mod.list_dataset_columns(
+            self.context,
+            self.dataset.value,
+        )
+
+        dataset_ids = _registry_mod.list_dataset_ids(self.context)
+        dataset_options = [""] + dataset_ids
+
+        self.protocol_widgets = {
+            "protocol_split_strategy": pn.widgets.Select(
+                name="",
+                options=[
+                    "random",
+                    "by_group",
+                    "temporal",
+                    "predefined",
+                ],
+                value="random",
+                sizing_mode="stretch_width",
+            ),
+            "protocol_validation_source": pn.widgets.Select(
+                name="",
+                options={
+                    "Split from selected dataset": "split",
+                    "Use separate validation dataset": "dataset",
+                },
+                value="split",
+                sizing_mode="stretch_width",
+            ),
+            "protocol_validation_dataset_id": pn.widgets.Select(
+                name="",
+                options=dataset_options,
+                value="",
+                sizing_mode="stretch_width",
+            ),
+            "protocol_test_source": pn.widgets.Select(
+                name="",
+                options={
+                    "Split from selected dataset": "split",
+                    "Use separate test dataset": "dataset",
+                    "No test set": "none",
+                },
+                value="split",
+                sizing_mode="stretch_width",
+            ),
+            "protocol_test_dataset_id": pn.widgets.Select(
+                name="",
+                options=dataset_options,
+                value="",
+                sizing_mode="stretch_width",
+            ),
+            "protocol_group_column": pn.widgets.Select(
+                name="",
+                options=cols,
+                value="",
+                sizing_mode="stretch_width",
+            ),
+            "protocol_split_column": pn.widgets.Select(
+                name="",
+                options=cols,
+                value="",
+                sizing_mode="stretch_width",
+            ),
+            "protocol_validation_size": pn.widgets.FloatInput(
+                name="",
+                value=0.1,
+                start=0.01,
+                end=0.8,
+                step=0.01,
+                sizing_mode="stretch_width",
+            ),
+            "protocol_test_size": pn.widgets.FloatInput(
+                name="",
+                value=0.2,
+                start=0.0,
+                end=0.8,
+                step=0.01,
+                sizing_mode="stretch_width",
+            ),
+            "protocol_selection_metric": pn.widgets.Select(
+                name="",
+                options=["val_accuracy", "val_f1_macro", "val_loss"],
+                value="val_accuracy",
+                sizing_mode="stretch_width",
+            ),
+            "protocol_random_state": pn.widgets.IntInput(
+                name="",
+                value=42,
+                sizing_mode="stretch_width",
+            ),
+        }
+
+        self.params_area.append(
+            pn.pane.Markdown(
+                "#### Validation/test protocol enforced by AstronomicAL"
+            )
+        )
+
+        for name in _PROTOCOL_KEYS:
+            widget = self.protocol_widgets[name]
+            field = self._field(
+                _PROTOCOL_LABELS.get(name, name),
+                widget,
+            )
+            self.protocol_fields[name] = field
+            self.params_area.append(field)
+
+        for key in (
+            "protocol_split_strategy",
+            "protocol_validation_source",
+            "protocol_test_source",
+        ):
+            try:
+                self.protocol_widgets[key].param.watch(
+                    lambda *_: self._sync_protocol_visibility(),
+                    "value",
+                )
+            except Exception:
+                pass
+
+        self._sync_protocol_visibility()
 
 
-    def _sync_split_visibility(self) -> None:
-        validation_source_widget = self.param_widgets.get("validation_source")
-        test_source_widget = self.param_widgets.get("test_source")
+    def _sync_protocol_visibility(self) -> None:
+        if not self.protocol_widgets:
+            return
+
+        split_strategy = str(
+            getattr(
+                self.protocol_widgets.get("protocol_split_strategy"),
+                "value",
+                "",
+            )
+            or "random"
+        ).strip()
 
         validation_source = str(
-            getattr(validation_source_widget, "value", "") or "split"
+            getattr(
+                self.protocol_widgets.get("protocol_validation_source"),
+                "value",
+                "",
+            )
+            or "split"
         ).strip()
 
         test_source = str(
-            getattr(test_source_widget, "value", "") or "none"
+            getattr(
+                self.protocol_widgets.get("protocol_test_source"),
+                "value",
+                "",
+            )
+            or "split"
         ).strip()
 
-        def _show(name: str, visible: bool) -> None:
-            field = self.param_fields.get(name)
-            widget = self.param_widgets.get(name)
+        val_from_split = validation_source == "split"
+        test_from_split = test_source == "split"
+        any_from_split = val_from_split or test_from_split
 
+        def _show(name: str, visible: bool) -> None:
+            field = self.protocol_fields.get(name)
             if field is not None:
                 field.visible = visible
 
-            if widget is not None and hasattr(widget, "disabled"):
-                try:
-                    widget.disabled = not visible
-                except Exception:
-                    pass
+        _show("protocol_validation_dataset_id", validation_source == "dataset")
+        _show("protocol_test_dataset_id", test_source == "dataset")
 
-        _show("validation_size", validation_source == "split")
-        _show("validation_dataset_id", validation_source == "dataset")
-
-        _show("test_size", test_source == "split")
-        _show("test_dataset_id", test_source == "dataset")
-
-        random_state_visible = (
-            validation_source == "split"
-            or test_source == "split"
+        _show(
+            "protocol_group_column",
+            any_from_split and split_strategy in ("by_group", "temporal"),
         )
-        _show("random_state", random_state_visible)
+
+        _show(
+            "protocol_split_column",
+            any_from_split and split_strategy == "predefined",
+        )
+
+        _show(
+            "protocol_validation_size",
+            val_from_split and split_strategy != "predefined",
+        )
+
+        _show(
+            "protocol_test_size",
+            test_from_split and split_strategy != "predefined",
+        )
+
+        _show(
+            "protocol_random_state",
+            any_from_split and split_strategy in ("random", "by_group"),
+        )
+
+        _show("protocol_selection_metric", True)
+
+    def _refresh_protocol_columns(self) -> None:
+        if not self.protocol_widgets:
+            return
+
+        cols = [""] + _registry_mod.list_dataset_columns(
+            self.context,
+            self.dataset.value,
+        )
+
+        for key in ("protocol_group_column", "protocol_split_column"):
+            widget = self.protocol_widgets.get(key)
+            if widget is None:
+                continue
+
+            current = widget.value
+            widget.options = cols
+            widget.value = current if current in cols else ""
+
+        dataset_ids = _registry_mod.list_dataset_ids(self.context)
+        dataset_options = [""] + dataset_ids
+
+        for key in (
+            "protocol_validation_dataset_id",
+            "protocol_test_dataset_id",
+        ):
+            widget = self.protocol_widgets.get(key)
+            if widget is None:
+                continue
+
+            current = widget.value
+            widget.options = dataset_options
+            widget.value = current if current in dataset_options else ""
+
+    # ------------------------------------------------------------------
+
+    def _on_dataset_change(self, *_: Any) -> None:
+        self._refresh_protocol_columns()
+        self._apply_inferred_defaults()
 
     def _empty_widget_value(self, value: Any) -> bool:
         return value is None or value == "" or value == [] or value == {}
@@ -381,21 +626,6 @@ class MLRecipeLauncherPanel:
                     applied.append(f"`{name}` = `{value}`")
                 except Exception:
                     pass
-
-        split_widget = self.param_widgets.get("split_mode")
-        split_mode = str(getattr(split_widget, "value", "") or "random_size").strip()
-
-        if split_mode == "explicit_datasets":
-            train_dataset_widget = self.param_widgets.get("train_dataset_id")
-            if train_dataset_widget is not None and dataset_id:
-                try:
-                    if self._empty_widget_value(train_dataset_widget.value):
-                        train_dataset_widget.value = dataset_id
-                        applied.append(f"`train_dataset_id` = `{dataset_id}`")
-                except Exception:
-                    pass
-
-        self._sync_split_visibility()
 
         if applied:
             self.status.alert_type = "info"
@@ -479,6 +709,7 @@ class MLRecipeLauncherPanel:
         spec = self.registry.get(self.recipe.value)
         properties = (spec.params_schema or {}).get("properties", {}) or {}
 
+        # Recipe internals (schema-generated widgets).
         for name, widget in self.param_widgets.items():
             value = widget.value
             schema = properties.get(name, {})
@@ -488,39 +719,14 @@ class MLRecipeLauncherPanel:
                 try:
                     value = json.loads(value)
                 except Exception:
-                    # Keep the raw string; validation/error handling should happen in recipe.
+                    # Keep the raw string; the recipe/runner handles validation.
                     pass
 
             params[name] = value
 
-        validation_source = str(params.get("validation_source") or "split").strip()
-        test_source = str(params.get("test_source") or "none").strip()
-
-        if validation_source not in {"split", "dataset"}:
-            validation_source = "split"
-
-        if test_source not in {"none", "split", "dataset"}:
-            test_source = "none"
-
-        params["validation_source"] = validation_source
-        params["test_source"] = test_source
-
-        if validation_source == "split":
-            params["validation_dataset_id"] = ""
-        else:
-            params["validation_size"] = 0.0
-
-        if test_source == "none":
-            params["test_size"] = 0.0
-            params["test_dataset_id"] = ""
-        elif test_source == "split":
-            params["test_dataset_id"] = ""
-        elif test_source == "dataset":
-            params["test_size"] = 0.0
-
-        # Remove legacy fields so stale hidden widgets cannot affect the run.
-        params.pop("split_mode", None)
-        params.pop("train_dataset_id", None)
+        # Protocol controls (panel-owned; only present for managed recipes).
+        for name, widget in self.protocol_widgets.items():
+            params[name] = widget.value
 
         params["recipe_id"] = self.recipe.value
         params["dataset_id"] = self.dataset.value
@@ -605,7 +811,6 @@ class MLRecipeLauncherPanel:
         self.status.object = (
             "Cancellation requested. The recipe will stop at the next safe cancellation point."
         )
-
 
     def _set_running_state(self, running: bool) -> None:
         def apply() -> None:

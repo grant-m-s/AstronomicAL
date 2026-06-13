@@ -546,7 +546,7 @@ def create_ml_recipe_registry(context=None):
 
     registry = registry_module.MLRecipeRegistry()
     registry.register(recipes_module.ExternalPythonRecipe)
-    registry.register(recipes_module.CIFARStyleImageClassifierRecipe)
+    registry.register(recipes_module.CIFARResNetRecipe)
     return registry
 
 
