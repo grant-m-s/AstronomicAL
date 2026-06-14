@@ -2294,6 +2294,7 @@ class RunHarness:
             model,
             parts,
             num_classes,
+            split_spec_artifact_id=split_spec_id,
         )
 
         eval_id = self._write_evaluation_report(
@@ -3100,8 +3101,7 @@ class RunHarness:
     def _snapshot(self, model): raise NotImplementedError
     def _restore(self, model, state): raise NotImplementedError
     def _assert_output_dim(self, model, num_classes, train_loader): raise NotImplementedError
-    def _write_model_artifact(self, model, parts, num_classes) -> Optional[str]: raise NotImplementedError
-
+    def _write_model_artifact(self, model, parts, num_classes, *, split_spec_artifact_id=None) -> Optional[str]: raise NotImplementedError
 
 def _stratifiable(labels) -> bool:
     import numpy as np
@@ -3251,6 +3251,8 @@ class TorchClassificationHarness(RunHarness):
         model,
         parts: Partitions,
         num_classes,
+        *,
+        split_spec_artifact_id: Optional[str] = None,
     ) -> Optional[str]:
         import torch
 
@@ -3327,6 +3329,7 @@ class TorchClassificationHarness(RunHarness):
             "recipe_id": self.run.recipe_id,
             "recipe_version": self.run.recipe_version,
             "protocol_id": parts.protocol_id,
+            "split_spec_artifact_id": split_spec_artifact_id,
             "created_at": time.time(),
             "class_names": list(parts.train.classes),
             "num_classes": int(num_classes),
