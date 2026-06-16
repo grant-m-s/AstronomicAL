@@ -1815,6 +1815,7 @@ class EuclidCutoutPanel:
 
         has_color = color_bands is not None
 
+
         self.image_container = ImageVisualizationClass(
             images=images,
             wcs=wcs_list,
