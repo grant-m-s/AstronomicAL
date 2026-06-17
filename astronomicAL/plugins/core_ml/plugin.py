@@ -6,15 +6,14 @@ from pathlib import Path
 
 from astronomicAL.platform.plugins import PluginManifest
 
-
 manifest = PluginManifest(
     id="core.ml",
     name="ML Core",
-    version="0.4.0",
+    version="0.5.0",
     description=(
-        "Machine-learning workbench: model definitions, adaptive data binding, "
-        "tabular/image training, durable model artifacts, predictions, active-learning "
-        "batches, metrics, and training curves."
+        "Machine-learning core: code-backed recipes with a protocol-enforcing "
+        "harness, durable model artifacts, compatibility-checked prediction, "
+        "active-learning batches, trained-model cataloguing, and training curves."
     ),
     requires=["scikit-learn>=1.2"],
     optional_requires=["torch", "torchvision", "pillow", "matplotlib", "optuna", "joblib"],
@@ -22,8 +21,9 @@ manifest = PluginManifest(
     tags=[
         "core",
         "ml",
-        "sklearn",
+        "recipe",
         "torch",
+        "sklearn",
         "classification",
         "regression",
         "image",
@@ -53,16 +53,7 @@ def register(api) -> None:
     actions = _load_sibling_module("actions")
     prediction = _load_sibling_module("prediction")
     trained_models = _load_sibling_module("trained_models")
-    predict_panel = _load_sibling_module("predict_panel")
     recipe_runner = _load_sibling_module("recipe_runner")
-
-    api.register_service(
-        key="registry",
-        factory=create_ml_registry,
-        lazy=True,
-        replace=True,
-        description="ML registry for model/provider specs.",
-    )
 
     api.register_service(
         key="trained_model_catalog",
@@ -84,151 +75,19 @@ def register(api) -> None:
     )
 
     api.register_action(
-        id="train_tabular",
-        title="Train Tabular Model",
-        handler=actions.train_tabular_action,
-        description=(
-            "Train a saved tabular model definition and persist the trained model "
-            "as a durable ml.model artifact."
-        ),
-        category="Machine Learning",
-        icon="psychology",
-        tags=["ml", "training", "tabular", "sklearn", "torch"],
-        inputs={
-            "dataset": True,
-            "selection": "optional",
-            "columns": "many",
-            "numeric_columns": "none",
-            "required_mappings": ["record_id"],
-            "optional_mappings": ["target_label"],
-        },
-        outputs=[
-            {"type": "ml.feature_spec", "description": "Feature/target binding used for the run."},
-            {"type": "ml.split_spec", "description": "Train/validation/test split row ids."},
-            {"type": "ml.model", "description": "Durable trained model artifact."},
-            {"type": "ml.evaluation_report", "description": "Validation/test metrics."},
-            {"type": "ml.predictions", "description": "Held-out predictions."},
-            {"type": "ml.training_log", "description": "Training epochs or one-step sklearn log."},
-            {"type": "ml.run", "description": "Run summary tying artifacts together."},
-        ],
-        params_schema={
-            "type": "object",
-            "required": ["target_column", "model_id"],
-            "properties": {
-                "dataset_id": {"type": "string"},
-                "target_column": {"type": "string", "minLength": 1},
-                "feature_columns": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "minItems": 1,
-                },
-                "model_id": {"type": "string", "minLength": 1},
-                "task": {
-                    "type": "string",
-                    "enum": ["classification", "regression"],
-                    "default": "classification",
-                },
-                "test_size": {
-                    "type": "number",
-                    "minimum": 0.01,
-                    "maximum": 0.8,
-                    "default": 0.2,
-                },
-                "validation_size": {
-                    "type": "number",
-                    "minimum": 0.01,
-                    "maximum": 0.8,
-                    "default": 0.2,
-                },
-                "random_state": {"type": "integer", "default": 42},
-                "stratify": {"type": "boolean", "default": True},
-                "optimize_metric": {"type": "string", "default": "val_loss"},
-                "torch_hidden_layers": {"type": "string", "default": "128,64"},
-                "torch_epochs": {"type": "integer", "minimum": 1, "default": 50},
-                "torch_batch_size": {"type": "integer", "minimum": 1, "default": 512},
-                "torch_learning_rate": {"type": "number", "minimum": 0.0, "default": 0.001},
-                "torch_weight_decay": {"type": "number", "minimum": 0.0, "default": 0.0},
-                "torch_patience": {"type": "integer", "minimum": 1, "default": 12},
-                "run_id": {"type": "string"},
-                "training_log_artifact_id": {"type": "string"},
-            },
-        },
-        run_in_job=True,
-        requires=["scikit-learn>=1.2"],
-        optional_requires=["torch", "optuna", "joblib"],
-    )
-
-    api.register_action(
-        id="train_image_classifier",
-        title="Train Image Classifier",
-        handler=actions.train_image_classifier_action,
-        description=(
-            "Train a saved torch image-classification model definition and persist "
-            "the trained model as a durable ml.model artifact."
-        ),
-        category="Machine Learning",
-        icon="image",
-        tags=["ml", "training", "image", "torch", "classification"],
-        inputs={
-            "dataset": True,
-            "selection": "optional",
-            "columns": "many",
-            "numeric_columns": "none",
-            "required_mappings": ["record_id"],
-            "optional_mappings": ["target_label"],
-        },
-        outputs=[
-            {"type": "ml.image_spec", "description": "Image/target binding used for the run."},
-            {"type": "ml.split_spec", "description": "Train/validation/test split row ids."},
-            {"type": "ml.model", "description": "Durable trained model artifact."},
-            {"type": "ml.evaluation_report", "description": "Validation/test metrics."},
-            {"type": "ml.predictions", "description": "Held-out image predictions."},
-            {"type": "ml.training_log", "description": "Training epochs and tuning log."},
-            {"type": "ml.run", "description": "Run summary tying artifacts together."},
-        ],
-        params_schema={
-            "type": "object",
-            "required": ["image_column", "target_column", "model_id"],
-            "properties": {
-                "dataset_id": {"type": "string"},
-                "image_column": {"type": "string", "minLength": 1},
-                "target_column": {"type": "string", "minLength": 1},
-                "model_id": {"type": "string", "minLength": 1},
-                "test_size": {
-                    "type": "number",
-                    "minimum": 0.01,
-                    "maximum": 0.8,
-                    "default": 0.2,
-                },
-                "validation_size": {
-                    "type": "number",
-                    "minimum": 0.01,
-                    "maximum": 0.8,
-                    "default": 0.2,
-                },
-                "random_state": {"type": "integer", "default": 42},
-                "stratify": {"type": "boolean", "default": True},
-                "run_id": {"type": "string"},
-                "training_log_artifact_id": {"type": "string"},
-            },
-        },
-        run_in_job=True,
-        requires=[],
-        optional_requires=["torch", "torchvision", "pillow", "optuna"],
-    )
-
-    api.register_action(
         id="run_ml_recipe",
         title="Run ML Recipe",
         handler=recipe_runner.run_ml_recipe_action,
         description=(
             "Run a code-backed ML recipe. This is the extension point for expert "
             "training loops with custom transforms, dataloaders, schedulers, losses, "
-            "callbacks, checkpointing, and prediction logic."
+            "callbacks, checkpointing, and prediction logic. Managed recipes run "
+            "under a protocol-enforcing harness that owns splitting, validation "
+            "selection, test evaluation, and provenance."
         ),
         category="Machine Learning",
         icon="integration_instructions",
-        tags=["ml", "recipe", "training", "expert", "torch", "workflow"],
+        tags=["ml", "recipe", "training", "expert", "torch", "sklearn", "workflow"],
         inputs={
             "dataset": True,
             "selection": "optional",
@@ -239,7 +98,8 @@ def register(api) -> None:
         },
         outputs=[
             {"type": "ml.training_log", "description": "Live recipe progress and metrics."},
-            {"type": "ml.model", "description": "Optional durable trained model artifact."},
+            {"type": "ml.split_spec", "description": "Train/validation/test split row ids and protocol."},
+            {"type": "ml.model", "description": "Durable trained model artifact."},
             {"type": "ml.predictions", "description": "Optional prediction artifact."},
             {"type": "ml.evaluation_report", "description": "Optional evaluation report."},
             {"type": "ml.run", "description": "Run summary and provenance."},
@@ -308,45 +168,6 @@ def register(api) -> None:
     )
 
     api.register_action(
-        id="predict_tabular",
-        title="Predict with Tabular Model",
-        handler=prediction.predict_tabular_action,
-        description=(
-            "Run inference over a dataset or selection using a durable sklearn "
-            "tabular ml.model artifact."
-        ),
-        category="Machine Learning",
-        icon="batch_prediction",
-        tags=["ml", "prediction", "inference", "tabular", "sklearn"],
-        inputs={
-            "dataset": True,
-            "selection": "optional",
-            "columns": "optional",
-            "numeric_columns": "none",
-            "required_mappings": ["record_id"],
-            "accepts_artifact_types": ["ml.model"],
-        },
-        outputs=[
-            {
-                "type": "ml.predictions",
-                "description": "Predictions and probabilities for each row.",
-            }
-        ],
-        params_schema={
-            "type": "object",
-            "properties": {
-                "dataset_id": {"type": "string"},
-                "model_artifact_id": {"type": "string"},
-                "feature_columns": {"type": "array", "items": {"type": "string"}},
-                "run_id": {"type": "string"},
-            },
-        },
-        run_in_job=True,
-        requires=["scikit-learn>=1.2"],
-        optional_requires=["joblib"],
-    )
-
-    api.register_action(
         id="create_active_learning_batch",
         title="Create Active-Learning Batch",
         handler=actions.create_active_learning_batch_action,
@@ -393,50 +214,6 @@ def register(api) -> None:
     )
 
     api.register_panel(
-        id="model_builder",
-        title="ML Model Builder",
-        factory=create_model_builder_panel,
-        description=(
-            "Create reusable sklearn and torch model definitions with explicit "
-            "hyperparameters for use in the ML Workbench."
-        ),
-        category="Machine Learning",
-        icon="tune",
-        tags=["ml", "models", "hyperparameters", "sklearn", "torch"],
-        uses_services=["core.ml.registry"],
-        produces=["ml.model_definition"],
-        default_layout={"x": 0, "y": 0, "w": 5, "h": 7},
-    )
-
-    api.register_panel(
-        id="workbench",
-        title="ML Workbench",
-        factory=create_ml_workbench_panel,
-        description=(
-            "Train saved model definitions. The workbench adapts its input binding "
-            "to the selected model definition modality."
-        ),
-        category="Machine Learning",
-        icon="psychology",
-        tags=["ml", "training", "classification", "regression", "tabular", "image"],
-        required_mappings=["record_id"],
-        optional_mappings=["target_label"],
-        uses_services=["core.ml.registry"],
-        produces=[
-            "ml.feature_spec",
-            "ml.image_spec",
-            "ml.split_spec",
-            "ml.model",
-            "ml.predictions",
-            "ml.evaluation_report",
-            "ml.training_log",
-            "ml.run",
-            "ml.run.finished",
-        ],
-        default_layout={"x": 5, "y": 0, "w": 5, "h": 7},
-    )
-
-    api.register_panel(
         id="recipe_launcher",
         title="ML Recipe Launcher",
         factory=create_ml_recipe_launcher_panel,
@@ -447,12 +224,13 @@ def register(api) -> None:
         ),
         category="Machine Learning",
         icon="integration_instructions",
-        tags=["ml", "recipes", "training", "torch", "expert", "no-code"],
+        tags=["ml", "recipes", "training", "torch", "sklearn", "expert"],
         required_mappings=["record_id"],
         optional_mappings=["target_label", "image.path", "image.uri"],
         uses_services=["core.ml.recipe_registry"],
         produces=[
             "ml.training_log",
+            "ml.split_spec",
             "ml.model",
             "ml.predictions",
             "ml.evaluation_report",
@@ -461,7 +239,7 @@ def register(api) -> None:
             "ml.recipe_run.progress",
             "ml.recipe_run.finished",
         ],
-        default_layout={"x": 10, "y": 0, "w": 5, "h": 7},
+        default_layout={"x": 0, "y": 0, "w": 5, "h": 7},
     )
 
     api.register_panel(
@@ -495,37 +273,6 @@ def register(api) -> None:
     )
 
 
-def create_ml_registry():
-    ml = _load_sibling_module("ml")
-    return ml.build_default_registry()
-
-
-def create_model_builder_panel(context, **kwargs):
-    builder_module = _load_sibling_module("model_builder_panel")
-    registry = context.services.get("core.ml.registry")
-
-    controller = builder_module.MLModelBuilderPanel(
-        context=context,
-        registry=registry,
-        restore_state=kwargs.get("restore_state"),
-    )
-
-    return controller.panel(), controller
-
-
-def create_ml_workbench_panel(context, **kwargs):
-    panel_module = _load_sibling_module("panel")
-    registry = context.services.get("core.ml.registry")
-
-    controller = panel_module.MLWorkbenchPanel(
-        context=context,
-        registry=registry,
-        restore_state=kwargs.get("restore_state"),
-    )
-
-    return controller.panel(), controller
-
-
 def create_training_curves_panel(context, **kwargs):
     curves_module = _load_sibling_module("curves_panel")
 
@@ -536,9 +283,11 @@ def create_training_curves_panel(context, **kwargs):
 
     return controller.panel(), controller
 
+
 def create_ml_predict_panel(context, **kwargs):
     predict_panel_module = _load_sibling_module("predict_panel")
     return predict_panel_module.create_predict_panel(context=context, **kwargs)
+
 
 def create_ml_recipe_registry(context=None):
     registry_module = _load_sibling_module("recipe_registry")
@@ -547,6 +296,10 @@ def create_ml_recipe_registry(context=None):
     registry = registry_module.MLRecipeRegistry()
     registry.register(recipes_module.ExternalPythonRecipe)
     registry.register(recipes_module.CIFARResNetRecipe)
+    registry.register(recipes_module.TimmImageClassifierRecipe)
+    registry.register(recipes_module.WideResNetCIFARRecipe)
+    registry.register(recipes_module.TimmImageRegressorRecipe)
+    registry.register(recipes_module.TabularMLPRegressorRecipe)
     return registry
 
 

@@ -764,6 +764,20 @@ class MenuDashboard:
         const popover = root.querySelector('.al-hmenu-body-popover');
         if (!popover) { return; }
 
+        // Walk ancestors INCLUDING across shadow-DOM boundaries. BokehJS renders
+        // widget/HTML-pane content inside a shadow root, so a plain parentElement
+        // walk stops at the shadow host and never reaches the ReactGrid tile that
+        // actually clips the deep submenus.
+        function alParent(node) {
+            if (!node) { return null; }
+            if (node.parentElement) { return node.parentElement; }
+            const r = (node.getRootNode && node.getRootNode());
+            if (r && r.host) { return r.host; }
+            const pn = node.parentNode;
+            if (pn && pn.host) { return pn.host; }
+            return null;
+        }
+
         function restoreFor(pop) {
             const fixes = pop.__alFixes;
             if (fixes) {
@@ -806,11 +820,13 @@ class MenuDashboard:
 
         function openMenu(pop, r) {
             console.log('[hmenu] openMenu called');
-            // Lift overflow clipping up the ancestor chain so the in-root popover
-            // is not cropped by the ReactGrid tile or any scroll container.
+            // Lift overflow clipping up the ancestor chain (crossing shadow
+            // boundaries) so the in-root popover and its nested submenus are not
+            // cropped by the ReactGrid tile, the shadow host, or any scroll
+            // container.
             const fixes = [];
-            let node = pop.parentElement;
-            while (node && node !== document.documentElement) {
+            let node = alParent(pop);
+            while (node && node !== document.documentElement && node !== document.body) {
                 const cs = window.getComputedStyle(node);
                 if (cs.overflow !== 'visible' ||
                     cs.overflowX !== 'visible' ||
@@ -825,12 +841,12 @@ class MenuDashboard:
                     node.style.overflowX = 'visible';
                     node.style.overflowY = 'visible';
                 }
-                node = node.parentElement;
+                node = alParent(node);
             }
             pop.__alFixes = fixes;
 
             const zlifts = [];
-            let zn = pop.parentElement;
+            let zn = alParent(pop);
             while (zn && zn !== document.body && zn !== document.documentElement) {
                 zlifts.push({ el: zn, zIndex: zn.style.zIndex, position: zn.style.position });
                 const zcs = window.getComputedStyle(zn);
@@ -838,7 +854,7 @@ class MenuDashboard:
                     zn.style.position = 'relative';
                 }
                 zn.style.zIndex = '2147483000';
-                zn = zn.parentElement;
+                zn = alParent(zn);
             }
             pop.__alZLifts = zlifts;
 
@@ -859,7 +875,7 @@ class MenuDashboard:
                 console.log('[hmenu] topAtCenter=', topEl,
                     'isLeafOrPopover=', !!(topEl && topEl.closest &&
                         topEl.closest('.al-hmenu-body-popover')));
-                
+
                 console.log('[hmenu] OPEN geom:',
                     'popover=', JSON.stringify(pr),
                     'anchor=', JSON.stringify(ar),
@@ -964,6 +980,7 @@ class MenuDashboard:
         openMenu(popover, root);
         """
         return self._attr(js)
+
 
     def _click_js(self) -> str:
         target_name = self._js_string(self._target_name)
