@@ -1,3 +1,4 @@
+#BUG: Doesnt provide result metrics even when groundtruth provided
 from __future__ import annotations
 
 import time
@@ -89,7 +90,7 @@ class MLTrainingCurvesPanel:
 
         self.show_points = pn.widgets.Checkbox(
             name="Show point markers",
-            value=True,
+            value=False,
             sizing_mode="stretch_width",
         )
 
@@ -1045,10 +1046,12 @@ class MLTrainingCurvesPanel:
             except Exception:
                 pass
         elif y_scale == "auto":
+
             try:
-                if not y_values.empty and y_values.min() > 0 and y_values.min() < 0.01:
+                if not y_values.empty and y_values.min() > 0 and "loss" in ylabel.lower():
                     ax.set_yscale("log")
-            except Exception:
+            except Exception as e:
+                print(f"y_scale auto exception - {e}")
                 pass
 
         fig.tight_layout()
@@ -1134,7 +1137,7 @@ class MLTrainingCurvesPanel:
                 if not y_values.empty and y_values.min() > 0:
                     ax.set_yscale("log")
             elif y_scale == "auto":
-                if not y_values.empty and y_values.min() > 0 and y_values.min() < 0.01:
+                if not y_values.empty and y_values.min() > 0 and "loss" in metric.lower():
                     ax.set_yscale("log")
         except Exception:
             pass
@@ -1190,7 +1193,7 @@ class MLTrainingCurvesPanel:
                 if not y_values.empty and y_values.min() > 0:
                     ax.set_yscale("log")
             elif y_scale == "auto":
-                if not y_values.empty and y_values.min() > 0 and y_values.min() < 0.01:
+                if not y_values.empty and y_values.min() > 0 and "loss" in ylabel.lower():
                     ax.set_yscale("log")
         except Exception:
             pass

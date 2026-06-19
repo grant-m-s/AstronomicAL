@@ -1,0 +1,357 @@
+from __future__ import annotations
+
+import importlib.util
+import sys
+from pathlib import Path
+
+from astronomicAL.platform.plugins import PluginManifest
+
+
+manifest = PluginManifest(
+    id="core.active_learning",
+    name="Active Learning",
+    version="0.1.1",
+    description=(
+        "Active-learning session manager built on ML predictions, ranked "
+        "query strategies, AstronomicAL selection sets, and scratch "
+        "retraining through core.ml recipes when available."
+    ),
+
+    # Important:
+    # Do NOT use requires_plugins=["core.ml"] here.
+    #
+    # The current plugin manager validates required plugin ids at enable time.
+    # If this plugin is enabled before core.ml in the discovery loop, the
+    # manager rejects it before register() is ever called.
+    #
+    # Active Learning can still be useful without core.ml already enabled:
+    # - it can create random initial selections,
+    # - manage AL sessions,
+    # - track verified/unsure labels,
+    # - rank existing ml.predictions artifacts,
+    # - register query strategies.
+    #
+    # Only the "train from scratch" path requires core.ml at runtime.
+    requires_plugins=[],
+
+    requires=[],
+    optional_requires=[],
+    capabilities=[
+        "panel",
+        "action",
+        "active-learning",
+        "selection",
+        "machine-learning",
+    ],
+    tags=[
+        "core",
+        "active-learning",
+        "ml",
+        "selection",
+        "query-strategy",
+    ],
+)
+
+
+def _load_sibling_module(stem: str):
+    module_name = f"{__name__}.{stem}"
+    if module_name in sys.modules:
+        return sys.modules[module_name]
+
+    path = Path(__file__).with_name(f"{stem}.py")
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Could not load sibling module {stem!r} from {path}")
+
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def register(api) -> None:
+    actions = _load_sibling_module("actions")
+    panel_module = _load_sibling_module("panel")
+    strategies = _load_sibling_module("strategies")
+
+    api.register_service(
+        key="query_strategy_registry",
+        factory=lambda context: strategies.create_default_strategy_registry(),
+        lazy=True,
+        replace=True,
+        description=(
+            "Registry for active-learning query strategies. Other plugins can "
+            "retrieve this service and register new QueryStrategy instances."
+        ),
+    )
+
+    api.register_action(
+        id="start_session",
+        title="Start Active-Learning Session",
+        handler=actions.start_session_action,
+        description=(
+            "Create an active-learning session and draw an ordered initial "
+            "random sample from the unlabelled pool."
+        ),
+        category="Active Learning",
+        icon="playlist_add",
+        tags=["active-learning", "random", "selection", "session"],
+        inputs={
+            "dataset": True,
+            "selection": "none",
+            "columns": "none",
+            "numeric_columns": "none",
+            "required_mappings": ["record_id"],
+        },
+        outputs=[
+            {
+                "type": "al.session",
+                "description": "Active-learning session state.",
+            },
+            {
+                "type": "ml.active_learning_batch",
+                "description": "Initial random review batch.",
+            },
+            {
+                "type": "selection.ids",
+                "optional": True,
+                "description": "Ordered selection set.",
+            },
+        ],
+        params_schema={
+            "type": "object",
+            "properties": {
+                "dataset_id": {"type": "string"},
+                "label_options": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+                "target_column": {
+                    "type": "string",
+                    "default": "al_label",
+                },
+                "initial_k": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "default": 20,
+                },
+                "seed": {
+                    "type": "integer",
+                    "default": 42,
+                },
+                "make_selection": {
+                    "type": "boolean",
+                    "default": True,
+                },
+            },
+        },
+        run_in_job=False,
+    )
+
+    api.register_action(
+        id="query_batch",
+        title="Create Active-Learning Query Batch",
+        handler=actions.query_batch_action,
+        description=(
+            "Rank prediction records with a registered query strategy, ignore "
+            "already labelled/unsure rows, and promote the top-k rows to the "
+            "AstronomicAL selection set in informativeness order."
+        ),
+        category="Active Learning",
+        icon="rule",
+        tags=["active-learning", "query", "selection", "uncertainty"],
+        inputs={
+            "dataset": False,
+            "selection": "none",
+            "columns": "none",
+            "numeric_columns": "none",
+            "accepts_artifact_types": ["ml.predictions"],
+        },
+        outputs=[
+            {
+                "type": "al.session",
+                "description": "Updated active-learning session state.",
+            },
+            {
+                "type": "ml.active_learning_batch",
+                "description": "Ranked review batch.",
+            },
+            {
+                "type": "selection.ids",
+                "optional": True,
+                "description": "Ordered selection set.",
+            },
+        ],
+        params_schema={
+            "type": "object",
+            "properties": {
+                "session_artifact_id": {"type": "string"},
+                "predictions_artifact_id": {"type": "string"},
+                "strategy_id": {
+                    "type": "string",
+                    "default": "least_confidence",
+                },
+                "k": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "default": 200,
+                },
+                "seed": {
+                    "type": "integer",
+                    "default": 42,
+                },
+                "make_selection": {
+                    "type": "boolean",
+                    "default": True,
+                },
+            },
+        },
+        run_in_job=True,
+    )
+
+    api.register_action(
+        id="record_label",
+        title="Record Active-Learning Label",
+        handler=actions.record_label_action,
+        description=(
+            "Record a label/verification for the focused row. The special "
+            "Unsure label removes a row from the pool but does not add it to "
+            "the training set."
+        ),
+        category="Active Learning",
+        icon="label",
+        tags=["active-learning", "label", "annotation", "selection"],
+        inputs={
+            "dataset": False,
+            "selection": "optional",
+            "columns": "none",
+            "numeric_columns": "none",
+        },
+        outputs=[
+            {
+                "type": "al.session",
+                "description": "Updated active-learning session state.",
+            },
+        ],
+        params_schema={
+            "type": "object",
+            "required": ["session_artifact_id", "label"],
+            "properties": {
+                "session_artifact_id": {"type": "string"},
+                "row_id": {"type": "string"},
+                "label": {"type": "string"},
+                "source": {
+                    "type": "string",
+                    "default": "manual",
+                },
+            },
+        },
+        run_in_job=False,
+    )
+
+    api.register_action(
+        id="train_from_session",
+        title="Train Active-Learning Round From Scratch",
+        handler=actions.train_from_session_action,
+        description=(
+            "Materialise the verified labels as a training dataset, seed the "
+            "runtime, and call core.ml.run_ml_recipe so every active-learning "
+            "round starts from the same initialisation."
+        ),
+        category="Active Learning",
+        icon="model_training",
+        tags=["active-learning", "training", "ml", "recipe", "scratch"],
+        inputs={
+            "dataset": False,
+            "selection": "none",
+            "columns": "none",
+            "numeric_columns": "none",
+        },
+        outputs=[
+            {
+                "type": "al.session",
+                "description": "Updated session with the completed AL round.",
+            },
+            {
+                "type": "al.training_set",
+                "description": "Training rows and label manifest.",
+            },
+            {
+                "type": "ml.run",
+                "optional": True,
+                "description": "core.ml run summary.",
+            },
+            {
+                "type": "ml.model",
+                "optional": True,
+                "description": "Trained model artifact from core.ml.",
+            },
+        ],
+        params_schema={
+            "type": "object",
+            "required": ["session_artifact_id", "recipe_id"],
+            "properties": {
+                "session_artifact_id": {"type": "string"},
+                "recipe_id": {"type": "string"},
+                "recipe_params": {"type": "object"},
+                "target_column": {
+                    "type": "string",
+                    "default": "al_label",
+                },
+                "train_dataset_id": {"type": "string"},
+                "seed": {"type": "integer"},
+            },
+        },
+        run_in_job=True,
+    )
+
+    api.register_panel(
+        id="panel",
+        title="Active Learning",
+        factory=create_active_learning_panel,
+        description=(
+            "Manage active-learning sessions, initial random sampling, ranked "
+            "query batches, manual labels including Unsure, and scratch "
+            "retraining through selectable core.ml recipes. Recipes, datasets, "
+            "columns, labels, validation/test sets, and schema-defined recipe "
+            "parameters are populated from platform state where available."
+        ),
+        category="Active Learning",
+        icon="psychology",
+        tags=["active-learning", "ml", "selection", "annotation"],
+        required_mappings=[],
+        optional_mappings=["record_id", "target_label", "image.path", "image.uri"],
+
+        # This is intentionally descriptive only. The AL panel should still
+        # load if core.ml has not been enabled yet.
+        uses_services=[
+            "core.active_learning.query_strategy_registry",
+            "core.ml.recipe_registry",
+        ],
+
+        produces=[
+            "al.session",
+            "al.training_set",
+            "ml.active_learning_batch",
+            "selection.ids",
+            "al.session.created",
+            "al.query_batch.created",
+            "al.label.recorded",
+            "al.round.training_started",
+            "al.round.training_finished",
+        ],
+        default_layout={"x": 0, "y": 0, "w": 6, "h": 8},
+        state_version=1,
+        persist_layout=True,
+        persist_state=True,
+        restore_policy="best_effort",
+    )
+
+
+def create_active_learning_panel(context, **kwargs):
+    panel_module = _load_sibling_module("panel")
+    controller = panel_module.ActiveLearningPanel(
+        context=context,
+        restore_state=kwargs.get("restore_state"),
+    )
+    return controller.panel(), controller

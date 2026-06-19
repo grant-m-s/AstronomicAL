@@ -824,13 +824,32 @@ class MenuDashboard:
             // boundaries) so the in-root popover and its nested submenus are not
             // cropped by the ReactGrid tile, the shadow host, or any scroll
             // container.
+            //
+            // IMPORTANT: skip ancestors that actually own a scroll position.
+            // Forcing overflow:visible on a scrolled element resets its
+            // scrollTop/scrollLeft to 0 (a "visible" box has no scrollport), which
+            // is what caused the page to jump to the top while the menu was open
+            // and snap back on close. Pure clipping ancestors (overflow:hidden
+            // tiles, shadow hosts that aren't scrolled) are still lifted.
             const fixes = [];
             let node = alParent(pop);
             while (node && node !== document.documentElement && node !== document.body) {
                 const cs = window.getComputedStyle(node);
-                if (cs.overflow !== 'visible' ||
+                const clips =
+                    cs.overflow !== 'visible' ||
                     cs.overflowX !== 'visible' ||
-                    cs.overflowY !== 'visible') {
+                    cs.overflowY !== 'visible';
+
+                const scrollableY =
+                    (cs.overflowY === 'auto' || cs.overflowY === 'scroll' ||
+                     cs.overflow  === 'auto' || cs.overflow  === 'scroll') &&
+                    node.scrollHeight > node.clientHeight + 1;
+                const scrollableX =
+                    (cs.overflowX === 'auto' || cs.overflowX === 'scroll' ||
+                     cs.overflow  === 'auto' || cs.overflow  === 'scroll') &&
+                    node.scrollWidth > node.clientWidth + 1;
+
+                if (clips && !scrollableY && !scrollableX) {
                     fixes.push({
                         el: node,
                         overflow: node.style.overflow,

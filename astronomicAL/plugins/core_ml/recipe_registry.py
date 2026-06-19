@@ -2754,9 +2754,7 @@ class RunHarness:
         p = self.protocol
 
         if not p.validation_dataset_id:
-            raise ValueError(
-                "External split strategy requires a validation dataset."
-            )
+            raise ValueError("External split strategy requires a validation dataset.")
 
         train_dataset_id = self.run.dataset_id
         val_dataset_id = p.validation_dataset_id
@@ -2767,7 +2765,6 @@ class RunHarness:
             columns=columns,
             role="training",
         )
-
         val_df = self._load_partition_frame(
             val_dataset_id,
             columns=columns,
@@ -2782,17 +2779,13 @@ class RunHarness:
                 role="test",
             )
 
-        train_labels = (
-            train_df[b.target_column].astype(str).tolist()
-            if b.target_column
-            else ["" for _ in range(len(train_df))]
-        )
-
-        classes = sorted(set(train_labels))
-
-        if len(classes) < 2:
-            raise ValueError(
-                f"Training dataset has <2 classes after filtering: {classes}"
+        if self._task_kind() == "regression":
+            classes: List[str] = []
+        else:
+            classes = self._classification_classes(
+                train_df=train_df,
+                val_df=val_df,
+                test_df=test_df,
             )
 
         train_p = self._partition_from_frame(
@@ -2800,13 +2793,14 @@ class RunHarness:
             frame=train_df,
             dataset_id=train_dataset_id,
             classes=classes,
+            source="selected",
         )
-
         val_p = self._partition_from_frame(
             name="val",
             frame=val_df,
             dataset_id=val_dataset_id,
             classes=classes,
+            source="dataset",
         )
 
         test_p = None
@@ -2816,10 +2810,13 @@ class RunHarness:
                 frame=test_df,
                 dataset_id=test_dataset_id,
                 classes=classes,
+                source="dataset",
             )
 
         self._assert_disjoint(train_p, val_p, test_p)
-        self._assert_label_subset(classes, val_p, test_p)
+
+        if self._task_kind() != "regression":
+            self._assert_label_subset(classes, val_p, test_p)
 
         if len(val_p) == 0:
             raise ValueError("External validation dataset is empty.")
@@ -2829,7 +2826,6 @@ class RunHarness:
             "train": train_df,
             "val": val_df,
         }
-
         if test_df is not None:
             self._partition_frames["test"] = test_df
 
@@ -2838,6 +2834,8 @@ class RunHarness:
             val=val_p,
             test=test_p,
             strategy=p.split_strategy,
+            validation_source=p.validation_source,
+            test_source=p.test_source,
             group_column=None,
             random_state=p.random_state,
             protocol_id=p.protocol_id,
@@ -2848,7 +2846,6 @@ class RunHarness:
             test_dataset_id=test_dataset_id,
         )
 
-
 # ---- partitioning (modality-agnostic) ----------------------------------
     def _partition(self) -> Partitions:
         b = self.binding
@@ -2856,18 +2853,13 @@ class RunHarness:
         regression = self._task_kind() == "regression"
 
         cols = [b.record_id_column]
-
         if b.target_column:
             cols.append(b.target_column)
-
         cols += [c for c in b.input_columns if c]
-
         if p.group_column:
             cols.append(p.group_column)
-
         if p.split_column:
             cols.append(p.split_column)
-
         cols = list(dict.fromkeys([c for c in cols if c]))
 
         base_df = self._load_partition_frame(
@@ -2894,20 +2886,44 @@ class RunHarness:
 
         train_df = base_df.iloc[train_idx].reset_index(drop=True)
 
-        train_labels = (
-            train_df[b.target_column].astype(str).tolist()
-            if b.target_column
-            else ["" for _ in range(len(train_df))]
-        )
+        if p.validation_source == "split":
+            val_df = base_df.iloc[val_idx].reset_index(drop=True)
+            val_dataset_id = self.run.dataset_id
+            val_source = "split"
+        else:
+            val_df = self._load_partition_frame(
+                p.validation_dataset_id,
+                columns=cols,
+                role="validation",
+            )
+            val_dataset_id = p.validation_dataset_id
+            val_source = "dataset"
+
+        test_df = None
+        test_dataset_id = None
+        test_source = "none"
+
+        if p.test_source == "split":
+            test_df = base_df.iloc[test_idx].reset_index(drop=True)
+            test_dataset_id = self.run.dataset_id
+            test_source = "split"
+        elif p.test_source == "dataset":
+            test_df = self._load_partition_frame(
+                p.test_dataset_id,
+                columns=cols,
+                role="test",
+            )
+            test_dataset_id = p.test_dataset_id
+            test_source = "dataset"
 
         if regression:
             classes: List[str] = []
         else:
-            classes = sorted(set(train_labels))
-            if len(classes) < 2:
-                raise ValueError(
-                    f"Training partition has <2 classes after protocol split: {classes}"
-                )
+            classes = self._classification_classes(
+                train_df=train_df,
+                val_df=val_df,
+                test_df=test_df,
+            )
 
         train_p = self._partition_from_frame(
             name="train",
@@ -2917,56 +2933,26 @@ class RunHarness:
             source="selected",
         )
 
-        if p.validation_source == "split":
-            val_df = base_df.iloc[val_idx].reset_index(drop=True)
-            val_p = self._partition_from_frame(
-                name="val",
-                frame=val_df,
-                dataset_id=self.run.dataset_id,
-                classes=classes,
-                source="split",
-            )
-        else:
-            val_df = self._load_partition_frame(
-                p.validation_dataset_id,
-                columns=cols,
-                role="validation",
-            )
-            val_p = self._partition_from_frame(
-                name="val",
-                frame=val_df,
-                dataset_id=p.validation_dataset_id,
-                classes=classes,
-                source="dataset",
-            )
+        val_p = self._partition_from_frame(
+            name="val",
+            frame=val_df,
+            dataset_id=val_dataset_id,
+            classes=classes,
+            source=val_source,
+        )
 
         test_p = None
-        test_df = None
-
-        if p.test_source == "split":
-            test_df = base_df.iloc[test_idx].reset_index(drop=True)
+        if test_df is not None:
             test_p = self._partition_from_frame(
                 name="test",
                 frame=test_df,
-                dataset_id=self.run.dataset_id,
+                dataset_id=test_dataset_id,
                 classes=classes,
-                source="split",
-            )
-        elif p.test_source == "dataset":
-            test_df = self._load_partition_frame(
-                p.test_dataset_id,
-                columns=cols,
-                role="test",
-            )
-            test_p = self._partition_from_frame(
-                name="test",
-                frame=test_df,
-                dataset_id=p.test_dataset_id,
-                classes=classes,
-                source="dataset",
+                source=test_source,
             )
 
         self._assert_disjoint(train_p, val_p, test_p)
+
         if not regression:
             self._assert_label_subset(classes, val_p, test_p)
 
@@ -2978,7 +2964,6 @@ class RunHarness:
             "train": train_df,
             "val": val_df,
         }
-
         if test_df is not None:
             self._partition_frames["test"] = test_df
 
@@ -3068,15 +3053,161 @@ class RunHarness:
             if s_tr & s_te or s_va & s_te:
                 raise RuntimeError("test partition overlaps train/val (leakage).")
 
+    def _is_active_learning_run(self) -> bool:
+        params = dict(getattr(self.run, "params", {}) or {})
+        if params.get("al_session_id") or params.get("al_session_artifact_id"):
+            return True
+
+        protocol = str(params.get("al_protocol") or "").strip().lower()
+        return protocol in {"review", "active_learning", "active-learning", "al", "benchmark"}
+
+    def _normalise_class_list(self, value: Any) -> List[str]:
+        if value is None:
+            return []
+
+        if isinstance(value, str):
+            parts = [part.strip() for part in value.replace("\n", ",").split(",")]
+        elif isinstance(value, Mapping):
+            parts = [str(key).strip() for key in value.keys()]
+        elif isinstance(value, Iterable):
+            parts = [str(item).strip() for item in value]
+        else:
+            parts = [str(value).strip()]
+
+        out: List[str] = []
+        for item in parts:
+            if not item:
+                continue
+            if item not in out:
+                out.append(item)
+        return out
+
+    def _labels_from_frame(self, frame) -> List[str]:
+        b = self.binding
+        if frame is None or not b.target_column or b.target_column not in frame.columns:
+            return []
+
+        values: List[str] = []
+        try:
+            raw = frame[b.target_column].dropna().astype(str).tolist()
+        except Exception:
+            raw = []
+
+        for value in raw:
+            value = str(value).strip()
+            if value and value not in values:
+                values.append(value)
+        return values
+
+    def _declared_class_universe(self) -> List[str]:
+        """Return the run-declared class universe, preserving user order.
+
+        Active-learning runs should pass this from the AL session's label_options.
+        The harness also accepts common aliases because recipes/plugins may use
+        different names.
+        """
+        params = dict(getattr(self.run, "params", {}) or {})
+
+        for key in (
+            "label_options",
+            "class_labels",
+            "classes",
+            "class_names",
+            "known_classes",
+            "target_classes",
+        ):
+            labels = self._normalise_class_list(params.get(key))
+            if labels:
+                return labels
+
+        return []
+
+    def _classification_classes(
+        self,
+        *,
+        train_df,
+        val_df=None,
+        test_df=None,
+    ) -> List[str]:
+        """Resolve model class universe for classification.
+
+        Non-AL default:
+            Use classes present in the training partition.
+
+        AL default:
+            Prefer declared label_options/classes from the AL session. If those
+            are missing, include labels from train/val/test so evaluation can
+            cover every known label instead of crashing on labels absent from
+            the initial training subset.
+        """
+        train_labels = self._labels_from_frame(train_df)
+        val_labels = self._labels_from_frame(val_df)
+        test_labels = self._labels_from_frame(test_df)
+
+        declared = self._declared_class_universe()
+        is_al = self._is_active_learning_run()
+
+        if declared:
+            classes = list(declared)
+            source = "declared"
+        elif is_al:
+            classes = list(dict.fromkeys([*train_labels, *val_labels, *test_labels]))
+            source = "active_learning_eval_partitions"
+        else:
+            classes = sorted(set(train_labels))
+            source = "training_partition"
+
+        class_set = set(str(label) for label in classes)
+
+        missing_train_labels = sorted(set(str(label) for label in train_labels) - class_set)
+        if missing_train_labels:
+            raise ValueError(
+                "Training labels contain value(s) outside the model class universe: "
+                f"{missing_train_labels}. Known classes are {classes}."
+            )
+
+        if len(classes) < 2:
+            raise ValueError(
+                f"Classification requires at least two known classes. Resolved {classes} "
+                f"from source={source!r}."
+            )
+
+        train_seen = sorted(set(str(label) for label in train_labels))
+        val_seen = sorted(set(str(label) for label in val_labels))
+        test_seen = sorted(set(str(label) for label in test_labels))
+
+        self._class_universe_info = {
+            "source": source,
+            "active_learning": bool(is_al),
+            "classes": list(classes),
+            "train_seen_classes": train_seen,
+            "validation_seen_classes": val_seen,
+            "test_seen_classes": test_seen,
+            "classes_without_training_examples": [
+                label for label in classes if str(label) not in set(train_seen)
+            ],
+            "evaluation_includes_classes_absent_from_training": bool(
+                (set(val_seen) | set(test_seen)) - set(train_seen)
+            ),
+        }
+
+        return classes
+
     def _assert_label_subset(self, classes, val_p, test_p):
-        cset = set(classes)
+        cset = set(str(label) for label in classes)
+
         for part in (val_p, test_p):
             if part is None:
                 continue
-            extra = sorted(set(part.labels) - cset)
+
+            extra = sorted(set(str(label) for label in part.labels) - cset)
             if extra:
                 raise ValueError(
-                    f"{part.name} contains classes unseen in training: {extra}")
+                    f"{part.name} contains labels that are not in the model class "
+                    f"universe: {extra}. Known classes are {sorted(cset)}. "
+                    "For active learning, pass the full class list through "
+                    "label_options/classes/class_labels when training."
+                )
 
     def _is_better(self, score: float) -> bool:
         if self._best_score is None:
@@ -3108,6 +3239,9 @@ class RunHarness:
                 "validation_row_ids": parts.val.record_ids,
                 "test_row_ids": parts.test.record_ids if parts.test else [],
                 "classes": parts.train.classes,
+                "class_universe": json_safe(
+                    dict(getattr(self, "_class_universe_info", {}) or {})
+                ),
                 "isolation": {
                     "partitions_disjoint": True,
                     "test_used_in_training": False,
@@ -3147,6 +3281,11 @@ class RunHarness:
                 "metrics": test_metrics,
                 "reported_metrics": test_metrics,
                 "reported_partition": "test" if parts.test else None,
+                "classes": parts.train.classes,
+                "class_universe": json_safe(
+                    dict(getattr(self, "_class_universe_info", {}) or {})
+                ),
+                "evaluation_scope": "all_known_classes",
                 "validity": {
                     "metric_partition": "test" if parts.test else "none",
                     "selection_partition": "validation",
