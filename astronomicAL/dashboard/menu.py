@@ -593,7 +593,17 @@ class MenuDashboard:
                 position: absolute;
                 top: calc(100% + 3px);
                 left: 0;
-                z-index: 1000;
+
+                /*
+                 * Keep the Add Panel menu above normal dashboard/grid content,
+                 * but below Panel/Bootstrap modal/dialog layers.
+                 *
+                 * Bootstrap modal backdrop/modal commonly occupy ~1040/1050.
+                 * The previous implementation lifted ancestors to 2147483000,
+                 * which allowed this menu to render above active modals.
+                 */
+                z-index: 900;
+
                 list-style: none;
                 margin: 0;
                 padding: 4px 0;
@@ -648,7 +658,7 @@ class MenuDashboard:
                 top: -5px;
                 left: calc(100% - 1px);
                 margin: 0;
-                z-index: 1001;
+                z-index: 901;
             }}
 
             .al-hmenu-body-popover .al-hmenu-item:hover > .al-hmenu-submenu,
@@ -764,6 +774,47 @@ class MenuDashboard:
         const popover = root.querySelector('.al-hmenu-body-popover');
         if (!popover) { return; }
 
+        // These values intentionally sit below modal/dialog layers.
+        // Bootstrap/Panel modal stacks commonly use backdrop/modal around
+        // 1040/1050+. The menu only needs to beat ReactGrid tile stacking.
+        const AL_HMENU_TILE_Z = '900';
+        const AL_HMENU_POPOVER_Z = '901';
+
+        function alModalIsOpen() {
+            const selectors = [
+                '.modal.show',
+                '.modal.in',
+                '.bk-modal',
+                '.bk-dialog',
+                '.bk-Dialog',
+                '.pn-modal',
+                '.pn-modal-content',
+                '.modal-backdrop',
+                '.modal-backdrop.show',
+                '[role="dialog"][aria-modal="true"]',
+                '[aria-modal="true"]'
+            ];
+
+            for (let i = 0; i < selectors.length; i++) {
+                const nodes = document.querySelectorAll(selectors[i]);
+                for (let j = 0; j < nodes.length; j++) {
+                    const el = nodes[j];
+                    const cs = window.getComputedStyle(el);
+                    const rect = el.getBoundingClientRect();
+                    if (
+                        cs.display !== 'none' &&
+                        cs.visibility !== 'hidden' &&
+                        rect.width > 0 &&
+                        rect.height > 0
+                    ) {
+                        return true;
+                    }
+                }
+            }
+
+            return false;
+        }
+
         // Walk ancestors INCLUDING across shadow-DOM boundaries. BokehJS renders
         // widget/HTML-pane content inside a shadow root, so a plain parentElement
         // walk stops at the shadow host and never reaches the ReactGrid tile that
@@ -791,6 +842,7 @@ class MenuDashboard:
                 }
                 pop.__alFixes = null;
             }
+
             const zlifts = pop.__alZLifts;
             if (zlifts) {
                 for (let i = 0; i < zlifts.length; i++) {
@@ -805,7 +857,6 @@ class MenuDashboard:
         }
 
         function closeMenu(pop) {
-            console.log('[hmenu] closeMenu called');
             restoreFor(pop);
             pop.style.display = 'none';
             const r = pop.closest('.al-hmenu-root');
@@ -819,18 +870,20 @@ class MenuDashboard:
         }
 
         function openMenu(pop, r) {
-            console.log('[hmenu] openMenu called');
-            // Lift overflow clipping up the ancestor chain (crossing shadow
-            // boundaries) so the in-root popover and its nested submenus are not
-            // cropped by the ReactGrid tile, the shadow host, or any scroll
-            // container.
+            // Never open the dashboard menu over an active modal/dialog.
+            if (alModalIsOpen()) {
+                closeAllMenus();
+                return;
+            }
+
+            // Lift overflow clipping up the ancestor chain, crossing shadow
+            // boundaries, so the in-root popover and nested submenus are not
+            // cropped by the ReactGrid tile, shadow host, or pure clipping
+            // containers.
             //
             // IMPORTANT: skip ancestors that actually own a scroll position.
-            // Forcing overflow:visible on a scrolled element resets its
-            // scrollTop/scrollLeft to 0 (a "visible" box has no scrollport), which
-            // is what caused the page to jump to the top while the menu was open
-            // and snap back on close. Pure clipping ancestors (overflow:hidden
-            // tiles, shadow hosts that aren't scrolled) are still lifted.
+            // Forcing overflow:visible on a scrolled element resets scrollTop /
+            // scrollLeft to 0.
             const fixes = [];
             let node = alParent(pop);
             while (node && node !== document.documentElement && node !== document.body) {
@@ -844,6 +897,7 @@ class MenuDashboard:
                     (cs.overflowY === 'auto' || cs.overflowY === 'scroll' ||
                      cs.overflow  === 'auto' || cs.overflow  === 'scroll') &&
                     node.scrollHeight > node.clientHeight + 1;
+
                 const scrollableX =
                     (cs.overflowX === 'auto' || cs.overflowX === 'scroll' ||
                      cs.overflow  === 'auto' || cs.overflow  === 'scroll') &&
@@ -860,50 +914,61 @@ class MenuDashboard:
                     node.style.overflowX = 'visible';
                     node.style.overflowY = 'visible';
                 }
+
                 node = alParent(node);
             }
             pop.__alFixes = fixes;
 
+            /*
+             * Raise only the local dashboard/grid ancestor stack, and cap it
+             * below modal layers. The old value, 2147483000, caused the Add
+             * Panel menu to render above active modals.
+             */
             const zlifts = [];
             let zn = alParent(pop);
             while (zn && zn !== document.body && zn !== document.documentElement) {
-                zlifts.push({ el: zn, zIndex: zn.style.zIndex, position: zn.style.position });
+                zlifts.push({
+                    el: zn,
+                    zIndex: zn.style.zIndex,
+                    position: zn.style.position
+                });
+
                 const zcs = window.getComputedStyle(zn);
                 if (zcs.position === 'static') {
                     zn.style.position = 'relative';
                 }
-                zn.style.zIndex = '2147483000';
+
+                zn.style.zIndex = AL_HMENU_TILE_Z;
                 zn = alParent(zn);
             }
             pop.__alZLifts = zlifts;
 
+            pop.style.zIndex = AL_HMENU_POPOVER_Z;
             pop.style.display = 'block';
 
             r.classList.add('al-hmenu-open');
 
             window.requestAnimationFrame(function() {
+                if (alModalIsOpen()) {
+                    closeMenu(pop);
+                    return;
+                }
+
                 const pr = pop.getBoundingClientRect();
                 const anchor = pop.parentElement;
-                const ar = anchor.getBoundingClientRect();
-                const gi = pop.closest('.react-grid-item');
-                const gr = gi ? gi.getBoundingClientRect() : null;
+                const ar = anchor ? anchor.getBoundingClientRect() : null;
 
-                const cx = pr.left + pr.width / 2;
-                const cy = pr.top + pr.height / 2;
-                const topEl = document.elementFromPoint(cx, cy);
-                console.log('[hmenu] topAtCenter=', topEl,
-                    'isLeafOrPopover=', !!(topEl && topEl.closest &&
-                        topEl.closest('.al-hmenu-body-popover')));
+                // If the menu is pushed off the right edge, flip the root menu.
+                if (pr.right > window.innerWidth - 8 && anchor) {
+                    pop.style.left = 'auto';
+                    pop.style.right = '0';
+                } else {
+                    pop.style.left = '0';
+                    pop.style.right = 'auto';
+                }
 
-                console.log('[hmenu] OPEN geom:',
-                    'popover=', JSON.stringify(pr),
-                    'anchor=', JSON.stringify(ar),
-                    'gridItem=', gr ? JSON.stringify(gr) : 'none',
-                    'popDisplay=', getComputedStyle(pop).display,
-                    'popVisible=', (pr.width > 0 && pr.height > 0),
-                    'fixesApplied=', (pop.__alFixes ? pop.__alFixes.length : 0));
+                installSubmenuFlipHandlers(pop);
             });
-
         }
 
         function installSubmenuFlipHandlers(scope) {
@@ -912,17 +977,25 @@ class MenuDashboard:
                 const item = items[i];
                 if (item.__alFlipBound) { continue; }
                 item.__alFlipBound = true;
+
                 item.addEventListener('mouseenter', function() {
                     item.classList.remove('al-hmenu-flip');
+
                     window.requestAnimationFrame(function() {
                         let submenu = null;
                         for (let k = 0; k < item.children.length; k++) {
-                            const c = item.children[k];
-                            if (c.classList && c.classList.contains('al-hmenu-submenu')) {
-                                submenu = c; break;
+                            const child = item.children[k];
+                            if (
+                                child.classList &&
+                                child.classList.contains('al-hmenu-submenu')
+                            ) {
+                                submenu = child;
+                                break;
                             }
                         }
+
                         if (!submenu) { return; }
+
                         const rect = submenu.getBoundingClientRect();
                         if (rect.right > window.innerWidth - 8) {
                             item.classList.add('al-hmenu-flip');
@@ -937,53 +1010,40 @@ class MenuDashboard:
             window.__alHmenuGlobal = true;
 
             document.addEventListener('click', function(evt) {
-                console.log('[hmenu] GLOBAL capture click. target=', evt.target,
-                    'cls=', evt.target && evt.target.className,
-                    'closestRoot=', evt.target.closest('.al-hmenu-root'),
-                    'closestLeaf=', evt.target.closest('.al-hmenu-leaf-button'),
-                    'sinceOpen=', Date.now() - (window.__alHmenuOpenedAt || 0));
-                if (Date.now() - (window.__alHmenuOpenedAt || 0) < 150) { return; }
-                if (evt.target.closest('.al-hmenu-root')) { return; }
-                document.querySelectorAll('.al-hmenu-body-popover').forEach(function(pop) {
-                    if (pop.style.display !== 'block') { return; }
-                    const fixes = pop.__alFixes;
-                    if (fixes) {
-                        for (let i = 0; i < fixes.length; i++) {
-                            const f = fixes[i];
-                            try {
-                                f.el.style.overflow = f.overflow;
-                                f.el.style.overflowX = f.overflowX;
-                                f.el.style.overflowY = f.overflowY;
-                            } catch (e) {}
-                        }
-                        pop.__alFixes = null;
-                    }
-                    const zlifts = pop.__alZLifts;
-                    if (zlifts) {
-                        for (let i = 0; i < zlifts.length; i++) {
-                            const z = zlifts[i];
-                            try {
-                                z.el.style.zIndex = z.zIndex;
-                                z.el.style.position = z.position;
-                            } catch (e) {}
-                        }
-                        pop.__alZLifts = null;
-                    }
-                    pop.style.display = 'none';
-                    const r = pop.closest('.al-hmenu-root');
-                    if (r) { r.classList.remove('al-hmenu-open'); }
-                });
+                if (Date.now() - (window.__alHmenuOpenedAt || 0) < 150) {
+                    return;
+                }
+
+                if (evt.target.closest && evt.target.closest('.al-hmenu-root')) {
+                    return;
+                }
+
+                closeAllMenus();
             }, true);
 
             document.addEventListener('keydown', function(evt) {
-                if (evt.key !== 'Escape') { return; }
-                document.querySelectorAll('.al-hmenu-body-popover').forEach(function(pop) {
-                    if (pop.style.display === 'block') {
-                        const ev = new MouseEvent('click', { bubbles: true });
-                        document.body.dispatchEvent(ev);
-                    }
-                });
+                if (evt.key === 'Escape') {
+                    closeAllMenus();
+                }
             }, true);
+
+            // If a modal/dialog appears after the menu has opened, immediately
+            // close and restore the menu stack.
+            const observer = new MutationObserver(function() {
+                if (alModalIsOpen()) {
+                    closeAllMenus();
+                }
+            });
+
+            try {
+                observer.observe(document.body, {
+                    childList: true,
+                    subtree: true,
+                    attributes: true,
+                    attributeFilter: ['class', 'style', 'aria-hidden', 'aria-modal']
+                });
+                window.__alHmenuModalObserver = observer;
+            } catch (e) {}
         }
 
         installGlobalHandlers();
@@ -993,13 +1053,16 @@ class MenuDashboard:
             return;
         }
 
+        if (alModalIsOpen()) {
+            closeAllMenus();
+            return;
+        }
+
         closeAllMenus();
-        installSubmenuFlipHandlers(popover);
         window.__alHmenuOpenedAt = Date.now();
         openMenu(popover, root);
         """
         return self._attr(js)
-
 
     def _click_js(self) -> str:
         target_name = self._js_string(self._target_name)
@@ -1009,9 +1072,7 @@ class MenuDashboard:
         event.stopPropagation();
 
         const selectedValue = this.getAttribute('data-value') || '';
-        console.log('[hmenu] LEAF onclick:', selectedValue,
-            'inRoot=', !!this.closest('.al-hmenu-root'),
-            'popoverFound=', !!this.closest('.al-hmenu-body-popover'));
+
         const payload = JSON.stringify({{
             value: selectedValue,
             event_id: Date.now().toString() + ':' + Math.random().toString()
