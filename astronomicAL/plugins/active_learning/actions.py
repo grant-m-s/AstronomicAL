@@ -54,6 +54,53 @@ def _column_like_recipe_params(params: Mapping[str, Any]) -> Dict[str, str]:
 
     return out
 
+def _feature_columns_from_recipe_params(params: Mapping[str, Any]) -> List[str]:
+    values = (
+        params.get("feature_columns")
+        or params.get("input_columns")
+        or params.get("features")
+        or params.get("x_columns")
+        or []
+    )
+
+    if isinstance(values, str):
+        text = values.strip()
+        if not text:
+            return []
+
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, list):
+                values = parsed
+            elif isinstance(parsed, str):
+                values = [parsed]
+            else:
+                values = [text]
+        except Exception:
+            values = [
+                part.strip()
+                for chunk in text.splitlines()
+                for part in chunk.split(",")
+                if part.strip()
+            ]
+
+    elif isinstance(values, Mapping):
+        values = values.keys()
+
+    elif isinstance(values, (int, float)):
+        values = [values]
+
+    columns: List[str] = []
+    for value in values or []:
+        if value is None:
+            continue
+        column = str(value).strip()
+        if not column or column == "Use Index":
+            continue
+        if column not in columns:
+            columns.append(column)
+
+    return columns
 
 def _existing_dataset_columns(context: Any, dataset_id: str) -> set[str]:
     try:
@@ -107,8 +154,15 @@ def _resolve_training_required_columns(
     ):
         add(mappings.get(semantic))
 
-    # Carry explicit recipe/protocol column params.
+    # Carry explicit recipe/protocol single-column params.
     for column in _column_like_recipe_params(recipe_params).values():
+        add(column)
+
+    # Carry explicit tabular model input features. This is the critical AL/ML
+    # bridge: the derived AL training dataframe must physically contain every
+    # selected feature column, otherwise core.ml receives an empty/wrong input
+    # contract.
+    for column in _feature_columns_from_recipe_params(recipe_params):
         add(column)
 
     return needed
@@ -696,6 +750,25 @@ def train_from_session_action(
             f"derived AL training dataset does not contain it: {image_column!r}. "
             f"Available columns: {list(train_df.columns)}"
         )
+
+    feature_columns = _feature_columns_from_recipe_params(recipe_params)
+    if feature_columns:
+        missing_features = [
+            column
+            for column in feature_columns
+            if column not in train_df.columns
+        ]
+        if missing_features:
+            raise ValueError(
+                "Active Learning resolved feature_columns for training, but the "
+                "derived AL training dataset does not contain: "
+                f"{', '.join(missing_features)}. "
+                f"Available columns: {list(train_df.columns)}"
+            )
+
+        recipe_params["feature_columns"] = feature_columns
+        recipe_params["input_columns"] = feature_columns
+        recipe_params["features"] = feature_columns
 
     context.datasets.register(
         train_dataset_id,

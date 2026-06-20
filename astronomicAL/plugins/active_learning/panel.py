@@ -1,6 +1,3 @@
-# BUG: pick random starting -> label -> train -> predict -> query -> label -> train (Attempted) -> [ActiveLearningPanel] Scratch training failed: Resolved recipe column(s) are not present in the dataset: image_path |
-# BUG: protocol options for val and test dont automatically line up with what was chosen earlier.
-
 from __future__ import annotations
 
 import json
@@ -13,9 +10,46 @@ import panel as pn
 from astronomicAL.platform.plugins.specs import ActionRequest
 
 from . import actions
+from . import analytics as al_analytics
 from . import state as al_state
 
 _AL_LAYOUT_CSS_INSTALLED = False
+
+AL_OWNED_RECIPE_PARAM_NAMES = {
+    "dataset_id",
+    "recipe_id",
+    "train_dataset_id",
+    "session_artifact_id",
+    "al_session_id",
+    "al_session_artifact_id",
+    "al_training_artifact_id",
+    "al_round",
+    "target",
+    "label",
+    "target_column",
+    "label_column",
+    "record_id_column",
+    "id_column",
+    "feature_columns",
+    "input_columns",
+    "features",
+    "x_columns",
+    "label_options",
+    "class_labels",
+    "classes",
+    "known_classes",
+    "target_classes",
+    "validation_dataset_id",
+    "test_dataset_id",
+    "protocol_validation_source",
+    "protocol_validation_dataset_id",
+    "protocol_validation_size",
+    "protocol_test_source",
+    "protocol_test_dataset_id",
+    "protocol_test_size",
+    "protocol_random_state",
+    "al_protocol",
+}
 
 class ActiveLearningPanel:
     state_version = 1
@@ -58,6 +92,91 @@ class ActiveLearningPanel:
             options=[],
             value=None,
         )
+
+        self.feature_filter = pn.widgets.TextInput(
+            name="Feature filter / prefix",
+            value="",
+            placeholder="e.g. flux_, mag_, err_ — comma/newline separates multiple filters",
+            sizing_mode="stretch_width",
+            margin=(0, 0, 8, 0),
+        )
+
+        self.feature_replace_matching_button = pn.widgets.Button(
+            name="Replace with matches",
+            button_type="light",
+            width=175,
+            margin=(0, 8, 8, 0),
+        )
+        self.feature_add_matching_button = pn.widgets.Button(
+            name="Add matches",
+            button_type="light",
+            width=120,
+            margin=(0, 8, 8, 0),
+        )
+        self.feature_select_numeric_button = pn.widgets.Button(
+            name="Select numeric features",
+            button_type="light",
+            width=170,
+            margin=(0, 8, 8, 0),
+        )
+        self.feature_clear_button = pn.widgets.Button(
+            name="Clear features",
+            button_type="light",
+            width=120,
+            margin=(0, 0, 8, 0),
+        )
+
+        self.feature_columns = pn.widgets.TextAreaInput(
+            name="Selected feature columns",
+            value="\n".join(
+                str(value)
+                for value in list(restore_state.get("feature_columns") or [])
+                if value is not None
+            ),
+            placeholder=(
+                "Selected feature columns, one per line.\n"
+                "Use the filter above and buttons below to bulk-add columns."
+            ),
+            height=130,
+            min_height=130,
+            sizing_mode="stretch_width",
+            margin=(0, 0, 8, 0),
+        )
+
+        self.feature_match_preview = pn.pane.Markdown(
+            "",
+            height=46,
+            min_height=46,
+            sizing_mode="stretch_width",
+            margin=(0, 0, 10, 0),
+            styles={
+                "font-size": "12px",
+                "color": "#666",
+                "line-height": "1.25",
+                "overflow": "hidden",
+                "text-overflow": "ellipsis",
+                "border": "1px solid rgba(0,0,0,0.08)",
+                "border-radius": "4px",
+                "padding": "6px",
+                "background": "#fafafa",
+            },
+        )
+
+        self.validation_fraction = pn.widgets.FloatInput(
+            name="Validation random split fraction",
+            value=float(restore_state.get("validation_fraction", 0.1)),
+            start=0.0,
+            end=0.8,
+            step=0.01,
+        )
+        self.test_fraction = pn.widgets.FloatInput(
+            name="Test random split fraction",
+            value=float(restore_state.get("test_fraction", 0.2)),
+            start=0.0,
+            end=0.8,
+            step=0.01,
+        )
+
         self.validation_dataset_select = pn.widgets.Select(
             name="Validation dataset",
             options={"Split from AL training rows": ""},
@@ -109,6 +228,16 @@ class ActiveLearningPanel:
             button_type="primary",
         )
 
+        self.auto_label_hint = pn.pane.Markdown(
+            "",
+            sizing_mode="stretch_width",
+            styles={
+                "font-size": "12px",
+                "color": "#666",
+                "overflow-wrap": "anywhere",
+            },
+        )
+
         self.auto_label_source_column = pn.widgets.Select(
             name="Auto-label from dataset column",
             options=[],
@@ -148,6 +277,74 @@ class ActiveLearningPanel:
             },
         )
 
+        self._analytics_frame_index = int(restore_state.get("analytics_frame_index", 0))
+        self._analytics_frames: List[Dict[str, Any]] = []
+
+
+        self._analytics_dirty = True
+
+        self._source_label_cache: Dict[Any, Any] = {}
+
+        self.analytics_x_column = pn.widgets.Select(
+            name="Analytics X column",
+            options=[],
+            value=restore_state.get("analytics_x_column"),
+        )
+        self.analytics_y_column = pn.widgets.Select(
+            name="Analytics Y column",
+            options=[],
+            value=restore_state.get("analytics_y_column"),
+        )
+
+        self.analytics_first_button = pn.widgets.Button(name="<<", button_type="light", width=44)
+        self.analytics_prev_button = pn.widgets.Button(name="<", button_type="light", width=44)
+        self.analytics_next_button = pn.widgets.Button(name=">", button_type="light", width=44)
+        self.analytics_last_button = pn.widgets.Button(name=">>", button_type="light", width=44)
+        self.analytics_refresh_button = pn.widgets.Button(
+            name="Refresh analytics",
+            button_type="light",
+        )
+
+        self.analytics_frame_label = pn.pane.Markdown(
+            "_No active-learning analytics frame selected._",
+            sizing_mode="stretch_width",
+        )
+        self.analytics_summary = pn.pane.Markdown(
+            "",
+            sizing_mode="stretch_width",
+        )
+
+        self.analytics_scatter = pn.pane.Bokeh(
+            al_analytics.make_empty_figure(),
+            sizing_mode="stretch_width",
+            height=450,
+        )
+        self.analytics_performance_plot = pn.pane.Bokeh(
+            al_analytics.make_empty_figure("No performance timeline yet."),
+            sizing_mode="stretch_width",
+            height=300,
+        )
+        self.analytics_informativeness_plot = pn.pane.Bokeh(
+            al_analytics.make_empty_figure("No query informativeness timeline yet."),
+            sizing_mode="stretch_width",
+            height=300,
+        )
+        self.analytics_points_table = _make_table()
+
+        self.training_contract_summary = pn.pane.Markdown(
+            "",
+            sizing_mode="stretch_width",
+            styles={
+                "font-size": "12px",
+                "line-height": "1.35",
+                "overflow-wrap": "anywhere",
+                "border": "1px solid rgba(0,0,0,0.10)",
+                "border-radius": "4px",
+                "padding": "8px",
+                "background": "#fafafa",
+            },
+        )
+
         self._normalise_widget_layout()
 
         self.refresh_button.on_click(self._refresh_clicked)
@@ -157,10 +354,51 @@ class ActiveLearningPanel:
         self.unsure_button.on_click(self._unsure_clicked)
         self.train_button.on_click(self._train_clicked)
         self.auto_label_button.on_click(self._auto_label_next_clicked)
+        self.analytics_first_button.on_click(self._analytics_first_frame_clicked)
+        self.analytics_prev_button.on_click(self._analytics_prev_frame_clicked)
+        self.analytics_next_button.on_click(self._analytics_next_frame_clicked)
+        self.analytics_last_button.on_click(self._analytics_last_frame_clicked)
+        self.analytics_refresh_button.on_click(self._analytics_refresh_clicked)
+
+        self.feature_add_matching_button.on_click(self._feature_add_matching_clicked)
+        self.feature_replace_matching_button.on_click(self._feature_replace_matching_clicked)
+        self.feature_select_numeric_button.on_click(self._feature_select_numeric_clicked)
+        self.feature_clear_button.on_click(self._feature_clear_clicked)
+
 
         self.session_select.param.watch(self._session_selected, "value")
         self.dataset_select.param.watch(self._dataset_changed, "value")
         self.target_column.param.watch(self._target_column_changed, "value")
+
+        self.auto_label_source_column.param.watch(
+            self._auto_label_source_changed,
+            "value",
+        )
+        self.feature_filter.param.watch(
+            lambda *_: self._refresh_feature_match_preview(),
+            "value",
+        )
+        self.feature_columns.param.watch(
+            self._feature_columns_changed,
+            "value",
+        )
+        self.validation_fraction.param.watch(
+            lambda *_: self._refresh_training_contract_summary(),
+            "value",
+        )
+        self.test_fraction.param.watch(
+            lambda *_: self._refresh_training_contract_summary(),
+            "value",
+        )
+        self.validation_dataset_select.param.watch(
+            lambda *_: self._refresh_training_contract_summary(),
+            "value",
+        )
+        self.test_dataset_select.param.watch(
+            lambda *_: self._refresh_training_contract_summary(),
+            "value",
+        )
+
         self.recipe_select.param.watch(self._recipe_changed, "value")
         self.predictions_select.param.watch(self._predictions_changed, "value")
         self.label_options_select.param.watch(
@@ -168,31 +406,104 @@ class ActiveLearningPanel:
             "value",
         )
 
+        self.analytics_x_column.param.watch(
+            self._analytics_control_changed,
+            "value",
+        )
+        self.analytics_y_column.param.watch(
+            self._analytics_control_changed,
+            "value",
+        )
+
+        self._syncing_auto_label_source = False
+        self._auto_label_source_user_set = bool(
+            restore_state.get("auto_label_source_column")
+        )
+
         self._subscribe_refresh_events()
         self.refresh()
         self._restore_widget_state(restore_state)
 
+
     def panel(self):
-        # Tabs are back for the query -> label -> train workflow, but with
-        # dynamic=True: an inactive tab's content is NOT rendered until you
-        # switch to it, so it is never measured while display:none. That was
-        # the cause of the overlapping/collapsed widgets with the old
-        # dynamic=False tabs.
+
+        feature_selector_section = pn.Column(
+            self.feature_filter,
+            pn.Row(
+                self.feature_replace_matching_button,
+                self.feature_add_matching_button,
+                sizing_mode="stretch_width",
+                min_height=42,
+                margin=(0, 0, 4, 0),
+                styles={
+                    "overflow": "visible",
+                    "clear": "both",
+                },
+            ),
+            pn.Row(
+                self.feature_select_numeric_button,
+                self.feature_clear_button,
+                sizing_mode="stretch_width",
+                min_height=42,
+                margin=(0, 0, 4, 0),
+                styles={
+                    "overflow": "visible",
+                    "clear": "both",
+                },
+            ),
+            self.feature_columns,
+            self.feature_match_preview,
+            sizing_mode="stretch_width",
+            min_height=300,
+            height_policy="min",
+            margin=(0, 0, 0, 0),
+            styles={
+                "max-width": "100%",
+                "width": "100%",
+                "box-sizing": "border-box",
+                "overflow": "visible",
+                "clear": "both",
+                "padding": "0",
+            },
+        )
+
         start_section = self._tab_body(
             pn.Column(
-                self.dataset_select,
-                self.session_select,
-                self.al_protocol,
-                self.recipe_select,
-                self.recipe_card,
-                self.label_options_select,
-                self.target_column,
-                self.seed,
-                self.initial_k,
-                self.validation_dataset_select,
-                self.test_dataset_select,
-                self.start_button,
+                self._start_field(self.dataset_select),
+                self._start_field(self.session_select),
+                self._start_field(self.al_protocol),
+                self._start_field(self.recipe_select),
+                self._start_field(self.recipe_card, min_height=155, margin=(0, 0, 18, 0)),
+                self._start_field(self.label_options_select, min_height=82),
+                self._start_field(self.target_column),
+
+                self._start_field(
+                    feature_selector_section,
+                    min_height=330,
+                    margin=(0, 0, 24, 0),
+                ),
+
+                self._start_field(self.seed),
+                self._start_field(self.initial_k),
+                self._start_field(self.validation_dataset_select),
+                self._start_field(self.validation_fraction),
+                self._start_field(self.test_dataset_select),
+                self._start_field(self.test_fraction),
+
+                self._start_field(
+                    self.start_button,
+                    min_height=48,
+                    margin=(4, 0, 18, 0),
+                ),
                 sizing_mode="stretch_width",
+                margin=(0, 0, 0, 0),
+                styles={
+                    "max-width": "100%",
+                    "width": "100%",
+                    "box-sizing": "border-box",
+                    "overflow": "visible",
+                    "clear": "both",
+                },
             ),
         )
 
@@ -217,15 +528,11 @@ class ActiveLearningPanel:
                 self.auto_label_source_column,
                 self.auto_label_n,
                 self.auto_label_button,
+                self.auto_label_hint,
                 sizing_mode="stretch_width",
             ),
         )
 
-        # The recipe params live in a fixed-height scroll box. A definite
-        # height means the container can't under-report its size, which was
-        # letting the train button and the (out-of-tabs) session summary draw
-        # over the params tail. The train button sits BELOW this box, so it is
-        # always visible without scrolling inside the box.
         params_scroller = pn.Column(
             self.recipe_params_area,
             height=340,
@@ -245,6 +552,8 @@ class ActiveLearningPanel:
 
         train_section = self._tab_body(
             pn.Column(
+                self.training_contract_summary,
+                pn.layout.Divider(margin=(8, 0, 8, 0)),
                 params_scroller,
                 pn.layout.Divider(margin=(8, 0, 8, 0)),
                 self.train_hint,
@@ -260,18 +569,92 @@ class ActiveLearningPanel:
             ("Train", train_section),
             dynamic=True,
             sizing_mode="stretch_width",
+            height_policy="auto",
             styles={
                 "max-width": "100%",
                 "width": "100%",
                 "box-sizing": "border-box",
+                "overflow": "visible",
             },
             css_classes=["al-controls-tabs"],
+        )
+
+        # Fixed-height scroll viewport: lower sections never start until below
+        # the whole top workflow area. Tall tabs scroll inside this viewport.
+        controls_frame = pn.Column(
+            controls_tabs,
+            sizing_mode="stretch_width",
+            height=700,
+            min_height=700,
+            max_height=700,
+            scroll=True,
+            margin=(0, 0, 10, 0),
+            styles={
+                "max-width": "100%",
+                "width": "100%",
+                "box-sizing": "border-box",
+                "overflow-y": "auto",
+                "overflow-x": "hidden",
+                "position": "relative",
+                "border-bottom": "1px solid rgba(0,0,0,0.20)",
+                "padding-bottom": "8px",
+            },
+            css_classes=["al-controls-frame"],
+        )
+
+        analytics_section = pn.Column(
+            pn.pane.Markdown(
+                "### AL analytics",
+                sizing_mode="stretch_width",
+                margin=(0, 0, 4, 0),
+            ),
+            pn.pane.Markdown(
+                (
+                    "Scatter frame shows all points that have been trained on up "
+                    "to the selected AL round/frame. Marker colour is the stored "
+                    "query-strategy value / informativeness score from "
+                    "`ml.active_learning_batch` artifacts."
+                ),
+                sizing_mode="stretch_width",
+            ),
+            pn.Row(
+                self.analytics_x_column,
+                self.analytics_y_column,
+                sizing_mode="stretch_width",
+            ),
+            pn.Row(
+                self.analytics_first_button,
+                self.analytics_prev_button,
+                self.analytics_next_button,
+                self.analytics_last_button,
+                self.analytics_refresh_button,
+                sizing_mode="stretch_width",
+            ),
+            self.analytics_frame_label,
+            self.analytics_scatter,
+            pn.layout.Divider(margin=(8, 0, 8, 0)),
+            self.analytics_performance_plot,
+            pn.layout.Divider(margin=(8, 0, 8, 0)),
+            self.analytics_informativeness_plot,
+            pn.layout.Divider(margin=(8, 0, 8, 0)),
+            self.analytics_summary,
+            self.analytics_points_table,
+            sizing_mode="stretch_width",
+            scroll=True,
+            styles={
+                "max-width": "100%",
+                "width": "100%",
+                "box-sizing": "border-box",
+                "overflow-y": "auto",
+                "overflow-x": "hidden",
+            },
         )
 
         results_tabs = pn.Tabs(
             ("Current query batch", self.batch_table),
             ("Labelled / verified / unsure", self.labels_table),
             ("Session JSON", self.session_json),
+            ("Analytics", analytics_section),
             dynamic=True,
             sizing_mode="stretch_width",
             styles={
@@ -281,6 +664,14 @@ class ActiveLearningPanel:
             },
             css_classes=["al-results-tabs"],
         )
+
+        self._controls_tabs = controls_tabs
+        self._results_tabs = results_tabs
+
+        try:
+            results_tabs.param.watch(self._results_tab_changed, "active")
+        except Exception:
+            pass
 
         return pn.Column(
             pn.pane.Markdown(
@@ -296,7 +687,7 @@ class ActiveLearningPanel:
             ),
             self.status,
             self.refresh_button,
-            controls_tabs,
+            controls_frame,
             pn.layout.Divider(margin=(8, 0, 8, 0)),
             self.summary,
             results_tabs,
@@ -313,9 +704,52 @@ class ActiveLearningPanel:
             css_classes=["al-panel-root"],
         )
 
-    def refresh(self) -> None:
+
+
+    def _switch_results_tab(self, tab_name: str) -> None:
+        tabs = getattr(self, "_results_tabs", None)
+        if tabs is None:
+            return
+
+        tab_indices = {
+            "Current query batch": 0,
+            "Labelled / verified / unsure": 1,
+            "Session JSON": 2,
+            "Analytics": 3,
+        }
+        index = tab_indices.get(str(tab_name))
+        if index is None:
+            return
+
+        try:
+            tabs.active = index
+        except Exception:
+            pass
+
+    def _switch_controls_tab(self, tab_name: str) -> None:
+        tabs = getattr(self, "_controls_tabs", None)
+        if tabs is None:
+            return
+
+        tab_indices = {
+            "Start": 0,
+            "Query": 1,
+            "Review": 2,
+            "Train": 3,
+        }
+        index = tab_indices.get(str(tab_name))
+        if index is None:
+            return
+
+        try:
+            tabs.active = index
+        except Exception:
+            pass
+
+    def refresh(self, *, include_analytics: bool = False) -> None:
         if self._disposed:
             return
+
         self._refresh_datasets()
         self._refresh_sessions()
         self._refresh_predictions()
@@ -330,6 +764,12 @@ class ActiveLearningPanel:
         self._set_label_select_options()
         self._refresh_review_label_for_focus()
         self._refresh_session_views()
+
+        if include_analytics:
+            self._maybe_refresh_analytics_views(force=True)
+        else:
+            self._mark_analytics_dirty()
+
         self._update_action_gating()
 
     def dispose(self) -> None:
@@ -361,8 +801,11 @@ class ActiveLearningPanel:
             "recipe_id": self.recipe_select.value,
             "label_options": list(self.label_options_select.value or []),
             "target_column": self.target_column.value,
+            "feature_columns": self._selected_feature_columns(),
             "validation_dataset_id": self.validation_dataset_select.value,
+            "validation_fraction": float(self.validation_fraction.value or 0.0),
             "test_dataset_id": self.test_dataset_select.value,
+            "test_fraction": float(self.test_fraction.value or 0.0),
             "al_protocol": self.al_protocol.value,
             "seed": int(self.seed.value or 0),
             "initial_k": int(self.initial_k.value or 0),
@@ -372,10 +815,13 @@ class ActiveLearningPanel:
             "advance_after_label": bool(self.advance_after_label.value),
             "auto_label_n": int(self.auto_label_n.value or 1),
             "auto_label_source_column": self.auto_label_source_column.value,
+            "analytics_x_column": self.analytics_x_column.value,
+            "analytics_y_column": self.analytics_y_column.value,
+            "analytics_frame_index": int(self._analytics_frame_index or 0),
         }
 
     def _refresh_clicked(self, *_: Any) -> None:
-        self.refresh()
+        self.refresh(include_analytics=True)
         self._set_status("Refreshed.", "info")
 
     def _start_clicked(self, *_: Any) -> None:
@@ -388,6 +834,8 @@ class ActiveLearningPanel:
                     "No label options are available. Choose a populated label column, "
                     "or choose a recipe/predictions artifact that exposes class labels."
                 )
+
+            start_params = self._start_owned_recipe_params()
 
             request = ActionRequest(
                 dataset_id=dataset_id,
@@ -403,11 +851,14 @@ class ActiveLearningPanel:
                     "initial_k": int(self.initial_k.value or 0),
                     "seed": int(self.seed.value or 0),
                     "make_selection": True,
+                    **start_params,
                 },
                 origin="core.active_learning.panel",
             )
             result = actions.start_session_action(self.context, request)
             self._use_action_session_result(result)
+            self._switch_controls_tab("Review")
+            self._switch_results_tab("Current query batch")
             self._set_status(
                 f"Started session with {len(result.get('row_ids') or [])} random rows.",
                 "success",
@@ -433,6 +884,8 @@ class ActiveLearningPanel:
                 },
                 origin="core.active_learning.panel",
             )
+
+            self._switch_controls_tab("Query")
 
             manager = getattr(self.context, "plugins", None)
             run_action = getattr(manager, "run_action", None)
@@ -461,7 +914,11 @@ class ActiveLearningPanel:
         self._record_current_label(al_state.UNSURE_LABEL)
 
     def _record_current_label(self, label: Any) -> None:
+        import time
+
         try:
+            t0 = time.perf_counter()
+
             session_artifact_id = self._require_session()
             row_id = self._current_focus_row_id()
             if row_id is None:
@@ -476,20 +933,50 @@ class ActiveLearningPanel:
                 },
                 origin="core.active_learning.panel",
             )
+
             result = actions.record_label_action(self.context, request)
-            self._use_action_session_result(result)
+            t1 = time.perf_counter()
+
+            new_session_artifact_id = result.get("session_artifact_id")
+            if new_session_artifact_id:
+                self._current_session_artifact_id = str(new_session_artifact_id)
 
             display = al_state.display_label(result.get("label"))
             self._set_status(f"Recorded {display!r} for row {row_id}.", "success")
 
+            t2 = time.perf_counter()
+
             if bool(self.advance_after_label.value):
                 self._advance_focus_after(row_id)
+
+            t3 = time.perf_counter()
+
+            self._mark_analytics_dirty()
+            self._schedule_light_review_refresh()
+
+            t4 = time.perf_counter()
+
+            print(
+                "[AL label timing]",
+                {
+                    "record_label_action": round(t1 - t0, 4),
+                    "status_update": round(t2 - t1, 4),
+                    "advance_focus": round(t3 - t2, 4),
+                    "schedule_light_refresh": round(t4 - t3, 4),
+                    "total_hot_path": round(t4 - t0, 4),
+                },
+                flush=True,
+            )
 
         except Exception as exc:
             self._set_error("Could not record label", exc)
 
     def _refresh_auto_label_source_column(self) -> None:
-        """Refresh physical dataset columns usable for benchmark auto-labelling."""
+        """Refresh physical dataset columns usable for benchmark auto-labelling.
+
+        Default follows the Start tab's training label column unless the user
+        has manually chosen a different Review auto-label source column.
+        """
         current = self.auto_label_source_column.value
         dataset_id = self.dataset_select.value
 
@@ -498,12 +985,28 @@ class ActiveLearningPanel:
 
         self.auto_label_source_column.options = options
 
-        if current in options.values():
-            self.auto_label_source_column.value = current
+        target_column = str(self.target_column.value or "").strip()
+
+        if (
+            self._auto_label_column_should_follow_target()
+            and target_column
+            and target_column != "al_label"
+            and target_column in columns
+        ):
+            self._set_auto_label_source_value(target_column)
             return
 
-        # Prefer common human-readable label columns first.
+        if current in options.values():
+            self._set_auto_label_source_value(current)
+            return
+
+        mapped_target = self._dataset_mapping(dataset_id, "target_label")
+        if mapped_target and mapped_target in columns:
+            self._set_auto_label_source_value(mapped_target)
+            return
+
         for candidate in (
+            target_column,
             "label_name",
             "target_label_name",
             "class_name",
@@ -516,11 +1019,11 @@ class ActiveLearningPanel:
             "fine_label",
             "coarse_label",
         ):
-            if candidate in columns:
-                self.auto_label_source_column.value = candidate
+            if candidate and candidate in columns:
+                self._set_auto_label_source_value(candidate)
                 return
 
-        self.auto_label_source_column.value = columns[0] if columns else None
+        self._set_auto_label_source_value(columns[0] if columns else None)
 
 
     def _physical_columns_for_dataset(self, dataset_id: Any) -> List[str]:
@@ -548,30 +1051,45 @@ class ActiveLearningPanel:
     ) -> str:
         """Resolve the physical source column to read benchmark labels from.
 
-        This is intentionally separate from the AL training target column.
+        Prefer the Review source column, then the Start tab's target column.
         """
         columns = set(self._physical_columns_for_dataset(dataset_id))
 
-        explicit = str(self.auto_label_source_column.value or "").strip()
-        if explicit and explicit in columns:
-            return explicit
+        candidates: List[str] = []
 
-        # If the UI value is a semantic mapping name rather than a physical column,
-        # try resolving it through DatasetManager mappings.
-        for semantic in (
-            explicit,
-            "target_label_name",
-            "target_label",
-            "label_name",
-            "label",
-            "class_label",
-            "class",
-            "target",
-        ):
-            if not semantic:
+        explicit = str(self.auto_label_source_column.value or "").strip()
+        target = str(self.target_column.value or session.get("target_column") or "").strip()
+
+        if explicit:
+            candidates.append(explicit)
+        if target and target != explicit:
+            candidates.append(target)
+
+        candidates.extend(
+            [
+                "target_label",
+                "label",
+                "class_label",
+                "class",
+                "target",
+                "label_name",
+                "target_label_name",
+                "class_name",
+                "target_name",
+                "fine_label",
+                "coarse_label",
+            ]
+        )
+
+        for candidate in candidates:
+            if candidate and candidate in columns:
+                return candidate
+
+            if not candidate:
                 continue
+
             try:
-                mapped = self.context.datasets.get_mapping(dataset_id, semantic)
+                mapped = self.context.datasets.get_mapping(dataset_id, candidate)
             except Exception:
                 mapped = None
 
@@ -579,26 +1097,9 @@ class ActiveLearningPanel:
             if mapped and mapped in columns:
                 return mapped
 
-        # Last-resort conventional names.
-        for candidate in (
-            "label_name",
-            "target_label_name",
-            "class_name",
-            "target_name",
-            "class_label",
-            "target_label",
-            "label",
-            "class",
-            "target",
-            "fine_label",
-            "coarse_label",
-        ):
-            if candidate in columns:
-                return candidate
-
         raise ValueError(
             "Could not find a physical source label column for auto-labelling. "
-            f"Choose one in 'Auto-label from dataset column'. "
+            "Choose one in 'Auto-label from dataset column'. "
             f"Available columns: {sorted(columns)}"
         )
 
@@ -630,16 +1131,6 @@ class ActiveLearningPanel:
         return text or None
 
     def _auto_label_next_clicked(self, *_: Any) -> None:
-        """Record labels for the next N ordered rows in the active selection set.
-
-        "Next N" starts at the current focus row. If the current focus is the
-        first queried row and N=50, rows 1..50 are labelled, then focus moves to
-        row 51.
-
-        Labels are read from the selected target column on the pool/source dataset.
-        This is intended for benchmark/debug workflows where the ground-truth label
-        column already exists.
-        """
         try:
             session_artifact_id = self._require_session()
             session = self._load_current_session() or {}
@@ -692,95 +1183,344 @@ class ActiveLearningPanel:
                 except ValueError:
                     start_index = 0
 
-            already_seen = set(str(row_id) for row_id in (session.get("ignored_row_ids", []) or []))
-            already_seen.update(str(row_id) for row_id in ((session.get("labels") or {}).keys()))
+            already_seen = set(
+                str(row_id)
+                for row_id in (session.get("ignored_row_ids", []) or [])
+            )
+            already_seen.update(
+                str(row_id)
+                for row_id in ((session.get("labels") or {}).keys())
+            )
 
-            # Start at current focus and take the next N not-yet-recorded rows.
             to_label: List[str] = []
-            cursor = start_index
-            while cursor < len(ordered_row_ids) and len(to_label) < n:
-                row_id = ordered_row_ids[cursor]
-                if row_id not in already_seen:
+            for row_id in ordered_row_ids[start_index:]:
+                row_id = str(row_id)
+                if row_id in already_seen and row_id != str(focus_row_id):
+                    continue
+                to_label.append(row_id)
+                if len(to_label) >= n:
+                    break
+
+            if len(to_label) < n:
+                for row_id in ordered_row_ids[:start_index]:
+                    row_id = str(row_id)
+                    if row_id in already_seen:
+                        continue
                     to_label.append(row_id)
-                cursor += 1
+                    if len(to_label) >= n:
+                        break
 
             if not to_label:
-                raise ValueError("No unlabelled rows remain at or after the current focus.")
-
-            labels_by_row_id = self._read_existing_labels_for_rows(
-                dataset_id=dataset_id,
-                row_ids=to_label,
-                target_column=source_label_column,
-            )
-
-            recorded = 0
-            skipped_missing: List[str] = []
-            latest_session_artifact_id = session_artifact_id
-
-            for row_id in to_label:
-                raw_label = labels_by_row_id.get(str(row_id))
-                label = self._normalise_auto_label_value(
-                    raw_label,
-                    label_options=label_options,
+                self._set_status(
+                    "No unlabelled rows remain in the active query batch.",
+                    "warning",
                 )
-                if label is None or str(label).strip() == "":
-                    skipped_missing.append(str(row_id))
-                    continue
+                return
 
-                request = ActionRequest(
-                    params={
-                        "session_artifact_id": latest_session_artifact_id,
-                        "dataset_id": dataset_id,
-                        "row_id": row_id,
-                        "label": label,
-                        "source": "active_learning_panel.auto_label_next",
-                    },
-                    origin="core.active_learning.panel",
-                )
-
-                result = actions.record_label_action(self.context, request)
-                latest_session_artifact_id = str(
-                    result.get("session_artifact_id") or latest_session_artifact_id
-                )
-                recorded += 1
-
-            if latest_session_artifact_id:
-                self._current_session_artifact_id = latest_session_artifact_id
-
-            # Move focus to the next row after the consumed block, i.e. if N=50
-            # starts at rank 1, focus moves to rank 51.
             next_focus = None
-            if cursor < len(ordered_row_ids):
-                next_focus = ordered_row_ids[cursor]
+            labelled_set = set(to_label)
+            for row_id in ordered_row_ids:
+                row_id = str(row_id)
+                if row_id not in labelled_set and row_id not in already_seen:
+                    next_focus = row_id
+                    break
 
-            if next_focus is not None and hasattr(selection, "set_focus"):
-                selection.set_focus(
-                    dataset_id=dataset_id,
-                    row_id=next_focus,
-                    origin="core.active_learning.panel.auto_label_next",
-                    selection_set_id=getattr(active_set, "selection_set_id", None),
-                    metadata={
-                        "reason": "after_auto_label_next",
-                        "auto_labelled_count": recorded,
-                        "requested_n": n,
-                    },
-                )
+            selection_set_id = getattr(active_set, "selection_set_id", None)
 
-            self.refresh()
-
-            message = (
-                f"Auto-labelled {recorded} row(s) from `{source_label_column}`."
+            self._set_running(True)
+            self.auto_label_button.name = f"Labelling {len(to_label)}..."
+            self.auto_label_hint.object = (
+                f"_Auto-labelling {len(to_label)} row(s) from "
+                f"`{source_label_column}`. The button is disabled until this finishes._"
             )
-            if skipped_missing:
-                message += f" Skipped {len(skipped_missing)} row(s) with missing labels."
-            if next_focus is not None:
-                message += f" Focus moved to row `{next_focus}`."
+            self._set_status(
+                f"Auto-labelling {len(to_label)} row(s) from `{source_label_column}`...",
+                "info",
+            )
 
-            self._set_status(message, "success" if recorded else "warning")
+            worker_kwargs = {
+                "session_artifact_id": session_artifact_id,
+                "dataset_id": dataset_id,
+                "row_ids": to_label,
+                "source_label_column": source_label_column,
+                "label_options": label_options,
+                "requested_n": n,
+                "next_focus": next_focus,
+                "selection_set_id": selection_set_id,
+            }
+
+            submit = getattr(getattr(self.context, "jobs", None), "submit", None)
+            if callable(submit):
+                key = (
+                    f"core.active_learning.auto_label_next:"
+                    f"{session_artifact_id}:{source_label_column}:{len(to_label)}"
+                )
+                self._active_job_handle = submit(
+                    self._auto_label_next_worker,
+                    title=f"Auto-label {len(to_label)} active-learning rows",
+                    key=key,
+                    on_done=self._on_auto_label_done,
+                    on_error=self._on_auto_label_error,
+                    **worker_kwargs,
+                )
+            else:
+                result = self._auto_label_next_worker(**worker_kwargs)
+                self._on_auto_label_done(result)
 
         except Exception as exc:
+            self._set_running(False)
+            self.auto_label_button.name = "Label next N most informative points"
+            self._active_job_handle = None
             self._set_error("Could not auto-label next points", exc)
 
+    def _auto_label_next_worker(
+        self,
+        *,
+        session_artifact_id: str,
+        dataset_id: str,
+        row_ids: List[str],
+        source_label_column: str,
+        label_options: List[str],
+        requested_n: int,
+        next_focus: Optional[str],
+        selection_set_id: Any = None,
+        cancel_token: Any = None,
+    ) -> Dict[str, Any]:
+        """Background worker for Review-tab benchmark auto-labelling.
+
+        This deliberately performs a bulk session update and writes one session
+        artifact at the end. Calling actions.record_label_action once per row is
+        correct but very slow for large batches because each call saves a new
+        artifact and publishes refresh events.
+        """
+        actions._check_cancelled(cancel_token)
+
+        session = al_state.coerce_session(
+            self.context.artifacts.get(session_artifact_id)
+        )
+
+        labels_by_row_id = self._read_existing_labels_for_rows(
+            dataset_id=dataset_id,
+            row_ids=row_ids,
+            target_column=source_label_column,
+        )
+
+        updated = al_state.coerce_session(session)
+        labels = dict(updated.get("labels") or {})
+
+        ignored: List[str] = [
+            str(row_id)
+            for row_id in (updated.get("ignored_row_ids", []) or [])
+            if row_id is not None
+        ]
+        ignored_seen = set(ignored)
+
+        training: List[str] = [
+            str(row_id)
+            for row_id in (updated.get("training_row_ids", []) or [])
+            if row_id is not None
+        ]
+        training_seen = set(training)
+
+        history = list(updated.get("history") or [])
+        round_index = int(updated.get("round", 0))
+
+        recorded_rows: List[Dict[str, Any]] = []
+        skipped_missing: List[str] = []
+
+        for row_id in row_ids:
+            actions._check_cancelled(cancel_token)
+
+            row_id = str(row_id)
+            raw_label = labels_by_row_id.get(row_id)
+            label = self._normalise_auto_label_value(
+                raw_label,
+                label_options=label_options,
+            )
+
+            if label is None or str(label).strip() == "":
+                skipped_missing.append(row_id)
+                continue
+
+            label_value = al_state.normalise_label(label)
+            if not label_value:
+                skipped_missing.append(row_id)
+                continue
+
+            timestamp = al_state.now()
+            is_unsure = label_value == al_state.UNSURE_LABEL
+
+            entry = {
+                "row_id": row_id,
+                "label": label_value,
+                "display_label": al_state.display_label(label_value),
+                "status": "unsure" if is_unsure else "verified",
+                "source": "active_learning_panel.auto_label_next",
+                "round": round_index,
+                "timestamp": timestamp,
+            }
+            labels[row_id] = entry
+
+            if row_id not in ignored_seen:
+                ignored.append(row_id)
+                ignored_seen.add(row_id)
+
+            # A row may have been labelled before. Remove stale training status,
+            # then add it back only if the new value is a verified label.
+            if row_id in training_seen:
+                training = [item for item in training if item != row_id]
+                training_seen.discard(row_id)
+
+            if not is_unsure:
+                training.append(row_id)
+                training_seen.add(row_id)
+
+            history.append(
+                {
+                    "event": "label_recorded",
+                    "row_id": row_id,
+                    "label": label_value,
+                    "status": entry["status"],
+                    "timestamp": timestamp,
+                }
+            )
+
+            recorded_rows.append(
+                {
+                    "row_id": row_id,
+                    "label": label_value,
+                    "display_label": al_state.display_label(label_value),
+                    "status": entry["status"],
+                }
+            )
+
+        updated["labels"] = labels
+        updated["ignored_row_ids"] = list(dict.fromkeys(ignored))
+        updated["training_row_ids"] = list(dict.fromkeys(training))
+        updated["history"] = history
+        updated["updated_at"] = al_state.now()
+
+        if recorded_rows:
+            new_session_artifact_id = actions._put_session(
+                self.context,
+                updated,
+                previous_artifact_id=session_artifact_id,
+            )
+        else:
+            new_session_artifact_id = session_artifact_id
+
+        counts = al_state.counts(updated)
+
+        if recorded_rows:
+            actions._publish(
+                self.context,
+                "al.labels.recorded_bulk",
+                {
+                    "session_artifact_id": new_session_artifact_id,
+                    "previous_session_artifact_id": session_artifact_id,
+                    "session_id": updated.get("session_id"),
+                    "dataset_id": updated.get("dataset_id"),
+                    "source_dataset_id": dataset_id,
+                    "source_label_column": source_label_column,
+                    "recorded_count": len(recorded_rows),
+                    "skipped_missing_count": len(skipped_missing),
+                    "requested_n": requested_n,
+                    "row_ids": [row["row_id"] for row in recorded_rows],
+                    "counts": counts,
+                },
+            )
+
+        return {
+            "ok": True,
+            "session_artifact_id": new_session_artifact_id,
+            "previous_session_artifact_id": session_artifact_id,
+            "session_id": updated.get("session_id"),
+            "dataset_id": updated.get("dataset_id"),
+            "source_dataset_id": dataset_id,
+            "source_label_column": source_label_column,
+            "recorded": len(recorded_rows),
+            "recorded_rows": recorded_rows[:25],
+            "skipped_missing": skipped_missing,
+            "skipped_missing_count": len(skipped_missing),
+            "requested_n": requested_n,
+            "next_focus": next_focus,
+            "selection_set_id": selection_set_id,
+            "counts": counts,
+        }
+
+    def _on_auto_label_done(self, result: Any) -> None:
+        if self._disposed:
+            return
+
+        self._active_job_handle = None
+        self.auto_label_button.name = "Label next N most informative points"
+        self.auto_label_hint.object = ""
+
+        if not isinstance(result, Mapping):
+            self._set_running(False)
+            self._set_status(
+                "Auto-labelling finished, but returned an unexpected result shape.",
+                "warning",
+            )
+            return
+
+        session_artifact_id = str(result.get("session_artifact_id") or "").strip()
+        if session_artifact_id:
+            self._current_session_artifact_id = session_artifact_id
+
+        self._set_running(False)
+
+        dataset_id = str(
+            result.get("source_dataset_id")
+            or result.get("dataset_id")
+            or self.dataset_select.value
+            or ""
+        ).strip()
+        next_focus = result.get("next_focus")
+
+        if dataset_id and next_focus is not None:
+            selection = getattr(self.context, "selection", None)
+            set_focus = getattr(selection, "set_focus", None)
+            if callable(set_focus):
+                try:
+                    set_focus(
+                        dataset_id=dataset_id,
+                        row_id=str(next_focus),
+                        origin="core.active_learning.panel.auto_label_next",
+                        selection_set_id=result.get("selection_set_id"),
+                        metadata={
+                            "reason": "after_auto_label_next",
+                            "auto_labelled_count": int(result.get("recorded") or 0),
+                            "requested_n": int(result.get("requested_n") or 0),
+                        },
+                    )
+                except Exception:
+                    pass
+
+        self.refresh()
+        self._switch_controls_tab("Train" if int(result.get("recorded") or 0) else "Review")
+        self._switch_results_tab("Labelled / verified / unsure")
+
+        recorded = int(result.get("recorded") or 0)
+        skipped_missing = int(result.get("skipped_missing_count") or 0)
+        source_label_column = result.get("source_label_column") or "selected column"
+
+        message = f"Auto-labelled {recorded} row(s) from `{source_label_column}`."
+        if skipped_missing:
+            message += f" Skipped {skipped_missing} row(s) with missing labels."
+        if next_focus is not None:
+            message += f" Focus moved to row `{next_focus}`."
+
+        self._set_status(message, "success" if recorded else "warning")
+
+    def _on_auto_label_error(self, error: Any) -> None:
+        if self._disposed:
+            return
+        self._set_running(False)
+        self.auto_label_button.name = "Label next N most informative points"
+        self.auto_label_hint.object = ""
+        self._active_job_handle = None
+        self._set_error("Could not auto-label next points", error)
 
     def _read_existing_labels_for_rows(
         self,
@@ -791,12 +1531,8 @@ class ActiveLearningPanel:
     ) -> Dict[str, Any]:
         """Read existing labels for specific row IDs from a physical dataset column.
 
-        This is used by the Review tab's benchmark auto-labelling flow.
-
-        Important:
-        context.datasets.get_rows_by_ids(...) may return a reduced dataframe that
-        does not contain every physical source column. If it drops target_column,
-        fall back to a projected/full dataframe read and filter manually.
+        Handles exact int64 ids and fallback scientific-notation ids produced by
+        UI/table display paths.
         """
         if not row_ids:
             return {}
@@ -804,7 +1540,7 @@ class ActiveLearningPanel:
         dataset_id = str(dataset_id or "").strip()
         target_column = str(target_column or "").strip()
         row_ids = [str(row_id) for row_id in row_ids]
-        row_id_set = set(row_ids)
+        requested_key_map = self._requested_row_id_key_map(row_ids)
 
         if not dataset_id:
             raise ValueError("No dataset_id supplied for auto-labelling.")
@@ -814,7 +1550,6 @@ class ActiveLearningPanel:
         id_column = actions._resolve_record_id_column(self.context, dataset_id)
 
         def get_df_compat(columns: Optional[List[str]] = None) -> pd.DataFrame:
-            """Call DatasetManager.get_df across old/new signatures."""
             if columns:
                 projected = list(
                     dict.fromkeys(
@@ -828,8 +1563,6 @@ class ActiveLearningPanel:
                 except TypeError:
                     return self.context.datasets.get_df(dataset_id)
                 except Exception:
-                    # Some lazy/projected backends may reject a column projection.
-                    # Fall back to full materialisation.
                     return self.context.datasets.get_df(dataset_id)
 
             return self.context.datasets.get_df(dataset_id)
@@ -865,14 +1598,22 @@ class ActiveLearningPanel:
                 )
 
             out: Dict[str, Any] = {}
+
             for _, row in frame.iterrows():
-                row_id = str(row[id_column])
-                if row_id not in row_id_set:
+                source_row_id = row[id_column]
+                matching_requested_id = None
+
+                for key in self._row_id_match_keys(source_row_id):
+                    if key in requested_key_map:
+                        matching_requested_id = requested_key_map[key]
+                        break
+
+                if matching_requested_id is None:
                     continue
 
                 value = row[target_column]
                 if pd.notna(value):
-                    out[row_id] = value
+                    out[str(matching_requested_id)] = value
 
             return out
 
@@ -885,24 +1626,25 @@ class ActiveLearningPanel:
 
             out: Dict[str, Any] = {}
 
-            # Build a str(index) -> real index lookup once.
-            index_lookup = {str(idx): idx for idx in frame.index}
+            for idx, row in frame.iterrows():
+                matching_requested_id = None
+                for key in self._row_id_match_keys(idx):
+                    if key in requested_key_map:
+                        matching_requested_id = requested_key_map[key]
+                        break
 
-            for row_id in row_ids:
-                real_index = index_lookup.get(str(row_id))
-                if real_index is None:
+                if matching_requested_id is None:
                     continue
 
-                value = frame.loc[real_index, target_column]
+                value = row[target_column]
                 if pd.notna(value):
-                    out[str(row_id)] = value
+                    out[str(matching_requested_id)] = value
 
             return out
 
         if id_column:
             row_lookup_df: Optional[pd.DataFrame] = None
 
-            # Fast path: use row lookup first.
             try:
                 row_lookup_df = self.context.datasets.get_rows_by_ids(
                     dataset_id,
@@ -913,16 +1655,16 @@ class ActiveLearningPanel:
             except Exception:
                 row_lookup_df = None
 
-            # If fast path returned the needed columns, use it.
             if (
                 row_lookup_df is not None
                 and not row_lookup_df.empty
                 and id_column in row_lookup_df.columns
                 and target_column in row_lookup_df.columns
             ):
-                return extract_by_id_column(row_lookup_df)
+                found = extract_by_id_column(row_lookup_df)
+                if found:
+                    return found
 
-            # Otherwise fall back to projected/full dataset read.
             try:
                 source_df = get_df_compat([id_column, target_column])
             except Exception as exc:
@@ -947,13 +1689,11 @@ class ActiveLearningPanel:
                     f"get_rows_by_ids dataframe columns: {row_lookup_columns}"
                 )
 
-            filtered = source_df[
-                source_df[id_column].astype(str).isin(row_id_set)
-            ].copy()
+            mask = self._row_id_series_mask(source_df[id_column], requested_key_map)
+            filtered = source_df[mask].copy()
 
             return extract_by_id_column(filtered)
 
-        # No record_id mapping: use dataframe index matching.
         source_df = get_df_compat([target_column])
 
         if target_column not in source_df.columns:
@@ -972,11 +1712,13 @@ class ActiveLearningPanel:
             if not recipe_id:
                 raise ValueError("Choose a core.ml recipe.")
 
+            recipe_params = self._recipe_params()
+
             params = {
                 "session_artifact_id": session_artifact_id,
                 "dataset_id": self.dataset_select.value or "",
                 "recipe_id": recipe_id,
-                "recipe_params": self._recipe_params(),
+                "recipe_params": recipe_params,
                 "target_column": self.target_column.value or "al_label",
                 "validation_dataset_id": self.validation_dataset_select.value or "",
                 "test_dataset_id": self.test_dataset_select.value or "",
@@ -984,11 +1726,13 @@ class ActiveLearningPanel:
                 "seed": int(self.seed.value or 0),
             }
             params.update(self._protocol_params())
+
             request = ActionRequest(
                 params=params,
                 origin="core.active_learning.panel",
             )
 
+            self._switch_controls_tab("Train")
             self._set_running(True)
             self._set_status(
                 "Training started. Active Learning will call the registered core.ml recipe action from scratch.",
@@ -1029,12 +1773,25 @@ class ActiveLearningPanel:
     def _on_query_done(self, result: Any) -> None:
         if self._disposed:
             return
+
         self._set_running(False)
         self._active_job_handle = None
+
         if not isinstance(result, Mapping):
-            self._set_status("Query finished, but returned an unexpected result shape.", "warning")
+            self._set_status(
+                "Query finished, but returned an unexpected result shape.",
+                "warning",
+            )
             return
-        self._use_action_session_result(result)
+
+        self._use_action_session_result(result, include_analytics=False)
+
+        # Query creates a new batch, so analytics is stale. Refresh it only
+        # because we are explicitly switching to the Analytics tab here.
+        self._mark_analytics_dirty()
+        self._switch_results_tab("Analytics")
+        self._refresh_analytics_if_visible(force=True)
+
         stats = result.get("rank_stats") or {}
         self._set_status(
             (
@@ -1051,18 +1808,31 @@ class ActiveLearningPanel:
             return
         self._set_running(False)
         self._active_job_handle = None
+        self._switch_controls_tab("Query")
         self._set_error("Could not create active-learning query batch", error)
 
     def _on_train_done(self, result: Any) -> None:
         if self._disposed:
             return
+
         self._set_running(False)
         self._active_job_handle = None
+
         if not isinstance(result, Mapping):
-            self._set_status("Training finished, but returned an unexpected result shape.", "warning")
+            self._set_status(
+                "Training finished, but returned an unexpected result shape.",
+                "warning",
+            )
             return
 
-        self._use_action_session_result(result)
+        self._use_action_session_result(result, include_analytics=False)
+
+        # Training completion changes the performance timeline, so mark
+        # analytics stale and refresh only when the Analytics tab is shown.
+        self._mark_analytics_dirty()
+        self._switch_results_tab("Analytics")
+        self._refresh_analytics_if_visible(force=True)
+
         pool_dataset_id = self._session_pool_dataset_id()
         self._set_status(
             (
@@ -1079,15 +1849,19 @@ class ActiveLearningPanel:
             return
         self._set_running(False)
         self._active_job_handle = None
+        self._switch_controls_tab("Train")
         self._set_error("Scratch training failed", error)
 
     def _session_selected(self, event: Any) -> None:
         value = getattr(event, "new", None)
         if value:
             self._current_session_artifact_id = str(value)
+            self._analytics_frame_index = 0
             self._refresh_predictions()
             self._refresh_review_label_for_focus()
             self._refresh_session_views()
+            self._mark_analytics_dirty()
+            self._refresh_analytics_if_visible()
             self._update_action_gating()
 
     def _label_options_changed(self, *_: Any) -> None:
@@ -1298,11 +2072,90 @@ class ActiveLearningPanel:
         _set_table_value(self.batch_table, batch_df)
         self.session_json.object = session
 
-    def _use_action_session_result(self, result: Mapping[str, Any]) -> None:
+    def _use_action_session_result(
+        self,
+        result: Mapping[str, Any],
+        *,
+        include_analytics: bool = False,
+    ) -> None:
         session_artifact_id = result.get("session_artifact_id")
         if session_artifact_id:
             self._current_session_artifact_id = str(session_artifact_id)
-        self.refresh()
+        self.refresh(include_analytics=include_analytics)
+
+    def _schedule_light_review_refresh(self) -> None:
+        """Refresh cheap Review/session UI after the focus has already moved.
+
+        This intentionally does not rebuild analytics. It is scheduled for the
+        next UI tick when possible so the user-visible refocus is not blocked by
+        tables, summaries, or action-gating updates.
+        """
+
+        def apply() -> None:
+            if self._disposed:
+                return
+
+            try:
+                self._refresh_session_views()
+                self._set_label_select_options()
+                self._refresh_review_label_for_focus()
+                self._update_action_gating()
+            except Exception:
+                # A failed auxiliary refresh should not break the Review hot path.
+                pass
+
+        try:
+            curdoc = getattr(pn.state, "curdoc", None)
+            if curdoc is not None:
+                curdoc.add_next_tick_callback(apply)
+            else:
+                apply()
+        except Exception:
+            apply()
+
+    def _mark_analytics_dirty(self) -> None:
+        self._analytics_dirty = True
+
+    def _analytics_tab_is_active(self) -> bool:
+        tabs = getattr(self, "_results_tabs", None)
+        if tabs is None:
+            return False
+
+        try:
+            return int(getattr(tabs, "active", -1)) == 3
+        except Exception:
+            return False
+
+    def _refresh_analytics_if_visible(self, *, force: bool = False) -> None:
+        if self._analytics_tab_is_active():
+            self._maybe_refresh_analytics_views(force=force)
+        else:
+            self._mark_analytics_dirty()
+
+    def _maybe_refresh_analytics_views(self, *, force: bool = False) -> None:
+        if self._disposed:
+            return
+
+        if not force and not bool(getattr(self, "_analytics_dirty", True)):
+            return
+
+        self._refresh_analytics_columns()
+        self._refresh_analytics_views()
+        self._analytics_dirty = False
+
+    def _analytics_control_changed(self, *_: Any) -> None:
+        self._mark_analytics_dirty()
+        self._refresh_analytics_if_visible(force=True)
+
+    def _results_tab_changed(self, event: Any) -> None:
+        try:
+            active = int(getattr(event, "new", -1))
+        except Exception:
+            active = -1
+
+        if active == 3:
+            self._maybe_refresh_analytics_views()
+
 
     def _set_label_select_options(self) -> None:
         labels = al_state.parse_label_options(self.label_options_select.value)
@@ -1318,39 +2171,307 @@ class ActiveLearningPanel:
         elif options:
             self.label_select.value = al_state.UNSURE_LABEL
 
-    def _advance_focus_after(self, row_id: str) -> None:
+    def _current_ranked_review_row_ids(self) -> List[str]:
+        """Return the ordered row ids for the current review batch.
+
+        This must stay cheap. Do not query datasets here. The Review hot path
+        should use only session/batch/selection metadata that is already in
+        memory or stored in small artifacts.
+        """
+        session = self._current_session()
+        if not isinstance(session, Mapping):
+            return []
+
+        last_batch = session.get("last_batch") or {}
+        row_ids: List[str] = []
+
+        if isinstance(last_batch, Mapping):
+            for row_id in last_batch.get("row_ids") or []:
+                if row_id is not None:
+                    row_ids.append(str(row_id))
+
+        if row_ids:
+            return list(dict.fromkeys(row_ids))
+
+        batch_artifact_id = ""
+        if isinstance(last_batch, Mapping):
+            batch_artifact_id = str(last_batch.get("batch_artifact_id") or "").strip()
+
+        if not batch_artifact_id:
+            batch_artifact_id = str(session.get("last_batch_artifact_id") or "").strip()
+
+        if batch_artifact_id:
+            try:
+                batch = self.context.artifacts.get(batch_artifact_id)
+            except Exception:
+                batch = None
+
+            if isinstance(batch, Mapping):
+                for row_id in batch.get("row_ids") or []:
+                    if row_id is not None:
+                        row_ids.append(str(row_id))
+
+                if not row_ids:
+                    for record in batch.get("records") or []:
+                        if not isinstance(record, Mapping):
+                            continue
+                        row_id = record.get("row_id")
+                        if row_id is not None:
+                            row_ids.append(str(row_id))
+
+        if row_ids:
+            return list(dict.fromkeys(row_ids))
+
         selection = getattr(self.context, "selection", None)
         if selection is None:
-            return
+            return []
 
-        active_set = selection.get_active_set()
-        if active_set is None:
-            return
+        # Best-effort fallback for platform selection-set APIs. Keep this broad
+        # because SelectionManager has changed a few times during the plugin
+        # system migration.
+        for method_name in (
+            "get_selection_set",
+            "get_active_selection_set",
+            "get_current_selection_set",
+        ):
+            method = getattr(selection, method_name, None)
+            if not callable(method):
+                continue
 
-        row_ids = [str(item) for item in getattr(active_set, "row_ids", []) or []]
+            try:
+                selection_set = method()
+            except TypeError:
+                try:
+                    selection_set = method(None)
+                except Exception:
+                    continue
+            except Exception:
+                continue
+
+            if selection_set is None:
+                continue
+
+            values = getattr(selection_set, "row_ids", None)
+            if values is None and isinstance(selection_set, Mapping):
+                values = selection_set.get("row_ids")
+
+            for row_id in values or []:
+                if row_id is not None:
+                    row_ids.append(str(row_id))
+
+            if row_ids:
+                return list(dict.fromkeys(row_ids))
+
+        return []
+
+    def _session_labelled_or_ignored_row_ids(self) -> set[str]:
+        """Rows that Review navigation should skip.
+
+        This function intentionally does not inspect the source dataset. It only
+        reads the AL session payload, so it is safe to call on every label click.
+        """
+        session = self._current_session()
+        if not isinstance(session, Mapping):
+            return set()
+
+        skip: set[str] = set()
+
+        def add_many(values: Any) -> None:
+            if values is None:
+                return
+
+            if isinstance(values, Mapping):
+                values = values.keys()
+            elif isinstance(values, (str, bytes, bytearray, int, float)):
+                values = [values]
+
+            for value in values or []:
+                if value is None:
+                    continue
+                text = str(value).strip()
+                if text:
+                    skip.add(text)
+
+        add_many(session.get("ignored_row_ids") or [])
+        add_many(session.get("training_row_ids") or [])
+        add_many(session.get("labels") or {})
+
+        return skip
+
+    def _next_review_row_id_after(self, current_row_id: Any) -> Optional[str]:
+        """Find the next unlabelled row in the current ordered AL batch.
+
+        This is the critical Review hot-path lookup. It must not call
+        context.datasets.get_df(), get_rows_by_ids(), analytics helpers, or any
+        visualisation code.
+        """
+        current_row_id = str(current_row_id or "").strip()
+        row_ids = self._current_ranked_review_row_ids()
         if not row_ids:
-            return
+            return None
 
-        session = self._load_current_session() or {}
-        ignored = set(str(item) for item in session.get("ignored_row_ids", []) or [])
+        skip = self._session_labelled_or_ignored_row_ids()
+        if current_row_id:
+            skip.add(current_row_id)
+
+        start_index = 0
+        if current_row_id in row_ids:
+            start_index = row_ids.index(current_row_id) + 1
+
+        # Prefer rows after the current row.
+        for row_id in row_ids[start_index:]:
+            row_id = str(row_id)
+            if row_id and row_id not in skip:
+                return row_id
+
+        # Wrap around only if needed.
+        for row_id in row_ids[:start_index]:
+            row_id = str(row_id)
+            if row_id and row_id not in skip:
+                return row_id
+
+        return None
+
+    def _set_focus_next_tick(
+        self,
+        *,
+        dataset_id: str,
+        row_id: str,
+        origin: str,
+    ) -> None:
+        """Set platform focus outside the label-click hot path.
+
+        selection.set_focus publishes selection.focus.changed synchronously.
+        Some subscribers, especially visualisation panels, may need to resolve
+        row data. Scheduling this avoids making the label button wait for those
+        subscribers.
+        """
+
+        def apply() -> None:
+            if self._disposed:
+                return
+
+            selection = getattr(self.context, "selection", None)
+            if selection is None:
+                return
+
+            try:
+                if hasattr(selection, "set_focus"):
+                    selection.set_focus(
+                        dataset_id=dataset_id,
+                        row_id=str(row_id),
+                        origin=origin,
+                    )
+                elif hasattr(selection, "focus"):
+                    selection.focus(
+                        dataset_id=dataset_id,
+                        row_id=str(row_id),
+                        origin=origin,
+                    )
+            except TypeError:
+                try:
+                    selection.set_focus(dataset_id, str(row_id))
+                except Exception:
+                    pass
+            except Exception:
+                pass
 
         try:
-            start = row_ids.index(str(row_id)) + 1
-        except ValueError:
-            start = 0
+            curdoc = getattr(pn.state, "curdoc", None)
+            if curdoc is not None:
+                curdoc.add_next_tick_callback(apply)
+            else:
+                apply()
+        except Exception:
+            apply()
 
-        for candidate in row_ids[start:]:
-            if candidate in ignored:
-                continue
-            selection.set_focus(
-                dataset_id=active_set.dataset_id,
-                row_id=candidate,
+    def _advance_focus_after(self, current_row_id: Any) -> None:
+        import time
+
+        t0 = time.perf_counter()
+
+        try:
+            next_row_id = self._next_review_row_id_after(current_row_id)
+            t1 = time.perf_counter()
+
+            if not next_row_id:
+                self._set_status(
+                    "Recorded label. No more unlabelled rows remain in the current batch.",
+                    "success",
+                )
+                t2 = time.perf_counter()
+                print(
+                    "[AL advance timing]",
+                    {
+                        "find_next": round(t1 - t0, 4),
+                        "no_next_status": round(t2 - t1, 4),
+                        "total": round(t2 - t0, 4),
+                    },
+                    flush=True,
+                )
+                return
+
+            dataset_id = self._session_pool_dataset_id()
+            if not dataset_id:
+                session = self._current_session()
+                dataset_id = str(
+                    session.get("pool_dataset_id")
+                    or session.get("dataset_id")
+                    or self.dataset_select.value
+                    or ""
+                ).strip()
+
+            t2 = time.perf_counter()
+
+            if not dataset_id:
+                self._set_status(
+                    f"Recorded label. Next row is {next_row_id}, but no dataset is active.",
+                    "warning",
+                )
+                t3 = time.perf_counter()
+                print(
+                    "[AL advance timing]",
+                    {
+                        "find_next": round(t1 - t0, 4),
+                        "resolve_dataset": round(t2 - t1, 4),
+                        "missing_dataset_status": round(t3 - t2, 4),
+                        "total": round(t3 - t0, 4),
+                    },
+                    flush=True,
+                )
+                return
+
+            self._set_focus_next_tick(
+                dataset_id=dataset_id,
+                row_id=next_row_id,
                 origin="core.active_learning.panel.advance",
-                selection_set_id=active_set.selection_set_id,
-                metadata={"reason": "advance_after_label"},
             )
-            self._refresh_review_label_for_focus()
-            return
+
+            t3 = time.perf_counter()
+
+            print(
+                "[AL advance timing]",
+                {
+                    "find_next": round(t1 - t0, 4),
+                    "resolve_dataset": round(t2 - t1, 4),
+                    "schedule_focus": round(t3 - t2, 4),
+                    "total": round(t3 - t0, 4),
+                    "next_row_id": str(next_row_id),
+                },
+                flush=True,
+            )
+
+        except Exception as exc:
+            t_err = time.perf_counter()
+            print(
+                "[AL advance timing]",
+                {
+                    "error_after": round(t_err - t0, 4),
+                    "error": str(exc),
+                },
+                flush=True,
+            )
+            self._set_error("Could not advance to the next review row", exc)
 
     def _load_current_session(self) -> Optional[Dict[str, Any]]:
         if not self._current_session_artifact_id:
@@ -1516,12 +2637,35 @@ class ActiveLearningPanel:
         dataset_id: Optional[str],
         row_id: Any,
     ) -> Optional[str]:
+
         dataset_id = str(dataset_id or "").strip()
         row_id = str(row_id or "").strip()
-        column = str(self.target_column.value or "").strip()
 
-        if not dataset_id or not row_id or not column or column == "al_label":
+        if not dataset_id or not row_id:
             return None
+
+        column = str(self.auto_label_source_column.value or "").strip()
+        if not column:
+            column = str(self.target_column.value or "").strip()
+
+        if not column or column == "al_label":
+            return None
+
+        columns = set(self._physical_columns_for_dataset(dataset_id))
+
+        if column not in columns:
+            # The widget value may occasionally be a semantic mapping name rather
+            # than the physical column. Resolve it defensively.
+            try:
+                mapped = self.context.datasets.get_mapping(dataset_id, column)
+            except Exception:
+                mapped = None
+
+            mapped = str(mapped or "").strip()
+            if mapped and mapped in columns:
+                column = mapped
+            else:
+                return None
 
         value = self._dataset_value_for_row(
             dataset_id=dataset_id,
@@ -1531,7 +2675,14 @@ class ActiveLearningPanel:
         if value is None:
             return None
 
-        label = al_state.normalise_label(value)
+        label = self._normalise_auto_label_value(
+            value,
+            label_options=self._current_label_options(),
+        )
+        if label is None:
+            return None
+
+        label = al_state.normalise_label(label)
         return label or None
 
     def _dataset_value_for_row(
@@ -1541,6 +2692,13 @@ class ActiveLearningPanel:
         row_id: str,
         column: str,
     ) -> Optional[Any]:
+        dataset_id = str(dataset_id or "").strip()
+        row_id = str(row_id or "").strip()
+        column = str(column or "").strip()
+
+        if not dataset_id or not row_id or not column:
+            return None
+
         id_column = self._dataset_mapping(dataset_id, "record_id")
 
         if not id_column:
@@ -1550,7 +2708,8 @@ class ActiveLearningPanel:
                     id_column = candidate
                     break
 
-        # Prefer row-id lookup when the platform supports it.
+        requested_key_map = self._requested_row_id_key_map([row_id])
+
         if id_column:
             try:
                 df = self.context.datasets.get_rows_by_ids(
@@ -1563,7 +2722,6 @@ class ActiveLearningPanel:
             except Exception:
                 pass
 
-        # Fallback to a small dataframe materialisation.
         try:
             try:
                 needed = [column]
@@ -1580,12 +2738,17 @@ class ActiveLearningPanel:
                 return None
 
             if id_column and id_column in df.columns:
-                match = df[df[id_column].astype(str) == row_id]
+                mask = self._row_id_series_mask(df[id_column], requested_key_map)
+                match = df[mask]
                 if not match.empty:
                     return match.iloc[0][column]
 
-            # Some datasets use the dataframe index as the record id.
-            index_matches = [idx for idx in df.index if str(idx) == row_id]
+            index_matches = []
+            for idx in df.index:
+                if self._row_id_match_keys(idx) & set(requested_key_map.keys()):
+                    index_matches.append(idx)
+                    break
+
             if index_matches:
                 return df.loc[index_matches[0], column]
 
@@ -1619,6 +2782,7 @@ class ActiveLearningPanel:
 
     def _restore_widget_state(self, state: Mapping[str, Any]) -> None:
         state = dict(state or {})
+
         for widget_name, key in (
             ("dataset_select", "dataset_id"),
             ("recipe_select", "recipe_id"),
@@ -1627,11 +2791,14 @@ class ActiveLearningPanel:
             ("test_dataset_select", "test_dataset_id"),
             ("strategy_select", "strategy_id"),
             ("al_protocol", "al_protocol"),
+            ("analytics_x_column", "analytics_x_column"),
+            ("analytics_y_column", "analytics_y_column"),
         ):
             widget = getattr(self, widget_name, None)
             value = state.get(key)
             if widget is None or value is None:
                 continue
+
             try:
                 options = widget.options
                 valid_values = set(options.values()) if isinstance(options, dict) else set(options)
@@ -1640,9 +2807,46 @@ class ActiveLearningPanel:
             except Exception:
                 pass
 
+        try:
+            self._analytics_frame_index = int(state.get("analytics_frame_index") or 0)
+        except Exception:
+            self._analytics_frame_index = 0
+
+        feature_columns = [
+            str(value)
+            for value in list(state.get("feature_columns") or [])
+            if value is not None
+        ]
+        if feature_columns and hasattr(self, "feature_columns"):
+            try:
+                self._set_feature_columns_value(feature_columns)
+            except Exception:
+                pass
+
+        # Restore visible random split sizes from the Start tab.
+        if hasattr(self, "validation_fraction"):
+            try:
+                self.validation_fraction.value = float(
+                    state.get("validation_fraction", self.validation_fraction.value)
+                    or 0.0
+                )
+            except Exception:
+                pass
+
+        if hasattr(self, "test_fraction"):
+            try:
+                self.test_fraction.value = float(
+                    state.get("test_fraction", self.test_fraction.value)
+                    or 0.0
+                )
+            except Exception:
+                pass
+
         labels = al_state.parse_label_options(state.get("label_options"))
         if labels:
-            self.label_options_select.options = list(dict.fromkeys([*labels, *self.label_options_select.options]))
+            self.label_options_select.options = list(
+                dict.fromkeys([*labels, *self.label_options_select.options])
+            )
             self.label_options_select.value = labels
 
         params = state.get("recipe_params") or {}
@@ -1655,6 +2859,15 @@ class ActiveLearningPanel:
                     except Exception:
                         pass
 
+        # Start tab owns the AL training contract. Recompute the summary after
+        # all restored values have landed.
+        try:
+            self._refresh_training_contract_summary()
+        except Exception:
+            pass
+
+        self._mark_analytics_dirty()
+        self._refresh_analytics_if_visible()
         self._update_action_gating()
 
     def _subscribe_refresh_events(self) -> None:
@@ -1662,6 +2875,7 @@ class ActiveLearningPanel:
         subscribe = getattr(events, "subscribe", None)
         if not callable(subscribe):
             return
+
         topics = [
             "plugin.enabled",
             "plugin.disabled",
@@ -1671,7 +2885,7 @@ class ActiveLearningPanel:
             "dataset.registered",
             "dataset.loaded",
             "dataset.updated",
-            "dataset.*"
+            "dataset.*",
             "selection.focus.changed",
             "selection.focus.cleared",
             "ml.recipe.registered",
@@ -1680,11 +2894,18 @@ class ActiveLearningPanel:
             "ml.model.created",
             "ml.run.created",
             "ml.predictions.created",
+            "al.session.saved",
+            "al.query_batch.created",
+            "al.round.training_started",
             "al.round.training_finished",
+            "al.labels.recorded_bulk",
         ]
+
         for topic in topics:
             try:
-                self._subscriptions.append(subscribe(topic, self._on_external_refresh_event))
+                self._subscriptions.append(
+                    subscribe(topic, self._on_external_refresh_event)
+                )
             except Exception:
                 pass
 
@@ -1694,6 +2915,10 @@ class ActiveLearningPanel:
         The platform EventBus calls subscribers as cb(topic, payload). This
         method accepts multiple callback shapes so event handling never breaks
         the panel.
+
+        Important for Review performance:
+        single-label actions publish AL/session events. Do not respond to those
+        events with a full refresh or eager analytics rebuild.
         """
         if self._disposed:
             return
@@ -1719,6 +2944,7 @@ class ActiveLearningPanel:
             payload = kwargs.get("payload", kwargs)
 
         topic = str(topic or "")
+        payload = payload if isinstance(payload, Mapping) else {}
 
         def apply() -> None:
             if self._disposed:
@@ -1728,17 +2954,69 @@ class ActiveLearningPanel:
                 self._refresh_review_label_for_focus()
                 return
 
-            if (
-                topic.startswith("dataset.")
-                or topic.startswith("mapping.")
-            ):
+            if topic in {
+                "dataset.active.changed",
+                "dataset.registered",
+                "dataset.loaded",
+                "dataset.updated",
+            } or topic.startswith("dataset.") or topic.startswith("mapping."):
+                self._source_label_cache.clear()
                 self._refresh_dataset_dependent_widgets()
+                self._mark_analytics_dirty()
+                self._refresh_analytics_if_visible()
                 return
 
-            try:
-                self.refresh()
-            except Exception:
-                pass
+            if topic == "al.session.saved":
+                session_artifact_id = str(payload.get("session_artifact_id") or "").strip()
+                if session_artifact_id:
+                    self._current_session_artifact_id = session_artifact_id
+
+                self._refresh_session_views()
+                self._update_action_gating()
+                self._mark_analytics_dirty()
+                self._refresh_analytics_if_visible()
+                return
+
+            if topic == "al.labels.recorded_bulk":
+                session_artifact_id = str(payload.get("session_artifact_id") or "").strip()
+                if session_artifact_id:
+                    self._current_session_artifact_id = session_artifact_id
+
+                self._refresh_session_views()
+                self._update_action_gating()
+                self._mark_analytics_dirty()
+                self._refresh_analytics_if_visible()
+                return
+
+            if topic in {
+                "al.query_batch.created",
+                "al.round.training_started",
+                "al.round.training_finished",
+                "ml.model_definition.created",
+                "ml.model.created",
+                "ml.run.created",
+                "ml.predictions.created",
+            }:
+                self._refresh_predictions()
+                self._refresh_session_views()
+                self._update_action_gating()
+                self._mark_analytics_dirty()
+                self._refresh_analytics_if_visible()
+                return
+
+            if topic in {
+                "plugin.enabled",
+                "plugin.disabled",
+                "ml.recipe.registered",
+                "ml.recipe.unregistered",
+            }:
+                self.refresh(include_analytics=False)
+                return
+
+            # Conservative fallback: keep widgets fresh, but do not rebuild
+            # analytics unless the user is actually viewing Analytics.
+            self.refresh(include_analytics=False)
+            self._refresh_analytics_if_visible()
 
         try:
             curdoc = getattr(pn.state, "curdoc", None)
@@ -1749,12 +3027,319 @@ class ActiveLearningPanel:
         except Exception:
             apply()
 
+    def _analytics_refresh_clicked(self, *_: Any) -> None:
+        self._mark_analytics_dirty()
+        self._switch_results_tab("Analytics")
+        self._maybe_refresh_analytics_views(force=True)
+        self._set_status("Analytics refreshed from AL/ML artifacts.", "info")
+
+    def _analytics_first_frame_clicked(self, *_: Any) -> None:
+        self._analytics_frame_index = 0
+        self._mark_analytics_dirty()
+        self._switch_results_tab("Analytics")
+        self._maybe_refresh_analytics_views(force=True)
+
+    def _analytics_prev_frame_clicked(self, *_: Any) -> None:
+        self._analytics_frame_index = max(0, int(self._analytics_frame_index or 0) - 1)
+        self._mark_analytics_dirty()
+        self._switch_results_tab("Analytics")
+        self._maybe_refresh_analytics_views(force=True)
+
+    def _analytics_next_frame_clicked(self, *_: Any) -> None:
+        frame_count = len(self._analytics_frames or [])
+        if frame_count:
+            self._analytics_frame_index = min(
+                frame_count - 1,
+                int(self._analytics_frame_index or 0) + 1,
+            )
+        self._mark_analytics_dirty()
+        self._switch_results_tab("Analytics")
+        self._maybe_refresh_analytics_views(force=True)
+
+    def _analytics_last_frame_clicked(self, *_: Any) -> None:
+        frame_count = len(self._analytics_frames or [])
+        if frame_count:
+            self._analytics_frame_index = frame_count - 1
+        self._mark_analytics_dirty()
+        self._switch_results_tab("Analytics")
+        self._maybe_refresh_analytics_views(force=True)
+
+    def _refresh_analytics_columns(self) -> None:
+        session = self._load_current_session()
+        dataset_id = self._session_pool_dataset_id(session)
+        if not dataset_id:
+            dataset_id = str(self.dataset_select.value or "").strip()
+
+        columns = al_analytics.dataset_columns(self.context, dataset_id)
+        options = {column: column for column in columns}
+
+        current_x = self.analytics_x_column.value
+        current_y = self.analytics_y_column.value
+
+        self.analytics_x_column.options = options
+        self.analytics_y_column.options = options
+
+        guessed_x, guessed_y = al_analytics.guess_xy_columns(
+            self.context,
+            dataset_id,
+        )
+
+        if current_x in options.values():
+            self.analytics_x_column.value = current_x
+        elif guessed_x in options.values():
+            self.analytics_x_column.value = guessed_x
+        elif columns:
+            self.analytics_x_column.value = columns[0]
+        else:
+            self.analytics_x_column.value = None
+
+        if current_y in options.values():
+            self.analytics_y_column.value = current_y
+        elif guessed_y in options.values():
+            self.analytics_y_column.value = guessed_y
+        elif len(columns) >= 2:
+            self.analytics_y_column.value = columns[1]
+        elif columns:
+            self.analytics_y_column.value = columns[0]
+        else:
+            self.analytics_y_column.value = None
+
+    def _refresh_analytics_views(self) -> None:
+        if self._disposed:
+            return
+
+        session = self._load_current_session()
+        if not session:
+            self._analytics_frames = []
+            self.analytics_frame_label.object = "_Start or select an AL session to see analytics._"
+            self.analytics_scatter.object = al_analytics.make_empty_figure(
+                "Start or select an AL session to see trained-point analytics."
+            )
+            self.analytics_performance_plot.object = al_analytics.make_empty_figure(
+                "No active-learning session selected."
+            )
+            self.analytics_informativeness_plot.object = al_analytics.make_empty_figure(
+                "No active-learning session selected."
+            )
+            self.analytics_summary.object = ""
+            _set_table_value(self.analytics_points_table, pd.DataFrame())
+            self._update_analytics_nav_buttons()
+            return
+
+        self._analytics_frames = al_analytics.query_batches_for_session(
+            self.context,
+            session,
+        )
+
+        if self._analytics_frames:
+            self._analytics_frame_index = max(
+                0,
+                min(
+                    int(self._analytics_frame_index or 0),
+                    len(self._analytics_frames) - 1,
+                ),
+            )
+        else:
+            self._analytics_frame_index = 0
+
+        performance_df = al_analytics.performance_dataframe(
+            self.context,
+            session,
+        )
+        informativeness_df = al_analytics.informativeness_dataframe(
+            self.context,
+            session,
+        )
+
+        self.analytics_performance_plot.object = al_analytics.make_performance_figure(
+            performance_df,
+        )
+        self.analytics_informativeness_plot.object = al_analytics.make_informativeness_figure(
+            informativeness_df,
+        )
+
+        x_column = str(self.analytics_x_column.value or "").strip()
+        y_column = str(self.analytics_y_column.value or "").strip()
+
+        if not x_column or not y_column:
+            self.analytics_scatter.object = al_analytics.make_empty_figure(
+                "Choose X and Y columns for the trained-point scatter plot."
+            )
+            self.analytics_frame_label.object = "_Choose X and Y columns to render the scatter frame._"
+            self.analytics_summary.object = self._analytics_summary_markdown(
+                session=session,
+                performance_df=performance_df,
+                informativeness_df=informativeness_df,
+                scatter_df=pd.DataFrame(),
+                frame={},
+            )
+            _set_table_value(self.analytics_points_table, pd.DataFrame())
+            self._update_analytics_nav_buttons()
+            return
+
+        try:
+            scatter_df, frame = al_analytics.training_scatter_dataframe(
+                self.context,
+                session,
+                frame_index=int(self._analytics_frame_index or 0),
+                x_column=x_column,
+                y_column=y_column,
+            )
+        except Exception as exc:
+            scatter_df = pd.DataFrame()
+            frame = {}
+            self.analytics_scatter.object = al_analytics.make_empty_figure(
+                f"Could not build AL scatter frame: {exc}"
+            )
+        else:
+            self.analytics_scatter.object = al_analytics.make_training_scatter_figure(
+                scatter_df,
+                frame=frame,
+                x_column=x_column,
+                y_column=y_column,
+            )
+
+        frame_index = int(frame.get("frame_index", self._analytics_frame_index) or 0)
+        frame_count = int(frame.get("frame_count", len(self._analytics_frames)) or len(self._analytics_frames))
+        round_index = frame.get("round", session.get("round", 0))
+        strategy_id = frame.get("strategy_id") or frame.get("strategy") or "unknown"
+        batch_artifact_id = frame.get("artifact_id") or "none"
+
+        if frame_count:
+            self.analytics_frame_label.object = (
+                f"**Frame {frame_index + 1}/{frame_count}** · "
+                f"round `{round_index}` · strategy `{strategy_id}` · "
+                f"batch `{batch_artifact_id}`"
+            )
+        else:
+            self.analytics_frame_label.object = (
+                "_No query-batch artifacts found yet. The scatter falls back to "
+                "currently verified/trained session labels where possible._"
+            )
+
+        self.analytics_summary.object = self._analytics_summary_markdown(
+            session=session,
+            performance_df=performance_df,
+            informativeness_df=informativeness_df,
+            scatter_df=scatter_df,
+            frame=frame,
+        )
+
+        table_df = scatter_df.copy()
+        if not table_df.empty:
+            columns = [
+                col
+                for col in (
+                    "row_id",
+                    "trained_round",
+                    "queried_round",
+                    "strategy_id",
+                    "informativeness_score",
+                    "x",
+                    "y",
+                    "source_batch_artifact_id",
+                )
+                if col in table_df.columns
+            ]
+            table_df = table_df[columns].head(1000)
+
+        _set_table_value(self.analytics_points_table, table_df)
+        self._update_analytics_nav_buttons()
+
+    def _update_analytics_nav_buttons(self) -> None:
+        frame_count = len(self._analytics_frames or [])
+        has_frames = frame_count > 0
+
+        for button in (
+            self.analytics_first_button,
+            self.analytics_prev_button,
+            self.analytics_next_button,
+            self.analytics_last_button,
+        ):
+            try:
+                button.disabled = not has_frames
+            except Exception:
+                pass
+
+        if has_frames:
+            is_first = int(self._analytics_frame_index or 0) <= 0
+            is_last = int(self._analytics_frame_index or 0) >= frame_count - 1
+
+            self.analytics_first_button.disabled = is_first
+            self.analytics_prev_button.disabled = is_first
+            self.analytics_next_button.disabled = is_last
+            self.analytics_last_button.disabled = is_last
+
+    def _analytics_summary_markdown(
+        self,
+        *,
+        session: Mapping[str, Any],
+        performance_df: pd.DataFrame,
+        informativeness_df: pd.DataFrame,
+        scatter_df: pd.DataFrame,
+        frame: Mapping[str, Any],
+    ) -> str:
+        counts = al_state.counts(session)
+        frame_count = len(self._analytics_frames or [])
+        scored_count = 0
+        unscored_count = 0
+
+        if scatter_df is not None and not scatter_df.empty:
+            try:
+                scored_count = int(scatter_df["has_score"].sum())
+                unscored_count = int((~scatter_df["has_score"]).sum())
+            except Exception:
+                scored_count = 0
+                unscored_count = len(scatter_df)
+
+        latest_perf = ""
+        if performance_df is not None and not performance_df.empty:
+            metric_rows = performance_df[
+                pd.to_numeric(performance_df.get("metric_value"), errors="coerce").notna()
+            ]
+            if not metric_rows.empty:
+                row = metric_rows.iloc[-1]
+                latest_perf = (
+                    f"`{row.get('metric_name')}` = **{row.get('metric_value'):.4g}** "
+                    f"at {int(row.get('trained_count') or 0)} trained images"
+                )
+
+        latest_query = ""
+        if informativeness_df is not None and not informativeness_df.empty:
+            row = informativeness_df.iloc[-1]
+            latest_query = (
+                f"batch {int(row.get('batch_index') or 0)} · "
+                f"strategy `{row.get('strategy_id')}` · "
+                f"mean={row.get('mean_informativeness'):.4g}"
+                if pd.notna(row.get("mean_informativeness"))
+                else f"batch {int(row.get('batch_index') or 0)} · strategy `{row.get('strategy_id')}`"
+            )
+
+        return (
+            "#### Analytics source summary\n\n"
+            f"| Field | Value |\n"
+            f"|---|---|\n"
+            f"| Session | `{session.get('session_id')}` |\n"
+            f"| Pool dataset | `{session.get('pool_dataset_id') or session.get('dataset_id')}` |\n"
+            f"| Current AL round | `{session.get('round')}` |\n"
+            f"| Verified training labels | **{counts.get('labelled_or_verified', 0)}** |\n"
+            f"| Query batch frames | **{frame_count}** |\n"
+            f"| Points visible in scatter frame | **{len(scatter_df) if scatter_df is not None else 0}** |\n"
+            f"| Points with query value | **{scored_count}** |\n"
+            f"| Points without query value | **{unscored_count}** |\n"
+            f"| Latest performance | {latest_perf or '_No numeric metric found yet._'} |\n"
+            f"| Latest informativeness | {latest_query or '_No query timeline yet._'} |\n"
+        )
+
     def _dataset_changed(self, *_: Any) -> None:
+        self._source_label_cache.clear()
         self._refresh_column_widgets()
         self._refresh_validation_test_datasets()
         self._refresh_recipe_params()
         self._apply_recipe_inferred_defaults()
         self._refresh_labels_from_available_context()
+        self._mark_analytics_dirty()
+        self._refresh_analytics_if_visible()
 
     def _recipe_changed(self, *_: Any) -> None:
         self._refresh_recipe_params()
@@ -1766,9 +3351,16 @@ class ActiveLearningPanel:
         self._update_action_gating()
 
     def _target_column_changed(self, *_: Any) -> None:
+        # Changing the Start-tab label column should make Review auto-labelling
+        # follow it again unless the user subsequently picks another source.
+        self._auto_label_source_user_set = False
+
+        self._refresh_feature_column_options()
+        self._refresh_auto_label_source_column()
         self._refresh_labels_from_available_context()
         self._set_label_select_options()
         self._refresh_review_label_for_focus()
+        self._refresh_training_contract_summary()
 
     def _current_label_options(self) -> List[str]:
         labels = al_state.parse_label_options(self.label_options_select.value)
@@ -1936,11 +3528,7 @@ class ActiveLearningPanel:
         self._update_action_gating()
 
     def _refresh_column_widgets(self) -> None:
-        """Refresh column-backed dropdowns after dataset or mappings change.
-
-        This keeps the target-label dropdown, recipe column params, and protocol
-        column params aligned with the currently selected dataset.
-        """
+        """Refresh column-backed dropdowns after dataset or mappings change."""
         dataset_id = self.dataset_select.value
         columns = self._dataset_columns(dataset_id)
 
@@ -1958,22 +3546,57 @@ class ActiveLearningPanel:
             guessed = self._guess_label_column(columns)
             self.target_column.value = guessed if guessed in target_options else "al_label"
 
+        self._refresh_feature_column_options()
+
         column_options = [""] + columns
 
-        # Refresh recipe parameter widgets that represent dataset columns.
         for name, widget in list(self.recipe_param_widgets.items()):
+            lname = str(name).lower()
+
+            if lname in {
+                "feature_columns",
+                "input_columns",
+                "features",
+                "x_columns",
+            }:
+                current_values = self._normalise_column_list(getattr(widget, "value", None))
+                current_values = [
+                    str(value)
+                    for value in current_values
+                    if str(value) in columns
+                ]
+
+                if isinstance(widget, pn.widgets.TextAreaInput):
+                    widget.value = "\n".join(current_values)
+                    continue
+
+                if hasattr(widget, "options"):
+                    try:
+                        widget.options = columns
+                    except Exception:
+                        pass
+
+                try:
+                    widget.value = current_values
+                except Exception:
+                    pass
+
+                continue
+
             if not isinstance(widget, pn.widgets.Select):
                 continue
 
-            lname = str(name).lower()
             looks_like_column_param = (
                 lname.endswith("_column")
-                or lname in {
+                or lname
+                in {
                     "target",
                     "label",
                     "label_column",
                     "target_column",
                     "image_column",
+                    "image_path_column",
+                    "image_uri_column",
                     "mask_column",
                     "record_id_column",
                     "id_column",
@@ -1989,7 +3612,6 @@ class ActiveLearningPanel:
             widget.options = column_options
             widget.value = current if current in column_options else ""
 
-        # Refresh protocol column widgets if they have already been built.
         for key in ("protocol_group_column", "protocol_split_column"):
             widget = self.protocol_widgets.get(key)
             if widget is None or not isinstance(widget, pn.widgets.Select):
@@ -2000,6 +3622,7 @@ class ActiveLearningPanel:
             widget.value = current if current in column_options else ""
 
         self._refresh_labels_from_available_context()
+        self._refresh_training_contract_summary()
 
     def _refresh_recipes(self) -> None:
         current = self.recipe_select.value
@@ -2264,6 +3887,46 @@ class ActiveLearningPanel:
             css_classes=["al-tab-body"],
         )
 
+    def _start_field(
+        self,
+        obj: Any,
+        *,
+        min_height: int = 70,
+        margin: tuple[int, int, int, int] = (0, 0, 16, 0),
+    ) -> pn.Column:
+        """Wrap a Start-tab widget so Panel reserves enough vertical space."""
+        return pn.Column(
+            obj,
+            sizing_mode="stretch_width",
+            min_height=min_height,
+            height_policy="min",
+            margin=margin,
+            styles={
+                "max-width": "100%",
+                "width": "100%",
+                "box-sizing": "border-box",
+                "overflow": "visible",
+                "clear": "both",
+                "padding": "0",
+            },
+        )
+
+    def _start_button_row(self, *objects: Any) -> pn.Column:
+        row = pn.Row(
+            *objects,
+            sizing_mode="stretch_width",
+            min_height=42,
+            margin=(0, 0, 0, 0),
+            styles={
+                "max-width": "100%",
+                "width": "100%",
+                "box-sizing": "border-box",
+                "overflow": "visible",
+                "clear": "both",
+            },
+        )
+        return self._start_field(row, min_height=50, margin=(0, 0, 16, 0))
+
     def _section(self, title: str, body: Any):
         return pn.Column(
             pn.pane.Markdown(
@@ -2293,32 +3956,88 @@ class ActiveLearningPanel:
         kind = str(schema.get("type", "string"))
         default = schema.get("default", "")
         widget_kind = str(schema.get("x-widget") or schema.get("widget") or "")
+        lower_name = str(name or "").lower()
 
-        if widget_kind in {"dataset_select", "dataset"} or name.endswith("_dataset_id"):
+        if widget_kind in {"dataset_select", "dataset"} or lower_name.endswith("_dataset_id"):
             options = [""] + self._dataset_ids()
             value = default if default in options else ""
-            return pn.widgets.Select(name="", options=options, value=value, sizing_mode="stretch_width")
+            return pn.widgets.Select(
+                name="",
+                options=options,
+                value=value,
+                sizing_mode="stretch_width",
+            )
 
         if (
-            widget_kind in {"column_select", "column"}
-            or name.endswith("_column")
-            or name in {
+            widget_kind
+            in {
+                "column_multichoice",
+                "column_multi_choice",
+                "column_multiselect",
+                "column_multi_select",
+                "feature_columns",
+            }
+            or lower_name
+            in {
+                "feature_columns",
+                "input_columns",
+                "features",
+                "x_columns",
+            }
+        ):
+            columns = self._dataset_columns(self.dataset_select.value)
+            selected = [
+                column
+                for column in self._normalise_column_list(default)
+                if column in columns
+            ]
+            return pn.widgets.TextAreaInput(
+                name="",
+                value="\n".join(selected),
+                placeholder="Feature columns, one per line.",
+                height=120,
+                min_height=120,
+                sizing_mode="stretch_width",
+            )
+
+        if (
+            widget_kind in {"column_select", "dataset_column", "column"}
+            or lower_name.endswith("_column")
+            or lower_name
+            in {
                 "target",
+                "label",
                 "label_column",
                 "target_column",
                 "image_column",
+                "image_path_column",
+                "image_uri_column",
                 "mask_column",
+                "record_id_column",
+                "id_column",
+                "group_column",
+                "split_column",
             }
         ):
             columns = [""] + self._dataset_columns(self.dataset_select.value)
-            value = default if default in columns else ""
-            return pn.widgets.Select(name="", options=columns, value=value, sizing_mode="stretch_width")
+            value = str(default or "")
+            return pn.widgets.Select(
+                name="",
+                options=columns,
+                value=value if value in columns else "",
+                sizing_mode="stretch_width",
+            )
 
         if "enum" in schema:
             values = list(schema.get("enum") or [])
             options = {str(v): v for v in values}
             value = default if default in values else (values[0] if values else None)
-            return pn.widgets.Select(name="", options=options, value=value, sizing_mode="stretch_width")
+            return pn.widgets.Select(
+                name="",
+                options=options,
+                value=value,
+                sizing_mode="stretch_width",
+            )
 
         if kind in {"integer", "int"}:
             return pn.widgets.IntInput(
@@ -2339,11 +4058,22 @@ class ActiveLearningPanel:
             )
 
         if kind in {"boolean", "bool"}:
-            return pn.widgets.Checkbox(name="", value=bool(default), sizing_mode="stretch_width")
+            return pn.widgets.Checkbox(
+                name="",
+                value=bool(default),
+                sizing_mode="stretch_width",
+            )
 
         if kind in {"array", "object"}:
-            text = json.dumps(default if default not in ("", None) else ([] if kind == "array" else {}))
-            return pn.widgets.TextAreaInput(name="", value=text, height=100, sizing_mode="stretch_width")
+            text = json.dumps(
+                default if default not in ("", None) else ([] if kind == "array" else {})
+            )
+            return pn.widgets.TextAreaInput(
+                name="",
+                value=text,
+                height=100,
+                sizing_mode="stretch_width",
+            )
 
         return pn.widgets.TextInput(
             name="",
@@ -2353,12 +4083,10 @@ class ActiveLearningPanel:
         )
 
     def _build_protocol_section(self, *, managed: bool):
-        """Build the advanced validation/test protocol block.
+        """Build the advanced protocol block.
 
-        Returns the layout object (or None) instead of appending to
-        ``recipe_params_area`` directly. The caller assembles the full list and
-        assigns ``recipe_params_area.objects`` in a single shot, which avoids
-        the stale-parent-height collapse caused by incremental ``.append``.
+        Start tab owns validation/test datasets and random split fractions.
+        This block only exposes genuinely advanced protocol settings.
         """
         if not managed:
             return None
@@ -2383,25 +4111,6 @@ class ActiveLearningPanel:
                 },
                 value="random",
             ),
-            "protocol_validation_source": pn.widgets.Select(
-                name="",
-                options={
-                    "Split from AL training rows": "split",
-                    "Use selected validation dataset": "dataset",
-                },
-                value="dataset" if self.validation_dataset_select.value else "split",
-            ),
-            "protocol_validation_dataset_id": self.validation_dataset_select,
-            "protocol_test_source": pn.widgets.Select(
-                name="",
-                options={
-                    "Split from AL training rows": "split",
-                    "Use selected test dataset": "dataset",
-                    "No test set": "none",
-                },
-                value="dataset" if self.test_dataset_select.value else "split",
-            ),
-            "protocol_test_dataset_id": self.test_dataset_select,
             "protocol_group_column": pn.widgets.Select(
                 name="",
                 options=column_options,
@@ -2411,20 +4120,6 @@ class ActiveLearningPanel:
                 name="",
                 options=column_options,
                 value="",
-            ),
-            "protocol_validation_size": pn.widgets.FloatInput(
-                name="",
-                value=0.1,
-                start=0.01,
-                end=0.8,
-                step=0.01,
-            ),
-            "protocol_test_size": pn.widgets.FloatInput(
-                name="",
-                value=0.2,
-                start=0.0,
-                end=0.8,
-                step=0.01,
             ),
             "protocol_selection_metric": pn.widgets.Select(
                 name="",
@@ -2443,12 +4138,8 @@ class ActiveLearningPanel:
 
         advanced_body = pn.Column(
             self._field("Split method", self.protocol_widgets["protocol_split_strategy"]),
-            self._field("Validation source", self.protocol_widgets["protocol_validation_source"]),
-            self._field("Test source", self.protocol_widgets["protocol_test_source"]),
             self._field("Group/time column", self.protocol_widgets["protocol_group_column"]),
             self._field("Predefined split column", self.protocol_widgets["protocol_split_column"]),
-            self._field("Validation fraction", self.protocol_widgets["protocol_validation_size"]),
-            self._field("Test fraction", self.protocol_widgets["protocol_test_size"]),
             self._field("Best-epoch metric", self.protocol_widgets["protocol_selection_metric"]),
             self._field("Protocol random seed", self.protocol_widgets["protocol_random_state"]),
             visible=False,
@@ -2483,6 +4174,7 @@ class ActiveLearningPanel:
 
     def _protocol_params(self) -> Dict[str, Any]:
         params: Dict[str, Any] = {}
+
         for key, widget in self.protocol_widgets.items():
             try:
                 params[key] = widget.value
@@ -2492,17 +4184,33 @@ class ActiveLearningPanel:
         validation_dataset_id = self.validation_dataset_select.value or ""
         test_dataset_id = self.test_dataset_select.value or ""
 
+        validation_fraction = float(self.validation_fraction.value or 0.0)
+        test_fraction = float(self.test_fraction.value or 0.0)
+
         if validation_dataset_id:
             params["protocol_validation_source"] = "dataset"
             params["protocol_validation_dataset_id"] = validation_dataset_id
+        else:
+            params["protocol_validation_source"] = "split"
+            params["protocol_validation_dataset_id"] = ""
+            params["protocol_validation_size"] = validation_fraction
 
         if test_dataset_id:
             params["protocol_test_source"] = "dataset"
             params["protocol_test_dataset_id"] = test_dataset_id
+        elif test_fraction > 0:
+            params["protocol_test_source"] = "split"
+            params["protocol_test_dataset_id"] = ""
+            params["protocol_test_size"] = test_fraction
+        else:
+            params["protocol_test_source"] = "none"
+            params["protocol_test_dataset_id"] = ""
+            params["protocol_test_size"] = 0.0
 
         params["validation_dataset_id"] = validation_dataset_id
         params["test_dataset_id"] = test_dataset_id
         params["al_protocol"] = self.al_protocol.value or "review"
+
         return params
 
     def _refresh_recipe_params(self) -> None:
@@ -2528,8 +4236,8 @@ class ActiveLearningPanel:
 
         if spec is None:
             self.recipe_card.object = "No recipe selected."
-            # Single assignment; never incrementally mutate a mounted Column.
             self.recipe_params_area.objects = []
+            self._refresh_training_contract_summary()
             return
 
         recipe_cls = getattr(spec, "recipe_cls", None)
@@ -2552,21 +4260,26 @@ class ActiveLearningPanel:
 
         properties = (getattr(spec, "params_schema", {}) or {}).get("properties", {}) or {}
 
-        # Build the entire child list locally, then assign it to the mounted
-        # Column in ONE operation. Incremental .append() on an already-rendered
-        # Column leaves Bokeh with a stale parent height, so following siblings
-        # (the divider + train button) get drawn over the params area's tail.
         new_objects: List[Any] = []
+
+        skipped_owned: List[str] = []
 
         if properties:
             for name, schema in properties.items():
                 name = str(name)
+
+                # Start tab owns these. Do not ask again in Train.
+                if name.lower() in AL_OWNED_RECIPE_PARAM_NAMES:
+                    skipped_owned.append(name)
+                    continue
+
                 widget = self._widget_for_schema(name, schema)
                 if name in previous_values:
                     try:
                         widget.value = previous_values[name]
                     except Exception:
                         pass
+
                 field = self._form_row(str(schema.get("title") or name), widget)
                 self.recipe_param_widgets[name] = widget
                 self.recipe_param_fields[name] = field
@@ -2580,6 +4293,24 @@ class ActiveLearningPanel:
                 )
             )
 
+        if skipped_owned:
+            new_objects.insert(
+                0,
+                pn.pane.Markdown(
+                    (
+                        "_Dataset, recipe, target, feature columns, labels, "
+                        "validation, and test settings are controlled by the "
+                        "Start tab and passed into the recipe automatically._"
+                    ),
+                    sizing_mode="stretch_width",
+                    styles={
+                        "font-size": "12px",
+                        "color": "#666",
+                        "overflow-wrap": "anywhere",
+                    },
+                ),
+            )
+
         protocol_block = self._build_protocol_section(managed=managed)
         for name, value in previous_protocol_values.items():
             widget = self.protocol_widgets.get(name)
@@ -2588,13 +4319,12 @@ class ActiveLearningPanel:
                     widget.value = value
                 except Exception:
                     pass
+
         if protocol_block is not None:
             new_objects.append(protocol_block)
 
         self.recipe_params_area.objects = new_objects
 
-        # Reserve enough height for the children so the inner column never
-        # compresses them inside the fixed-height scroll box.
         est = 0
         for widget in self.recipe_param_widgets.values():
             try:
@@ -2607,6 +4337,8 @@ class ActiveLearningPanel:
             self.recipe_params_area.min_height = max(est, 60)
         except Exception:
             pass
+
+        self._refresh_training_contract_summary()
 
     def _refresh_validation_test_datasets(self) -> None:
         dataset_options = {"Split from AL training rows": ""}
@@ -2717,6 +4449,476 @@ class ActiveLearningPanel:
             except Exception:
                 return []
 
+    def _normalise_column_list(self, value: Any) -> List[str]:
+        if value is None:
+            return []
+
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return []
+
+            try:
+                parsed = json.loads(text)
+                if isinstance(parsed, list):
+                    value = parsed
+                elif isinstance(parsed, str):
+                    value = [parsed]
+                else:
+                    value = [text]
+            except Exception:
+                value = [
+                    part.strip()
+                    for chunk in text.splitlines()
+                    for part in chunk.split(",")
+                    if part.strip()
+                ]
+
+        elif isinstance(value, Mapping):
+            value = value.keys()
+
+        elif isinstance(value, (int, float)):
+            value = [value]
+
+        columns: List[str] = []
+        for item in value or []:
+            if item is None:
+                continue
+            text = str(item).strip()
+            if not text or text == "Use Index":
+                continue
+            if text not in columns:
+                columns.append(text)
+
+        return columns
+
+    def _selected_feature_columns(self) -> List[str]:
+        """Return selected feature columns from the editable text area."""
+        if not hasattr(self, "feature_columns"):
+            return []
+        return self._normalise_column_list(self.feature_columns.value)
+
+    def _set_feature_columns_value(self, columns: Iterable[Any]) -> None:
+        """Set selected feature columns into the editable text area.
+
+        feature_columns is now a TextAreaInput, not a CrossSelector, so never
+        use .options here.
+        """
+        valid = set(self._dataset_columns(self.dataset_select.value))
+        clean: List[str] = []
+
+        for value in columns or []:
+            if value is None:
+                continue
+
+            column = str(value).strip()
+            if not column or column == "Use Index":
+                continue
+
+            if valid and column not in valid:
+                continue
+
+            if column not in clean:
+                clean.append(column)
+
+        self.feature_columns.value = "\n".join(clean)
+        self._refresh_feature_match_preview()
+        self._refresh_training_contract_summary()
+
+    def _feature_select_numeric_clicked(self, *_: Any) -> None:
+        """Bulk-select numeric dataset columns.
+
+        This replaces the older CrossSelector implementation that used
+        self.feature_columns.options.
+        """
+        numeric = self._numeric_feature_columns()
+        self._set_feature_columns_value(numeric)
+
+    def _feature_clear_clicked(self, *_: Any) -> None:
+        self._set_feature_columns_value([])
+
+    def _feature_add_matching_clicked(self, *_: Any) -> None:
+        current = self._selected_feature_columns()
+        matches = self._feature_filter_matches()
+        self._set_feature_columns_value([*current, *matches])
+
+    def _feature_replace_matching_clicked(self, *_: Any) -> None:
+        matches = self._feature_filter_matches()
+        self._set_feature_columns_value(matches)
+
+    def _feature_columns_changed(self, *_: Any) -> None:
+        self._refresh_feature_match_preview()
+        self._refresh_training_contract_summary()
+
+    def _row_id_match_keys(self, value: Any) -> set[str]:
+        """Build tolerant match keys for exact int64 and scientific-notation ids.
+
+        This is a defensive fallback for UI paths that display large object IDs
+        as floats, e.g. -5.6309557250480134e+17. Exact strings are always used
+        first; float keys are only fallback aliases.
+        """
+        if value is None:
+            return set()
+
+        try:
+            if pd.isna(value):
+                return set()
+        except Exception:
+            pass
+
+        text = str(value).strip()
+        if not text:
+            return set()
+
+        keys = {text}
+
+        # Strip a harmless trailing .0 for small integer-like values.
+        if text.endswith(".0"):
+            keys.add(text[:-2])
+
+        try:
+            as_float = float(text)
+            if not pd.isna(as_float):
+                keys.add(str(as_float))
+                keys.add(repr(as_float))
+                keys.add(format(as_float, ".17g"))
+                keys.add(format(as_float, ".16g"))
+                keys.add(format(as_float, ".15g"))
+                if as_float.is_integer():
+                    keys.add(str(int(as_float)))
+        except Exception:
+            pass
+
+        try:
+            as_int = int(text)
+            keys.add(str(as_int))
+            as_float = float(as_int)
+            keys.add(str(as_float))
+            keys.add(repr(as_float))
+            keys.add(format(as_float, ".17g"))
+            keys.add(format(as_float, ".16g"))
+            keys.add(format(as_float, ".15g"))
+        except Exception:
+            pass
+
+        return {key for key in keys if key}
+
+    def _requested_row_id_key_map(self, row_ids: List[str]) -> Dict[str, str]:
+        out: Dict[str, str] = {}
+        for row_id in row_ids:
+            original = str(row_id)
+            for key in self._row_id_match_keys(original):
+                out.setdefault(key, original)
+        return out
+
+    def _row_id_series_mask(
+        self,
+        series: pd.Series,
+        requested_key_map: Mapping[str, str],
+    ) -> pd.Series:
+        if series is None or series.empty or not requested_key_map:
+            return pd.Series(False, index=getattr(series, "index", []))
+
+        requested_keys = set(str(key) for key in requested_key_map.keys())
+
+        try:
+            exact = series.astype(str).isin(requested_keys)
+        except Exception:
+            exact = pd.Series(False, index=series.index)
+
+        # Fallback for large int64 ids that have been converted to scientific
+        # notation somewhere in UI/JS. This is slower, so only use it if exact
+        # matching did not find everything.
+        try:
+            if int(exact.sum()) >= len(set(requested_key_map.values())):
+                return exact
+        except Exception:
+            pass
+
+        try:
+            fuzzy = series.map(
+                lambda value: bool(self._row_id_match_keys(value) & requested_keys)
+            )
+            return exact | fuzzy
+        except Exception:
+            return exact
+
+    def _auto_label_column_should_follow_target(self) -> bool:
+        if not bool(getattr(self, "_auto_label_source_user_set", False)):
+            return True
+
+        current = str(self.auto_label_source_column.value or "").strip()
+        return not current
+
+    def _set_auto_label_source_value(self, value: Any) -> None:
+        self._syncing_auto_label_source = True
+        try:
+            self.auto_label_source_column.value = value
+        finally:
+            self._syncing_auto_label_source = False
+
+    def _auto_label_source_changed(self, event: Any) -> None:
+        if bool(getattr(self, "_syncing_auto_label_source", False)):
+            return
+
+        value = str(getattr(event, "new", "") or "").strip()
+        self._auto_label_source_user_set = bool(value)
+
+    def _feature_filter_tokens(self) -> List[str]:
+        text = str(self.feature_filter.value or "").strip()
+        if not text:
+            return []
+
+        tokens: List[str] = []
+        for chunk in text.splitlines():
+            for part in chunk.split(","):
+                token = part.strip()
+                if token and token not in tokens:
+                    tokens.append(token)
+
+        return tokens
+
+    def _feature_filter_matches(self) -> List[str]:
+        columns = self._dataset_columns(self.dataset_select.value)
+        tokens = self._feature_filter_tokens()
+
+        target = str(self.target_column.value or "").strip()
+        excluded = {
+            "",
+            "Use Index",
+            target,
+            "al_label",
+            "label",
+            "labels",
+            "target",
+            "target_label",
+            "class",
+            "class_label",
+            "prediction",
+            "predicted_label",
+            "prediction_confidence",
+            "entropy",
+            "least_confidence",
+            "margin",
+            "margin_uncertainty",
+            "selection_rank",
+            "rank",
+        }
+
+        if not tokens:
+            return []
+
+        matches: List[str] = []
+
+        for column in columns:
+            if column in excluded:
+                continue
+
+            lower_column = str(column).lower()
+
+            for token in tokens:
+                lower_token = token.lower()
+
+                # Useful cases:
+                #   flux_      -> all columns containing/starting flux_
+                #   flux_*     -> prefix match
+                #   *flux*     -> contains match
+                #   flux       -> contains match
+                if lower_token.endswith("*") and not lower_token.startswith("*"):
+                    ok = lower_column.startswith(lower_token[:-1])
+                elif lower_token.startswith("*") and lower_token.endswith("*") and len(lower_token) > 2:
+                    ok = lower_token[1:-1] in lower_column
+                elif lower_token.startswith("*"):
+                    ok = lower_column.endswith(lower_token[1:])
+                else:
+                    ok = lower_token in lower_column
+
+                if ok:
+                    matches.append(str(column))
+                    break
+
+        return list(dict.fromkeys(matches))
+
+    def _refresh_feature_match_preview(self) -> None:
+        if not hasattr(self, "feature_match_preview"):
+            return
+
+        selected = self._selected_feature_columns()
+        matches = self._feature_filter_matches()
+        tokens = self._feature_filter_tokens()
+
+        if not tokens:
+            self.feature_match_preview.object = (
+                f"Selected {len(selected)} feature column(s). "
+                "Type a prefix or substring above, then use Add/Replace matches."
+            )
+            return
+
+        if matches:
+            preview = ", ".join(str(column) for column in matches[:6])
+            if len(matches) > 6:
+                preview += f", … +{len(matches) - 6} more"
+        else:
+            preview = "no matching columns"
+
+        self.feature_match_preview.object = (
+            f"Filter matches {len(matches)} column(s). "
+            f"Selected {len(selected)}. Preview: {preview}"
+        )
+
+    def _feature_columns_from_recipe_params(self, params: Mapping[str, Any]) -> List[str]:
+        params = dict(params or {})
+        for key in ("feature_columns", "input_columns", "features", "x_columns"):
+            columns = self._normalise_column_list(params.get(key))
+            if columns:
+                return columns
+        return []
+
+    def _start_owned_recipe_params(self) -> Dict[str, Any]:
+        feature_columns = self._selected_feature_columns()
+        target_column = self.target_column.value or "al_label"
+        validation_dataset_id = self.validation_dataset_select.value or ""
+        test_dataset_id = self.test_dataset_select.value or ""
+
+        params: Dict[str, Any] = {
+            "dataset_id": self.dataset_select.value or "",
+            "recipe_id": self.recipe_select.value or "",
+            "target_column": target_column,
+            "label_column": target_column,
+            "label_options": self._current_label_options(),
+            "class_labels": self._current_label_options(),
+            "classes": self._current_label_options(),
+            "known_classes": self._current_label_options(),
+            "target_classes": self._current_label_options(),
+            "validation_dataset_id": validation_dataset_id,
+            "test_dataset_id": test_dataset_id,
+            "al_protocol": self.al_protocol.value or "review",
+            "seed": int(self.seed.value or 0),
+            "random_seed": int(self.seed.value or 0),
+            "protocol_random_state": int(self.seed.value or 0),
+        }
+
+        if feature_columns:
+            params["feature_columns"] = feature_columns
+            params["input_columns"] = feature_columns
+            params["features"] = feature_columns
+            params["x_columns"] = feature_columns
+
+        params.update(self._protocol_params())
+        return params
+
+    def _refresh_feature_column_options(self) -> None:
+        """Keep selected feature text valid for the current dataset/target."""
+        columns = set(self._dataset_columns(self.dataset_select.value))
+        target = str(self.target_column.value or "").strip()
+
+        current = []
+        for column in self._selected_feature_columns():
+            if column not in columns:
+                continue
+            if target and column == target:
+                continue
+            current.append(column)
+
+        self._set_feature_columns_value(current)
+        self._refresh_feature_match_preview()
+
+    def _numeric_feature_columns(self) -> List[str]:
+        dataset_id = self.dataset_select.value
+        columns = self._dataset_columns(dataset_id)
+
+        target = str(self.target_column.value or "").strip()
+        excluded = {
+            "",
+            "Use Index",
+            target,
+            "al_label",
+            "label",
+            "labels",
+            "target",
+            "target_label",
+            "class",
+            "class_label",
+            "prediction",
+            "predicted_label",
+            "prediction_confidence",
+            "entropy",
+            "least_confidence",
+            "margin",
+            "margin_uncertainty",
+            "selection_rank",
+            "rank",
+        }
+
+        try:
+            id_column = actions._resolve_record_id_column(self.context, dataset_id)
+            if id_column:
+                excluded.add(str(id_column))
+        except Exception:
+            pass
+
+        candidate_columns = [
+            column
+            for column in columns
+            if column not in excluded
+        ]
+
+        if not candidate_columns:
+            return []
+
+        try:
+            try:
+                df = self.context.datasets.get_df(dataset_id, columns=candidate_columns)
+            except TypeError:
+                df = self.context.datasets.get_df(dataset_id)
+
+            numeric = [
+                str(column)
+                for column in candidate_columns
+                if column in df.columns and pd.api.types.is_numeric_dtype(df[column])
+            ]
+            return numeric
+        except Exception:
+            return candidate_columns
+
+    def _refresh_training_contract_summary(self) -> None:
+        if not hasattr(self, "training_contract_summary"):
+            return
+
+        features = self._selected_feature_columns()
+        validation_dataset_id = self.validation_dataset_select.value or ""
+        test_dataset_id = self.test_dataset_select.value or ""
+
+        validation_text = (
+            f"dataset `{validation_dataset_id}`"
+            if validation_dataset_id
+            else f"random split `{float(self.validation_fraction.value or 0.0):.3g}`"
+        )
+        test_text = (
+            f"dataset `{test_dataset_id}`"
+            if test_dataset_id
+            else f"random split `{float(self.test_fraction.value or 0.0):.3g}`"
+        )
+
+        feature_preview = ", ".join(f"`{column}`" for column in features[:10])
+        if len(features) > 10:
+            feature_preview += f", … +{len(features) - 10} more"
+        if not feature_preview:
+            feature_preview = "_none selected_"
+
+        self.training_contract_summary.object = (
+            "### Training contract\n\n"
+            f"- Dataset: `{self.dataset_select.value or ''}`\n"
+            f"- Recipe: `{self.recipe_select.value or ''}`\n"
+            f"- Target/label column: `{self.target_column.value or 'al_label'}`\n"
+            f"- Input features ({len(features)}): {feature_preview}\n"
+            f"- Validation: {validation_text}\n"
+            f"- Test: {test_text}\n\n"
+            "_The Train tab only shows model/hyperparameter controls. Dataset, "
+            "target, features, labels, validation, and test settings come from "
+            "the Start tab._"
+        )
+
     def _guess_label_column(self, columns: List[str]) -> str:
         lowered = {str(col).lower(): str(col) for col in columns}
 
@@ -2744,22 +4946,28 @@ class ActiveLearningPanel:
     def _recipe_params(self) -> Dict[str, Any]:
         params: Dict[str, Any] = {}
         spec = self._selected_recipe_spec()
-        properties = (getattr(spec, "params_schema", {}) or {}).get("properties", {}) if spec else {}
+        properties = (
+            (getattr(spec, "params_schema", {}) or {}).get("properties", {})
+            if spec
+            else {}
+        )
 
         for name, widget in self.recipe_param_widgets.items():
             value = widget.value
             schema = properties.get(name, {}) if isinstance(properties, Mapping) else {}
             kind = str(schema.get("type", "string"))
+
             if kind in {"array", "object"} and isinstance(value, str):
                 try:
                     value = json.loads(value)
                 except Exception:
                     pass
+
             params[name] = value
 
-        params.update(self._protocol_params())
-        params["recipe_id"] = self.recipe_select.value
-        params["dataset_id"] = self.dataset_select.value
+        # Start tab is canonical for AL recipe contract settings.
+        params.update(self._start_owned_recipe_params())
+
         return params
 
     # ------------------------------------------------------------------
@@ -2797,7 +5005,6 @@ class ActiveLearningPanel:
         if self._disposed:
             return
 
-        # While a job is running, _set_running owns the disabled state.
         if self._job_running:
             return
 
@@ -2806,12 +5013,12 @@ class ActiveLearningPanel:
         labelled = self._labelled_count(session)
         trained = self._session_has_been_trained(session)
 
-        # Train requires at least one labelled / verified point.
         can_train = has_session and labelled >= 1
         try:
             self.train_button.disabled = not can_train
         except Exception:
             pass
+
         if not has_session:
             self.train_hint.object = "_Start or select a session first._"
         elif labelled < 1:
@@ -2819,9 +5026,6 @@ class ActiveLearningPanel:
         else:
             self.train_hint.object = ""
 
-        # Query requires a trained model and predictions over the original pool
-        # dataset. Predictions over the derived AL training dataset are not
-        # valid query inputs.
         selected_prediction = str(self.predictions_select.value or "").strip()
         prediction_ok = bool(
             selected_prediction
@@ -2854,6 +5058,31 @@ class ActiveLearningPanel:
             )
         else:
             self.query_hint.object = ""
+
+        auto_label_column = str(self.auto_label_source_column.value or "").strip()
+        can_auto_label = has_session and bool(auto_label_column)
+
+        try:
+            selection = getattr(self.context, "selection", None)
+            active_set = selection.get_active_set() if selection is not None else None
+            if active_set is None:
+                can_auto_label = False
+        except Exception:
+            can_auto_label = False
+
+        try:
+            self.auto_label_button.disabled = not can_auto_label
+        except Exception:
+            pass
+
+        if not has_session:
+            self.auto_label_hint.object = "_Start or select a session before auto-labelling._"
+        elif not auto_label_column:
+            self.auto_label_hint.object = "_Choose an auto-label source column._"
+        elif not can_auto_label:
+            self.auto_label_hint.object = "_Create or select a query batch before auto-labelling._"
+        else:
+            self.auto_label_hint.object = ""
 
     def _require_dataset(self) -> str:
         dataset_id = str(self.dataset_select.value or "").strip()
@@ -2910,6 +5139,63 @@ class ActiveLearningPanel:
 
         return artifact_id
 
+    def _set_status(self, message: str, alert_type: str = "info") -> None:
+        """Update the status alert shown at the top of the AL panel."""
+        try:
+            self.status.object = str(message or "")
+            self.status.alert_type = str(alert_type or "info")
+            self.status.visible = bool(message)
+        except Exception:
+            print(f"[ActiveLearningPanel STATUS] {alert_type}: {message}", flush=True)
+
+    def _set_error(self, message: str, error: Any = None) -> None:
+        """Display and log an error without letting the error handler crash.
+
+        Many panel callbacks call this from except blocks, so this method must
+        be defensive. If _set_status/status itself is temporarily broken, fall
+        back to printing the error rather than raising another exception.
+        """
+        details = ""
+
+        if error is not None:
+            try:
+                details = str(error).strip()
+            except Exception:
+                details = repr(error)
+
+        display_message = str(message or "Error").strip()
+        if details:
+            display_message = f"{display_message}: {details}"
+
+        try:
+            tb = traceback.format_exc()
+            if tb and "NoneType: None" not in tb:
+                print(
+                    f"[ActiveLearningPanel ERROR] {display_message}\n{tb}",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"[ActiveLearningPanel ERROR] {display_message}",
+                    flush=True,
+                )
+        except Exception:
+            pass
+
+        try:
+            self._set_status(display_message, "danger")
+            return
+        except Exception:
+            pass
+
+        # Last-resort UI fallback if _set_status has also been removed/broken.
+        try:
+            self.status.object = display_message
+            self.status.alert_type = "danger"
+            self.status.visible = True
+        except Exception:
+            print(display_message, flush=True)
+
     def _set_running(self, running: bool) -> None:
         self._job_running = running
         self.train_button.disabled = running
@@ -2917,27 +5203,27 @@ class ActiveLearningPanel:
         self.query_button.disabled = running
         self.label_button.disabled = running
         self.unsure_button.disabled = running
+        self.auto_label_button.disabled = running
+
+        for button in (
+            getattr(self, "analytics_refresh_button", None),
+            getattr(self, "analytics_first_button", None),
+            getattr(self, "analytics_prev_button", None),
+            getattr(self, "analytics_next_button", None),
+            getattr(self, "analytics_last_button", None),
+            getattr(self, "feature_select_numeric_button", None),
+            getattr(self, "feature_clear_button", None),
+        ):
+            if button is None:
+                continue
+            try:
+                button.disabled = running
+            except Exception:
+                pass
+
         if not running:
-            # Re-apply workflow gating now that the job has finished.
             self._update_action_gating()
-
-    def _set_status(self, message: str, alert_type: str = "info") -> None:
-        self.status.object = message
-        self.status.alert_type = alert_type
-        self.status.visible = True
-
-    def _set_error(self, title: str, error: Any) -> None:
-        detail = str(error)
-        self.status.object = f"**{title}**\n\n{detail}"
-        self.status.alert_type = "danger"
-        self.status.visible = True
-        try:
-            print(
-                f"[ActiveLearningPanel] {title}: {detail}\n{traceback.format_exc()}",
-                flush=True,
-            )
-        except Exception:
-            pass
+            self._update_analytics_nav_buttons()
 
 
 def _make_table():

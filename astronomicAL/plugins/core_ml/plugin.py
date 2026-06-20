@@ -275,17 +275,27 @@ def create_ml_predict_panel(context, **kwargs):
 
 
 def create_ml_recipe_registry(context=None):
-
     from . import recipe_registry as registry_module
     from . import recipes as recipes_module
+    from . import sklearn_harness
+    from . import sklearn_recipes
+
+    # Register sklearn harness selection with recipe_registry.make_harness().
+    # Idempotent in sklearn_harness.register().
+    sklearn_harness.register()
 
     registry = registry_module.MLRecipeRegistry()
+
     registry.register(recipes_module.ExternalPythonRecipe)
     registry.register(recipes_module.CIFARResNetRecipe)
     registry.register(recipes_module.TimmImageClassifierRecipe)
     registry.register(recipes_module.WideResNetCIFARRecipe)
     registry.register(recipes_module.TimmImageRegressorRecipe)
     registry.register(recipes_module.TabularMLPRegressorRecipe)
+
+    registry.register(sklearn_recipes.SklearnTabularClassifierRecipe)
+    registry.register(sklearn_recipes.SklearnTabularRegressorRecipe)
+
     return registry
 
 

@@ -773,17 +773,85 @@ class TabularMLPRegressorRecipe(ManagedMLRecipe):
 
     params_schema = {
         "type": "object",
+        "required": ["feature_columns"],
         "properties": {
-            "hidden_layers": {"type": "array", "items": {"type": "integer"},
-                              "default": [256, 256, 128]},
-            "dropout": {"type": "number", "default": 0.1, "minimum": 0.0},
-            "n_outputs": {"type": "integer", "default": 1, "minimum": 1},
-            "loss": {"type": "string", "enum": ["mse", "mae", "huber"], "default": "mse"},
-            "epochs": {"type": "integer", "default": 200, "minimum": 1},
-            "batch_size": {"type": "integer", "default": 256, "minimum": 1},
-            "num_workers": {"type": "integer", "default": 0, "minimum": 0},
-            "learning_rate": {"type": "number", "default": 1e-3},
-            "weight_decay": {"type": "number", "default": 1e-5},
+            "record_id_column": {
+                "type": "string",
+                "title": "Record ID column",
+                "description": "Stable row/object identifier column.",
+                "default": "",
+                "x-widget": "column_select",
+            },
+            "target_column": {
+                "type": "string",
+                "title": "Target / label column",
+                "description": "Continuous regression target column.",
+                "default": "",
+                "x-widget": "column_select",
+            },
+            "feature_columns": {
+                "type": "array",
+                "items": {"type": "string"},
+                "title": "Input feature columns",
+                "description": (
+                    "Numeric dataset columns used as model inputs. "
+                    "For this torch MLP recipe, selected values must be "
+                    "convertible to float."
+                ),
+                "default": [],
+                "x-widget": "column_multichoice",
+            },
+            "auto_feature_columns": {
+                "type": "boolean",
+                "title": "Auto-select feature columns if none are chosen",
+                "description": (
+                    "Fallback only. Explicit feature selection is recommended."
+                ),
+                "default": False,
+            },
+            "hidden_layers": {
+                "type": "array",
+                "items": {"type": "integer"},
+                "default": [256, 256, 128],
+            },
+            "dropout": {
+                "type": "number",
+                "default": 0.1,
+                "minimum": 0.0,
+            },
+            "n_outputs": {
+                "type": "integer",
+                "default": 1,
+                "minimum": 1,
+            },
+            "loss": {
+                "type": "string",
+                "enum": ["mse", "mae", "huber"],
+                "default": "mse",
+            },
+            "epochs": {
+                "type": "integer",
+                "default": 200,
+                "minimum": 1,
+            },
+            "batch_size": {
+                "type": "integer",
+                "default": 256,
+                "minimum": 1,
+            },
+            "num_workers": {
+                "type": "integer",
+                "default": 0,
+                "minimum": 0,
+            },
+            "learning_rate": {
+                "type": "number",
+                "default": 1e-3,
+            },
+            "weight_decay": {
+                "type": "number",
+                "default": 1e-5,
+            },
         },
     }
 

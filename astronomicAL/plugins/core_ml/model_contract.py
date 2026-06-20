@@ -72,6 +72,49 @@ def json_safe(value: Any) -> Any:
         pass
     return str(value)
 
+def safe_record_id(value: Any) -> str:
+    """Return a stable string record id without turning large ints into floats.
+
+    Important for Euclid/object_id style identifiers:
+    large int64 ids must remain exact strings. If a float already reached this
+    function, precision may already be lost, so do not invent integer precision
+    for very large floats.
+    """
+    if value is None:
+        return ""
+
+    if isinstance(value, str):
+        return value.strip()
+
+    if isinstance(value, np.integer):
+        return str(int(value))
+
+    if isinstance(value, int):
+        return str(value)
+
+    if isinstance(value, np.floating):
+        value = float(value)
+
+    if isinstance(value, float):
+        if math.isnan(value) or math.isinf(value):
+            return ""
+
+        # Only stringify small integral floats as ints. Large floats may be
+        # rounded scientific-notation versions of int64 ids, so keep their
+        # float representation for fallback matching rather than pretending
+        # they are exact.
+        if value.is_integer() and abs(value) <= 9_007_199_254_740_991:
+            return str(int(value))
+
+        return repr(value)
+
+    if isinstance(value, np.generic):
+        try:
+            return safe_record_id(value.item())
+        except Exception:
+            pass
+
+    return str(value).strip()
 
 def _as_mapping(value: Any) -> Dict[str, Any]:
     if isinstance(value, Mapping):
@@ -486,8 +529,12 @@ def build_predictions_payload(
     params: Optional[Mapping[str, Any]] = None,
     prediction_scope: str = "inference",
 ) -> Dict[str, Any]:
-    """Build a visualisation-ready ml.predictions payload."""
+    """Build a visualisation-ready ml.predictions payload.
 
+    Row identity is taken from the explicit row_ids iterable first. Prediction
+    records may have been built through pandas iterrows/JSON paths that can
+    coerce large int64 identifiers into float/scientific notation.
+    """
     contract = ensure_model_contract(
         context=context,
         model_artifact_id=model_artifact_id,
@@ -495,10 +542,22 @@ def build_predictions_payload(
         persist=True,
     )
     output_schema = dict(contract.get("output_schema") or {})
+
     records_list = [dict(row) for row in records]
-    row_ids_list = [str(row_id) for row_id in row_ids]
+    row_ids_list = [safe_record_id(row_id) for row_id in row_ids]
+
+    # Attach exact row ids back onto the records before payload/table creation.
+    # This keeps ml.predictions.records and prediction_table.rows aligned.
+    for index, row_id in enumerate(row_ids_list):
+        if index >= len(records_list):
+            break
+        if row_id:
+            records_list[index]["row_id"] = row_id
+            records_list[index]["record_id"] = row_id
+
     table_rows = prediction_table_rows(
         records=records_list,
+        row_ids=row_ids_list,
         output_schema=output_schema,
         model_artifact_id=model_artifact_id,
         prediction_run_id=run_id,
@@ -545,51 +604,99 @@ def prediction_table_rows(
     output_schema: Mapping[str, Any],
     model_artifact_id: str,
     prediction_run_id: str,
+    row_ids: Optional[Iterable[Any]] = None,
 ) -> List[Dict[str, Any]]:
-    """Flatten per-row prediction records into dataset/plot-friendly columns."""
+    """Flatten per-row prediction records into dataset/plot-friendly columns.
 
-    classes = [str(c) for c in output_schema.get("classes") or output_schema.get("class_order") or []]
+    Prefer explicit row_ids over row_id values embedded in records, because the
+    embedded record can pass through pandas/JSON paths that coerce large int64
+    ids into floats.
+    """
+    classes = [
+        str(c)
+        for c in output_schema.get("classes")
+        or output_schema.get("class_order")
+        or []
+    ]
     probability_columns = dict(output_schema.get("probability_columns") or {})
+
+    records_list = [dict(record) for record in records]
+    explicit_row_ids = [safe_record_id(row_id) for row_id in row_ids or []]
+
     rows: List[Dict[str, Any]] = []
-    for raw in records:
+
+    for index, raw in enumerate(records_list):
         record = dict(raw)
-        row_id = record.get("row_id", record.get("record_id"))
-        prediction = record.get("prediction", record.get("y_pred", record.get("predicted_label")))
+
+        if index < len(explicit_row_ids) and explicit_row_ids[index]:
+            row_id = explicit_row_ids[index]
+        else:
+            row_id = safe_record_id(record.get("row_id", record.get("record_id")))
+
+        prediction = record.get(
+            "prediction",
+            record.get("y_pred", record.get("predicted_label")),
+        )
+
         row: Dict[str, Any] = {
-            "record_id": None if row_id is None else str(row_id),
+            "record_id": row_id or None,
             "predicted_label": json_safe(prediction),
             "prediction": json_safe(prediction),
             "prediction_run_id": prediction_run_id,
             "model_artifact_id": model_artifact_id,
         }
+
         if "y_true" in record:
             row["true_label"] = json_safe(record.get("y_true"))
             row["is_correct"] = bool(str(record.get("y_true")) == str(prediction))
+
         if "confidence" in record:
             row["prediction_confidence"] = json_safe(record.get("confidence"))
+
         if "max_probability" in record:
             row["prediction_confidence"] = json_safe(record.get("max_probability"))
-        for key in ("least_confidence", "margin", "margin_uncertainty", "entropy", "active_learning_score"):
+
+        for key in (
+            "least_confidence",
+            "margin",
+            "margin_uncertainty",
+            "entropy",
+            "active_learning_score",
+        ):
             if key in record:
                 row[key] = json_safe(record.get(key))
+
         by_class = record.get("probabilities_by_class")
         if isinstance(by_class, Mapping):
             for class_name, value in by_class.items():
-                column = probability_columns.get(str(class_name)) or f"prob_{_safe_column_token(str(class_name))}"
+                column = (
+                    probability_columns.get(str(class_name))
+                    or f"prob_{_safe_column_token(str(class_name))}"
+                )
                 row[column] = json_safe(value)
+
         probabilities = record.get("probabilities")
         if probabilities is not None and not isinstance(by_class, Mapping):
             probs = list(probabilities)
             for idx, value in enumerate(probs):
                 class_name = classes[idx] if idx < len(classes) else str(idx)
-                column = probability_columns.get(str(class_name)) or f"prob_{_safe_column_token(str(class_name))}"
+                column = (
+                    probability_columns.get(str(class_name))
+                    or f"prob_{_safe_column_token(str(class_name))}"
+                )
                 row[column] = json_safe(value)
+
         for class_name in classes:
             legacy_key = f"proba_{class_name}"
             if legacy_key in record:
-                column = probability_columns.get(str(class_name)) or f"prob_{_safe_column_token(str(class_name))}"
+                column = (
+                    probability_columns.get(str(class_name))
+                    or f"prob_{_safe_column_token(str(class_name))}"
+                )
                 row[column] = json_safe(record[legacy_key])
+
         rows.append(json_safe(row))
+
     return rows
 
 

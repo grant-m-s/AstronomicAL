@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-import importlib.util
-import sys
-from pathlib import Path
 
 from astronomicAL.platform.plugins import PluginManifest
 
@@ -17,21 +14,6 @@ manifest = PluginManifest(
         "retraining through core.ml recipes when available."
     ),
 
-    # Important:
-    # Do NOT use requires_plugins=["core.ml"] here.
-    #
-    # The current plugin manager validates required plugin ids at enable time.
-    # If this plugin is enabled before core.ml in the discovery loop, the
-    # manager rejects it before register() is ever called.
-    #
-    # Active Learning can still be useful without core.ml already enabled:
-    # - it can create random initial selections,
-    # - manage AL sessions,
-    # - track verified/unsure labels,
-    # - rank existing ml.predictions artifacts,
-    # - register query strategies.
-    #
-    # Only the "train from scratch" path requires core.ml at runtime.
     requires_plugins=[],
 
     requires=[],
@@ -52,27 +34,10 @@ manifest = PluginManifest(
     ],
 )
 
-
-def _load_sibling_module(stem: str):
-    module_name = f"{__name__}.{stem}"
-    if module_name in sys.modules:
-        return sys.modules[module_name]
-
-    path = Path(__file__).with_name(f"{stem}.py")
-    spec = importlib.util.spec_from_file_location(module_name, path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"Could not load sibling module {stem!r} from {path}")
-
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
 def register(api) -> None:
-    actions = _load_sibling_module("actions")
-    panel_module = _load_sibling_module("panel")
-    strategies = _load_sibling_module("strategies")
+    from . import actions
+    from . import panel as panel_module
+    from . import strategies as strategies
 
     api.register_service(
         key="query_strategy_registry",
@@ -319,8 +284,8 @@ def register(api) -> None:
         category="Active Learning",
         icon="psychology",
         tags=["active-learning", "ml", "selection", "annotation"],
-        required_mappings=[],
-        optional_mappings=["record_id", "target_label", "image.path", "image.uri"],
+        required_mappings=["record_id"],
+        optional_mappings=["target_label", "image.path", "image.uri"],
 
         # This is intentionally descriptive only. The AL panel should still
         # load if core.ml has not been enabled yet.
@@ -349,7 +314,9 @@ def register(api) -> None:
 
 
 def create_active_learning_panel(context, **kwargs):
-    panel_module = _load_sibling_module("panel")
+    
+    from . import panel as panel_module
+
     controller = panel_module.ActiveLearningPanel(
         context=context,
         restore_state=kwargs.get("restore_state"),

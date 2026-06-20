@@ -101,7 +101,17 @@ def _build_data_binding(
     spec: Any,
     params: Mapping[str, Any],
 ):
-    """Resolve dataset columns for a recipe run."""
+    """Resolve dataset columns for a managed recipe run.
+
+    The important rule is that tabular feature columns are now explicit first:
+    feature_columns/input_columns/features/x_columns. Auto inference is only a
+    fallback when auto_feature_columns=True.
+    """
+    from .feature_columns import (
+        default_feature_columns,
+        feature_columns_from_params,
+        parse_column_list,
+    )
 
     inferred = _registry_mod.infer_column_bindings(
         context,
@@ -109,21 +119,22 @@ def _build_data_binding(
         spec,
         params=params,
     )
-
     columns = _registry_mod.list_dataset_columns(context, dataset_id)
 
     record_id_column = (
         params.get("record_id_column")
+        or params.get("id_column")
         or inferred.get("record_id_column")
         or inferred.get("record_id")
     )
-
     if not record_id_column and "id" in columns:
         record_id_column = "id"
 
     target_column = (
         params.get("target_column")
         or params.get("label_column")
+        or params.get("target")
+        or params.get("label")
         or inferred.get("target_column")
         or inferred.get("target_label")
     )
@@ -131,24 +142,55 @@ def _build_data_binding(
     image_column = (
         params.get("image_column")
         or params.get("image_path_column")
+        or params.get("image_uri_column")
         or inferred.get("image_column")
         or inferred.get("image_path")
         or inferred.get("image_uri")
     )
 
-    input_columns = list(
-        params.get("input_columns")
-        or params.get("feature_columns")
-        or inferred.get("input_columns")
-        or []
-    )
+    input_columns = feature_columns_from_params(params)
 
-    if image_column and image_column not in input_columns:
-        input_columns.append(image_column)
+    if not input_columns:
+        input_columns = (
+            parse_column_list(params.get("input_columns"))
+            or parse_column_list(inferred.get("input_columns"))
+            or parse_column_list(inferred.get("feature_columns"))
+        )
 
     record_id_column = str(record_id_column) if record_id_column else ""
     target_column = str(target_column) if target_column else None
     image_column = str(image_column) if image_column else None
+
+    recipe_cls = getattr(spec, "recipe_cls", None)
+    execution_mode = str(
+        getattr(recipe_cls, "execution_mode", None)
+        or getattr(spec, "execution_mode", "freeform")
+        or "freeform"
+    )
+    task = str(getattr(spec, "task", "") or "").lower()
+    modality = str(getattr(spec, "modality", "") or "").lower()
+
+    def _truthy(value: Any) -> bool:
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+        return bool(value)
+
+    if (
+        modality == "tabular"
+        and not input_columns
+        and _truthy(params.get("auto_feature_columns"))
+    ):
+        input_columns = default_feature_columns(
+            context,
+            dataset_id,
+            record_id_column=record_id_column,
+            target_column=target_column,
+            image_column=image_column,
+            params=params,
+        )
+
+    if image_column and image_column not in input_columns:
+        input_columns.append(image_column)
 
     binding = _registry_mod.DataBinding(
         record_id_column=record_id_column,
@@ -157,17 +199,11 @@ def _build_data_binding(
         image_column=image_column,
     )
 
-
-    execution_mode = str(
-        getattr(spec, "execution_mode", "freeform") or "freeform"
-    )
-    task = str(getattr(spec, "task", "") or "").lower()
-    modality = str(getattr(spec, "modality", "") or "").lower()
-
     if execution_mode == "managed":
         if not binding.record_id_column:
             raise ValueError(
-                "Managed recipes require a record-id column."
+                "Managed recipes require a record-id column. "
+                "Set `record_id_column`, map `record_id`, or add an id column."
             )
 
         if task == "classification" and not binding.target_column:
@@ -177,6 +213,13 @@ def _build_data_binding(
                 "target/label column to the dataset."
             )
 
+        if task == "regression" and not binding.target_column:
+            raise ValueError(
+                "Managed regression recipes require a target column. "
+                "Set `target_column`, map `target_label`, or add a matching "
+                "target column to the dataset."
+            )
+
         if modality == "image" and not binding.image_column:
             raise ValueError(
                 "Managed image recipes require an image column. "
@@ -184,8 +227,14 @@ def _build_data_binding(
                 "matching image path column to the dataset."
             )
 
-    missing_columns = []
+        if modality == "tabular" and not binding.input_columns:
+            raise ValueError(
+                "Managed tabular recipes require input feature columns. "
+                "Choose `feature_columns` in the recipe launcher or AL panel, "
+                "or enable `auto_feature_columns`."
+            )
 
+    missing_columns = []
     for column in (
         binding.record_id_column,
         binding.target_column,

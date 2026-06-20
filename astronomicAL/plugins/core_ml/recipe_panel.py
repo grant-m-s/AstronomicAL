@@ -550,6 +550,52 @@ class MLRecipeLauncherPanel:
 
         _show("protocol_selection_metric", True)
 
+    def _refresh_recipe_column_widgets(self) -> None:
+        columns = list(_registry_mod.list_dataset_columns(self.context, self.dataset.value))
+        column_options = [""] + columns
+
+        for name, widget in list(self.param_widgets.items()):
+            lower_name = str(name).lower()
+
+            if isinstance(widget, pn.widgets.MultiChoice) and lower_name in {
+                "feature_columns",
+                "input_columns",
+                "features",
+                "x_columns",
+            }:
+                current = [
+                    str(value)
+                    for value in list(widget.value or [])
+                    if str(value) in columns
+                ]
+                widget.options = columns
+                widget.value = current
+                continue
+
+            if isinstance(widget, pn.widgets.Select):
+                looks_like_column = (
+                    lower_name.endswith("_column")
+                    or lower_name
+                    in {
+                        "target",
+                        "label",
+                        "target_column",
+                        "label_column",
+                        "record_id_column",
+                        "id_column",
+                        "image_column",
+                        "image_path_column",
+                        "image_uri_column",
+                        "group_column",
+                        "split_column",
+                    }
+                )
+                if looks_like_column:
+                    current = widget.value
+                    widget.options = column_options
+                    widget.value = current if current in column_options else ""
+
+
     def _refresh_protocol_columns(self) -> None:
         if not self.protocol_widgets:
             return
@@ -586,6 +632,7 @@ class MLRecipeLauncherPanel:
     # ------------------------------------------------------------------
 
     def _on_dataset_change(self, *_: Any) -> None:
+        self._refresh_recipe_column_widgets()
         self._refresh_protocol_columns()
         self._apply_inferred_defaults()
 
@@ -633,6 +680,11 @@ class MLRecipeLauncherPanel:
                 "Inferred recipe inputs from the selected dataset: "
                 + ", ".join(applied)
             )
+
+    def _column_list_from_value(self, value: Any) -> List[str]:
+        from .feature_columns import parse_column_list
+
+        return parse_column_list(value)
 
     def _widget_for_schema(self, name: str, schema: Mapping[str, Any]):
         kind = str(schema.get("type", "string"))
