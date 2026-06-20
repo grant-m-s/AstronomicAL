@@ -220,8 +220,10 @@ class BaseVisualisationPanel(param.Parameterized):
             [
                 "x",
                 "y",
-                "label_filter",
                 "color_by",
+                "color_mode",
+                "color_cmap",
+                "label_filter",
                 "render_mode",
                 "datashade_threshold",
                 "interactive_sample_limit",
@@ -244,6 +246,9 @@ class BaseVisualisationPanel(param.Parameterized):
                 str(getattr(self.state, "x", None)),
                 str(getattr(self.state, "y", None)),
                 str(getattr(self.state, "color_by", None)),
+                str(getattr(self.state, "color_mode", None)),
+                str(getattr(self.state, "color_cmap", None)),
+                tuple(getattr(self.state, "label_filter", []) or []),
                 bool(getattr(self.state, "log_x", False)),
                 bool(getattr(self.state, "log_y", False)),
             )
@@ -914,6 +919,8 @@ class BaseVisualisationPanel(param.Parameterized):
             getattr(self.state, "record_id_col", None),
             getattr(self.state, "label_col", None),
             getattr(self.state, "color_by", None),
+            getattr(self.state, "color_mode", None),
+            getattr(self.state, "color_cmap", None),
             getattr(self.state, "log_x", None),
             getattr(self.state, "log_y", None),
             tuple(getattr(self.state, "label_filter", []) or []),
@@ -962,7 +969,15 @@ class BaseVisualisationPanel(param.Parameterized):
         reason_str = str(reason or "unknown")
 
         if delay_ms is None:
-            if reason_str in {"state.x", "state.y", "state.color_by", "state.label_col"}:
+            if reason_str in {
+                "state.x",
+                "state.y",
+                "state.color_by",
+                "state.color_mode",
+                "state.color_cmap",
+                "state.label_filter",
+                "state.label_col",
+            }:
                 delay_ms = 300
             elif reason_str.startswith("selection."):
                 delay_ms = 150
@@ -3081,16 +3096,19 @@ class BaseVisualisationPanel(param.Parameterized):
         self._schedule_refresh(reason=f"{topic}.visualisation", delay_ms=100)
 
     def _uses_label_rendering(self) -> bool:
-        color_by = str(getattr(self.state, "color_by", "") or "").strip().lower()
-        label_filter = getattr(self.state, "label_filter", None) or []
-        label_col = getattr(self.state, "label_col", None)
+        colour_col = None
+        try:
+            colour_col = self.state.colour_column()
+        except Exception:
+            colour_col = getattr(self.state, "color_by", None)
 
-        if color_by == "labels":
+        label_filter = getattr(self.state, "label_filter", None) or []
+
+        if colour_col is not None and str(colour_col) not in {"", "None", "No Labels"}:
             return True
 
-        if label_col and label_col != "No Labels":
-            if label_filter and "All" not in label_filter:
-                return True
+        if label_filter and "All" not in label_filter:
+            return True
 
         return False
 
@@ -3187,6 +3205,14 @@ class BaseVisualisationPanel(param.Parameterized):
             str(getattr(self.state, "y", "") or ""),
             str(getattr(self.state, "record_id_col", "") or ""),
         }
+
+        try:
+            colour_col = self.state.colour_column()
+        except Exception:
+            colour_col = getattr(self.state, "color_by", None)
+
+        if colour_col is not None:
+            used_columns.add(str(colour_col or ""))
 
         if self._uses_label_rendering():
             used_columns.add(str(getattr(self.state, "label_col", "") or ""))
@@ -3669,46 +3695,51 @@ class BaseVisualisationPanel(param.Parameterized):
 
     def _settings_controls(self):
         return pn.Column(
-        pn.Row(
-            self.status_pane,
-            settings_checkbox(self.state.param.log_x, name="Log X"),
-            settings_checkbox(self.state.param.log_y, name="Log Y"),
-        ),
-        pn.Spacer(height=1),
-        pn.Row(
-            settings_select(self.state.param.color_by, name="Colour", width=130),
-            settings_multichoice(self.state.param.label_filter, name="Labels", width=210),
-        ),
-        pn.Spacer(height=1),
-        pn.Row(
-            settings_select(self.state.param.render_mode, name="Render", width=130),
-        ),
-        pn.Spacer(height=2),
-        pn.Row(
-            settings_int_input(self.state.param.datashade_threshold, name="Shade threshold", width=145),
-            settings_int_input(self.state.param.interactive_sample_limit, name="Sample limit", width=130),
-            settings_int_input(self.state.param.max_selection_ids, name="Max selected IDs", width=145),
-        ),
-        pn.Spacer(height=2),
-        pn.Row(
-            settings_float_slider(self.state.param.point_size, name="Size", width=175),
-            settings_float_slider(self.state.param.point_alpha, name="Alpha", width=175),
-        ),
-        sizing_mode="stretch_width",
-        height_policy="fit",
-        margin=(5, 0, 0, 0),
-        styles={
-            "overflow": "visible",
-            "align-content": "flex-start",
-            "align-items": "flex-start",
-            "gap": "2px 6px",
-            "padding": "4px 6px 4px 6px",
-            "border-top": "1px solid #ddd",
-            "border-bottom": "1px solid #eee",
-            "background": "#fafafa",
-            "box-sizing": "border-box",
-        },
-    )
+            pn.Row(
+                self.status_pane,
+                settings_checkbox(self.state.param.log_x, name="Log X"),
+                settings_checkbox(self.state.param.log_y, name="Log Y"),
+            ),
+            pn.Spacer(height=1),
+            pn.Row(
+                settings_select(self.state.param.color_by, name="Colour by", width=230),
+                settings_select(self.state.param.color_mode, name="Mode", width=130),
+                settings_select(self.state.param.color_cmap, name="Cmap", width=130),
+            ),
+            pn.Spacer(height=1),
+            pn.Row(
+                settings_multichoice(self.state.param.label_filter, name="Classes", width=360),
+            ),
+            pn.Spacer(height=1),
+            pn.Row(
+                settings_select(self.state.param.render_mode, name="Render", width=130),
+            ),
+            pn.Spacer(height=2),
+            pn.Row(
+                settings_int_input(self.state.param.datashade_threshold, name="Shade threshold", width=145),
+                settings_int_input(self.state.param.interactive_sample_limit, name="Sample limit", width=130),
+                settings_int_input(self.state.param.max_selection_ids, name="Max selected IDs", width=145),
+            ),
+            pn.Spacer(height=2),
+            pn.Row(
+                settings_float_slider(self.state.param.point_size, name="Size", width=175),
+                settings_float_slider(self.state.param.point_alpha, name="Alpha", width=175),
+            ),
+            sizing_mode="stretch_width",
+            height_policy="fit",
+            margin=(5, 0, 0, 0),
+            styles={
+                "overflow": "visible",
+                "align-content": "flex-start",
+                "align-items": "flex-start",
+                "gap": "2px 6px",
+                "padding": "4px 6px 4px 6px",
+                "border-top": "1px solid #ddd",
+                "border-bottom": "1px solid #eee",
+                "background": "#fafafa",
+                "box-sizing": "border-box",
+            },
+        )
 
     def _header(self):
         return pn.GridBox(

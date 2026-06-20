@@ -20,6 +20,11 @@ from bokeh.models import ColumnDataSource
 
 from .base import BaseVisualisationPanel
 from .constants import (
+    INTERNAL_COLOR_COLOUR,
+    INTERNAL_COLOR_DISPLAY,
+    INTERNAL_COLOR_RAW,
+    INTERNAL_COLOR_VALUE,
+    INTERNAL_LABEL_COLOUR,
     INTERNAL_LABEL_DISPLAY,
     INTERNAL_ROW_ID,
     INTERNAL_X,
@@ -41,6 +46,7 @@ from .constants import (
 )
 from .utils import (
     DENSITY_RENDERER,
+    HOVER_COLOR,
     HOVER_LABEL,
     HOVER_ROW_ID,
     PreparedFrame,
@@ -503,14 +509,25 @@ class ScatterPanel(BaseVisualisationPanel):
         forced_ids=(),
         limit=None,
     ):
+        try:
+            colour_col = self.state.colour_column()
+        except Exception:
+            colour_col = getattr(self.state, "color_by", None)
+
+        try:
+            colour_mode = self.state.effective_colour_mode()
+        except Exception:
+            colour_mode = getattr(self.state, "color_mode", None)
+
         return (
             id(self._frame_for_cache(data)),
             self._range_cache_key(x_range),
             self._range_cache_key(y_range),
             int(limit or 0),
             tuple(str(row_id) for row_id in forced_ids or ()),
-            str(getattr(self.state, "color_by", None)),
-            str(getattr(self.state, "label_col", None)),
+            str(colour_col),
+            str(colour_mode),
+            str(getattr(self.state, "color_cmap", "") or ""),
             tuple(getattr(self.state, "label_filter", None) or ()),
             "coverage-v2-no-row-order-cap",
             int(COVERAGE_SAMPLE_X_BINS),
@@ -693,8 +710,20 @@ class ScatterPanel(BaseVisualisationPanel):
         if HOVER_LABEL not in out.columns:
             if INTERNAL_LABEL_DISPLAY in out.columns:
                 out[HOVER_LABEL] = out[INTERNAL_LABEL_DISPLAY].astype(str)
+            elif INTERNAL_COLOR_DISPLAY in out.columns:
+                out[HOVER_LABEL] = out[INTERNAL_COLOR_DISPLAY].astype(str)
             else:
                 out[HOVER_LABEL] = "—"
+
+        if HOVER_COLOR not in out.columns:
+            if INTERNAL_COLOR_DISPLAY in out.columns:
+                out[HOVER_COLOR] = out[INTERNAL_COLOR_DISPLAY].astype(str)
+            elif INTERNAL_COLOR_VALUE in out.columns:
+                out[HOVER_COLOR] = out[INTERNAL_COLOR_VALUE]
+            elif INTERNAL_COLOR_RAW in out.columns:
+                out[HOVER_COLOR] = out[INTERNAL_COLOR_RAW].astype(str)
+            else:
+                out[HOVER_COLOR] = "—"
 
         # Avoid Bokeh/JavaScript integer precision warnings.
         id_columns = [
@@ -1916,12 +1945,24 @@ class ScatterPanel(BaseVisualisationPanel):
                 row_ids = list(getattr(active_set, "row_ids", []) or [])
                 selection_signature = (str(set_id), len(row_ids))
 
+        try:
+            colour_col = self.state.colour_column()
+        except Exception:
+            colour_col = getattr(self.state, "color_by", None)
+
+        try:
+            colour_mode = self.state.effective_colour_mode()
+        except Exception:
+            colour_mode = getattr(self.state, "color_mode", None)
+
         return (
             getattr(self, "_last_prepared_cache_key", None),
             bool(use_raster),
             str(getattr(self.state, "x", "") or ""),
             str(getattr(self.state, "y", "") or ""),
-            str(getattr(self.state, "color_by", "") or ""),
+            str(colour_col or ""),
+            str(colour_mode or ""),
+            str(getattr(self.state, "color_cmap", "") or ""),
             tuple(getattr(self.state, "label_filter", []) or []),
             bool(getattr(self.state, "log_x", False)),
             bool(getattr(self.state, "log_y", False)),
@@ -3128,14 +3169,29 @@ class ScatterPanel(BaseVisualisationPanel):
 
         return points_dmap
 
-
     def _scatter_points_element(self, data: PreparedFrame):
         frame = self._bokeh_safe_frame(data.frame)
 
-        vdims = [HOVER_ROW_ID, HOVER_LABEL, INTERNAL_ROW_ID]
+        try:
+            colour_col = self.state.colour_column()
+        except Exception:
+            colour_col = getattr(self.state, "color_by", None)
 
-        if INTERNAL_LABEL_DISPLAY in frame.columns:
-            vdims.append(INTERNAL_LABEL_DISPLAY)
+        try:
+            colour_mode = self.state.effective_colour_mode()
+        except Exception:
+            colour_mode = getattr(self.state, "color_mode", None)
+
+        vdims = [HOVER_ROW_ID, HOVER_LABEL, HOVER_COLOR, INTERNAL_ROW_ID]
+
+        for column in (
+            INTERNAL_LABEL_DISPLAY,
+            INTERNAL_COLOR_DISPLAY,
+            INTERNAL_COLOR_VALUE,
+            INTERNAL_COLOR_COLOUR,
+        ):
+            if column in frame.columns and column not in vdims:
+                vdims.append(column)
 
         if frame.empty:
             empty_frame = pd.DataFrame(
@@ -3144,12 +3200,14 @@ class ScatterPanel(BaseVisualisationPanel):
                     INTERNAL_Y: pd.Series(dtype="float64"),
                     HOVER_ROW_ID: pd.Series(dtype="object"),
                     HOVER_LABEL: pd.Series(dtype="object"),
+                    HOVER_COLOR: pd.Series(dtype="object"),
                     INTERNAL_ROW_ID: pd.Series(dtype="object"),
                 }
             )
 
-            if INTERNAL_LABEL_DISPLAY in vdims:
-                empty_frame[INTERNAL_LABEL_DISPLAY] = pd.Series(dtype="object")
+            for column in vdims:
+                if column not in empty_frame.columns:
+                    empty_frame[column] = pd.Series(dtype="object")
 
             points = hv.Points(
                 empty_frame,
@@ -3215,40 +3273,88 @@ class ScatterPanel(BaseVisualisationPanel):
         opts["hooks"] = list(opts.get("hooks", [])) + hooks
 
         if (
-            self.state.color_by == "Labels"
-            and INTERNAL_LABEL_DISPLAY in frame.columns
-            and frame[INTERNAL_LABEL_DISPLAY].nunique(dropna=True) <= 40
+            colour_col is not None
+            and colour_mode == "categorical"
+            and INTERNAL_COLOR_DISPLAY in frame.columns
+            and frame[INTERNAL_COLOR_DISPLAY].nunique(dropna=True) <= 40
         ):
             colour_key = _colour_key_from_frame(frame)
             if colour_key:
-                opts["color"] = INTERNAL_LABEL_DISPLAY
+                opts["color"] = INTERNAL_COLOR_DISPLAY
                 opts["cmap"] = colour_key
                 opts["legend_position"] = "right"
             else:
                 opts["color"] = "#1f77b4"
+
+        elif (
+            colour_col is not None
+            and colour_mode == "continuous"
+            and INTERNAL_COLOR_VALUE in frame.columns
+        ):
+            opts["color"] = INTERNAL_COLOR_VALUE
+            opts["cmap"] = str(getattr(self.state, "color_cmap", "Viridis") or "Viridis")
+            opts["colorbar"] = True
+            opts["clabel"] = str(colour_col)
+
         else:
             opts["color"] = "#1f77b4"
 
         return points.opts(**opts)
 
     def _scatter_rasterized(self, data: PreparedFrame):
-        frame = self._bokeh_safe_frame(data.frame[[INTERNAL_X, INTERNAL_Y]])
+        try:
+            colour_col = self.state.colour_column()
+        except Exception:
+            colour_col = getattr(self.state, "color_by", None)
 
-        points = hv.Points(
-            frame,
-            kdims=[INTERNAL_X, INTERNAL_Y],
+        try:
+            colour_mode = self.state.effective_colour_mode()
+        except Exception:
+            colour_mode = getattr(self.state, "color_mode", None)
+
+        use_continuous_colour = (
+            colour_col is not None
+            and colour_mode == "continuous"
+            and INTERNAL_COLOR_VALUE in data.frame.columns
         )
+
+        columns = [INTERNAL_X, INTERNAL_Y]
+        if use_continuous_colour:
+            columns.append(INTERNAL_COLOR_VALUE)
+
+        frame = self._bokeh_safe_frame(data.frame[columns])
+
+        if use_continuous_colour:
+            points = hv.Points(
+                frame,
+                kdims=[INTERNAL_X, INTERNAL_Y],
+                vdims=[INTERNAL_COLOR_VALUE],
+            )
+            aggregator = ds.mean(INTERNAL_COLOR_VALUE)
+            cmap = str(getattr(self.state, "color_cmap", "Viridis") or "Viridis")
+            colorbar_label = str(colour_col)
+            cnorm = "linear"
+        else:
+            points = hv.Points(
+                frame,
+                kdims=[INTERNAL_X, INTERNAL_Y],
+            )
+            aggregator = ds.count()
+            cmap = VISIBLE_DENSITY_CMAP
+            colorbar_label = "count"
+            cnorm = "eq_hist"
 
         range_opts = self._current_range_opts(include_y=True)
 
         raster = rasterize(
             points,
-            aggregator=ds.count(),
+            aggregator=aggregator,
             pixel_ratio=2,
         ).opts(
-            cmap=VISIBLE_DENSITY_CMAP,
+            cmap=cmap,
             colorbar=True,
-            cnorm="eq_hist",
+            clabel=colorbar_label,
+            cnorm=cnorm,
             clipping_colors={"NaN": "white"},
             bgcolor="white",
             responsive=True,
@@ -3719,14 +3825,17 @@ class ScatterPanel(BaseVisualisationPanel):
         self._schedule_post_selection_refresh()
 
 def _colour_key_from_frame(frame: pd.DataFrame) -> dict:
-    if INTERNAL_LABEL_DISPLAY not in frame.columns:
-        return {}
-
-    if "__label_colour__" not in frame.columns:
+    if INTERNAL_COLOR_DISPLAY in frame.columns and INTERNAL_COLOR_COLOUR in frame.columns:
+        label_col = INTERNAL_COLOR_DISPLAY
+        colour_col = INTERNAL_COLOR_COLOUR
+    elif INTERNAL_LABEL_DISPLAY in frame.columns and INTERNAL_LABEL_COLOUR in frame.columns:
+        label_col = INTERNAL_LABEL_DISPLAY
+        colour_col = INTERNAL_LABEL_COLOUR
+    else:
         return {}
 
     pairs = (
-        frame[[INTERNAL_LABEL_DISPLAY, "__label_colour__"]]
+        frame[[label_col, colour_col]]
         .dropna()
         .drop_duplicates()
         .itertuples(index=False, name=None)
