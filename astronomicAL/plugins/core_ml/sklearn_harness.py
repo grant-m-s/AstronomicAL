@@ -24,20 +24,6 @@ from .recipe_registry import (
 )
 
 
-def _load_sibling_module(stem: str):
-    module_name = f"astronomicAL.plugins.core_ml.{stem}"
-    if module_name in sys.modules:
-        return sys.modules[module_name]
-    path = Path(__file__).with_name(f"{stem}.py")
-    spec = importlib.util.spec_from_file_location(module_name, path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"Could not load sibling module {stem!r} from {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
 @dataclass
 class SklearnBatch:
     """The sklearn analogue of a torch DataLoader: a materialised partition."""

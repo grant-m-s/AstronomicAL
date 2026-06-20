@@ -28,20 +28,6 @@ except Exception:  # pragma: no cover
     replace_dataset_with_dataframe_parquet = None
 
 
-def _load_sibling_module(stem: str):
-    module_name = f"{__name__}.{stem}"
-    if module_name in sys.modules:
-        return sys.modules[module_name]
-    path = Path(__file__).with_name(f"{stem}.py")
-    spec = importlib.util.spec_from_file_location(module_name, path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"Could not load sibling module {stem!r} from {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
 _PROV_META = {
     "novel": ("New data", "the real test — never seen by the model", True),
     "test": ("Held-out test", "the real test — held out during training", True),
@@ -583,7 +569,8 @@ class MLPredictPanel:
         self.status.alert_type = "info"
         self.status.object = "Working…"
 
-        prediction = _load_sibling_module("prediction")
+        from . import prediction
+
         submit = getattr(getattr(self.context, "jobs", None), "submit", None)
         key = f"core.ml.predict:{dataset_id}:{model_id}"
         if callable(submit):

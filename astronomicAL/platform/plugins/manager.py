@@ -522,6 +522,153 @@ class PluginManager:
         return f"astronomical_local_plugin_{self._slug(stem)}_{digest}"
 
     @staticmethod
+    def _local_package_name(module_name: str) -> str:
+        """Return the synthetic package name for a local plugin directory.
+
+        Local directory plugins should behave like normal Python packages:
+
+            my_plugin/
+                plugin.py
+                panel.py
+                actions.py
+
+        The platform loads plugin.py as the package module itself, not as an
+        isolated file module. That lets plugin authors use ordinary relative
+        imports such as:
+
+            from . import panel
+            from . import actions
+
+        Some older/local records may already have a module_name ending in
+        ".plugin"; strip that so all sibling imports resolve from the plugin
+        directory package root.
+        """
+        package_name = str(module_name or "").strip()
+        if package_name.endswith(".plugin"):
+            package_name = package_name.rsplit(".", 1)[0]
+        return package_name
+
+    @staticmethod
+    def _purge_module_tree(module_name: str) -> None:
+        """Remove a module and all of its submodules from sys.modules.
+
+        This is used for local plugin reloads so edited sibling files such as
+        panel.py, actions.py, services.py, analytics.py, etc. are not kept alive
+        by Python's import cache.
+        """
+        module_name = str(module_name or "").strip()
+        if not module_name:
+            return
+
+        for name in list(sys.modules):
+            if name == module_name or name.startswith(f"{module_name}."):
+                sys.modules.pop(name, None)
+
+    def _purge_modules_for_candidate(self, candidate: PluginCandidate) -> None:
+        """Clear import-cache entries for a local plugin candidate."""
+        if candidate.path is None:
+            return
+
+        path = Path(candidate.path).resolve()
+
+        if path.name == "plugin.py" and path.parent.is_dir():
+            package_name = self._local_package_name(candidate.module_name)
+            self._purge_module_tree(package_name)
+        else:
+            sys.modules.pop(candidate.module_name, None)
+
+        candidate.module = None
+
+    def _load_local_package_plugin(
+        self,
+        module_name: str,
+        plugin_path: Path,
+    ) -> ModuleType:
+        """Load a local directory plugin as a real synthetic package.
+
+        This is the permanent fix for repeated plugin-local helpers like:
+
+            def _load_sibling_module(...)
+
+        Given:
+
+            astronomicAL/plugins/active_learning/
+                plugin.py
+                panel.py
+                actions.py
+                state.py
+
+        this loads plugin.py as:
+
+            astronomical_local_plugin_active_learning_<hash>
+
+        and marks that module as a package with:
+
+            __path__ = [plugin directory]
+
+        Therefore plugin.py and its siblings can use standard relative imports:
+
+            from . import panel
+            from . import actions
+            from . import state
+
+        This also preserves compatibility with older plugin.py files whose
+        temporary sibling loader used:
+
+            f"{__name__}.{stem}"
+
+        because __name__ is now the plugin package name, not "...plugin".
+        """
+        plugin_path = Path(plugin_path).resolve()
+        package_dir = plugin_path.parent
+        package_name = self._local_package_name(module_name)
+
+        if not plugin_path.exists():
+            raise PluginLoadError(f"Plugin file does not exist: {plugin_path}")
+
+        if plugin_path.name != "plugin.py":
+            raise PluginLoadError(
+                f"Local package plugins must be loaded from plugin.py, got: {plugin_path}"
+            )
+
+        existing = sys.modules.get(package_name)
+        if existing is not None:
+            try:
+                existing_file = Path(str(getattr(existing, "__file__", ""))).resolve()
+            except Exception:
+                existing_file = None
+
+            if existing_file == plugin_path:
+                return existing
+
+            # Same synthetic name but different file/path. Clear stale modules.
+            self._purge_module_tree(package_name)
+
+        spec = importlib.util.spec_from_file_location(
+            package_name,
+            str(plugin_path),
+            submodule_search_locations=[str(package_dir)],
+        )
+        if spec is None or spec.loader is None:
+            raise PluginLoadError(f"Could not create import spec for {plugin_path}")
+
+        module = importlib.util.module_from_spec(spec)
+
+        # Make the plugin.py module behave as a package root.
+        module.__package__ = package_name
+        module.__path__ = [str(package_dir)]  # type: ignore[attr-defined]
+
+        sys.modules[package_name] = module
+
+        try:
+            spec.loader.exec_module(module)
+        except Exception:
+            self._purge_module_tree(package_name)
+            raise
+
+        return module
+
+    @staticmethod
     def _looks_like_manifest_file(value: str) -> bool:
         lowered = value.lower()
         return lowered.endswith(".json") or lowered.endswith(".toml")
@@ -859,19 +1006,40 @@ class PluginManager:
             context.events.publish("plugin.disabled", {"plugin_id": plugin_id})
 
     def reload(self, plugin_id: str, context: Any) -> None:
+
         record = self._require_record(plugin_id)
+
         self.disable(plugin_id, context=context)
-        if record.module is not None:
-            try:
-                record.module = importlib.reload(record.module)
-                if record.candidate.manifest_path is not None:
-                    record.manifest = self._read_static_manifest(record.candidate.manifest_path)
+
+        try:
+            if record.candidate.path is not None:
+                self._purge_modules_for_candidate(record.candidate)
+                record.module = None
+                module = self._load_module(record.candidate)
+                record.module = module
+            else:
+                if record.module is not None:
+                    record.module = importlib.reload(record.module)
                 else:
-                    record.manifest = self._read_manifest(record.module, candidate=record.candidate)
-            except Exception as exc:
-                record.status = PluginStatus.ERROR
-                record.error = self._format_exception(exc)
-                raise PluginLoadError(f"Failed to reload plugin {plugin_id}: {exc}") from exc
+                    record.module = self._load_module(record.candidate)
+
+            if record.candidate.manifest_path is not None:
+                record.manifest = self._read_static_manifest(
+                    record.candidate.manifest_path
+                )
+            else:
+                record.manifest = self._read_manifest(
+                    record.module,
+                    candidate=record.candidate,
+                )
+
+        except Exception as exc:
+            record.status = PluginStatus.ERROR
+            record.error = self._format_exception(exc)
+            raise PluginLoadError(
+                f"Failed to reload plugin {plugin_id}: {exc}"
+            ) from exc
+
         self.enable(plugin_id, context, validate=False)
 
         if hasattr(context, "events"):
@@ -1731,77 +1899,133 @@ class PluginManager:
         )
         return self._normalise_panel_result(result)
 
-    def _load_local_package_plugin(self, package_name: str, package_dir: Path) -> ModuleType:
-        package_dir = package_dir.resolve()
-        plugin_path = package_dir / "plugin.py"
+    def _load_local_package_plugin(
+        self,
+        module_name: str,
+        plugin_path: Path,
+    ) -> ModuleType:
+        """Load a local plugin directory as a real synthetic package.
 
-        if not plugin_path.exists():
-            raise PluginLoadError(f"Local plugin package has no plugin.py: {package_dir}")
+        Accepts either:
 
-        # Normalize defensively.
-        if package_name.endswith(".plugin"):
-            package_name = package_name.rsplit(".", 1)[0]
+            /path/to/my_plugin/plugin.py
 
-        created_package = False
+        or:
 
-        if package_name not in sys.modules:
-            package = ModuleType(package_name)
-            package.__file__ = str(package_dir / "__init__.py")
-            package.__package__ = package_name
-            package.__path__ = [str(package_dir)]
+            /path/to/my_plugin/
 
-            package_spec = importlib.machinery.ModuleSpec(
-                package_name,
-                loader=None,
-                is_package=True,
+        and loads plugin.py as the package module itself. This allows normal
+        plugin-local relative imports:
+
+            from . import panel
+            from . import actions
+            from . import state
+
+        Existing temporary _load_sibling_module helpers can remain while the
+        bundled plugins are migrated; they will still work with this layout.
+        """
+        plugin_path = Path(plugin_path).resolve()
+
+        if plugin_path.is_dir():
+            package_dir = plugin_path
+            plugin_file = package_dir / "plugin.py"
+        else:
+            plugin_file = plugin_path
+            package_dir = plugin_file.parent
+
+        if not plugin_file.exists() or not plugin_file.is_file():
+            raise PluginLoadError(
+                f"Local plugin package has no plugin.py: {plugin_file}"
             )
-            package_spec.submodule_search_locations = [str(package_dir)]
-            package.__spec__ = package_spec
 
-            sys.modules[package_name] = package
-            created_package = True
+        if plugin_file.name != "plugin.py":
+            raise PluginLoadError(
+                "Local package plugins must be loaded from plugin.py, "
+                f"got: {plugin_file}"
+            )
 
-        plugin_module_name = f"{package_name}.plugin"
+        package_name = self._local_package_name(module_name)
+
+        existing = sys.modules.get(package_name)
+        if existing is not None:
+            try:
+                existing_file = Path(str(getattr(existing, "__file__", ""))).resolve()
+            except Exception:
+                existing_file = None
+
+            if existing_file == plugin_file:
+                return existing
+
+            self._purge_module_tree(package_name)
 
         spec = importlib.util.spec_from_file_location(
-            plugin_module_name,
-            str(plugin_path),
+            package_name,
+            str(plugin_file),
+            submodule_search_locations=[str(package_dir)],
         )
         if spec is None or spec.loader is None:
-            raise PluginLoadError(f"Could not create import spec for {plugin_path}")
+            raise PluginLoadError(f"Could not create import spec for {plugin_file}")
 
         module = importlib.util.module_from_spec(spec)
-        sys.modules[plugin_module_name] = module
+
+        # Make plugin.py behave as the package root.
+        module.__package__ = package_name
+        module.__path__ = [str(package_dir)]  # type: ignore[attr-defined]
+
+        sys.modules[package_name] = module
 
         try:
             spec.loader.exec_module(module)
         except Exception:
-            sys.modules.pop(plugin_module_name, None)
-            if created_package:
-                sys.modules.pop(package_name, None)
+            self._purge_module_tree(package_name)
             raise
 
         return module
 
     def _load_module(self, candidate: PluginCandidate) -> ModuleType:
+        """Load the runtime module for a plugin candidate."""
         if candidate.module is not None:
             return candidate.module
 
         try:
             if candidate.path is not None:
-                return self._load_module_from_path(candidate.module_name, candidate.path)
-            return importlib.import_module(candidate.module_name)
+                module = self._load_module_from_path(
+                    candidate.module_name,
+                    candidate.path,
+                )
+            else:
+                module = importlib.import_module(candidate.module_name)
+
+            candidate.module = module
+            return module
+
         except Exception as exc:
-            raise PluginLoadError(f"Failed to import {candidate.module_name}: {exc}") from exc
+            raise PluginLoadError(
+                f"Failed to import {candidate.module_name}: {exc}"
+            ) from exc
 
     def _load_module_from_path(self, module_name: str, path: Path) -> ModuleType:
-        path = path.resolve()
+        """Load a plugin module from a filesystem path.
+
+        Directory plugins may be discovered either as a directory or as the
+        plugin.py file inside that directory. Both forms are treated as a local
+        synthetic package.
+
+        Single-file plugins that are not named plugin.py remain supported as
+        isolated modules.
+        """
+        path = Path(path).resolve()
 
         if not path.exists():
-            raise PluginLoadError(f"Plugin file does not exist: {path}")
+            raise PluginLoadError(f"Plugin path does not exist: {path}")
 
-        if path.name == "plugin.py" and path.parent.is_dir():
-            return self._load_local_package_plugin(module_name, path.parent)
+        if path.is_dir():
+            plugin_file = path / "plugin.py"
+            if plugin_file.exists():
+                return self._load_local_package_plugin(module_name, path)
+
+        if path.is_file() and path.name == "plugin.py":
+            return self._load_local_package_plugin(module_name, path)
 
         spec = importlib.util.spec_from_file_location(module_name, str(path))
         if spec is None or spec.loader is None:

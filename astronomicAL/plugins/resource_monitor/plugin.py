@@ -31,22 +31,6 @@ manifest = PluginManifest(
 )
 
 
-def _load_sibling_module(stem: str):
-    module_name = f"{__name__}.{stem}"
-    if module_name in sys.modules:
-        return sys.modules[module_name]
-
-    path = Path(__file__).with_name(f"{stem}.py")
-    spec = importlib.util.spec_from_file_location(module_name, path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"Could not load sibling module {stem!r} from {path}")
-
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
 def register(api) -> None:
     api.register_service(
         key="sampler",
@@ -79,12 +63,14 @@ def register(api) -> None:
 
 
 def create_resource_sampler():
-    panel_module = _load_sibling_module("panel")
+    from . import panel as panel_module
+
     return panel_module.ResourceSampler()
 
 
 def create_resource_monitor_panel(context, **kwargs):
-    panel_module = _load_sibling_module("panel")
+    from . import panel as panel_module
+
     sampler = context.services.get("core.resources.sampler")
 
     controller = panel_module.ResourceMonitorPanel(

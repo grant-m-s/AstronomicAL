@@ -9,22 +9,6 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional
 from astronomicAL.platform.plugins.specs import ActionRequest
 
 
-def _load_sibling_module(stem: str):
-    module_name = f"{__name__}.{stem}"
-    if module_name in sys.modules:
-        return sys.modules[module_name]
-
-    path = Path(__file__).with_name(f"{stem}.py")
-    spec = importlib.util.spec_from_file_location(module_name, path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"Could not load sibling module {stem!r} from {path}")
-
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
 def create_active_learning_batch_action(
     context: Any,
     request: Any,
@@ -40,7 +24,7 @@ def create_active_learning_batch_action(
 
     _check_cancelled(cancel_token)
 
-    artifact_utils = _load_sibling_module("artifacts")
+    from . import artifacts as artifact_utils
 
     request = _coerce_request(request)
     params = dict(request.params or {})

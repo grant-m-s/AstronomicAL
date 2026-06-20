@@ -14,30 +14,9 @@ import pandas as pd
 
 from astronomicAL.platform.plugins.specs import ActionRequest
 
-def _load_sibling_module(stem: str):
-    """Load sibling files when AstronomicAL's local plugin loader imports
-    plugin.py under a generated module name.
+from . import state as al_state
+from . import strategies as _strategies_module
 
-    Relative imports like ``from . import state`` can fail because the generated
-    local plugin module is not a normal package on sys.path.
-    """
-    module_name = f"{__name__.rsplit('.', 1)[0]}.{stem}"
-    if module_name in sys.modules:
-        return sys.modules[module_name]
-
-    path = Path(__file__).with_name(f"{stem}.py")
-    spec = importlib.util.spec_from_file_location(module_name, path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"Could not load sibling module {stem!r} from {path}")
-
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-al_state = _load_sibling_module("state")
-_strategies_module = _load_sibling_module("strategies")
 create_default_strategy_registry = _strategies_module.create_default_strategy_registry
 
 ORIGIN = "core.active_learning"

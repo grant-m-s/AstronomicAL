@@ -6,21 +6,6 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional
 
-
-def _load_sibling_module(stem: str):
-    module_name = f"{__name__}.{stem}"
-    if module_name in sys.modules:
-        return sys.modules[module_name]
-    path = Path(__file__).with_name(f"{stem}.py")
-    spec = importlib.util.spec_from_file_location(module_name, path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"Could not load sibling module {stem!r} from {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
 @dataclass(frozen=True)
 class TrainedModelDescriptor:
     artifact_id: str
@@ -41,7 +26,7 @@ class TrainedModelDescriptor:
     hyperparameter_summary: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
-        contract = _load_sibling_module("model_contract")
+        from . import model_contract as contract
         return contract.json_safe(asdict(self))
 
 
@@ -67,7 +52,8 @@ class TrainedModelCatalog:
         self._subscriptions.clear()
 
     def refresh(self) -> int:
-        contract_utils = _load_sibling_module("model_contract")
+        from . import model_contract as contract_utils
+
         artifacts = getattr(self.context, "artifacts", None)
         find = getattr(artifacts, "find", None)
         get = getattr(artifacts, "get", None)
@@ -161,7 +147,8 @@ class TrainedModelCatalog:
         return options
 
     def compatibility(self, artifact_id: str, dataset_id: str, **kwargs: Any) -> Dict[str, Any]:
-        contract_utils = _load_sibling_module("model_contract")
+        from . import model_contract as contract_utils
+
         report = contract_utils.validate_model_for_dataset(
             context=self.context,
             model_artifact_id=artifact_id,

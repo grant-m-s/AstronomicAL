@@ -32,28 +32,12 @@ manifest = PluginManifest(
     ],
 )
 
-
-def _load_sibling_module(stem: str):
-    module_name = f"{__name__}.{stem}"
-    if module_name in sys.modules:
-        return sys.modules[module_name]
-
-    path = Path(__file__).with_name(f"{stem}.py")
-    spec = importlib.util.spec_from_file_location(module_name, path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"Could not load sibling module {stem!r} from {path}")
-
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
 def register(api) -> None:
-    actions = _load_sibling_module("actions")
-    prediction = _load_sibling_module("prediction")
-    trained_models = _load_sibling_module("trained_models")
-    recipe_runner = _load_sibling_module("recipe_runner")
+
+    from . import actions
+    from . import prediction
+    from . import trained_models
+    from . import recipe_runner
 
     api.register_service(
         key="trained_model_catalog",
@@ -274,7 +258,7 @@ def register(api) -> None:
 
 
 def create_training_curves_panel(context, **kwargs):
-    curves_module = _load_sibling_module("curves_panel")
+    from . import curves_panel as curves_module
 
     controller = curves_module.MLTrainingCurvesPanel(
         context=context,
@@ -285,13 +269,15 @@ def create_training_curves_panel(context, **kwargs):
 
 
 def create_ml_predict_panel(context, **kwargs):
-    predict_panel_module = _load_sibling_module("predict_panel")
+    from . import predict_panel as predict_panel_module
+
     return predict_panel_module.create_predict_panel(context=context, **kwargs)
 
 
 def create_ml_recipe_registry(context=None):
-    registry_module = _load_sibling_module("recipe_registry")
-    recipes_module = _load_sibling_module("recipes")
+
+    from . import recipe_registry as registry_module
+    from . import recipes as recipes_module
 
     registry = registry_module.MLRecipeRegistry()
     registry.register(recipes_module.ExternalPythonRecipe)
@@ -304,5 +290,6 @@ def create_ml_recipe_registry(context=None):
 
 
 def create_ml_recipe_launcher_panel(context, **kwargs):
-    recipe_panel_module = _load_sibling_module("recipe_panel")
+    from . import recipe_panel as recipe_panel_module
+
     return recipe_panel_module.create_recipe_launcher_panel(context=context, **kwargs)

@@ -116,21 +116,6 @@ AUDIT_GAPS = [
     },
 ]
 
-
-def _load_sibling_module(stem: str):
-    module_name = f"{__name__}.{stem}"
-    if module_name in sys.modules:
-        return sys.modules[module_name]
-    path = Path(__file__).with_name(f"{stem}.py")
-    spec = importlib.util.spec_from_file_location(module_name, path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"Could not load sibling module {stem!r} from {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
 # =============================================================================
 # Provenance: the prediction analogue of partition isolation
 # =============================================================================
@@ -410,8 +395,10 @@ class Predictor:
 
     # -- the audit flow (not overridable) ------------------------------------
     def run(self) -> Dict[str, Any]:
-        artifact_utils = _load_sibling_module("artifacts")
-        contract_utils = _load_sibling_module("model_contract")
+
+        from . import artifacts as artifact_utils
+        from . import model_contract as contract_utils
+
         _check_cancelled(self.cancel_token)
 
         self.reconstruct()
@@ -699,8 +686,10 @@ class TorchImagePredictor(Predictor):
     modality = "image"
 
     def reconstruct(self) -> None:
-        artifact_utils = _load_sibling_module("artifacts")
-        image_sidecar = _load_sibling_module("image_sidecar")
+        
+        from . import artifacts as artifact_utils
+        from . import image_sidecar
+
         saved = artifact_utils.load_model_from_payload(self.model_payload)
         if not isinstance(saved, Mapping):
             raise TypeError("Image artifact did not load to a sidecar mapping.")
@@ -718,7 +707,8 @@ class TorchImagePredictor(Predictor):
         recipe = _resolve_recipe(self.context, str(self.model_payload.get("recipe_id") or "").strip())
         if recipe is not None:
             try:
-                registry_mod = _load_sibling_module("recipe_registry")
+                from . import recipe_registry as registry_mod
+
                 binding = registry_mod.DataBinding(
                     record_id_column=str(self.binding.get("record_id_column") or "id"),
                     target_column=None,
@@ -788,7 +778,8 @@ class SklearnTabularPredictor(Predictor):
     modality = "tabular"
 
     def reconstruct(self) -> None:
-        artifact_utils = _load_sibling_module("artifacts")
+        from . import artifacts as artifact_utils
+
         self._model = artifact_utils.load_model_from_payload(self.model_payload)
         self._features = [str(c) for c in self.binding.get("feature_columns") or []]
         if not self._features:
@@ -826,7 +817,9 @@ class TorchTabularPredictor(Predictor):
     modality = "tabular"
 
     def reconstruct(self) -> None:
-        artifact_utils = _load_sibling_module("artifacts")
+        
+        from . import artifacts as artifact_utils
+
         saved = artifact_utils.load_model_from_payload(self.model_payload)
         if not isinstance(saved, Mapping):
             raise TypeError("Torch tabular sidecar must be a mapping.")
@@ -889,8 +882,9 @@ def make_predictor(*, framework, modality, **kwargs) -> Predictor:
 # =============================================================================
 
 def predict_action(context: Any, request: Any, cancel_token: Any = None) -> Dict[str, Any]:
-    artifact_utils = _load_sibling_module("artifacts")
-    contract_utils = _load_sibling_module("model_contract")
+
+    from . import artifacts as artifact_utils
+    from . import model_contract as contract_utils
 
     request = _coerce_request(request)
     params = dict(request.params or {})

@@ -8,50 +8,8 @@ from typing import Any
 from astronomicAL.platform.plugins import PluginManifest
 from astronomicAL.platform.plugins.specs import ActionRequest
 
-
-# ---------------------------------------------------------------------------
-# Local-plugin sibling module loader
-# ---------------------------------------------------------------------------
-# AstronomicAL can load local plugin folders by importing plugin.py as a
-# generated standalone module. In that mode, package-relative imports fail.
-# This helper imports sibling files explicitly by path so the same plugin works
-# as a bundled plugin and as a local plugin folder.
-# ---------------------------------------------------------------------------
-
-_THIS_DIR = Path(__file__).resolve().parent
-_PLUGIN_STEM = "astronomical_integration_huggingface"
-
-
-def _load_sibling_module(alias: str):
-    existing = sys.modules.get(alias)
-    if existing is not None:
-        return existing
-
-    path = _THIS_DIR / f"{alias}.py"
-    if not path.exists():
-        raise ModuleNotFoundError(
-            f"Cannot find sibling module {alias!r}; expected file {path}"
-        )
-
-    unique_name = f"{_PLUGIN_STEM}_{alias}_{abs(hash(str(path.resolve())))}"
-    existing_unique = sys.modules.get(unique_name)
-    if existing_unique is not None:
-        sys.modules[alias] = existing_unique
-        return existing_unique
-
-    spec = importlib.util.spec_from_file_location(unique_name, path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"Could not create import spec for {path}")
-
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[unique_name] = module
-    sys.modules[alias] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-service_mod = _load_sibling_module("service")
-importer_mod = _load_sibling_module("importer")
+from . import service as service_mod
+from . import importer as importer_mod
 
 HuggingFaceDatasetService = service_mod.HuggingFaceDatasetService
 import_hf_image_dataset_as_manifest = importer_mod.import_hf_image_dataset_as_manifest
@@ -232,7 +190,8 @@ def create_huggingface_service(
 
 
 def create_browser_panel(context: Any, **kwargs):
-    browser_mod = _load_sibling_module("browser")
+    from . import browser as browser_mod
+
     controller = browser_mod.HuggingFaceBrowserPanel(context=context)
     return controller.panel(), controller
 
