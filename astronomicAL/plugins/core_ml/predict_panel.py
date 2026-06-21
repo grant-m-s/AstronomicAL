@@ -118,21 +118,46 @@ class LazyPredictionJoinSource:
     """Lazy LEFT JOIN of a predictions parquet onto a DuckDB/Parquet source.
 
     Adds prediction columns to a dataset without copying its rows: the join is
-    pushed down to DuckDB and only the requested rows/columns are ever read.
-    Same duck-typed source protocol as core.table_tools' lazy sources.
+    pushed down to DuckDB and only the requested rows/columns are read.
+
+    Unlike the previous version, this class supports updating existing pred_*
+    columns. It removes replaced columns from the base projection, then adds the
+    latest prediction columns from the parquet join.
     """
 
     backend_name = "duckdb_parquet_prediction_join"
 
-    def __init__(self, *, base_source, predictions_path, id_column, join_key,
-                 column_plan, base_columns, dataset_name=None, row_count_hint=None):
+    def __init__(
+        self,
+        *,
+        base_source,
+        predictions_path,
+        id_column,
+        join_key,
+        column_plan,
+        base_columns,
+        dataset_name=None,
+        row_count_hint=None,
+    ):
         self.base_source = base_source
         self.predictions_path = str(predictions_path)
         self.id_column = str(id_column)
         self.join_key = str(join_key)
         self.column_plan = list(column_plan)  # [(src, final), ...]
+
         self.dataset_name = dataset_name
-        self._columns_cache = [str(c) for c in base_columns] + [f for _s, f in self.column_plan]
+
+        added_columns = [str(final) for _src, final in self.column_plan]
+        added_set = set(added_columns)
+
+        # Key fix:
+        # if pred_label already exists and this run also writes pred_label,
+        # do not expose both old and new columns. Project the old one away
+        # from base.*, then add the fresh joined column.
+        self._base_columns = [
+            str(column) for column in base_columns if str(column) not in added_set
+        ]
+        self._columns_cache = self._base_columns + added_columns
         self._row_count_cache = int(row_count_hint) if row_count_hint is not None else None
 
     def _connect(self):
@@ -145,13 +170,24 @@ class LazyPredictionJoinSource:
         return _duckdb_relation_params(self.base_source)
 
     def _relation_sql(self) -> str:
-        proj = ", ".join(f"preds.{_quote_identifier(src)} AS {_quote_identifier(final)}"
-                         for src, final in self.column_plan)
-        return (f"SELECT base.*, {proj} "
-                f"FROM {_duckdb_relation_from_sql(self.base_source, alias='base')} "
-                f"LEFT JOIN read_parquet({_quote_sql_string(self.predictions_path)}) AS preds "
-                f"ON CAST(base.{_quote_identifier(self.id_column)} AS VARCHAR) "
-                f"= CAST(preds.{_quote_identifier(self.join_key)} AS VARCHAR)")
+        base_proj = [
+            f"base.{_quote_identifier(column)} AS {_quote_identifier(column)}"
+            for column in self._base_columns
+        ]
+        pred_proj = [
+            f"preds.{_quote_identifier(src)} AS {_quote_identifier(final)}"
+            for src, final in self.column_plan
+        ]
+
+        select_sql = ", ".join(base_proj + pred_proj) or "*"
+
+        return (
+            f"SELECT {select_sql} "
+            f"FROM {_duckdb_relation_from_sql(self.base_source, alias='base')} "
+            f"LEFT JOIN read_parquet({_quote_sql_string(self.predictions_path)}) AS preds "
+            f"ON CAST(base.{_quote_identifier(self.id_column)} AS VARCHAR) "
+            f"= CAST(preds.{_quote_identifier(self.join_key)} AS VARCHAR)"
+        )
 
     def _select_sql(self, *, columns=None) -> str:
         if not columns:
@@ -164,8 +200,10 @@ class LazyPredictionJoinSource:
     def dtypes(self) -> dict:
         con = self._connect()
         try:
-            df = con.execute(f"DESCRIBE SELECT * FROM {_duckdb_self_from_sql(self)} LIMIT 0",
-                             self._relation_params()).df()
+            df = con.execute(
+                f"DESCRIBE SELECT * FROM {_duckdb_self_from_sql(self)} LIMIT 0",
+                self._relation_params(),
+            ).df()
         finally:
             con.close()
         return {str(r["column_name"]): str(r["column_type"]) for _, r in df.iterrows()}
@@ -173,25 +211,32 @@ class LazyPredictionJoinSource:
     def row_count(self) -> Optional[int]:
         if self._row_count_cache is not None:
             return int(self._row_count_cache)
+
         con = self._connect()
         try:
-            res = con.execute(f"SELECT COUNT(*) FROM {_duckdb_self_from_sql(self)}",
-                              self._relation_params()).fetchone()
+            res = con.execute(
+                f"SELECT COUNT(*) FROM {_duckdb_self_from_sql(self)}",
+                self._relation_params(),
+            ).fetchone()
         finally:
             con.close()
+
         self._row_count_cache = int(res[0]) if res else 0
         return self._row_count_cache
 
     def to_pandas(self, *, columns=None, limit=None, where_sql=None, params=None) -> pd.DataFrame:
         sql = f"SELECT {self._select_sql(columns=columns)} FROM {_duckdb_self_from_sql(self)}"
         sql_params = self._relation_params()
+
         if where_sql:
             sql += f" WHERE ({where_sql})"
             if params:
                 sql_params.extend(list(params))
+
         if limit is not None:
             sql += " LIMIT ?"
             sql_params.append(int(limit))
+
         con = self._connect()
         try:
             return con.execute(sql, sql_params).df()
@@ -204,8 +249,12 @@ class LazyPredictionJoinSource:
     def get_row_by_position(self, position: int, *, columns=None) -> pd.DataFrame:
         if position < 0:
             return pd.DataFrame(columns=self.columns() if columns is None else columns)
-        sql = (f"SELECT {self._select_sql(columns=columns)} "
-               f"FROM {_duckdb_self_from_sql(self)} LIMIT 1 OFFSET ?")
+
+        sql = (
+            f"SELECT {self._select_sql(columns=columns)} "
+            f"FROM {_duckdb_self_from_sql(self)} LIMIT 1 OFFSET ?"
+        )
+
         con = self._connect()
         try:
             return con.execute(sql, [*self._relation_params(), int(position)]).df()
@@ -215,33 +264,48 @@ class LazyPredictionJoinSource:
     def get_row_by_id(self, row_id, *, id_column, columns=None) -> pd.DataFrame:
         if id_column == "Use Index" or id_column not in self.columns():
             return pd.DataFrame(columns=self.columns() if columns is None else columns)
-        return self.to_pandas(columns=columns, limit=1,
-                              where_sql=f"CAST({_quote_identifier(id_column)} AS VARCHAR) = ?",
-                              params=[str(row_id)])
+
+        return self.to_pandas(
+            columns=columns,
+            limit=1,
+            where_sql=f"CAST({_quote_identifier(id_column)} AS VARCHAR) = ?",
+            params=[str(row_id)],
+        )
 
     def get_rows_by_ids(self, row_ids, *, id_column, columns=None) -> pd.DataFrame:
         ids = [str(r) for r in (row_ids or [])]
+
         if not ids or id_column == "Use Index" or id_column not in self.columns():
             return pd.DataFrame(columns=list(columns or self.columns()))
+
         ordered, seen = [], set()
         for r in ids:
             if r not in seen:
                 seen.add(r)
                 ordered.append(r)
+
         sel = list(columns or [])
         if id_column not in sel:
             sel.insert(0, id_column)
-        sel = [c for c in sel if c in set(self.columns())] or [id_column]
+
+        existing = set(self.columns())
+        sel = [c for c in sel if c in existing] or [id_column]
+
         select_sql = ", ".join(f"src.{_quote_identifier(c)}" for c in sel)
         values_sql = ", ".join(["(?, ?)"] * len(ordered))
+
         values_params: list = []
         for order, rid in enumerate(ordered):
             values_params.extend([order, rid])
-        sql = ("WITH requested(__o, __id) AS "
-               f"(VALUES {values_sql}) SELECT {select_sql} "
-               f"FROM {_duckdb_self_from_sql(self, alias='src')} JOIN requested "
-               f"ON CAST(src.{_quote_identifier(id_column)} AS VARCHAR) = requested.__id "
-               "ORDER BY requested.__o")
+
+        sql = (
+            "WITH requested(__o, __id) AS "
+            f"(VALUES {values_sql}) SELECT {select_sql} "
+            f"FROM {_duckdb_self_from_sql(self, alias='src')} JOIN requested "
+            f"ON CAST(src.{_quote_identifier(id_column)} AS VARCHAR) = requested.__id "
+            "ORDER BY requested.__o"
+        )
+
         con = self._connect()
         try:
             return con.execute(sql, [*values_params, *self._relation_params()]).df()
@@ -251,23 +315,32 @@ class LazyPredictionJoinSource:
     def find_position_by_id(self, row_id, *, id_column) -> Optional[int]:
         if id_column == "Use Index" or id_column not in self.columns():
             return None
-        sql = ("SELECT rn FROM (SELECT ROW_NUMBER() OVER () - 1 AS rn, "
-               f"{_quote_identifier(id_column)} AS rid "
-               f"FROM {_duckdb_self_from_sql(self)}) AS n WHERE CAST(rid AS VARCHAR) = ? LIMIT 1")
+
+        sql = (
+            "SELECT rn FROM (SELECT ROW_NUMBER() OVER () - 1 AS rn, "
+            f"{_quote_identifier(id_column)} AS rid "
+            f"FROM {_duckdb_self_from_sql(self)}) AS n "
+            "WHERE CAST(rid AS VARCHAR) = ? LIMIT 1"
+        )
+
         con = self._connect()
         try:
             res = con.execute(sql, [*self._relation_params(), str(row_id)]).fetchone()
         finally:
             con.close()
+
         return int(res[0]) if res else None
 
     def metadata(self) -> dict:
-        return {"backend": self.backend_name,
-                "base_backend": getattr(self.base_source, "backend_name", "unknown"),
-                "dataset_name": self.dataset_name,
-                "predictions_path": self.predictions_path,
-                "added_columns": [f for _s, f in self.column_plan],
-                "materialized": False}
+        return {
+            "backend": self.backend_name,
+            "base_backend": getattr(self.base_source, "backend_name", "unknown"),
+            "dataset_name": self.dataset_name,
+            "predictions_path": self.predictions_path,
+            "added_columns": [f for _s, f in self.column_plan],
+            "replaced_columns": [f for _s, f in self.column_plan],
+            "materialized": False,
+        }
 
 
 # =============================================================================
@@ -549,9 +622,7 @@ class MLPredictPanel:
             "dataset_id": dataset_id, "model_artifact_id": model_id,
             "scope": "evaluation" if self._is_evaluation_mode() else "inference",
             "target_column": self._target_column_param(), "image_column": self._image_column_param(),
-            # The panel attaches columns to the live dataset itself, so the
-            # action must NOT spin up a separate predictions dataset.
-            "register_prediction_dataset": False,
+            "register_prediction_dataset": True,
             "require_target_compatible": (
                 bool(self.require_target_compatible.value) if self._is_evaluation_mode() else False),
             "device": str(self.device.value or "auto"),
@@ -704,28 +775,48 @@ class MLPredictPanel:
 
     def _attach_plan(self, rows, dataset_id) -> List[Tuple[str, str]]:
         base_cols = set(self._columns())
+
         keys: set = set()
-        for r in rows[:200]:
+        for r in rows[:500]:
             keys.update(r.keys())
 
         src_cols = [k for k in _ATTACH_PRIORITY if k in keys]
         src_cols += sorted(k for k in keys if k.startswith("prob_"))
-        seen: set = set()
-        src_cols = [k for k in src_cols if not (k in seen or seen.add(k))]
 
-        used = set(base_cols)
-        run8 = (self._last_predictions_artifact_id or uuid.uuid4().hex)[-8:]
+        seen_src: set = set()
+        src_cols = [k for k in src_cols if not (k in seen_src or seen_src.add(k))]
+
         plan: List[Tuple[str, str]] = []
+        used_finals: set = set()
+        run8 = (self._last_predictions_artifact_id or uuid.uuid4().hex)[-8:]
+
         for src in src_cols:
-            final = _ATTACH_FRIENDLY.get(src, f"pred_{src}")
-            if final in used:
-                final = f"{final}_{run8}"
-            base_final, i = final, 2
-            while final in used:
-                final = f"{base_final}_{i}"
-                i += 1
-            used.add(final)
+            canonical = _ATTACH_FRIENDLY.get(src, f"pred_{src}")
+
+            final = canonical
+
+            if final in used_finals:
+                base_final = final
+                i = 2
+                while final in used_finals or (
+                    final in base_cols and not str(final).startswith("pred_")
+                ):
+                    final = f"{base_final}_{i}"
+                    i += 1
+
+            # If a non-pred user column somehow collides with a generated name,
+            # keep it safe by suffixing.
+            if final in base_cols and not str(final).startswith("pred_"):
+                base_final = final
+                final = f"{base_final}_{run8}"
+                i = 2
+                while final in base_cols or final in used_finals:
+                    final = f"{base_final}_{run8}_{i}"
+                    i += 1
+
+            used_finals.add(final)
             plan.append((src, final))
+
         return plan
 
     def _write_predictions_parquet(self, rows, plan, dataset_id) -> Path:
@@ -855,32 +946,83 @@ class MLPredictPanel:
         by = (result.get("evaluation") or {}).get("metrics_by_provenance") or {}
         if not by:
             return ""
+
+        task = str(
+            (result.get("evaluation") or {}).get("task")
+            or (self._selected_model_descriptor() or {}).get("task")
+            or ""
+        ).lower()
+
         cards = []
+
         for key in _PROV_ORDER:
             if key not in by:
                 continue
+
             label, note, reportable = _PROV_META.get(key, (key, "", False))
             m = by[key]
-            acc = m.get("accuracy")
-            acc_str = f"{acc * 100:.0f}%" if isinstance(acc, (int, float)) else "—"
-            f1 = m.get("f1_macro")
-            f1_str = f" · F1 {f1:.2f}" if isinstance(f1, (int, float)) else ""
             n = int(m.get("n") or 0)
+
+            if task == "regression" or any(k in m for k in ("r2", "mae", "rmse")):
+                r2 = m.get("r2")
+                mae = m.get("mae")
+                rmse = m.get("rmse")
+
+                if isinstance(r2, (int, float)):
+                    main = f"R² {r2:.2f}"
+                elif isinstance(rmse, (int, float)):
+                    main = f"RMSE {rmse:.3g}"
+                else:
+                    main = "—"
+
+                details = []
+                if isinstance(mae, (int, float)):
+                    details.append(f"MAE {mae:.3g}")
+                if isinstance(rmse, (int, float)):
+                    details.append(f"RMSE {rmse:.3g}")
+                detail_text = " · " + " · ".join(details) if details else ""
+            else:
+                acc = m.get("accuracy")
+                main = f"{acc * 100:.0f}%" if isinstance(acc, (int, float)) else "—"
+
+                f1 = m.get("f1_macro")
+                detail_text = f" · F1 {f1:.2f}" if isinstance(f1, (int, float)) else ""
+
             accent = "#1a7f37" if reportable else "#8a8f98"
             bg = "#f1f9f3" if reportable else "#f6f7f9"
+
             cards.append(
-                f"<div style='flex:1;min-width:150px;border:1px solid #e1e5ec;border-left:4px solid {accent};"
-                f"border-radius:8px;background:{bg};padding:12px;'>"
-                f"<div style='font-size:30px;font-weight:800;color:{accent};line-height:1;'>{acc_str}</div>"
-                f"<div style='font-size:13px;font-weight:700;margin-top:4px;color:#20242a;'>{label}</div>"
-                f"<div style='font-size:11px;color:#666;margin-top:2px;'>{n:,} rows{f1_str}</div>"
-                f"<div style='font-size:11px;color:#888;margin-top:4px;'>{note}</div></div>")
+                f"<div style='flex:1;min-width:150px;border:1px solid #e1e5ec;"
+                f"border-left:4px solid {accent};border-radius:8px;background:{bg};"
+                f"padding:12px;'>"
+                f"<div style='font-size:30px;font-weight:800;color:{accent};"
+                f"line-height:1;'>{main}</div>"
+                f"<div style='font-size:13px;font-weight:700;margin-top:4px;"
+                f"color:#20242a;'>{label}</div>"
+                f"<div style='font-size:11px;color:#666;margin-top:2px;'>"
+                f"{n:,} rows{detail_text}</div>"
+                f"<div style='font-size:11px;color:#888;margin-top:4px;'>"
+                f"{note}</div></div>"
+            )
+
         if not cards:
             return ""
+
         footnote = self._overfit_note(by)
-        foot = f"<div style='font-size:12px;color:#b06b00;margin-top:8px;'>{footnote}</div>" if footnote else ""
-        return ("<div style='font-size:14px;font-weight:700;margin:0 0 8px;'>How accurate it was</div>"
-                "<div style='display:flex;flex-wrap:wrap;gap:10px;'>" + "".join(cards) + "</div>" + foot)
+        foot = (
+            f"<div style='font-size:12px;color:#b06b00;margin-top:8px;'>{footnote}</div>"
+            if footnote
+            else ""
+        )
+
+        title = "How well it matched the answers"
+        return (
+            f"<div style='font-size:14px;font-weight:700;margin:0 0 8px;'>{title}</div>"
+            "<div style='display:flex;flex-wrap:wrap;gap:10px;'>"
+            + "".join(cards)
+            + "</div>"
+            + foot
+        )
 
     def _overfit_note(self, by: Mapping[str, Any]) -> str:
         train = by.get("train")
@@ -970,43 +1112,104 @@ class MLPredictPanel:
     def _render_summary_plain(self, result, failed_count, added_columns, attach_error) -> str:
         count = int(result.get("count") or 0)
         dataset_id = str(result.get("dataset_id") or self._dataset_id() or "your dataset")
-        lines = [f"**Labelled {count:,} rows.**"]
+        derived_dataset_id = result.get("derived_dataset_id")
+
+        lines = [f"**Predicted {count:,} rows.**"]
+
         if failed_count:
             lines.append(f"Skipped **{failed_count}** image(s) that couldn't be opened.")
+
+        if derived_dataset_id:
+            lines.append(
+                f"Created prediction-table dataset **{derived_dataset_id}**."
+            )
+
         if added_columns:
-            lines.append(f"Added **{len(added_columns)}** prediction column(s) to **{dataset_id}**.")
+            lines.append(
+                f"Updated **{len(added_columns)}** prediction column(s) on **{dataset_id}**."
+            )
             label_col = next((c for c in added_columns if c.endswith("label")), added_columns[0])
             conf_col = next((c for c in added_columns if "confidence" in c), None)
             tip = f"Open a plot and colour points by **{label_col}**"
             if conf_col:
-                tip += f" (or **{conf_col}** to spot the unsure ones)"
+                tip += f" or inspect **{conf_col}**"
             lines.append(tip + ".")
         elif attach_error:
             lines.append(f"_Couldn't add prediction columns: {attach_error}._")
         elif not bool(self.attach_columns.value):
-            lines.append("_Column-adding is turned off (see More options)._")
+            lines.append("_Column-adding is turned off under More options._")
+
         return "  \n".join(lines)
 
     def _render_technical(self, result: Mapping[str, Any]) -> str:
         prov = result.get("provenance") or {}
-        lines: List[str] = [f"**Scope:** `{result.get('scope')}`",
-                            "**Provenance verified:** " + ("yes" if prov.get("verified") else "NO")]
+        lines: List[str] = [
+            f"**Scope:** `{result.get('scope')}`",
+            "**Provenance verified:** " + ("yes" if prov.get("verified") else "NO"),
+        ]
+
         if prov.get("split_spec_artifact_id"):
             lines.append(f"- split record: `{prov['split_spec_artifact_id']}`")
+
+        dataset_ids = prov.get("dataset_ids") or {}
+        if dataset_ids:
+            lines.append(
+                "- split datasets: "
+                + ", ".join(
+                    f"{key}=`{value}`"
+                    for key, value in dataset_ids.items()
+                    if value
+                )
+            )
+
+        aliases = prov.get("dataset_aliases") or {}
+        if aliases:
+            alias_bits = []
+            for key, values in aliases.items():
+                values = [str(v) for v in (values or []) if v]
+                if values:
+                    alias_bits.append(f"{key} aliases={values}")
+            if alias_bits:
+                lines.append("- provenance aliases: " + "; ".join(alias_bits))
+
         counts = prov.get("counts") or {}
         if counts:
-            lines.append("- rows by origin: " + ", ".join(
-                f"{_PROV_META.get(k, (k,))[0]} {v}" for k, v in counts.items()))
+            lines.append(
+                "- rows by origin: "
+                + ", ".join(
+                    f"{_PROV_META.get(k, (k,))[0]} {v}"
+                    for k, v in counts.items()
+                )
+            )
+
         for key, m in ((result.get("evaluation") or {}).get("metrics_by_provenance") or {}).items():
-            lines.append(f"- {_PROV_META.get(key, (key,))[0]}: n={m.get('n')}, "
-                         f"acc {self._fmt(m.get('accuracy'))}, F1 {self._fmt(m.get('f1_macro'))}")
+            if any(metric in m for metric in ("r2", "mae", "rmse")):
+                lines.append(
+                    f"- {_PROV_META.get(key, (key,))[0]}: "
+                    f"n={m.get('n')}, "
+                    f"R² {self._fmt(m.get('r2'))}, "
+                    f"MAE {self._fmt(m.get('mae'))}, "
+                    f"RMSE {self._fmt(m.get('rmse'))}"
+                )
+            else:
+                lines.append(
+                    f"- {_PROV_META.get(key, (key,))[0]}: "
+                    f"n={m.get('n')}, "
+                    f"acc {self._fmt(m.get('accuracy'))}, "
+                    f"F1 {self._fmt(m.get('f1_macro'))}"
+                )
+
         rvc = result.get("recipe_version_check")
         if rvc:
-            lines.append(f"**Method version:** trained `{rvc.get('trained_version')}`, "
-                         f"installed `{rvc.get('registered_version')}` "
-                         f"({'match' if rvc.get('match') else 'MISMATCH'})")
+            lines.append(
+                f"**Method version:** trained `{rvc.get('trained_version')}`, "
+                f"installed `{rvc.get('registered_version')}` "
+                f"({'match' if rvc.get('match') else 'MISMATCH'})"
+            )
+
         if result.get("checkpoint_sha256"):
             lines.append(f"**Model fingerprint:** `{str(result['checkpoint_sha256'])[:16]}…`")
+
         return "  \n".join(lines)
 
     def _fmt(self, value) -> str:
@@ -1021,23 +1224,40 @@ class MLPredictPanel:
         self.trust.visible = True
 
     def _fetch_table(self, artifact_id, result):
-        rows = list(result.get("prediction_preview") or [])
+        rows = []
         failed_count = int(result.get("failed_image_row_count") or 0)
         failed_rows = list(result.get("failed_image_rows") or [])
-        if (not rows or not failed_count) and artifact_id:
+
+        # Key fix:
+        # The action result only returns prediction_preview, usually 25 rows.
+        # Attaching from that preview means only 25 rows get pred_* values.
+        # Always prefer the full artifact table when it exists.
+        if artifact_id:
             payload = None
             try:
                 payload = self.context.artifacts.get(artifact_id)
             except Exception:
                 payload = None
+
             if isinstance(payload, Mapping):
-                rows = list((payload.get("prediction_table") or {}).get("rows") or []) or rows
+                rows = list((payload.get("prediction_table") or {}).get("rows") or [])
+
                 ib = payload.get("input_binding") or {}
                 transform = ib.get("transform") or {}
+
                 if not failed_count:
-                    failed_count = int(transform.get("failed_rows") or ib.get("failed_image_row_count") or 0)
+                    failed_count = int(
+                        transform.get("failed_rows")
+                        or ib.get("failed_image_row_count")
+                        or 0
+                    )
+
                 if not failed_rows:
                     failed_rows = list(ib.get("failed_image_rows") or [])
+
+        if not rows:
+            rows = list(result.get("prediction_preview") or [])
+
         return rows, failed_count, failed_rows
 
     # ----------------------------------------------------------- plain helpers

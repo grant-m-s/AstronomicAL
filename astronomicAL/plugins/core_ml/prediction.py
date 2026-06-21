@@ -126,32 +126,93 @@ class ProvenanceIndex:
     split_spec_artifact_id: Optional[str]
     protocol_id: Optional[str]
     record_id_column: Optional[str]
+
     train: frozenset
     val: frozenset
     test: frozenset
+
     train_dataset_id: Optional[str]
     val_dataset_id: Optional[str]
     test_dataset_id: Optional[str]
 
+    # Important for Active Learning:
+    #
+    # AL trains on a derived training dataset, but prediction is usually run
+    # against the original pool dataset. The split_spec therefore says
+    # "train_dataset_id == <derived_al_training_dataset>", while the predicted
+    # dataset is "<pool_dataset>". Row ids still refer to the same source
+    # objects. These aliases let provenance classify those rows as train/val/test
+    # when the platform can prove that the derived dataset came from the pool.
+    train_dataset_aliases: frozenset = field(default_factory=frozenset)
+    val_dataset_aliases: frozenset = field(default_factory=frozenset)
+    test_dataset_aliases: frozenset = field(default_factory=frozenset)
+
+    def _matches_dataset(
+        self,
+        *,
+        expected_dataset_id: Optional[str],
+        aliases: frozenset,
+        predict_dataset_id: Optional[str],
+    ) -> bool:
+        predicted = _clean_dataset_id(predict_dataset_id)
+        if not predicted:
+            return False
+
+        expected = _clean_dataset_id(expected_dataset_id)
+        if expected and predicted == expected:
+            return True
+
+        return predicted in aliases
+
     def classify(self, predict_dataset_id: Optional[str], row_id: Any) -> str:
         if not self.verified:
             return PROV_UNKNOWN
+
         rid = str(row_id)
-        # Dataset-aware: ids only match within their own dataset namespace.
-        if self.test_dataset_id == predict_dataset_id and rid in self.test:
+
+        # Dataset-aware, but now source-aware for derived AL datasets.
+        if (
+            rid in self.test
+            and self._matches_dataset(
+                expected_dataset_id=self.test_dataset_id,
+                aliases=self.test_dataset_aliases,
+                predict_dataset_id=predict_dataset_id,
+            )
+        ):
             return PROV_TEST
-        if self.val_dataset_id == predict_dataset_id and rid in self.val:
+
+        if (
+            rid in self.val
+            and self._matches_dataset(
+                expected_dataset_id=self.val_dataset_id,
+                aliases=self.val_dataset_aliases,
+                predict_dataset_id=predict_dataset_id,
+            )
+        ):
             return PROV_VAL
-        if self.train_dataset_id == predict_dataset_id and rid in self.train:
+
+        if (
+            rid in self.train
+            and self._matches_dataset(
+                expected_dataset_id=self.train_dataset_id,
+                aliases=self.train_dataset_aliases,
+                predict_dataset_id=predict_dataset_id,
+            )
+        ):
             return PROV_TRAIN
+
         return PROV_NOVEL
 
 
-def _resolve_provenance_index(context: Any, model_payload: Mapping[str, Any]) -> ProvenanceIndex:
+def _resolve_provenance_index(
+    context: Any,
+    model_payload: Mapping[str, Any],
+) -> ProvenanceIndex:
     artifacts = getattr(context, "artifacts", None)
     get = getattr(artifacts, "get", None)
+
     spec = None
-    spec_id = model_payload.get("split_spec_artifact_id")  # AUDIT_GAPS[0]: preferred
+    spec_id = model_payload.get("split_spec_artifact_id")
 
     if spec_id and callable(get):
         try:
@@ -172,9 +233,20 @@ def _resolve_provenance_index(context: Any, model_payload: Mapping[str, Any]) ->
             split_spec_artifact_id=None,
             protocol_id=model_payload.get("protocol_id"),
             record_id_column=None,
-            train=frozenset(), val=frozenset(), test=frozenset(),
-            train_dataset_id=None, val_dataset_id=None, test_dataset_id=None,
+            train=frozenset(),
+            val=frozenset(),
+            test=frozenset(),
+            train_dataset_id=None,
+            val_dataset_id=None,
+            test_dataset_id=None,
+            train_dataset_aliases=frozenset(),
+            val_dataset_aliases=frozenset(),
+            test_dataset_aliases=frozenset(),
         )
+
+    train_dataset_id = _clean_dataset_id(spec.get("train_dataset_id"))
+    val_dataset_id = _clean_dataset_id(spec.get("validation_dataset_id"))
+    test_dataset_id = _clean_dataset_id(spec.get("test_dataset_id"))
 
     return ProvenanceIndex(
         verified=True,
@@ -184,55 +256,259 @@ def _resolve_provenance_index(context: Any, model_payload: Mapping[str, Any]) ->
         train=frozenset(str(x) for x in (spec.get("train_row_ids") or [])),
         val=frozenset(str(x) for x in (spec.get("validation_row_ids") or [])),
         test=frozenset(str(x) for x in (spec.get("test_row_ids") or [])),
-        train_dataset_id=spec.get("train_dataset_id"),
-        val_dataset_id=spec.get("validation_dataset_id"),
-        test_dataset_id=spec.get("test_dataset_id"),
+        train_dataset_id=train_dataset_id,
+        val_dataset_id=val_dataset_id,
+        test_dataset_id=test_dataset_id,
+        train_dataset_aliases=_dataset_aliases_for_provenance(
+            context,
+            train_dataset_id,
+        ),
+        val_dataset_aliases=_dataset_aliases_for_provenance(
+            context,
+            val_dataset_id,
+        ),
+        test_dataset_aliases=_dataset_aliases_for_provenance(
+            context,
+            test_dataset_id,
+        ),
     )
 
 
 def _find_split_spec_by_run(context, *, run_id, protocol_id):
-    """Best-effort reverse lookup. Fragile by design — see AUDIT_GAPS[0]."""
-    artifacts = getattr(context, "artifacts", None)
-    if artifacts is None or not run_id:
+    """Best-effort reverse lookup. Direct model.split_spec_artifact_id is better."""
+    if not run_id and not protocol_id:
         return None, None
-    for method_name in ("query", "find", "list", "list_by_type"):
-        method = getattr(artifacts, method_name, None)
-        if not callable(method):
+
+    for aid, payload in _iter_artifact_payloads(context, "ml.split_spec"):
+        if not isinstance(payload, Mapping):
             continue
-        for call in (
-            lambda: method(artifact_type="ml.split_spec"),
-            lambda: method("ml.split_spec"),
-            lambda: method(),
-        ):
-            try:
-                results = call()
-            except Exception:
-                continue
-            for item in results or []:
-                aid, payload = _unpack_artifact(context, item)
-                if not isinstance(payload, Mapping):
-                    continue
-                if str(payload.get("run_id")) == str(run_id) or (
-                    protocol_id and str(payload.get("protocol_id")) == str(protocol_id)
-                ):
-                    return payload, aid
+
+        if run_id and str(payload.get("run_id")) == str(run_id):
+            return payload, aid
+
+        if protocol_id and str(payload.get("protocol_id")) == str(protocol_id):
+            return payload, aid
+
     return None, None
 
 
+def _clean_dataset_id(value: Any) -> Optional[str]:
+    text = str(value or "").strip()
+    return text or None
+
+
+def _dataset_aliases_for_provenance(
+    context: Any,
+    dataset_id: Optional[str],
+) -> frozenset:
+    """Return dataset ids that are provably aliases of `dataset_id`.
+
+    Used mainly for AL:
+      derived AL training dataset -> original AL pool dataset
+
+    Sources of truth, in order:
+      1. Dataset metadata registered by active_learning.actions
+      2. al.training_set artifacts
+      3. A few generic source/base/parent metadata keys
+    """
+    clean = _clean_dataset_id(dataset_id)
+    if not clean:
+        return frozenset()
+
+    aliases = {clean}
+
+    meta = _dataset_meta(context, clean)
+    for key in (
+        "source_dataset_id",
+        "pool_dataset_id",
+        "parent_dataset_id",
+        "base_dataset_id",
+        "origin_dataset_id",
+    ):
+        value = _clean_dataset_id(meta.get(key))
+        if value:
+            aliases.add(value)
+
+    aliases.update(_al_training_source_aliases(context, training_dataset_id=clean))
+
+    # Defensive: if any alias itself has source metadata, include one hop.
+    for alias in list(aliases):
+        alias_meta = _dataset_meta(context, alias)
+        for key in (
+            "source_dataset_id",
+            "pool_dataset_id",
+            "parent_dataset_id",
+            "base_dataset_id",
+            "origin_dataset_id",
+        ):
+            value = _clean_dataset_id(alias_meta.get(key))
+            if value:
+                aliases.add(value)
+
+    return frozenset(str(alias) for alias in aliases if alias)
+
+
+def _dataset_meta(context: Any, dataset_id: str) -> Dict[str, Any]:
+    datasets = getattr(context, "datasets", None)
+    if datasets is None or not dataset_id:
+        return {}
+
+    get_meta = getattr(datasets, "get_meta", None)
+    if callable(get_meta):
+        try:
+            meta = get_meta(dataset_id)
+            if isinstance(meta, Mapping):
+                return dict(meta)
+        except Exception:
+            pass
+
+    get = getattr(datasets, "get", None)
+    if callable(get):
+        try:
+            item = get(dataset_id)
+            for attr in ("metadata", "meta"):
+                meta = getattr(item, attr, None)
+                if isinstance(meta, Mapping):
+                    return dict(meta)
+        except Exception:
+            pass
+
+    return {}
+
+
+def _al_training_source_aliases(
+    context: Any,
+    *,
+    training_dataset_id: str,
+) -> set[str]:
+    aliases: set[str] = set()
+    wanted = str(training_dataset_id or "").strip()
+    if not wanted:
+        return aliases
+
+    for _aid, payload in _iter_artifact_payloads(context, "al.training_set"):
+        if not isinstance(payload, Mapping):
+            continue
+
+        payload_training_dataset_id = _clean_dataset_id(
+            payload.get("training_dataset_id")
+            or payload.get("dataset_id")
+        )
+        if payload_training_dataset_id != wanted:
+            continue
+
+        for key in (
+            "source_dataset_id",
+            "pool_dataset_id",
+            "original_dataset_id",
+            "parent_dataset_id",
+        ):
+            value = _clean_dataset_id(payload.get(key))
+            if value:
+                aliases.add(value)
+
+    return aliases
+
+
+def _iter_artifact_payloads(context: Any, artifact_type: Optional[str] = None):
+    """Yield (artifact_id, payload) across ArtifactStore API variants."""
+    artifacts = getattr(context, "artifacts", None)
+    if artifacts is None:
+        return
+
+    method_calls = []
+
+    for method_name in ("query", "find", "list_by_type", "list"):
+        method = getattr(artifacts, method_name, None)
+        if not callable(method):
+            continue
+
+        if artifact_type:
+            method_calls.extend(
+                [
+                    lambda method=method: method(artifact_type=artifact_type),
+                    lambda method=method: method(artifact_type),
+                ]
+            )
+
+        method_calls.append(lambda method=method: method())
+
+    seen_artifact_ids: set[str] = set()
+
+    for call in method_calls:
+        try:
+            results = call()
+        except TypeError:
+            continue
+        except Exception:
+            continue
+
+        for item in results or []:
+            aid, payload = _unpack_artifact(context, item)
+            if not isinstance(payload, Mapping):
+                continue
+
+            # If the store/list result exposes an artifact type, respect it.
+            payload_type = (
+                payload.get("artifact_type")
+                or payload.get("type")
+                or payload.get("kind")
+            )
+            if (
+                artifact_type
+                and payload_type
+                and str(payload_type) != str(artifact_type)
+            ):
+                # Some payloads use "kind" for model kind, not artifact type.
+                # Do not over-filter known AL training payloads, which may not
+                # carry artifact_type in the JSON body.
+                if artifact_type == "al.training_set" and payload.get(
+                    "training_dataset_id"
+                ):
+                    pass
+                else:
+                    continue
+
+            key = str(aid or id(payload))
+            if key in seen_artifact_ids:
+                continue
+            seen_artifact_ids.add(key)
+
+            yield aid, payload
+
+
 def _unpack_artifact(context, item):
-    if isinstance(item, Mapping) and "train_row_ids" in item:
-        return item.get("artifact_id"), item
+    """Return (artifact_id, payload) for several ArtifactStore result shapes."""
+    if isinstance(item, Mapping):
+        aid = (
+            item.get("artifact_id")
+            or item.get("id")
+            or item.get("artifactId")
+        )
+
+        payload = item.get("payload")
+        if isinstance(payload, Mapping):
+            return aid, payload
+
+        return aid, item
+
     if isinstance(item, str):
         try:
             return item, context.artifacts.get(item)
         except Exception:
             return item, None
+
     aid = getattr(item, "artifact_id", None) or getattr(item, "id", None)
     if aid:
         try:
             return aid, context.artifacts.get(aid)
         except Exception:
             return aid, None
+
+    payload = getattr(item, "payload", None)
+    if isinstance(payload, Mapping):
+        return aid, payload
+
     return None, None
 
 
@@ -395,17 +671,24 @@ class Predictor:
 
     # -- the audit flow (not overridable) ------------------------------------
     def run(self) -> Dict[str, Any]:
-
         from . import artifacts as artifact_utils
         from . import model_contract as contract_utils
 
         _check_cancelled(self.cancel_token)
-
         self.reconstruct()
 
         cols = list(dict.fromkeys([c for c in self.read_columns() if c]))
+
+        if (
+            self.scope == SCOPE_EVALUATION
+            and self.target_column
+            and self.target_column not in cols
+        ):
+            cols.append(self.target_column)
+
         df = self.context.datasets.get_df(self.dataset_id, columns=cols)
         df = _filter_rows(df, self.request, self.binding.get("record_id_column"))
+
         _check_cancelled(self.cancel_token)
 
         records = self.predict_records(df)
@@ -429,6 +712,7 @@ class Predictor:
             input_binding["failed_image_row_count"] = len(failed_rows)
 
         row_ids = [r["record_id"] for r in records]
+
         payload = contract_utils.build_predictions_payload(
             context=self.context,
             run_id=self.run_id,
@@ -449,6 +733,7 @@ class Predictor:
         payload["recipe_version_check"] = self.recipe_version_check
         payload["scope"] = self.scope
         payload["audit_gaps"] = AUDIT_GAPS
+
         if eval_block is not None:
             payload["evaluation"] = eval_block
             payload["evaluation_report_artifact_id"] = eval_report_id
@@ -471,26 +756,35 @@ class Predictor:
 
         self._publish_events(artifact_id, derived_dataset_id, payload)
 
-        return artifact_utils.json_safe({
-            "ok": True,
-            "scope": self.scope,
-            "artifact_id": artifact_id,
-            "evaluation_report_artifact_id": eval_report_id,
-            "derived_dataset_id": derived_dataset_id,
-            "dataset_id": self.dataset_id,
-            "model_artifact_id": self.model_artifact_id,
-            "count": len(row_ids),
-            "provenance": payload["provenance"],
-            "evaluation": eval_block,
-            "recipe_version_check": self.recipe_version_check,
-            "checkpoint_sha256": checkpoint_sha,
-            "audit_gaps": AUDIT_GAPS,
-            "recommended_color_columns": payload.get("visualisation", {}).get("recommended_color_columns", []),
-            "prediction_preview": list((payload.get("prediction_table") or {}).get("rows") or [])[:25],
-            "prediction_table_columns": list((payload.get("prediction_table") or {}).get("columns") or []),
-            "failed_image_row_count": len(failed_rows),
-            "failed_image_rows": failed_rows[:25],
-        })
+        return artifact_utils.json_safe(
+            {
+                "ok": True,
+                "scope": self.scope,
+                "artifact_id": artifact_id,
+                "evaluation_report_artifact_id": eval_report_id,
+                "derived_dataset_id": derived_dataset_id,
+                "dataset_id": self.dataset_id,
+                "model_artifact_id": self.model_artifact_id,
+                "count": len(row_ids),
+                "provenance": payload["provenance"],
+                "evaluation": eval_block,
+                "recipe_version_check": self.recipe_version_check,
+                "checkpoint_sha256": checkpoint_sha,
+                "audit_gaps": AUDIT_GAPS,
+                "recommended_color_columns": payload.get("visualisation", {}).get(
+                    "recommended_color_columns",
+                    [],
+                ),
+                "prediction_preview": list(
+                    (payload.get("prediction_table") or {}).get("rows") or []
+                )[:25],
+                "prediction_table_columns": list(
+                    (payload.get("prediction_table") or {}).get("columns") or []
+                ),
+                "failed_image_row_count": len(failed_rows),
+                "failed_image_rows": failed_rows[:25],
+            }
+        )
 
     # -- scope ---------------------------------------------------------------
     def _resolve_scope(self, requested: Optional[str]) -> str:
@@ -511,6 +805,7 @@ class Predictor:
         counts: Dict[str, int] = defaultdict(int)
         for r in records:
             counts[r.get("data_provenance", PROV_UNKNOWN)] += 1
+
         return {
             "verified": self.provenance.verified,
             "split_spec_artifact_id": self.provenance.split_spec_artifact_id,
@@ -518,6 +813,16 @@ class Predictor:
             "counts": dict(counts),
             "reportable_row_count": sum(counts[p] for p in _REPORTABLE_PROVENANCE),
             "seen_row_count": counts.get(PROV_TRAIN, 0) + counts.get(PROV_VAL, 0),
+            "dataset_ids": {
+                "train": self.provenance.train_dataset_id,
+                "validation": self.provenance.val_dataset_id,
+                "test": self.provenance.test_dataset_id,
+            },
+            "dataset_aliases": {
+                "train": sorted(self.provenance.train_dataset_aliases),
+                "validation": sorted(self.provenance.val_dataset_aliases),
+                "test": sorted(self.provenance.test_dataset_aliases),
+            },
             "reasons": {p: _PROV_REASON[p] for p in counts},
         }
 
@@ -539,27 +844,38 @@ class Predictor:
 
     # -- evaluation (honest, segregated) -------------------------------------
     def _maybe_evaluate(self, df, records):
-        if self.scope != SCOPE_EVALUATION or self.task == "regression":
+        if self.scope != SCOPE_EVALUATION:
             return None, None
+
         if not self.target_column or self.target_column not in df.columns:
             return None, None
 
         rid_col = self.binding.get("record_id_column")
         truth_by_id = {}
+
         for idx, row in df.iterrows():
             rid = str(row[rid_col]) if (rid_col and rid_col in df.columns) else str(idx)
-            val = row[self.target_column]
-            if pd.isna(val):
+            value = row[self.target_column]
+
+            if pd.isna(value):
                 continue
-            truth_by_id[rid] = str(val)
+
+            if self.task == "regression":
+                try:
+                    truth_by_id[rid] = float(value)
+                except Exception:
+                    continue
+            else:
+                truth_by_id[rid] = str(value)
 
         labelled = []
         for r in records:
-            t = truth_by_id.get(r["record_id"])
+            t = truth_by_id.get(str(r["record_id"]))
             if t is None:
                 continue
             r["y_true"] = t
             labelled.append(r)
+
         if not labelled:
             return None, None
 
@@ -570,26 +886,36 @@ class Predictor:
         per_bucket = {}
         for prov, recs in buckets.items():
             per_bucket[prov] = {
-                **_classification_metrics(recs),
+                **_metrics_for_task(self.task, recs),
                 "n": len(recs),
                 "reportable": prov in _REPORTABLE_PROVENANCE,
                 "reason": _PROV_REASON[prov],
             }
 
-        reportable = [r for r in labelled if r["data_provenance"] in _REPORTABLE_PROVENANCE]
-        headline = _classification_metrics(reportable) if reportable else None
+        reportable = [
+            r for r in labelled if r["data_provenance"] in _REPORTABLE_PROVENANCE
+        ]
+        headline = _metrics_for_task(self.task, reportable) if reportable else None
+
         reported_provs = sorted({r["data_provenance"] for r in reportable})
         metric_partition = (
-            "none" if not reported_provs
-            else reported_provs[0] if len(reported_provs) == 1
+            "none"
+            if not reported_provs
+            else reported_provs[0]
+            if len(reported_provs) == 1
             else "mixed"
         )
 
         eval_block = {
             "schema_version": EVALUATION_SCHEMA_VERSION,
             "scope": "post_hoc_evaluation",
-            "selection_metric": self.model_payload.get("metrics", {}).get("selection_metric")
-            or (self.model_payload.get("model_ref", {}).get("metadata", {}) or {}).get("selection_metric"),
+            "task": self.task,
+            "selection_metric": self.model_payload.get("metrics", {}).get(
+                "selection_metric"
+            )
+            or (self.model_payload.get("model_ref", {}).get("metadata", {}) or {}).get(
+                "selection_metric"
+            ),
             "selected_on_partition": "validation",
             "headline_metrics": headline,
             "headline_metric_partition": metric_partition,
@@ -619,11 +945,14 @@ class Predictor:
             "target_column": self.target_column,
             "created_at": time.time(),
         }
+
         report_id = self.context.artifacts.put(
-            "ml.evaluation_report", report_payload,
+            "ml.evaluation_report",
+            report_payload,
             dataset_id=self.dataset_id,
             params={"model_artifact_id": self.model_artifact_id, **self.params},
         )
+
         return eval_block, report_id
 
     def _evaluation_warnings(self, buckets) -> List[str]:
@@ -993,6 +1322,11 @@ def _classification_record(record_id: str, probabilities: Any, classes: Sequence
         rec["entropy"] = _entropy(probs)
     return rec
 
+def _metrics_for_task(task: str, records: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+    task = str(task or "classification").lower()
+    if task == "regression":
+        return _regression_metrics(records)
+    return _classification_metrics(records)
 
 def _classification_metrics(records: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
     y_true = [str(r.get("y_true")) for r in records if r.get("y_true") is not None and r.get("prediction") is not None]
@@ -1012,6 +1346,51 @@ def _classification_metrics(records: Sequence[Mapping[str, Any]]) -> Dict[str, A
         return {"accuracy": correct / len(y_true), "f1_macro": None, "balanced_accuracy": None,
                 "n_evaluated": len(y_true)}
 
+def _regression_metrics(records: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+    y_true = []
+    y_pred = []
+
+    for r in records:
+        if r.get("y_true") is None:
+            continue
+
+        pred = r.get("prediction", r.get("predicted_value", r.get("y_pred")))
+        if pred is None:
+            continue
+
+        try:
+            y_true.append(float(r.get("y_true")))
+            y_pred.append(float(pred))
+        except Exception:
+            continue
+
+    if not y_true:
+        return {
+            "mae": None,
+            "rmse": None,
+            "mse": None,
+            "r2": None,
+            "n_evaluated": 0,
+        }
+
+    yt = np.asarray(y_true, dtype=float)
+    yp = np.asarray(y_pred, dtype=float)
+    err = yp - yt
+    mse = float(np.mean(err ** 2))
+    rmse = float(math.sqrt(mse))
+    mae = float(np.mean(np.abs(err)))
+
+    ss_res = float(np.sum((yt - yp) ** 2))
+    ss_tot = float(np.sum((yt - np.mean(yt)) ** 2))
+    r2 = None if ss_tot == 0.0 else float(1.0 - ss_res / ss_tot)
+
+    return {
+        "mae": mae,
+        "rmse": rmse,
+        "mse": mse,
+        "r2": r2,
+        "n_evaluated": len(y_true),
+    }
 
 def _sklearn_classes(model) -> List[str]:
     classes = getattr(model, "classes_", None)
