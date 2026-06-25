@@ -19,6 +19,9 @@ from .utils import (
     force_wheel_zoom_hook,
     limited_histogram_hover_tool,
     renderer_name_hook,
+    AXIS_KIND_CATEGORICAL,
+    _runtime_axis_kind,
+    axis_tick_label_hook,
 )
 from .widgets import (
     settings_box,
@@ -155,7 +158,10 @@ class HistogramPanel(BaseVisualisationPanel):
             toolbar="right",
             tools=[limited_histogram_hover_tool(), "pan", "wheel_zoom", "box_zoom", "reset"],
             active_tools=["wheel_zoom"],
-            hooks=[force_wheel_zoom_hook],
+            hooks=[
+                force_wheel_zoom_hook,
+                axis_tick_label_hook(self.state),
+                   ],
             shared_axes=False,
             axiswise=True,
             framewise=True,
@@ -188,11 +194,14 @@ class HistogramPanel(BaseVisualisationPanel):
         return x
 
     def _histogram_extent(self, data: PreparedFrame) -> HistogramExtent:
-        x = self._valid_histogram_values(data.frame[INTERNAL_X].to_numpy(copy=False))
+        x = self._valid_histogram_values(
+            data.frame[INTERNAL_X].to_numpy(copy=False)
+        )
 
         if len(x) == 0:
             if self.state.log_x:
                 raise ValueError("No positive finite X data for Log X histogram")
+
             raise ValueError("No finite X data for histogram")
 
         xmin = self._state_limit("x_min")
@@ -200,11 +209,15 @@ class HistogramPanel(BaseVisualisationPanel):
 
         if xmin is None:
             xmin = float(np.nanmin(x))
+
         if xmax is None:
             xmax = float(np.nanmax(x))
 
         if not all(np.isfinite([xmin, xmax])):
             raise ValueError("Histogram limits must be finite numbers or empty")
+
+        if _runtime_axis_kind(self.state, self.state.x) == AXIS_KIND_CATEGORICAL:
+            return float(np.floor(xmin) - 0.5), float(np.ceil(xmax) + 0.5)
 
         if xmax <= xmin:
             raise ValueError("xmax must be greater than xmin")
@@ -262,7 +275,11 @@ class HistogramPanel(BaseVisualisationPanel):
             logy=self.state.log_y,
             tools=[limited_histogram_hover_tool(), "pan", "wheel_zoom", "box_zoom", "reset"],
             active_tools=["wheel_zoom"],
-            hooks=[force_wheel_zoom_hook, renderer_name_hook(HIST_RENDERER)],
+            hooks=[
+                force_wheel_zoom_hook,
+                renderer_name_hook(HIST_RENDERER),
+                axis_tick_label_hook(self.state)
+            ],
             responsive=True,
             min_height=PLOT_MIN_HEIGHT,
             show_grid=True,
@@ -273,8 +290,20 @@ class HistogramPanel(BaseVisualisationPanel):
         )
 
     def _bins_for(self, x: np.ndarray, extent: HistogramExtent):
-        n_bins = int(self.state.bins)
         xmin, xmax = extent
+
+        if _runtime_axis_kind(self.state, self.state.x) == AXIS_KIND_CATEGORICAL:
+            finite = np.asarray(x, dtype=float)
+            finite = finite[np.isfinite(finite)]
+
+            if len(finite) == 0:
+                return np.asarray([-0.5, 0.5], dtype=float)
+
+            first = int(np.floor(np.nanmin(finite)))
+            last = int(np.ceil(np.nanmax(finite)))
+            return np.arange(first - 0.5, last + 1.5, 1.0)
+
+        n_bins = int(self.state.bins)
 
         if self.state.log_x:
             return np.geomspace(xmin, xmax, n_bins + 1)

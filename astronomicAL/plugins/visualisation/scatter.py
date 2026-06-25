@@ -44,6 +44,7 @@ from .constants import (
     INTERACTIVE_DENSITY_ALPHA_GAMMA,
     FULL_RANGE_REL_TOL,
 )
+
 from .utils import (
     DENSITY_RENDERER,
     HOVER_COLOR,
@@ -61,6 +62,8 @@ from .utils import (
     deduplicate_toolbar_tools_hook,
     coverage_sample_prepared_frame,
     keep_pan_tool_active_hook,
+    _source_axis_is_numeric,
+    axis_tick_label_hook,
 )
 
 SELECTION_OVERLAY_METADATA_KEY = "visualisation.scatter.overlay_points"
@@ -618,14 +621,13 @@ class ScatterPanel(BaseVisualisationPanel):
 
         return positions
 
-    def _focus_point_from_dataset_row(self) -> Optional[tuple[float, Optional[float]]]:
-        """
-        Resolve the focused point from the DatasetSource instead of scanning the
-        full prepared plotting frame.
+    def _focus_point_from_dataset_row(
+        self,
+    ) -> Optional[tuple[float, Optional[float]]]:
+        """Resolve the focused point directly from the DatasetSource.
 
-        This is important after axis changes: existing focus metadata may not
-        match the new x/y variables, but the focused row can be fetched directly
-        from the Parquet-backed dataset.
+        This shortcut is valid only when the raw source values match the plotted
+        coordinates. Encoded categorical and datetime axes use the prepared frame.
         """
         selection = getattr(self.context, "selection", None)
         datasets = getattr(self.context, "datasets", None)
@@ -644,6 +646,7 @@ class ScatterPanel(BaseVisualisationPanel):
             return None
 
         row_id = getattr(focus, "row_id", None)
+
         if row_id is None:
             return None
 
@@ -651,25 +654,29 @@ class ScatterPanel(BaseVisualisationPanel):
         y_col = getattr(self.state, "y", None)
         record_id_col = getattr(self.state, "record_id_col", None)
 
-        if not x_col or not y_col or not record_id_col or record_id_col == "Use Index":
+        if (
+            not x_col
+            or not y_col
+            or not record_id_col
+            or record_id_col == "Use Index"
+        ):
+            return None
+
+        if not (
+            _source_axis_is_numeric(self.context, dataset_id, x_col)
+            and _source_axis_is_numeric(self.context, dataset_id, y_col)
+        ):
             return None
 
         try:
             source = datasets.get_source(dataset_id)
-        except Exception:
-            return None
-
-        try:
             row_df = source.to_pandas(
                 columns=[record_id_col, x_col, y_col],
                 where_sql=f'CAST("{record_id_col}" AS VARCHAR) = ?',
                 params=[str(row_id)],
                 limit=1,
             )
-        except TypeError:
-            # Older DatasetSource implementations may not support where_sql/params.
-            return None
-        except Exception:
+        except (TypeError, Exception):
             return None
 
         if row_df is None or row_df.empty:
@@ -979,16 +986,25 @@ class ScatterPanel(BaseVisualisationPanel):
         if not x_col or not y_col:
             return None
 
+        dataset_id = self._dataset_id()
+
+        # Encoded plot bounds cannot be applied to raw strings or datetimes.
+        if not (
+            _source_axis_is_numeric(self.context, dataset_id, x_col)
+            and _source_axis_is_numeric(self.context, dataset_id, y_col)
+        ):
+            return None
+
         try:
             left, bottom, right, top = bounds
-            x_min = min(float(left), float(right))
-            x_max = max(float(left), float(right))
-            y_min = min(float(bottom), float(top))
-            y_max = max(float(bottom), float(top))
+            x_min, x_max = sorted((float(left), float(right)))
+            y_min, y_max = sorted((float(bottom), float(top)))
         except Exception:
             return None
 
-        if not all(np.isfinite(value) for value in (x_min, x_max, y_min, y_max)):
+        values = (x_min, x_max, y_min, y_max)
+
+        if not all(np.isfinite(value) for value in values):
             return None
 
         qx = _quote_sql_identifier(x_col)
@@ -1002,10 +1018,10 @@ class ScatterPanel(BaseVisualisationPanel):
         ]
         params: list[Any] = [x_min, x_max, y_min, y_max]
 
-        if bool(getattr(self.state, "log_x", False)):
+        if getattr(self.state, "log_x", False):
             clauses.append(f"{qx} > 0")
 
-        if bool(getattr(self.state, "log_y", False)):
+        if getattr(self.state, "log_y", False):
             clauses.append(f"{qy} > 0")
 
         return " AND ".join(clauses), params
@@ -3230,6 +3246,7 @@ class ScatterPanel(BaseVisualisationPanel):
 
             opts["hooks"] = list(opts.get("hooks", [])) + [
                 renderer_name_hook(SCATTER_RENDERER),
+                axis_tick_label_hook(self.state),
             ]
 
             return points.opts(**opts)
@@ -3242,6 +3259,7 @@ class ScatterPanel(BaseVisualisationPanel):
 
         hooks = [
             renderer_name_hook(SCATTER_RENDERER),
+            axis_tick_label_hook(self.state),
         ]
 
         opts = dict(
@@ -3369,7 +3387,9 @@ class ScatterPanel(BaseVisualisationPanel):
             active_tools=[],
             toolbar=None,
 
-            hooks=[renderer_name_hook(DENSITY_RENDERER)],
+            hooks=[renderer_name_hook(DENSITY_RENDERER),
+                    axis_tick_label_hook(self.state),
+            ],
             show_grid=True,
             shared_axes=False,
             axiswise=True,
@@ -3421,7 +3441,10 @@ class ScatterPanel(BaseVisualisationPanel):
             line_alpha=0.0,
             tools=["box_select", "pan", "wheel_zoom", "box_zoom", "reset"],
             active_tools=["wheel_zoom"],
-            hooks=[force_wheel_zoom_hook],
+            hooks=[
+                axis_tick_label_hook(self.state),
+                force_wheel_zoom_hook
+            ],
             shared_axes=False,
             axiswise=True,
             framewise=True,
@@ -3811,6 +3834,8 @@ class ScatterPanel(BaseVisualisationPanel):
                 "truncated": bool(truncated) or len(overlay_points) > self._selection_overlay_limit(),
             }
 
+        print("should publish")
+
         selection.set_selection_set(
             dataset_id=dataset_id,
             row_ids=row_ids,
@@ -3821,6 +3846,8 @@ class ScatterPanel(BaseVisualisationPanel):
             create_artifact=True,
             update_focus_policy="preserve_or_first",
         )
+
+        
 
         self._schedule_post_selection_refresh()
 

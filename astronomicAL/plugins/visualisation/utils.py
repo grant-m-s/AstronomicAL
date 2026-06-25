@@ -20,6 +20,8 @@ from bokeh.models import (
     SaveTool,
     TapTool,
     WheelZoomTool,
+    DatetimeTickFormatter,
+    FixedTicker,
 )
 
 from .constants import (
@@ -33,6 +35,17 @@ from .constants import (
     INTERNAL_ROW_ID,
     INTERNAL_X,
     INTERNAL_Y,
+)
+
+from .axis_support import (
+    AXIS_KIND_CATEGORICAL,
+    AXIS_KIND_DATETIME,
+    AXIS_KIND_NUMERIC,
+    AxisEncoding,
+    encode_axis_array,
+    encode_axis_values,
+    infer_axis_kind_from_dtype,
+    plottable_columns_from_schema,
 )
 
 _HV_EXTENSION_LOADED = False
@@ -566,91 +579,10 @@ def _safe_series(df: pd.DataFrame, column: Any) -> pd.Series:
     return values
 
 def _numeric_array_from_array(values: Any) -> np.ndarray:
-    """Return a numeric NumPy array suitable for plotting.
-
-    This is the array-based equivalent of _numeric_array(df, column).
-    """
-    series = pd.Series(values)
-
-    if pd.api.types.is_bool_dtype(series.dtype):
-        return series.to_numpy(dtype=np.float32, copy=False, na_value=np.nan)
-
-    if pd.api.types.is_numeric_dtype(series.dtype):
-        try:
-            arr = series.to_numpy(copy=False)
-        except Exception:
-            arr = series.to_numpy(dtype=np.float64, copy=False, na_value=np.nan)
-    else:
-        arr = pd.to_numeric(series, errors="coerce").to_numpy(copy=False)
-
-    arr = np.asarray(arr)
-
-    if arr.dtype == np.float32:
-        return arr
-
-    if not np.issubdtype(arr.dtype, np.number):
-        values64 = arr.astype(np.float64, copy=False)
-    else:
-        values64 = arr.astype(np.float64, copy=False)
-
-    finite = np.isfinite(values64)
-
-    if not finite.any():
-        return values64
-
-    max_abs = np.nanmax(np.abs(values64[finite]))
-
-    if max_abs <= 1.0e20:
-        return values64.astype(np.float32, copy=False)
-
-    return values64
+    return encode_axis_array(values)
 
 def _numeric_array(df: pd.DataFrame, column: Any) -> np.ndarray:
-    """
-    Return a numeric NumPy array suitable for plotting.
-
-    Uses float32 only when safe. Very large scientific values, such as
-    luminosities, must remain float64 or they overflow to inf and disappear
-    during np.isfinite masking.
-    """
-    series = df[column]
-
-    if pd.api.types.is_bool_dtype(series.dtype):
-        return series.to_numpy(dtype=np.float32, copy=False, na_value=np.nan)
-
-    if pd.api.types.is_numeric_dtype(series.dtype):
-        try:
-            values = series.to_numpy(copy=False)
-        except Exception:
-            values = series.to_numpy(dtype=np.float64, copy=False, na_value=np.nan)
-    else:
-        values = pd.to_numeric(series, errors="coerce").to_numpy(copy=False)
-
-    values = np.asarray(values)
-
-    if values.dtype == np.float32:
-        return values
-
-    # Convert nullable/object/numeric arrays to float64 first. This avoids the
-    # overflow warning that happens when pandas casts huge values directly to
-    # float32.
-    if not np.issubdtype(values.dtype, np.number):
-        values64 = values.astype(np.float64, copy=False)
-    else:
-        values64 = values.astype(np.float64, copy=False)
-
-    finite = np.isfinite(values64)
-
-    if not finite.any():
-        return values64
-
-    max_abs = np.nanmax(np.abs(values64[finite]))
-
-    # Only downcast when it cannot overflow.
-    if max_abs <= 1.0e20:
-        return values64.astype(np.float32, copy=False)
-
-    return values64
+    return encode_axis_array(_safe_series(df, column))
 
 def _row_id_array(
     df: pd.DataFrame,
@@ -718,19 +650,118 @@ def _is_numeric_dtype_name(dtype_name: str) -> bool:
     return any(marker in dtype_name for marker in numeric_markers)
 
 
-def _numeric_columns_from_dataset(context, dataset_id: Optional[str]) -> List[str]:
+def _numeric_columns_from_dataset(
+    context,
+    dataset_id: Optional[str],
+) -> List[str]:
+    """Return all scalar columns that can be represented on a plot axis.
+
+    The historical function name is retained because VisualisationState
+    already imports it. The returned columns are no longer limited to
+    native numeric dtypes.
+    """
     columns = _dataset_columns(context, dataset_id)
     dtypes = _dataset_dtypes(context, dataset_id)
 
     if not dtypes:
         return columns
 
-    numeric_columns = [
-        column for column in columns
-        if _is_numeric_dtype_name(dtypes.get(column, ""))
-    ]
+    return plottable_columns_from_schema(columns, dtypes)
 
-    return numeric_columns
+def _source_axis_kind(
+    context,
+    dataset_id: Optional[str],
+    column: Any,
+) -> str:
+    """Return the schema-level axis kind for a source column."""
+    dtypes = _dataset_dtypes(context, dataset_id)
+    return infer_axis_kind_from_dtype(dtypes.get(str(column), ""))
+
+
+def _source_axis_is_numeric(
+    context,
+    dataset_id: Optional[str],
+    column: Any,
+) -> bool:
+    """Return whether raw numeric bounds can be applied to this source column."""
+    return _source_axis_kind(context, dataset_id, column) == AXIS_KIND_NUMERIC
+
+
+def _set_runtime_axis_encoding(
+    state,
+    column: Any,
+    encoding: AxisEncoding,
+) -> None:
+    """Store runtime encoding information for Bokeh axis formatting."""
+    if column is None:
+        return
+
+    column = str(column)
+
+    kinds = dict(getattr(state, "_axis_runtime_kinds", {}) or {})
+    kinds[column] = encoding.kind
+    state._axis_runtime_kinds = kinds
+
+    overrides = dict(getattr(state, "_axis_tick_overrides", {}) or {})
+
+    if encoding.kind == AXIS_KIND_CATEGORICAL and encoding.categories:
+        overrides[column] = {
+            float(index): str(label)
+            for index, label in enumerate(encoding.categories)
+        }
+    else:
+        overrides.pop(column, None)
+
+    state._axis_tick_overrides = overrides
+
+
+def _runtime_axis_kind(state, column: Any) -> str:
+    """Return the encoding kind selected while preparing the current frame."""
+    kinds = getattr(state, "_axis_runtime_kinds", {}) or {}
+    return str(kinds.get(str(column), AXIS_KIND_NUMERIC))
+
+
+def axis_tick_label_hook(state):
+    """Apply categorical labels and datetime formatting to Bokeh axes."""
+
+    def _hook(plot, element) -> None:
+        try:
+            figure = plot.state
+        except Exception:
+            return
+
+        runtime_kinds = getattr(state, "_axis_runtime_kinds", {}) or {}
+        tick_overrides = getattr(state, "_axis_tick_overrides", {}) or {}
+
+        for dimension, column in (
+            ("x", getattr(state, "x", None)),
+            ("y", getattr(state, "y", None)),
+        ):
+            if column is None:
+                continue
+
+            column = str(column)
+            kind = runtime_kinds.get(column)
+            axes = list(getattr(figure, f"{dimension}axis", []) or [])
+
+            for axis in axes:
+                if kind == AXIS_KIND_CATEGORICAL:
+                    labels = tick_overrides.get(column, {})
+
+                    if labels:
+                        try:
+                            axis.ticker = FixedTicker(ticks=sorted(labels))
+                            axis.major_label_overrides = labels
+                        except Exception:
+                            pass
+
+                elif kind == AXIS_KIND_DATETIME:
+                    try:
+                        axis.formatter = DatetimeTickFormatter()
+                    except Exception:
+                        pass
+
+    return _hook
 
 def _label_arrays(
     df: pd.DataFrame,
@@ -1146,13 +1177,32 @@ def prepare_plot_frame(
     # ------------------------------------------------------------------
     t_arrays = time.perf_counter()
 
-    x = _numeric_array_from_array(x_raw)
+    x_encoding = encode_axis_values(x_raw)
+    x = x_encoding.values
+    _set_runtime_axis_encoding(state, state.x, x_encoding)
+
     mask = np.isfinite(x)
 
     y = None
+    y_encoding = None
+
     if require_y:
-        y = _numeric_array_from_array(y_raw)
+        y_encoding = encode_axis_values(y_raw)
+        y = y_encoding.values
+        _set_runtime_axis_encoding(state, state.y, y_encoding)
         mask &= np.isfinite(y)
+
+    # Categorical and datetime coordinates cannot use logarithmic axes.
+    if x_encoding.kind != AXIS_KIND_NUMERIC and getattr(state, "log_x", False):
+        state.log_x = False
+
+    if (
+        require_y
+        and y_encoding is not None
+        and y_encoding.kind != AXIS_KIND_NUMERIC
+        and getattr(state, "log_y", False)
+    ):
+        state.log_y = False
 
     if state.log_x:
         mask &= x > 0
