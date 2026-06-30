@@ -6,7 +6,6 @@ import math
 import random
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
-
 @dataclass(frozen=True)
 class StrategyInfo:
     id: str
@@ -14,7 +13,6 @@ class StrategyInfo:
     description: str = ""
     requires_probabilities: bool = False
     deterministic: bool = True
-
 
 class QueryStrategy:
     """Base class for active-learning query strategies.
@@ -56,7 +54,6 @@ class QueryStrategy:
     ) -> Optional[float]:
         raise NotImplementedError
 
-
 class LeastConfidenceStrategy(QueryStrategy):
     id = "least_confidence"
     title = "Least confidence"
@@ -90,7 +87,6 @@ class LeastConfidenceStrategy(QueryStrategy):
 
         return 1.0 - max(probs)
 
-
 class MarginStrategy(QueryStrategy):
     id = "margin"
     title = "Smallest margin"
@@ -120,7 +116,6 @@ class MarginStrategy(QueryStrategy):
 
         return 1.0 - (probs[0] - probs[1])
 
-
 class EntropyStrategy(QueryStrategy):
     id = "entropy"
     title = "Entropy"
@@ -145,7 +140,6 @@ class EntropyStrategy(QueryStrategy):
 
         return float(-sum(p * math.log(max(p, 1.0e-12)) for p in probs))
 
-
 class RandomStrategy(QueryStrategy):
     id = "random"
     title = "Random"
@@ -165,7 +159,6 @@ class RandomStrategy(QueryStrategy):
         raw = f"{int(seed or 0)}:{row_id}".encode("utf-8")
         digest = hashlib.sha1(raw).hexdigest()[:16]
         return int(digest, 16) / float(0xFFFFFFFFFFFFFFFF)
-
 
 class QueryStrategyRegistry:
     def __init__(self) -> None:
@@ -277,7 +270,6 @@ class QueryStrategyRegistry:
         }
         return ranked
 
-
 def create_default_strategy_registry() -> QueryStrategyRegistry:
     registry = QueryStrategyRegistry()
     registry.register(LeastConfidenceStrategy())
@@ -285,7 +277,6 @@ def create_default_strategy_registry() -> QueryStrategyRegistry:
     registry.register(EntropyStrategy())
     registry.register(RandomStrategy())
     return registry
-
 
 def probability_values(record: Mapping[str, Any]) -> List[float]:
     """Extract class probabilities from the shapes used by core_ml predictions."""
@@ -317,7 +308,6 @@ def probability_values(record: Mapping[str, Any]) -> List[float]:
 
     return _normalise_probabilities(prefix_values)
 
-
 def _values_from_probability_candidate(candidate: Any) -> List[float]:
     if candidate is None:
         return []
@@ -332,7 +322,6 @@ def _values_from_probability_candidate(candidate: Any) -> List[float]:
 
     return []
 
-
 def _normalise_probabilities(values: Sequence[float]) -> List[float]:
     out = [max(0.0, float(value)) for value in values]
     total = sum(out)
@@ -341,7 +330,6 @@ def _normalise_probabilities(values: Sequence[float]) -> List[float]:
     if total > 1.0 + 1.0e-6 or total < 1.0 - 1.0e-6:
         out = [value / total for value in out]
     return out
-
 
 def _safe_float(value: Any) -> Optional[float]:
     if value is None:

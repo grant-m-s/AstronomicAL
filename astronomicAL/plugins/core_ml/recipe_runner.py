@@ -9,25 +9,7 @@ from typing import Any, Dict, Mapping, Optional
 
 from astronomicAL.platform.plugins.specs import ActionRequest
 
-
-def _load_sibling(stem: str):
-    module_name = f"{__name__}.{stem}"
-    if module_name in sys.modules:
-        return sys.modules[module_name]
-
-    path = Path(__file__).with_name(f"{stem}.py")
-    spec = importlib.util.spec_from_file_location(module_name, path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"Could not load sibling module {stem!r} from {path}")
-
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-_registry_mod = _load_sibling("recipe_registry")
-
+from . import recipe_registry as _registry_mod
 
 def _coerce_request(request: Any) -> ActionRequest:
     if isinstance(request, ActionRequest):

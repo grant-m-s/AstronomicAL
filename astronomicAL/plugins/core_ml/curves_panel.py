@@ -1,4 +1,6 @@
 #BUG: Doesnt provide result metrics even when groundtruth provided
+#BUG: Flicker When training round is fast
+
 from __future__ import annotations
 
 import time

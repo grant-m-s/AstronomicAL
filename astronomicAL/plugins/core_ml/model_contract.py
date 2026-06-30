@@ -656,6 +656,10 @@ def prediction_table_rows(
         if "max_probability" in record:
             row["prediction_confidence"] = json_safe(record.get("max_probability"))
 
+        for key in ("confidence_source", "confidence_semantics"):
+            if key in record:
+                row[key] = json_safe(record.get(key))
+
         for key in (
             "least_confidence",
             "margin",

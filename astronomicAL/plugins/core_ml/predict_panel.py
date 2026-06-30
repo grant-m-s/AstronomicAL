@@ -41,6 +41,8 @@ _PROV_ORDER = ["novel", "test", "validation", "train", "unknown"]
 _ATTACH_FRIENDLY = {
     "predicted_label": "pred_label",
     "prediction_confidence": "pred_confidence",
+    "confidence_source": "pred_confidence_source",
+    "confidence_semantics": "pred_confidence_semantics",
     "data_provenance": "pred_provenance",
     "entropy": "pred_entropy",
     "least_confidence": "pred_least_confidence",
@@ -50,6 +52,16 @@ _ATTACH_FRIENDLY = {
 }
 _ATTACH_PRIORITY = list(_ATTACH_FRIENDLY.keys())
 
+_GENERATED_PREDICTION_COLUMNS = set(_ATTACH_FRIENDLY.values())
+
+
+def _is_generated_prediction_column(column: Any) -> bool:
+    column = str(column)
+
+    return (
+        column in _GENERATED_PREDICTION_COLUMNS
+        or column.startswith("pred_prob_")
+    )
 
 # =============================================================================
 # DuckDB relation helpers (adapted from core.table_tools) + a lazy join source
@@ -148,15 +160,13 @@ class LazyPredictionJoinSource:
         self.dataset_name = dataset_name
 
         added_columns = [str(final) for _src, final in self.column_plan]
-        added_set = set(added_columns)
 
-        # Key fix:
-        # if pred_label already exists and this run also writes pred_label,
-        # do not expose both old and new columns. Project the old one away
-        # from base.*, then add the fresh joined column.
         self._base_columns = [
-            str(column) for column in base_columns if str(column) not in added_set
+            str(column)
+            for column in base_columns
+            if not _is_generated_prediction_column(column)
         ]
+    
         self._columns_cache = self._base_columns + added_columns
         self._row_count_cache = int(row_count_hint) if row_count_hint is not None else None
 
@@ -853,7 +863,18 @@ class MLPredictPanel:
             raise RuntimeError("the platform parquet-cache helpers aren't available")
         if source is None or not hasattr(source, "to_pandas"):
             raise RuntimeError("couldn't read the dataset")
+
         df = source.to_pandas()
+
+        generated_columns = [
+            column
+            for column in df.columns
+            if _is_generated_prediction_column(column)
+        ]
+
+        if generated_columns:
+            df = df.drop(columns=generated_columns)
+
         if id_column and id_column != "Use Index" and id_column in df.columns:
             key = df[id_column].astype(str)
         else:

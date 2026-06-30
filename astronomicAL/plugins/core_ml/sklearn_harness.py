@@ -254,6 +254,25 @@ class SklearnHarness(RunHarness):
             ("model", best),
         ])
 
+        prediction_capabilities = {
+            "predict": callable(getattr(pipeline, "predict", None)),
+            "predict_proba": callable(getattr(pipeline, "predict_proba", None)),
+            "decision_function": callable(getattr(pipeline, "decision_function", None)),
+        }
+
+        prediction_capabilities["confidence_available"] = (
+            prediction_capabilities["predict_proba"]
+            or prediction_capabilities["decision_function"]
+        )
+
+        prediction_capabilities["confidence_source"] = (
+            "predict_proba"
+            if prediction_capabilities["predict_proba"]
+            else "decision_function"
+            if prediction_capabilities["decision_function"]
+            else "unavailable"
+        )
+
         model_dir = ml_run_artifact_dir(self.run, kind="model")
         sidecar_path = model_dir / "model.joblib"
         joblib.dump(pipeline, sidecar_path)
@@ -279,6 +298,7 @@ class SklearnHarness(RunHarness):
             "test_dataset_id": parts.test_dataset_id,
             "validation_source": parts.validation_source,
             "test_source": parts.test_source,
+            "prediction_capabilities": prediction_capabilities,
             "model_ref": {
                 "storage": "local_file",
                 "uri": str(sidecar_path),
@@ -291,6 +311,7 @@ class SklearnHarness(RunHarness):
                     "recipe_id": self.run.recipe_id,
                     "run_id": self.run.run_id,
                     "python_type": f"{type(best).__module__}.{type(best).__name__}",
+                    "prediction_capabilities": prediction_capabilities,
                 },
             },
             "input_contract": {

@@ -12,25 +12,9 @@ import panel as pn
 
 from astronomicAL.platform.plugins.specs import ActionRequest
 
-
-def _load_sibling(stem: str):
-    module_name = f"{__name__}.{stem}"
-    if module_name in sys.modules:
-        return sys.modules[module_name]
-
-    path = Path(__file__).with_name(f"{stem}.py")
-    spec = importlib.util.spec_from_file_location(module_name, path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"Could not load sibling module {stem!r} from {path}")
-
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-_registry_mod = _load_sibling("recipe_registry")
-_runner = _load_sibling("recipe_runner")
+from . import recipe_registry as _registry_mod
+from . import recipe_runner as _runner
+from .feature_columns import parse_column_list
 
 
 # Protocol controls the panel owns for every MANAGED recipe. These are NOT
@@ -682,8 +666,6 @@ class MLRecipeLauncherPanel:
             )
 
     def _column_list_from_value(self, value: Any) -> List[str]:
-        from .feature_columns import parse_column_list
-
         return parse_column_list(value)
 
     def _widget_for_schema(self, name: str, schema: Mapping[str, Any]):

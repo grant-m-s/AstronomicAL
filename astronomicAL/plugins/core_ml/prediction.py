@@ -1101,6 +1101,112 @@ class TorchImagePredictor(Predictor):
             self.transform_desc["failed_rows"] = len(failed)
         return records
 
+def _normalise_probability_matrix(values: Any) -> Optional[np.ndarray]:
+    """Validate and row-normalise a probability matrix."""
+    try:
+        probs = np.asarray(values, dtype=float)
+    except Exception:
+        return None
+
+    if probs.ndim != 2 or probs.shape[1] < 2:
+        return None
+
+    probs = np.where(np.isfinite(probs), probs, 0.0)
+    probs = np.clip(probs, 0.0, None)
+
+    totals = probs.sum(axis=1, keepdims=True)
+    valid = totals[:, 0] > 0.0
+
+    if not np.any(valid):
+        return None
+
+    probs[valid] /= totals[valid]
+    probs[~valid] = 1.0 / probs.shape[1]
+    return probs
+
+
+def _sigmoid(values: Any) -> np.ndarray:
+    values = np.asarray(values, dtype=float)
+    values = np.clip(values, -709.0, 709.0)
+
+    result = np.empty_like(values, dtype=float)
+    positive = values >= 0
+
+    result[positive] = 1.0 / (1.0 + np.exp(-values[positive]))
+    exp_values = np.exp(values[~positive])
+    result[~positive] = exp_values / (1.0 + exp_values)
+
+    return result
+
+
+def _decision_scores_to_probability_matrix(
+    scores: Any,
+    *,
+    class_count: int,
+) -> Optional[np.ndarray]:
+    """Convert sklearn decision scores into probability-like values.
+
+    These values are suitable for ranking and visualisation, but are not
+    calibrated probabilities.
+    """
+    try:
+        scores = np.asarray(scores, dtype=float)
+    except Exception:
+        return None
+
+    if scores.ndim == 1:
+        positive = _sigmoid(scores)
+        return np.column_stack((1.0 - positive, positive))
+
+    if scores.ndim != 2:
+        return None
+
+    if scores.shape[1] == 1:
+        positive = _sigmoid(scores[:, 0])
+        return np.column_stack((1.0 - positive, positive))
+
+    if class_count and scores.shape[1] != class_count:
+        # This can happen with pairwise/OVO decision-function outputs.
+        return None
+
+    shifted = scores - np.nanmax(scores, axis=1, keepdims=True)
+    exponentials = np.exp(np.clip(shifted, -709.0, 0.0))
+    return _normalise_probability_matrix(exponentials)
+
+
+def _sklearn_probability_output(
+    model: Any,
+    X: pd.DataFrame,
+    *,
+    class_count: int,
+) -> tuple[Optional[np.ndarray], str]:
+    """Return probability-like outputs and their provenance."""
+    predict_proba = getattr(model, "predict_proba", None)
+
+    if callable(predict_proba):
+        try:
+            probabilities = _normalise_probability_matrix(predict_proba(X))
+
+            if probabilities is not None:
+                return probabilities, "predict_proba"
+        except Exception:
+            pass
+
+    decision_function = getattr(model, "decision_function", None)
+
+    if callable(decision_function):
+        try:
+            probabilities = _decision_scores_to_probability_matrix(
+                decision_function(X),
+                class_count=class_count,
+            )
+
+            if probabilities is not None:
+                return probabilities, "decision_function"
+        except Exception:
+            pass
+
+    return None, "labels_only"
 
 class SklearnTabularPredictor(Predictor):
     framework = "sklearn"
@@ -1121,23 +1227,60 @@ class SklearnTabularPredictor(Predictor):
     def predict_records(self, df) -> List[Dict[str, Any]]:
         rid_col = self.binding.get("record_id_column")
         X = df[self._features]
-        preds = self._model.predict(X)
-        probs = None
-        if hasattr(self._model, "predict_proba"):
-            try:
-                probs = np.asarray(self._model.predict_proba(X))
-            except Exception:
-                probs = None
-        classes = self.classes or _sklearn_classes(self._model)
-        records = []
-        ids = [str(df.iloc[i][rid_col]) if (rid_col and rid_col in df.columns) else str(df.index[i])
-               for i in range(len(df))]
-        for i, rid in enumerate(ids):
-            if probs is not None and i < probs.shape[0]:
-                records.append(_classification_record(rid, probs[i], classes))
+        predictions = np.asarray(self._model.predict(X))
+
+        # predict_proba and decision_function columns follow estimator.classes_,
+        # not an arbitrary class ordering stored elsewhere in the model artifact.
+        classes = _sklearn_classes(self._model) or list(self.classes)
+
+        probabilities, confidence_source = _sklearn_probability_output(
+            self._model,
+            X,
+            class_count=len(classes),
+        )
+
+        self.transform_desc["confidence_source"] = confidence_source
+        self.transform_desc["confidence_semantics"] = (
+            "probability_estimate"
+            if confidence_source == "predict_proba"
+            else "normalised_decision_score"
+            if confidence_source == "decision_function"
+            else "unavailable"
+        )
+
+        record_ids = [
+            str(df.iloc[index][rid_col])
+            if rid_col and rid_col in df.columns
+            else str(df.index[index])
+            for index in range(len(df))
+        ]
+
+        records: List[Dict[str, Any]] = []
+
+        for index, record_id in enumerate(record_ids):
+            if probabilities is not None and index < probabilities.shape[0]:
+                record = _classification_record(
+                    record_id,
+                    probabilities[index],
+                    classes,
+                )
+                record["confidence_source"] = confidence_source
+                record["confidence_semantics"] = self.transform_desc[
+                    "confidence_semantics"
+                ]
             else:
-                records.append({"record_id": rid, "row_id": rid,
-                                "prediction": _json_scalar(preds[i]), "y_pred": _json_scalar(preds[i])})
+                prediction = _json_scalar(predictions[index])
+                record = {
+                    "record_id": record_id,
+                    "row_id": record_id,
+                    "prediction": prediction,
+                    "y_pred": prediction,
+                    "confidence_source": "unavailable",
+                    "confidence_semantics": "unavailable",
+                }
+
+            records.append(record)
+
         return records
 
 
