@@ -36,7 +36,18 @@ class DynamicReactGrid(ReactComponent):
         "https://unpkg.com/react-grid-layout/css/styles.css",
         "https://unpkg.com/react-resizable/css/styles.css",
         """
-        .pn-dynamic-rgl { width: 100%; height: 100%; min-height: 600px; }
+        .pn-dynamic-rgl {
+            width: 100%;
+            height: 100%;
+            min-height: 600px;
+        }
+
+        .pn-dynamic-rgl-bottom-spacer {
+            height: 260px;
+            min-height: 260px;
+            pointer-events: none;
+        }
+
         .tile { border: 1px solid rgba(0,0,0,0.15); border-radius: 8px; overflow: hidden; height: 100%; display:flex; flex-direction:column; }
         .tile-header { padding: 6px 10px; font-size: 12px; user-select:none; cursor:grab; border-bottom:1px solid rgba(0,0,0,0.10); background:rgba(0,0,0,0.06); display:flex; align-items:center; justify-content:space-between; gap:8px; }
         .tile-title { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
@@ -319,6 +330,68 @@ function debugRGL(label, payload = {}) {
   );
 }
 
+function forceInitialPageScrollTop(root) {
+  if (window.__astronomicalDidInitialScrollTop) {
+    return;
+  }
+
+  window.__astronomicalDidInitialScrollTop = true;
+
+  try {
+    if ("scrollRestoration" in window.history) {
+      window.history.scrollRestoration = "manual";
+    }
+  } catch (_error) {
+    // Ignore unsupported browsers.
+  }
+
+  const scrollTop = () => {
+    try {
+      window.scrollTo({ top: 0, left: 0, behavior: "auto" });
+    } catch (_error) {
+      window.scrollTo(0, 0);
+    }
+
+    const scrollingElement = document.scrollingElement || document.documentElement;
+
+    if (scrollingElement) {
+      scrollingElement.scrollTop = 0;
+      scrollingElement.scrollLeft = 0;
+    }
+
+    if (document.documentElement) {
+      document.documentElement.scrollTop = 0;
+      document.documentElement.scrollLeft = 0;
+    }
+
+    if (document.body) {
+      document.body.scrollTop = 0;
+      document.body.scrollLeft = 0;
+    }
+
+    let node = root?.parentElement || null;
+
+    while (node && node !== document.body && node !== document.documentElement) {
+      const style = window.getComputedStyle(node);
+      const overflowY = style?.overflowY || "";
+
+      if (
+        (overflowY === "auto" || overflowY === "scroll") &&
+        node.scrollHeight > node.clientHeight
+      ) {
+        node.scrollTop = 0;
+      }
+
+      node = node.parentElement;
+    }
+  };
+
+  scrollTop();
+  window.requestAnimationFrame(scrollTop);
+  window.setTimeout(scrollTop, 50);
+  window.setTimeout(scrollTop, 250);
+}
+
 export function render({ model }) {
 
   const [keys] = model.useState("keys");
@@ -339,8 +412,13 @@ export function render({ model }) {
   const [currentBp, setCurrentBp] = model.useState("current_breakpoint");
   const [, setCurrentLayout] = model.useState("current_layout");
 
+  const rootRef = React.useRef(null);
   const currentBpRef = React.useRef(safeString(currentBp, "lg") || "lg");
   const closeEventCountRef = React.useRef(integerOr(closeEventCount, 0));
+
+  React.useEffect(() => {
+    forceInitialPageScrollTop(rootRef.current);
+  }, []);
 
   React.useEffect(() => {
     currentBpRef.current = safeString(currentBp, "lg") || "lg";
@@ -353,11 +431,13 @@ export function render({ model }) {
   const childrenArray = React.Children.toArray(model.get_child("objects"));
 
   // Stability trick to avoid mismatched title/content while Panel patches
-  // `keys` and `objects`.
+  // `keys` and `objects`. While a patch is unstable, keep rendering the last
+  // complete key/object pair and do not write normalized layouts back to Python.
   const incomingKeys = (keys || []).map((key) => String(key));
+  const patchIsStable = incomingKeys.length === childrenArray.length;
   const stable = React.useRef({ keys: [], children: [] });
 
-  if (incomingKeys.length === childrenArray.length) {
+  if (patchIsStable) {
     stable.current = {
       keys: incomingKeys,
       children: childrenArray,
@@ -385,7 +465,7 @@ export function render({ model }) {
   }
 
   if (previousLayoutSignatureRef.current !== layoutSignature) {
-  
+
     const cameFromThisComponent =
       lastClientLayoutSignatureRef.current === layoutSignature;
 
@@ -395,7 +475,7 @@ export function render({ model }) {
         next: layoutSignature,
         layouts: layoutsSummary(layouts || {}),
       });
-      
+
     previousLayoutSignatureRef.current = layoutSignature;
 
     if (!cameFromThisComponent) {
@@ -432,6 +512,9 @@ export function render({ model }) {
 debugRGL("render.state", {
   stableKeys,
   keySignature,
+  patchIsStable,
+  incomingKeys,
+  childCount: childrenArray.length,
   currentBp,
   currentBpRef: currentBpRef.current,
   suppressProgrammaticLayoutWrite: suppressProgrammaticLayoutWriteRef.current,
@@ -440,11 +523,23 @@ debugRGL("render.state", {
 });
 
   React.useEffect(() => {
+    if (!patchIsStable) {
+      debugRGL("normalize.skip.unstable_patch", {
+        incomingKeys,
+        childCount: childrenArray.length,
+        layouts: layoutsSummary(layouts || {}),
+        normalizedLayouts: layoutsSummary(normalizedLayouts || {}),
+      });
+      return;
+    }
+
     if (!sameJSON(layouts || {}, normalizedLayouts || {})) {
+      lastClientLayoutSignatureRef.current = JSON.stringify(normalizedLayouts || {});
       setLayouts(normalizedLayouts || {});
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
+    patchIsStable,
     keySignature,
     JSON.stringify(normalizedLayouts || {}),
   ]);
@@ -463,7 +558,7 @@ debugRGL("render.state", {
     : ["s", "w", "e", "n", "sw", "nw", "se", "ne"];
 
   return (
-    <div className="pn-dynamic-rgl">
+    <div ref={rootRef} className="pn-dynamic-rgl">
       <ResponsiveRGL
         layouts={normalizedLayouts || {}}
         breakpoints={breakpoints || {}}
@@ -480,30 +575,49 @@ debugRGL("render.state", {
           currentBpRef.current = nextBp;
           setCurrentBp(nextBp);
         }}
-        onLayoutChange={(currentLayout) => {
+        onLayoutChange={(currentLayout, allLayouts) => {
           const bp = currentBpRef.current || "lg";
 
           debugRGL("onLayoutChange.enter", {
             bp,
             stableKeys,
+            patchIsStable,
             suppressProgrammaticLayoutWrite: suppressProgrammaticLayoutWriteRef.current,
             rawCurrentLayout: layoutSummary(currentLayout || []),
+            rawAllLayouts: layoutsSummary(allLayouts || {}),
             incomingLayouts: layoutsSummary(layouts || {}),
             normalizedLayouts: layoutsSummary(normalizedLayouts || {}),
           });
 
-          const cleanCur = sanitizeLayout(
-            currentLayout || [],
-            stableKeys,
-            integerOr((colsByBp || {})[bp], 12)
-          );
+          if (!patchIsStable) {
+            debugRGL("onLayoutChange.skip.unstable_patch", {
+              bp,
+              incomingKeys,
+              childCount: childrenArray.length,
+              rawCurrentLayout: layoutSummary(currentLayout || []),
+              rawAllLayouts: layoutsSummary(allLayouts || {}),
+            });
+            return;
+          }
 
-          const cleanAll = mergeActiveBreakpointLayout(
-            layouts || {},
-            bp,
-            cleanCur,
+          const sourceLayouts =
+            allLayouts && Object.keys(allLayouts || {}).length > 0
+              ? allLayouts
+              : {
+                  ...(layouts || {}),
+                  [bp]: currentLayout || [],
+                };
+
+          const cleanAll = ensureLayoutsForKeys(
+            sourceLayouts || {},
             stableKeys,
             colsByBp || {}
+          );
+
+          const cleanCur = sanitizeLayout(
+            ((cleanAll || {})[bp] || currentLayout || []),
+            stableKeys,
+            integerOr((colsByBp || {})[bp], 12)
           );
 
           debugRGL("onLayoutChange.cleaned", {
@@ -591,6 +705,8 @@ debugRGL("render.state", {
           </div>
         ))}
       </ResponsiveRGL>
+
+      <div className="pn-dynamic-rgl-bottom-spacer" aria-hidden="true" />
     </div>
   );
 }

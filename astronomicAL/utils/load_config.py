@@ -21,7 +21,6 @@ DEFAULT_BREAKPOINTS = {"lg": 1500, "md": 1050, "sm": 0}
 DEFAULT_COLS_BY_BREAKPOINT = {"lg": 12, "md": 12, "sm": 12}
 DEFAULT_RESIZE_HANDLES = ["s", "w", "e", "n", "sw", "nw", "se"]
 
-
 def _publish(context: Any, topic: str, payload: dict[str, Any]) -> None:
     events = getattr(context, "events", None)
     if events is None:
@@ -31,7 +30,6 @@ def _publish(context: Any, topic: str, payload: dict[str, Any]) -> None:
         events.publish(topic, payload)
     except Exception:
         pass
-
 
 def create_layout_skeleton(
     react: pn.template.ReactTemplate,
@@ -63,7 +61,6 @@ def create_layout_skeleton(
         return react, grid
 
     return react
-
 
 def create_header(
     react: pn.template.ReactTemplate,
@@ -158,7 +155,6 @@ def create_header(
         },
     )
 
-
     def _on_add_menu(_event) -> None:
         try:
             add_menu_panel(grid, context=context)
@@ -185,7 +181,6 @@ def create_header(
     )
     react._runtime_status_box = runtime_status_box
 
-
     header_row = pn.Row(
         layout_controls,
         dataset_header.view,
@@ -206,7 +201,6 @@ def create_header(
 
     react._header_box[:] = [header_row]
     return react
-
 
 def _build_export_labelled_data_button(context: Any):
     """
@@ -264,7 +258,6 @@ def _build_export_labelled_data_button(context: Any):
     button.on_click(export_fits_file_cb)
     return button
 
-
 def bind_controller(view: Any, controller: Any):
     """
     Attach a controller to a Panel view.
@@ -284,7 +277,6 @@ def bind_controller(view: Any, controller: Any):
 
     return view
 
-
 def _overlaps(a: dict[str, int], b: dict[str, int]) -> bool:
     return not (
         a["x"] + a["w"] <= b["x"]
@@ -292,7 +284,6 @@ def _overlaps(a: dict[str, int], b: dict[str, int]) -> bool:
         or a["y"] + a["h"] <= b["y"]
         or b["y"] + b["h"] <= a["y"]
     )
-
 
 def _find_first_fit(
     layout_items: list[dict[str, Any]],
@@ -324,7 +315,6 @@ def _find_first_fit(
 
     return 0, max_y
 
-
 def _menu_geometry_for_breakpoint(breakpoint: str) -> tuple[int, int]:
     if breakpoint == "lg":
         return 4, 6
@@ -333,7 +323,6 @@ def _menu_geometry_for_breakpoint(breakpoint: str) -> tuple[int, int]:
         return 6, 6
 
     return 12, 6
-
 
 def _next_platform_panel_id(context: Any, prefix: str = "platform") -> str:
     settings = getattr(context.config, "settings", None)
@@ -364,7 +353,6 @@ def _next_platform_panel_id(context: Any, prefix: str = "platform") -> str:
     settings[counter_key] = current
 
     return f"{prefix}:{current}"
-
 
 def _layout_items_for_new_tile(
     grid: DynamicReactGrid,
@@ -397,7 +385,6 @@ def _layout_items_for_new_tile(
 
     return layout_items
 
-
 def add_menu_panel(
     grid: DynamicReactGrid | None = None,
     context: Any | None = None,
@@ -418,6 +405,12 @@ def add_menu_panel(
         raise ValueError("add_menu_panel requires context.config.")
 
     grid = context.workspace.grid
+
+    # Keep placement based on the latest browser-resized layout before this
+    # function calculates candidate geometry for the new Menu tile.
+    context.workspace._sync_grid()
+    context.workspace._merge_current_layout_into_layouts()
+    context.workspace._normalize_grid_state()
 
     panel_id = _next_platform_panel_id(context, prefix="menu")
     dashboard = Dashboard(
@@ -461,7 +454,6 @@ def add_menu_panel(
     )
 
     return panel_id
-
 
 def create_layout_from_file(
     react: pn.template.ReactTemplate,
@@ -529,7 +521,6 @@ def create_layout_from_file(
         return react, context.workspace.grid
 
     return react
-
 
 def create_default_layout(
     react: pn.template.ReactTemplate,
