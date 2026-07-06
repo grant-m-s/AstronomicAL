@@ -17,7 +17,6 @@ manifest = PluginManifest(
     tags=["core", "active-learning", "ml", "selection", "query-strategy"],
 )
 
-
 def register(api) -> None:
     from . import actions
     from . import strategies
@@ -61,6 +60,9 @@ def register(api) -> None:
                 "label_options": {"type": "array", "items": {"type": "string"}, "description": "Optional override; otherwise inferred from target_column/label_column."},
                 "target_column": {"type": "string", "description": "Dataset column used to infer labels and as the session target column."},
                 "label_column": {"type": "string", "description": "Alias for target_column."},
+                "task_type": {"type": "string", "enum": ["classification", "regression", "auto"], "default": "auto", "description": "Detected/declared target type."},
+                "problem_type": {"type": "string", "enum": ["classification", "regression", "auto"], "description": "Alias for task_type."},
+                "label_profile": {"type": "object", "description": "Bounded target-column profile used to infer classification vs regression."},
                 "infer_labels_from_column": {"type": "boolean", "default": True},
                 "initial_k": {"type": "integer", "minimum": 0, "default": 20},
                 "seed": {"type": "integer", "default": 42},
@@ -99,6 +101,7 @@ def register(api) -> None:
                 "validation_dataset_id": {"type": "string"},
                 "test_dataset_id": {"type": "string"},
                 "target_column": {"type": "string"},
+                "task_type": {"type": "string", "enum": ["classification", "regression", "auto"]},
                 "feature_columns": {"type": "array", "items": {"type": "string"}},
                 "image_column": {"type": "string"},
                 "mask_column": {"type": "string"},
@@ -142,6 +145,41 @@ def register(api) -> None:
                 "k": {"type": "integer", "minimum": 1, "default": 200},
                 "seed": {"type": "integer", "default": 42},
                 "make_selection": {"type": "boolean", "default": True},
+                "exclude_row_ids": {"type": "array", "items": {"type": "string"}},
+            },
+        },
+        run_in_job=True,
+    )
+
+    api.register_action(
+        id="score_pool",
+        title="Calculate Query-Strategy Scores",
+        handler=actions.score_pool_action,
+        description=(
+            "Score every currently eligible pool row with one or more registered query strategies "
+            "for XY diagnostics, without creating a review queue."
+        ),
+        category="Active Learning",
+        icon="analytics",
+        tags=["active-learning", "query", "strategy", "diagnostics", "visualisation"],
+        inputs={
+            "dataset": False,
+            "selection": "none",
+            "columns": "none",
+            "numeric_columns": "none",
+            "accepts_artifact_types": ["ml.predictions"],
+        },
+        outputs=[
+            {"type": "al.session", "description": "Updated session with the latest strategy-score artifact."},
+            {"type": "ml.active_learning_scores", "description": "Whole-pool strategy scores for diagnostics."},
+        ],
+        params_schema={
+            "type": "object",
+            "properties": {
+                "session_artifact_id": {"type": "string"},
+                "predictions_artifact_id": {"type": "string"},
+                "strategy_ids": {"type": "array", "items": {"type": "string"}, "description": "Use all registered strategies when omitted."},
+                "seed": {"type": "integer", "default": 42},
                 "exclude_row_ids": {"type": "array", "items": {"type": "string"}},
             },
         },
@@ -211,6 +249,7 @@ def register(api) -> None:
             "properties": {
                 "session_artifact_id": {"type": "string"},
                 "target_column": {"type": "string", "default": "al_label"},
+                "task_type": {"type": "string", "enum": ["classification", "regression", "auto"]},
                 "train_dataset_id": {"type": "string"},
                 "required_columns": {"type": "array", "items": {"type": "string"}},
                 "recipe_params": {"type": "object"},
@@ -249,6 +288,9 @@ def register(api) -> None:
                 "recipe_params": {"type": "object"},
                 "prediction_params": {"type": "object"},
                 "target_column": {"type": "string", "default": "al_label"},
+                "task_type": {"type": "string", "enum": ["classification", "regression", "auto"]},
+                "problem_type": {"type": "string", "enum": ["classification", "regression", "auto"]},
+                "label_profile": {"type": "object"},
                 "train_dataset_id": {"type": "string"},
                 "seed": {"type": "integer"},
                 "auto_predict": {"type": "boolean", "default": True},
@@ -279,9 +321,11 @@ def register(api) -> None:
             "al.session",
             "al.training_set",
             "ml.active_learning_batch",
+            "ml.active_learning_scores",
             "selection.ids",
             "al.session.created",
             "al.query_batch.created",
+            "al.strategy_scores.calculated",
             "al.label.recorded",
             "al.labels.bulk_recorded",
             "al.round.training_started",
@@ -298,7 +342,6 @@ def register(api) -> None:
         persist_state=True,
         restore_policy="best_effort",
     )
-
 
 def create_active_learning_panel(context, **kwargs):
     from . import panel as panel_module

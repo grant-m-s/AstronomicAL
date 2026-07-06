@@ -5,7 +5,6 @@ from typing import Any, Dict, Iterable, List, Mapping, Sequence
 
 from . import state as al_state
 
-
 def session_summary(session_payload: Mapping[str, Any]) -> Dict[str, Any]:
     session = al_state.coerce_session(session_payload)
     return {
@@ -18,15 +17,12 @@ def session_summary(session_payload: Mapping[str, Any]) -> Dict[str, Any]:
         "last_batch": dict(session.get("last_batch") or {}),
     }
 
-
 def label_history_rows(session_payload: Mapping[str, Any]) -> List[Dict[str, Any]]:
     return al_state.label_rows(session_payload)
-
 
 def batch_rows(batch_payload: Mapping[str, Any]) -> List[Dict[str, Any]]:
     records = batch_payload.get("records") or []
     return [dict(record) for record in records if isinstance(record, Mapping)]
-
 
 def cumulative_label_counts(session_payload: Mapping[str, Any]) -> List[Dict[str, Any]]:
     rows = sorted(al_state.label_rows(session_payload), key=lambda row: float(row.get("timestamp") or 0.0))
@@ -38,10 +34,8 @@ def cumulative_label_counts(session_payload: Mapping[str, Any]) -> List[Dict[str
         out.append({"index": idx, "row_id": row.get("row_id"), "label": label, **dict(counter)})
     return out
 
-
 def performance_rows(session_payload: Mapping[str, Any]) -> List[Dict[str, Any]]:
     return _performance_rows(session_payload, context=None)
-
 
 def performance_rows_with_artifacts(context: Any, session_payload: Mapping[str, Any]) -> List[Dict[str, Any]]:
     """Return AL performance rows, falling back to referenced core.ml artifacts.
@@ -53,7 +47,6 @@ def performance_rows_with_artifacts(context: Any, session_payload: Mapping[str, 
     """
 
     return _performance_rows(session_payload, context=context)
-
 
 def _performance_rows(session_payload: Mapping[str, Any], *, context: Any = None) -> List[Dict[str, Any]]:
     session = al_state.coerce_session(session_payload or {})
@@ -86,7 +79,6 @@ def _performance_rows(session_payload: Mapping[str, Any], *, context: Any = None
         out.extend(_latest_artifact_rows(context, session, existing_rows=out))
     return out
 
-
 def _entry_metrics(entry: Mapping[str, Any], *, context: Any = None) -> Dict[str, float]:
     metrics = dict(entry.get("metrics") or {})
     if metrics:
@@ -114,7 +106,6 @@ def _entry_metrics(entry: Mapping[str, Any], *, context: Any = None) -> Dict[str
             merged.setdefault(key, value)
     return merged
 
-
 def _artifact_ids_from_training_entry(entry: Mapping[str, Any]) -> List[str]:
     ids: List[str] = list(al_state.artifact_ids(entry))
 
@@ -134,12 +125,15 @@ def _artifact_ids_from_training_entry(entry: Mapping[str, Any]) -> List[str]:
     walk(entry)
     return list(dict.fromkeys(ids))
 
-
 def _latest_artifact_rows(context: Any, session: Mapping[str, Any], *, existing_rows: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
     """Create a performance row from latest core.ml artifacts when history lacks metrics."""
 
     existing_keys = {
         (int(row.get("round") or 0), int(row.get("labelled_count") or 0), str(row.get("metric") or ""))
+        for row in existing_rows
+    }
+    existing_x_keys = {
+        (int(row.get("labelled_count") or 0), str(row.get("metric") or ""))
         for row in existing_rows
     }
     round_index = int(session.get("round") or 0)
@@ -155,7 +149,8 @@ def _latest_artifact_rows(context: Any, session: Mapping[str, Any], *, existing_
     rows: List[Dict[str, Any]] = []
     for metric, value in metrics.items():
         key = (round_index, labelled_count, str(metric))
-        if key in existing_keys:
+        x_key = (labelled_count, str(metric))
+        if key in existing_keys or x_key in existing_x_keys:
             continue
         try:
             numeric = float(value)
@@ -173,7 +168,6 @@ def _latest_artifact_rows(context: Any, session: Mapping[str, Any], *, existing_
             }
         )
     return rows
-
 
 def _metrics_from_recent_artifacts(context: Any, session: Mapping[str, Any]) -> Dict[str, float]:
     artifacts = getattr(context, "artifacts", None)
@@ -208,7 +202,6 @@ def _metrics_from_recent_artifacts(context: Any, session: Mapping[str, Any]) -> 
             for metric, value in al_state.extract_metrics(payload).items():
                 merged.setdefault(metric, value)
     return merged
-
 
 def _artifact_matches_session(payload: Any, session: Mapping[str, Any]) -> bool:
     if not isinstance(payload, Mapping):

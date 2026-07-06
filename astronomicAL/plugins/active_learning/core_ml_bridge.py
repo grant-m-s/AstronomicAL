@@ -13,7 +13,6 @@ from . import actions as al_actions
 
 ORIGIN = "core.active_learning"
 
-
 def ml_event_payload(base: Mapping[str, Any], ml_result: Mapping[str, Any] | None = None) -> Dict[str, Any]:
     payload = dict(base)
     if ml_result is not None:
@@ -33,8 +32,6 @@ def ml_event_payload(base: Mapping[str, Any], ml_result: Mapping[str, Any] | Non
         if training_predictions not in (None, ""):
             payload["training_predictions_artifact_id"] = str(training_predictions)
     return payload
-
-
 
 def collect_prediction_artifact_ids(value: Any) -> List[str]:
     """Collect candidate prediction artifact ids from a core.ml predict result.
@@ -65,7 +62,6 @@ def collect_prediction_artifact_ids(value: Any) -> List[str]:
 
     visit(value)
     return al_state.stable_unique(found)
-
 
 def select_pool_predictions_artifact_id(
     context: Any,
@@ -113,7 +109,6 @@ def select_pool_predictions_artifact_id(
         f"{pool_dataset_id!r}. Candidate prediction artifacts: "
         + ("; ".join(mismatches + [f"{artifact_id}: no dataset metadata" for artifact_id in metadata_unknown]) or "none")
     )
-
 
 def prediction_result_for_pool(
     context: Any,
@@ -189,14 +184,12 @@ def enrich_ml_result_with_referenced_artifacts(context: Any, ml_result: Mapping[
         enriched.setdefault("referenced_artifacts", {}).update(artifact_payloads)
     return enriched
 
-
 def _artifact_summary_label(artifact_id: str, payload: Any) -> str:
     if isinstance(payload, Mapping):
         artifact_type = str(payload.get("type") or payload.get("artifact_type") or payload.get("kind") or "").strip()
         if artifact_type:
             return artifact_type.replace(".", "_")
     return str(artifact_id)
-
 
 def resolve_recipe_profile_info(context: Any, params: Mapping[str, Any]) -> Dict[str, Any]:
     """Resolve optional core.ml recipe-profile metadata without making AL depend on it."""
@@ -243,7 +236,6 @@ def resolve_recipe_profile_info(context: Any, params: Mapping[str, Any]) -> Dict
         "profile": profile,
     }
 
-
 def merged_profile_recipe_params(profile: Mapping[str, Any], params: Mapping[str, Any]) -> Dict[str, Any]:
     """Merge profile params for local AL needs such as training dataset materialisation."""
 
@@ -254,7 +246,6 @@ def merged_profile_recipe_params(profile: Mapping[str, Any], params: Mapping[str
         merged.update(dict(profile.get("protocol_params") or {}))
     merged.update(dict(params.get("recipe_params") or {}))
     return merged
-
 
 def profile_data_contract_action(context: Any, request: Any, cancel_token: Any = None) -> Dict[str, Any]:
     """Inspect the optional core.ml-facing data contract.
@@ -342,8 +333,6 @@ def profile_data_contract_action(context: Any, request: Any, cancel_token: Any =
     )
     return {"ok": not errors, "contract": contract, "errors": errors, "warnings": warnings}
 
-
-
 PREDICTION_COLUMN_NAMES = {
     "pred_label",
     "pred_confidence",
@@ -356,12 +345,10 @@ PREDICTION_COLUMN_NAMES = {
 }
 PREDICTION_COLUMN_PREFIXES = ("pred_prob_", "pred_", "prediction_", "prob_", "uncertainty_")
 
-
 def is_prediction_column(column: Any) -> bool:
     name = str(column or "").strip()
     lower = name.lower()
     return lower in PREDICTION_COLUMN_NAMES or lower.startswith(PREDICTION_COLUMN_PREFIXES)
-
 
 def clean_feature_columns(value: Any, *, available_columns: Optional[Sequence[str]] = None) -> List[str]:
     """Remove stale prediction-derived columns from a configured feature list.
@@ -383,6 +370,125 @@ def clean_feature_columns(value: Any, *, available_columns: Optional[Sequence[st
             out.append(column)
     return out
 
+
+IMAGE_COLUMN_PARAM_KEYS = (
+    "image_column",
+    "image_path_column",
+    "image_uri_column",
+    "image_url_column",
+    "image.path",
+    "image.uri",
+)
+
+IMAGE_MAPPING_KEYS = (
+    "image.path",
+    "image.uri",
+    "image.url",
+    "image",
+    "image_path",
+    "image_uri",
+    "image_url",
+)
+
+IMAGE_COLUMN_EXACT_NAMES = (
+    "image_path",
+    "image_uri",
+    "image_url",
+    "image",
+    "cutout_path",
+    "cutout_uri",
+    "cutout_url",
+    "file_path",
+    "filepath",
+)
+
+def _normalised_column_lookup(columns: Sequence[str]) -> Dict[str, str]:
+    return {str(column).strip().lower(): str(column) for column in columns if str(column).strip()}
+
+def _first_existing_column(candidates: Iterable[Any], columns: Sequence[str]) -> str:
+    lookup = _normalised_column_lookup(columns)
+    for raw in candidates:
+        candidate = str(raw or "").strip()
+        if not candidate:
+            continue
+        if candidate in columns:
+            return candidate
+        matched = lookup.get(candidate.lower())
+        if matched:
+            return matched
+    return ""
+
+def _image_column_candidates_from_params(params: Mapping[str, Any]) -> List[str]:
+    candidates: List[str] = []
+    for key in IMAGE_COLUMN_PARAM_KEYS:
+        value = params.get(key)
+        if value not in (None, "", [], {}):
+            for column in parse_string_list(value):
+                if column and column not in candidates:
+                    candidates.append(column)
+    return candidates
+
+def _image_column_candidates_from_mappings(context: Any, dataset_id: str) -> List[str]:
+    mappings = al_actions.dataset_mappings(context, dataset_id)
+    candidates: List[str] = []
+    for key in IMAGE_MAPPING_KEYS:
+        value = mappings.get(key)
+        if value and str(value) not in candidates:
+            candidates.append(str(value))
+    return candidates
+
+def _image_column_candidates_from_column_names(columns: Sequence[str]) -> List[str]:
+    lookup = _normalised_column_lookup(columns)
+    candidates: List[str] = []
+    for exact in IMAGE_COLUMN_EXACT_NAMES:
+        value = lookup.get(exact)
+        if value and value not in candidates:
+            candidates.append(value)
+    for column in columns:
+        lowered = str(column).lower()
+        # Avoid a generic ``path`` guess unless it is already mapped/explicit.
+        if "image" in lowered and any(token in lowered for token in ("path", "uri", "url", "file", "filename")):
+            value = str(column)
+            if value not in candidates:
+                candidates.append(value)
+    return candidates
+
+def resolve_image_column_for_al_training(
+    context: Any,
+    dataset_id: str,
+    params: Mapping[str, Any],
+    recipe_params: Mapping[str, Any],
+    *,
+    available_columns: Optional[Sequence[str]] = None,
+) -> str:
+    """Resolve the image input column that must survive AL training-set materialisation.
+
+    Before the large-data optimisation, AL materialised the entire pool dataframe for
+    training, so image columns were accidentally carried through.  Now the training
+    set is intentionally narrow; image recipes therefore need the image column to be
+    resolved from explicit params, dataset semantic mappings, or obvious image-path
+    column names and then added back deliberately.
+    """
+
+    columns = list(available_columns or [])
+    if not columns:
+        columns = list_dataset_columns(context, dataset_id)
+
+    candidates: List[str] = []
+    for source in (recipe_params, params):
+        candidates.extend(_image_column_candidates_from_params(source))
+    candidates.extend(_image_column_candidates_from_mappings(context, dataset_id))
+    candidates.extend(_image_column_candidates_from_column_names(columns))
+    return _first_existing_column(candidates, columns)
+
+def ensure_image_params(recipe_params: Dict[str, Any], image_column: str) -> None:
+    """Pass the resolved image column to core.ml using the aliases it accepts."""
+
+    image_column = str(image_column or "").strip()
+    if not image_column:
+        return
+    recipe_params.setdefault("image_column", image_column)
+    recipe_params.setdefault("image_path_column", image_column)
 
 def sanitize_recipe_params_for_al_training(params: Mapping[str, Any], *, available_columns: Optional[Sequence[str]] = None) -> Dict[str, Any]:
     """Return recipe params safe for AL scratch retraining.
@@ -447,6 +553,7 @@ def materialize_training_set_action(context: Any, request: Any, cancel_token: An
 
     round_index = int(session.get("round", 0)) + 1
     target_column = str(params.get("target_column") or session.get("target_column") or "al_label")
+    task_type = al_state.parse_task_type(params.get("task_type") or session.get("task_type") or session.get("problem_type"))
     train_dataset_id = str(params.get("train_dataset_id") or "").strip()
     if not train_dataset_id:
         train_dataset_id = al_actions.unique_dataset_id(f"{dataset_id}__al_train_r{round_index}")
@@ -456,8 +563,13 @@ def materialize_training_set_action(context: Any, request: Any, cancel_token: An
     recipe_params = sanitize_recipe_params_for_al_training(
         merged_profile_recipe_params(dict(profile_info.get("profile") or {}), params)
     )
+    source_columns = list_dataset_columns(context, dataset_id)
+    image_column = resolve_image_column_for_al_training(context, dataset_id, params, recipe_params, available_columns=source_columns)
+    ensure_image_params(recipe_params, image_column)
     required_columns.extend(column for column in column_like_recipe_params(recipe_params).values() if not is_prediction_column(column))
     required_columns.extend(clean_feature_columns(recipe_params.get("feature_columns") or recipe_params.get("input_columns") or []))
+    if image_column and image_column not in required_columns:
+        required_columns.append(image_column)
     train_df, id_column = training_dataframe(
         context,
         dataset_id=dataset_id,
@@ -481,6 +593,9 @@ def materialize_training_set_action(context: Any, request: Any, cancel_token: An
         source_dataset_id=dataset_id,
         pool_dataset_id=dataset_id,
         label_column=target_column,
+        target_column=target_column,
+        task_type=task_type,
+        problem_type=task_type,
     )
     al_actions.publish(
         context,
@@ -496,7 +611,7 @@ def materialize_training_set_action(context: Any, request: Any, cancel_token: An
         },
     )
 
-    class_labels = resolve_class_labels(params=params, session=session, labelled_items=labelled_items)
+    class_labels = [] if task_type == al_state.TASK_REGRESSION else resolve_class_labels(params=params, session=session, labelled_items=labelled_items)
     payload = {
         "schema_version": 3,
         "session_id": session["session_id"],
@@ -510,7 +625,11 @@ def materialize_training_set_action(context: Any, request: Any, cancel_token: An
         "recipe_profile_id": str(profile_info.get("recipe_profile_id") or session.get("recipe_profile_id") or ""),
         "recipe_profile_name": str(profile_info.get("recipe_profile_name") or session.get("recipe_profile_name") or ""),
         "target_column": target_column,
+        "task_type": task_type,
+        "problem_type": task_type,
+        "label_profile": dict(session.get("label_profile") or {}),
         "record_id_column": id_column,
+        "image_column": image_column,
         "class_labels": class_labels,
         "classes": class_labels,
         "round": round_index,
@@ -536,7 +655,11 @@ def materialize_training_set_action(context: Any, request: Any, cancel_token: An
         "training_dataset_id": train_dataset_id,
         "training_artifact_id": training_artifact_id,
         "target_column": target_column,
+        "task_type": task_type,
+        "problem_type": task_type,
+        "label_profile": dict(session.get("label_profile") or {}),
         "record_id_column": id_column,
+        "image_column": image_column,
         "class_labels": class_labels,
         "labelled_count": len(labelled_items),
         "recipe_id": str(profile_info.get("recipe_id") or session.get("recipe_id") or ""),
@@ -544,7 +667,6 @@ def materialize_training_set_action(context: Any, request: Any, cancel_token: An
         "recipe_profile_name": str(profile_info.get("recipe_profile_name") or session.get("recipe_profile_name") or ""),
         "round": round_index,
     }
-
 
 def train_from_session_action(context: Any, request: Any, cancel_token: Any = None) -> Dict[str, Any]:
     """Optional core.ml bridge: materialise labels, train, optionally predict/query."""
@@ -584,14 +706,23 @@ def train_from_session_action(context: Any, request: Any, cancel_token: Any = No
 
     try:
         materialized = materialize_training_set_action(context, ActionRequest(dataset_id=None, row_ids=None, columns=[], params=params, artifact_id=None, origin=f"{ORIGIN}.materialize_training_set"), cancel_token=cancel_token)
+        # materialize_training_set_action may create a new session revision after
+        # invalidating stale queued rows.  Continue from that revision even if the
+        # downstream core.ml training step fails.
+        session = al_state.coerce_session(materialized.get("session") or session)
+        session_artifact_id = str(materialized.get("session_artifact_id") or session_artifact_id)
         train_dataset_id = str(materialized["training_dataset_id"])
         training_artifact_id = str(materialized["training_artifact_id"])
         target_column = str(materialized["target_column"])
-        train_columns = list(context.datasets.get_df(train_dataset_id).columns)
+        task_type = al_state.parse_task_type(materialized.get("task_type") or session.get("task_type") or session.get("problem_type"))
+        train_columns = list_dataset_columns(context, train_dataset_id)
         recipe_params: Dict[str, Any] = sanitize_recipe_params_for_al_training(
             merged_profile_recipe_params(dict(profile_info.get("profile") or {}), params),
             available_columns=train_columns,
         )
+        image_column = str(materialized.get("image_column") or "").strip()
+        if image_column and image_column in train_columns:
+            ensure_image_params(recipe_params, image_column)
         recipe_params.update(
             {
                 "dataset_id": train_dataset_id,
@@ -603,9 +734,8 @@ def train_from_session_action(context: Any, request: Any, cancel_token: Any = No
                 "al_session_artifact_id": session_artifact_id,
                 "al_training_artifact_id": training_artifact_id,
                 "al_round": materialized["round"],
-                "label_options": materialized["class_labels"],
-                "class_labels": materialized["class_labels"],
-                "classes": materialized["class_labels"],
+                "task_type": task_type,
+                "problem_type": task_type,
                 "warm_start": False,
                 "reset_model": True,
                 "reset_model_each_round": True,
@@ -616,6 +746,12 @@ def train_from_session_action(context: Any, request: Any, cancel_token: Any = No
                 "random_seed": seed,
             }
         )
+        if task_type != al_state.TASK_REGRESSION:
+            recipe_params.update({
+                "label_options": materialized.get("class_labels") or [],
+                "class_labels": materialized.get("class_labels") or [],
+                "classes": materialized.get("class_labels") or [],
+            })
         id_column = materialized.get("record_id_column")
         if id_column:
             recipe_params.setdefault("record_id_column", id_column)
@@ -774,7 +910,6 @@ def train_from_session_action(context: Any, request: Any, cancel_token: Any = No
         "query_result": al_state.json_safe_summary(query_result),
     }
 
-
 def training_dataframe(
     context: Any,
     *,
@@ -784,12 +919,28 @@ def training_dataframe(
     required_columns: Optional[Sequence[str]] = None,
 ) -> Tuple[pd.DataFrame, Optional[str]]:
     id_column = acquisition.resolve_record_id_column(context, dataset_id)
-    source_df = context.datasets.get_df(dataset_id)
     row_ids = [str(item["row_id"]) for item in labelled_items]
     row_id_set = set(row_ids)
 
+    required = [str(column) for column in (required_columns or []) if column]
+    columns: List[str] = []
+    if id_column:
+        columns.append(id_column)
+    for column in required:
+        if column not in columns and column != target_column:
+            columns.append(column)
+
+    # Materialise only the columns needed by the recipe/profile plus the row id.
+    # The previous code loaded the whole pool dataframe before filtering labelled
+    # rows, which is very expensive for million-row, hundreds-column catalogues.
+    try:
+        source_df = context.datasets.get_df(dataset_id, columns=columns) if columns else context.datasets.get_df(dataset_id)
+    except TypeError:
+        source_df = context.datasets.get_df(dataset_id)
+
     if id_column and id_column in source_df.columns:
-        df = source_df[source_df[id_column].astype(str).isin(row_id_set)].copy()
+        mask = source_df[id_column].astype(str).isin(row_id_set)
+        df = source_df.loc[mask].copy()
         df["__al_row_id_order"] = df[id_column].astype(str).map({row_id: idx for idx, row_id in enumerate(row_ids)})
         df = df.sort_values("__al_row_id_order").drop(columns=["__al_row_id_order"])
     else:
@@ -803,18 +954,16 @@ def training_dataframe(
     if df.empty:
         raise ValueError("No labelled rows could be matched in the source dataset.")
 
-    labels_by_id = {str(item["row_id"]): str(item["label"]) for item in labelled_items}
+    labels_by_id = {str(item["row_id"]): item.get("label") for item in labelled_items}
     if id_column and id_column in df.columns:
         df[target_column] = df[id_column].astype(str).map(labels_by_id)
     else:
         df[target_column] = [labels_by_id.get(str(idx)) for idx in df.index]
 
-    required = [str(column) for column in (required_columns or []) if column]
     missing = [column for column in required if column not in df.columns]
     if missing:
         raise ValueError("Derived AL training dataset is missing required columns: " + ", ".join(missing))
     return df, id_column
-
 
 def resolve_class_labels(*, params: Mapping[str, Any], session: Mapping[str, Any], labelled_items: Sequence[Mapping[str, Any]]) -> List[str]:
     values = parse_string_list(
@@ -830,13 +979,11 @@ def resolve_class_labels(*, params: Mapping[str, Any], session: Mapping[str, Any
             values.append(label)
     return values
 
-
 def list_dataset_columns(context: Any, dataset_id: str) -> List[str]:
     try:
         return [str(column) for column in context.datasets.list_columns(dataset_id)]
     except Exception:
         return [str(column) for column in context.datasets.get_df(dataset_id).columns]
-
 
 def parse_string_list(value: Any) -> List[str]:
     if value is None:
@@ -854,7 +1001,6 @@ def parse_string_list(value: Any) -> List[str]:
         if item and item not in out:
             out.append(item)
     return out
-
 
 def column_like_recipe_params(params: Mapping[str, Any]) -> Dict[str, str]:
     out: Dict[str, str] = {}

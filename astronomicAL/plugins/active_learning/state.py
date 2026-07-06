@@ -9,9 +9,14 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 ARTIFACT_SESSION = "al.session"
 ARTIFACT_TRAINING_SET = "al.training_set"
 ARTIFACT_BATCH = "ml.active_learning_batch"
+ARTIFACT_STRATEGY_SCORES = "ml.active_learning_scores"
 
 UNSURE_LABEL = "__unsure__"
 UNSURE_DISPLAY = "Unsure"
+
+TASK_CLASSIFICATION = "classification"
+TASK_REGRESSION = "regression"
+TASK_UNKNOWN = "unknown"
 
 ROW_UNLABELLED = "unlabelled"
 ROW_QUEUED = "queued"
@@ -44,12 +49,11 @@ LATEST_REFERENCE_KEYS = (
     "predictions_artifact_id",
     "prediction_dataset_id",
     "acquisition_artifact_id",
+    "strategy_scores_artifact_id",
 )
-
 
 def now() -> float:
     return time.time()
-
 
 def normalise_label(label: Any) -> str:
     value = str(label or "").strip()
@@ -57,11 +61,43 @@ def normalise_label(label: Any) -> str:
         return UNSURE_LABEL
     return value
 
-
 def display_label(label: Any) -> str:
     value = normalise_label(label)
     return UNSURE_DISPLAY if value == UNSURE_LABEL else value
 
+def parse_task_type(value: Any, *, default: str = TASK_CLASSIFICATION) -> str:
+    text = str(value or "").strip().lower().replace("-", "_")
+    if text in {TASK_REGRESSION, "regress", "continuous", "numeric", "scalar"}:
+        return TASK_REGRESSION
+    if text in {TASK_CLASSIFICATION, "classify", "categorical", "category", "multiclass", "binary"}:
+        return TASK_CLASSIFICATION
+    if text in {TASK_UNKNOWN, "auto", "detect", "detected"}:
+        return TASK_UNKNOWN
+    return default
+
+def is_regression_task(session_payload: Mapping[str, Any]) -> bool:
+    return parse_task_type(dict(session_payload or {}).get("task_type"), default=TASK_CLASSIFICATION) == TASK_REGRESSION
+
+def normalise_regression_label(label: Any) -> float:
+    text = str(label or "").strip()
+    if text.lower() in {"unsure", "uncertain", "unknown", "skip", UNSURE_LABEL.lower()}:
+        raise ValueError("Use the Unsure label instead of a numeric value to skip a regression row.")
+    if not text:
+        raise ValueError("A numeric regression target value is required.")
+    try:
+        value = float(text)
+    except Exception as exc:
+        raise ValueError(f"Regression target values must be numeric; got {text!r}.") from exc
+    if value != value or value in (float("inf"), float("-inf")):
+        raise ValueError("Regression target values must be finite numbers.")
+    return value
+
+def display_regression_label(label: Any) -> str:
+    try:
+        value = float(label)
+    except Exception:
+        return str(label or "")
+    return f"{value:g}"
 
 def parse_label_options(value: Any) -> List[str]:
     if value is None:
@@ -81,14 +117,11 @@ def parse_label_options(value: Any) -> List[str]:
             out.append(label)
     return out
 
-
 def _blank_latest() -> Dict[str, Optional[str]]:
     return {key: None for key in LATEST_REFERENCE_KEYS}
 
-
 def stable_unique(values: Iterable[Any]) -> List[str]:
     return list(dict.fromkeys(str(value) for value in values if value not in (None, "")))
-
 
 def create_session(
     *,
@@ -104,6 +137,8 @@ def create_session(
     recipe_profile_id: Optional[str] = None,
     recipe_profile_name: Optional[str] = None,
     al_protocol: str = "review",
+    task_type: str = TASK_CLASSIFICATION,
+    label_profile: Optional[Mapping[str, Any]] = None,
     contract: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     timestamp = now()
@@ -121,7 +156,10 @@ def create_session(
         "recipe_profile_name": str(recipe_profile_name or ""),
         "al_protocol": str(al_protocol or "review"),
         "target_column": str(target_column or "al_label"),
-        "label_options": parse_label_options(label_options),
+        "task_type": parse_task_type(task_type),
+        "problem_type": parse_task_type(task_type),
+        "label_profile": copy.deepcopy(dict(label_profile or {})),
+        "label_options": parse_label_options(label_options) if parse_task_type(task_type) != TASK_REGRESSION else [],
         "seed": int(seed or 0),
         "round": 0,
         "created_at": timestamp,
@@ -139,7 +177,6 @@ def create_session(
         "contract": copy.deepcopy(dict(contract or {})),
     }
 
-
 def coerce_session(payload: Mapping[str, Any]) -> Dict[str, Any]:
     session = copy.deepcopy(dict(payload or {}))
     session.setdefault("schema_version", 4)
@@ -156,7 +193,12 @@ def coerce_session(payload: Mapping[str, Any]) -> Dict[str, Any]:
     session.setdefault("recipe_profile_name", "")
     session.setdefault("al_protocol", "review")
     session.setdefault("target_column", "al_label")
-    session["label_options"] = parse_label_options(session.get("label_options"))
+    detected_task = parse_task_type(session.get("task_type") or session.get("problem_type") or (session.get("label_profile") or {}).get("task_type"))
+    session["task_type"] = detected_task
+    session["problem_type"] = detected_task
+    session["label_profile"] = copy.deepcopy(dict(session.get("label_profile") or {}))
+    session["label_profile"].setdefault("task_type", detected_task)
+    session["label_options"] = [] if detected_task == TASK_REGRESSION else parse_label_options(session.get("label_options"))
     session.setdefault("seed", 42)
     session.setdefault("round", 0)
     session.setdefault("created_at", now())
@@ -195,17 +237,16 @@ def coerce_session(payload: Mapping[str, Any]) -> Dict[str, Any]:
 
     ignored = stable_unique(session.get("ignored_row_ids") or [])
     for row_id, entry in labels.items():
-        if normalise_label(entry.get("label")) == UNSURE_LABEL:
+        if str(entry.get("status") or "") == "unsure" or normalise_label(entry.get("label")) == UNSURE_LABEL:
             ignored.append(row_id)
     session["ignored_row_ids"] = stable_unique(ignored)
     session["training_row_ids"] = stable_unique(
         row_id
         for row_id, entry in labels.items()
-        if normalise_label(entry.get("label")) != UNSURE_LABEL
-        and str(entry.get("status") or "verified") in {"verified", "training"}
+        if str(entry.get("status") or "verified") in {"verified", "training"}
+        and normalise_label(entry.get("label")) != UNSURE_LABEL
     )
     return session
-
 
 def with_revision(session_payload: Mapping[str, Any], *, previous_session_artifact_id: Optional[str] = None) -> Dict[str, Any]:
     session = coerce_session(session_payload)
@@ -215,7 +256,6 @@ def with_revision(session_payload: Mapping[str, Any], *, previous_session_artifa
         session["revision"] = int(session.get("revision", 0) or 0) + 1
     session["updated_at"] = now()
     return session
-
 
 def with_contract(session_payload: Mapping[str, Any], *, contract: Optional[Mapping[str, Any]], event: str = "contract_updated") -> Dict[str, Any]:
     session = coerce_session(session_payload)
@@ -232,7 +272,6 @@ def with_contract(session_payload: Mapping[str, Any], *, contract: Optional[Mapp
     )
     return session
 
-
 def record_label(
     session_payload: Mapping[str, Any],
     *,
@@ -243,18 +282,27 @@ def record_label(
 ) -> Dict[str, Any]:
     session = coerce_session(session_payload)
     row_id_str = str(row_id or "").strip()
-    label_value = normalise_label(label)
+    raw_label_text = str(label or "").strip()
+    is_unsure = raw_label_text.lower() in {"unsure", "uncertain", "unknown", "skip", UNSURE_LABEL.lower()}
     if not row_id_str:
         raise ValueError("row_id is required.")
-    if not label_value:
+    if is_unsure:
+        label_value: Any = UNSURE_LABEL
+        display_value = UNSURE_DISPLAY
+    elif is_regression_task(session):
+        label_value = normalise_regression_label(label)
+        display_value = display_regression_label(label_value)
+    else:
+        label_value = normalise_label(label)
+        display_value = display_label(label_value)
+    if label_value in (None, ""):
         raise ValueError("label is required.")
 
     timestamp = now()
-    is_unsure = label_value == UNSURE_LABEL
     entry = {
         "row_id": row_id_str,
         "label": label_value,
-        "display_label": display_label(label_value),
+        "display_label": display_value,
         "status": "unsure" if is_unsure else "verified",
         "source": str(source or "manual"),
         "round": int(round_index if round_index is not None else session.get("round", 0)),
@@ -288,7 +336,6 @@ def record_label(
         }
     )
     return session
-
 
 def with_last_batch(
     session_payload: Mapping[str, Any],
@@ -338,7 +385,6 @@ def with_last_batch(
     )
     return session
 
-
 def clear_queued_rows(
     session_payload: Mapping[str, Any],
     *,
@@ -366,7 +412,7 @@ def clear_queued_rows(
         changed = True
 
     latest = dict(session.get("latest") or _blank_latest())
-    for key in ("acquisition_artifact_id", "predictions_artifact_id", "prediction_dataset_id"):
+    for key in ("acquisition_artifact_id", "predictions_artifact_id", "prediction_dataset_id", "strategy_scores_artifact_id"):
         if latest.get(key):
             latest[key] = None
             changed = True
@@ -384,7 +430,6 @@ def clear_queued_rows(
             }
         )
     return session
-
 
 def with_completed_training_round(
     session_payload: Mapping[str, Any],
@@ -419,6 +464,7 @@ def with_completed_training_round(
         latest["training_predictions_artifact_id"] = str(training_predictions)
         latest["predictions_artifact_id"] = None
         latest["prediction_dataset_id"] = None
+        latest["strategy_scores_artifact_id"] = None
     session["latest"] = latest
 
     row_states = dict(session.get("row_states") or {})
@@ -440,7 +486,6 @@ def with_completed_training_round(
     )
     return session
 
-
 def with_prediction_result(session_payload: Mapping[str, Any], *, prediction_result: Mapping[str, Any]) -> Dict[str, Any]:
     session = coerce_session(session_payload)
     artifact_id = find_nested_value(prediction_result, "predictions_artifact_id") or find_nested_value(prediction_result, "artifact_id")
@@ -449,6 +494,7 @@ def with_prediction_result(session_payload: Mapping[str, Any], *, prediction_res
     derived_dataset_id = find_nested_value(prediction_result, "derived_dataset_id") or find_nested_value(prediction_result, "prediction_dataset_id")
     latest = dict(session.get("latest") or _blank_latest())
     latest["predictions_artifact_id"] = str(artifact_id)
+    latest["strategy_scores_artifact_id"] = None
     if derived_dataset_id:
         latest["prediction_dataset_id"] = str(derived_dataset_id)
     session["latest"] = latest
@@ -464,17 +510,14 @@ def with_prediction_result(session_payload: Mapping[str, Any], *, prediction_res
     )
     return session
 
-
 def latest_reference(session_payload: Mapping[str, Any], key: str) -> Optional[str]:
     value = (coerce_session(session_payload).get("latest") or {}).get(str(key))
     return str(value) if value not in (None, "") else None
-
 
 def row_ids_in_states(session_payload: Mapping[str, Any], states: Sequence[str] = tuple(TERMINAL_QUERY_STATES)) -> List[str]:
     wanted = {str(state) for state in states}
     session = coerce_session(session_payload)
     return [str(row_id) for row_id, state in dict(session.get("row_states") or {}).items() if str(state) in wanted]
-
 
 def labelled_training_items(session_payload: Mapping[str, Any]) -> List[Dict[str, Any]]:
     session = coerce_session(session_payload)
@@ -482,22 +525,20 @@ def labelled_training_items(session_payload: Mapping[str, Any]) -> List[Dict[str
     out: List[Dict[str, Any]] = []
     for row_id in session.get("training_row_ids") or []:
         entry = labels.get(str(row_id))
-        if not entry or normalise_label(entry.get("label")) == UNSURE_LABEL:
+        if not entry or str(entry.get("status") or "") == "unsure" or normalise_label(entry.get("label")) == UNSURE_LABEL:
             continue
         out.append(dict(entry))
     return out
-
 
 def label_rows(session_payload: Mapping[str, Any]) -> List[Dict[str, Any]]:
     rows = [dict(entry) for entry in dict(coerce_session(session_payload).get("labels") or {}).values()]
     rows.sort(key=lambda row: float(row.get("timestamp") or 0.0), reverse=True)
     return rows
 
-
 def counts(session_payload: Mapping[str, Any]) -> Dict[str, int]:
     session = coerce_session(session_payload)
     labels = dict(session.get("labels") or {})
-    unsure_count = sum(1 for entry in labels.values() if normalise_label(entry.get("label")) == UNSURE_LABEL)
+    unsure_count = sum(1 for entry in labels.values() if str(entry.get("status") or "") == "unsure" or normalise_label(entry.get("label")) == UNSURE_LABEL)
     training_items = labelled_training_items(session)
     current_round = int(session.get("round", 0) or 0)
     labelled_since_last_train = sum(
@@ -516,13 +557,11 @@ def counts(session_payload: Mapping[str, Any]) -> Dict[str, int]:
         "total_reviewed": len(labels),
     }
 
-
 def label_counts(session_payload: Mapping[str, Any]) -> Dict[str, int]:
     counter: Counter[str] = Counter()
     for item in labelled_training_items(session_payload):
         counter[str(item.get("label") or "")] += 1
     return dict(counter)
-
 
 def find_nested_value(value: Any, key: str) -> Any:
     if isinstance(value, Mapping):
@@ -543,7 +582,6 @@ def find_nested_value(value: Any, key: str) -> Any:
             if found not in (None, ""):
                 return found
     return None
-
 
 def extract_metrics(value: Any) -> Dict[str, float]:
     """Best-effort extraction of scalar performance metrics from nested ML results."""
@@ -609,7 +647,6 @@ def extract_metrics(value: Any) -> Dict[str, float]:
     walk(value)
     return {key: val for key, val in sorted(out.items())}
 
-
 def artifact_ids(value: Any) -> List[str]:
     """Best-effort extraction of artifact ids from nested action/event payloads."""
 
@@ -656,7 +693,6 @@ def artifact_ids(value: Any) -> List[str]:
     walk(value)
     return stable_unique(ids)
 
-
 def looks_like_metric_name(key: str) -> bool:
     return any(
         token in key
@@ -679,7 +715,6 @@ def looks_like_metric_name(key: str) -> bool:
             "roc",
         )
     )
-
 
 def json_safe_summary(value: Any) -> Any:
     if value is None or isinstance(value, (str, int, float, bool)):

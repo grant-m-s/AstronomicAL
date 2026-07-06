@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Mapping
 
-
 @dataclass
 class DataContractReport:
     """Small compatibility wrapper for old AL contract callers.
@@ -33,14 +32,12 @@ class DataContractReport:
             "warnings": list(self.warnings),
         }
 
-
 def report_from_payload(payload: Mapping[str, Any]) -> DataContractReport:
     return DataContractReport(
         contract=dict(payload.get("contract") or payload),
         errors=[str(item) for item in (payload.get("errors") or [])],
         warnings=[str(item) for item in (payload.get("warnings") or [])],
     )
-
 
 def empty_contract(*, dataset_id: str = "", recipe_id: str = "") -> DataContractReport:
     return DataContractReport(
