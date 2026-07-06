@@ -237,6 +237,35 @@ def _build_data_binding(
 
     return binding
 
+def _resolve_profile_params(context: Any, params: Dict[str, Any]) -> Dict[str, Any]:
+    profile_key = (
+        params.get("recipe_profile_id")
+        or params.get("recipe_profile_artifact_id")
+        or params.get("profile_id")
+        or params.get("profile_artifact_id")
+    )
+    if not profile_key:
+        return params
+
+    store = context.services.get("core.ml.recipe_profile_store")
+    profile = store.get(str(profile_key))
+
+    merged: Dict[str, Any] = {}
+    merged.update(profile.get("recipe_params") or {})
+    merged.update(profile.get("protocol_params") or {})
+    merged.update(profile.get("binding_params") or {})
+
+    merged["recipe_id"] = profile.get("recipe_id")
+    merged["recipe_profile_id"] = profile.get("profile_id")
+    merged["recipe_profile_name"] = profile.get("name")
+
+    # Dataset is intentionally overridable. AL must pass the current
+    # round's materialised training dataset here.
+    if profile.get("default_dataset_id"):
+        merged["dataset_id"] = profile.get("default_dataset_id")
+
+    merged.update(params)
+    return merged
 
 def run_ml_recipe_action(
     context: Any,
@@ -249,7 +278,7 @@ def run_ml_recipe_action(
 
     recipe_id = str(params.get("recipe_id") or "").strip()
     if not recipe_id:
-        raise ValueError("Missing required recipe_id.")
+        raise ValueError("Missing required recipe_id or recipe_profile_id.")
 
     dataset_id = (
         params.get("dataset_id")
@@ -257,6 +286,9 @@ def run_ml_recipe_action(
     )
     if not dataset_id:
         raise ValueError("Missing required dataset_id.")
+
+    params = dict(request.params or {})
+    params = _resolve_profile_params(context, params)
 
     registry = context.services.get("core.ml.recipe_registry")
     spec = registry.get(recipe_id)
@@ -383,6 +415,8 @@ def run_ml_recipe_action(
             "schema_version": 2,
             "run_id": run.run_id,
             "dataset_id": dataset_id,
+            "profile_id": merged_params.get("recipe_profile_id"),
+            "profile_name": merged_params.get("recipe_profile_name"),
             "recipe_id": spec.id,
             "recipe_version": spec.version,
             "recipe_title": spec.title,
@@ -499,6 +533,8 @@ def run_ml_recipe_action(
         finished_payload = {
             "run_id": run.run_id,
             "dataset_id": dataset_id,
+            "recipe_profile_id": merged_params.get("recipe_profile_id"),
+            "recipe_profile_name": merged_params.get("recipe_profile_name"),
             "recipe_id": spec.id,
             "recipe_version": spec.version,
             "recipe_title": spec.title,

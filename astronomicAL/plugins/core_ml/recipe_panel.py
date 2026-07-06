@@ -16,23 +16,7 @@ from . import recipe_registry as _registry_mod
 from . import recipe_runner as _runner
 from .feature_columns import parse_column_list
 
-
-# Protocol controls the panel owns for every MANAGED recipe. These are NOT
-# recipe params — they are the experiment protocol, collected at the run level
-# and enforced by the harness. Keys match ProtocolConfig.from_params().
-_PROTOCOL_KEYS = (
-    "protocol_split_strategy",
-    "protocol_validation_source",
-    "protocol_validation_dataset_id",
-    "protocol_test_source",
-    "protocol_test_dataset_id",
-    "protocol_group_column",
-    "protocol_split_column",
-    "protocol_validation_size",
-    "protocol_test_size",
-    "protocol_selection_metric",
-    "protocol_random_state",
-)
+from .recipe_profiles import PROTOCOL_KEYS as _PROTOCOL_KEYS
 
 _PROTOCOL_LABELS = {
     "protocol_split_strategy": "Split method for selected dataset",
@@ -87,6 +71,11 @@ class MLRecipeLauncherPanel:
             sizing_mode="stretch_width",
         )
 
+        self.profile = pn.widgets.Select(name="", options={}, sizing_mode="stretch_width")
+        self.profile_name = pn.widgets.TextInput(name="", placeholder="Profile name", sizing_mode="stretch_width")
+        self.save_profile_button = pn.widgets.Button(name="Save profile", button_type="primary", sizing_mode="stretch_width")
+        self.load_profile_button = pn.widgets.Button(name="Load profile", button_type="light", sizing_mode="stretch_width")
+
         self.recipe_card = pn.pane.Markdown(
             "Choose a recipe.",
             sizing_mode="stretch_width",
@@ -108,6 +97,8 @@ class MLRecipeLauncherPanel:
         self.refresh_button.on_click(lambda *_: self.refresh())
         self.run_button.on_click(self._run_clicked)
         self.cancel_button.on_click(self._cancel_clicked)
+        self.save_profile_button.on_click(self._save_profile_clicked)
+        self.load_profile_button.on_click(self._load_profile_clicked)
 
         self.refresh()
 
@@ -119,6 +110,9 @@ class MLRecipeLauncherPanel:
             pn.pane.Markdown("### ML Recipe Launcher"),
             self._field("Recipe", self.recipe),
             self.recipe_card,
+            self._field("Saved profile", self.profile),
+            pn.Row(self.load_profile_button, self.save_profile_button, sizing_mode="stretch_width"),
+            self._field("Profile name", self.profile_name),
             self._field("Dataset", self.dataset),
             pn.Row(
                 self.refresh_button,
@@ -251,6 +245,30 @@ class MLRecipeLauncherPanel:
 
         self._sync_protocol_visibility()
 
+    def _profile_store(self):
+        try:
+            return self.context.services.get("core.ml.recipe_profile_store")
+        except Exception:
+            return None
+
+
+    def _refresh_profiles(self) -> None:
+        store = self._profile_store()
+        if store is None:
+            self.profile.options = {}
+            return
+
+        try:
+            profiles = store.list()
+        except Exception:
+            self.profile.options = {}
+            return
+
+        self.profile.options = {
+            f"{p.get('name') or p.get('profile_id')} | {p.get('recipe_title') or p.get('recipe_id')}": p.get("profile_id")
+            for p in profiles
+        }
+
     def refresh(self) -> None:
         recipes = self.registry.list()
         self.recipe.options = {recipe.title: recipe.id for recipe in recipes}
@@ -267,6 +285,7 @@ class MLRecipeLauncherPanel:
         elif self.dataset.value not in dataset_ids:
             self.dataset.value = dataset_ids[0] if dataset_ids else None
 
+        self._refresh_profiles()
         self._on_recipe_change()
         self._apply_inferred_defaults()
 
@@ -766,6 +785,110 @@ class MLRecipeLauncherPanel:
         params["dataset_id"] = self.dataset.value
         return params
 
+    def _save_profile_clicked(self, *_: Any) -> None:
+        if not self.recipe.value:
+            self.status.alert_type = "danger"
+            self.status.object = "Choose a recipe before saving a profile."
+            return
+
+        store = self._profile_store()
+        if store is None:
+            self.status.alert_type = "danger"
+            self.status.object = "Recipe profile store is not available."
+            return
+
+        spec = self.registry.get(self.recipe.value)
+        params = self._params()
+
+        from .recipe_profiles import split_profile_params
+        recipe_params, protocol_params, binding_params = split_profile_params(params)
+
+        name = str(self.profile_name.value or "").strip()
+        if not name:
+            name = f"{spec.title} profile"
+
+        existing_profile_id = self.profile.value if self.profile.value else ""
+
+        payload = {
+            "profile_id": existing_profile_id,
+            "name": name,
+            "recipe_id": spec.id,
+            "recipe_version": spec.version,
+            "recipe_title": spec.title,
+            "execution_mode": str(getattr(spec.recipe_cls, "execution_mode", "freeform") or "freeform"),
+            "task": getattr(spec, "task", ""),
+            "modality": getattr(spec, "modality", ""),
+            "default_dataset_id": self.dataset.value or "",
+            "recipe_params": recipe_params,
+            "protocol_params": protocol_params,
+            "binding_params": binding_params,
+            "source": "recipe_launcher",
+        }
+
+        try:
+            artifact_id = store.save(payload)
+        except Exception as exc:
+            self.status.alert_type = "danger"
+            self.status.object = f"Could not save recipe profile: `{exc}`"
+            return
+
+        self._refresh_profiles()
+        saved_profile_id = payload.get("profile_id") or ""
+        if saved_profile_id in self.profile.options.values():
+            self.profile.value = saved_profile_id
+
+        self.status.alert_type = "success"
+        self.status.object = f"Saved recipe profile `{name}` as `{artifact_id}`."
+
+    def _load_profile_clicked(self, *_: Any) -> None:
+        profile_id = self.profile.value
+        if not profile_id:
+            self.status.alert_type = "warning"
+            self.status.object = "Choose a saved profile first."
+            return
+
+        store = self._profile_store()
+        if store is None:
+            self.status.alert_type = "danger"
+            self.status.object = "Recipe profile store is not available."
+            return
+
+        try:
+            profile = store.get(profile_id)
+        except Exception as exc:
+            self.status.alert_type = "danger"
+            self.status.object = f"Could not load recipe profile: `{exc}`"
+            return
+
+        recipe_id = profile.get("recipe_id")
+        if recipe_id in self.recipe.options.values():
+            self.recipe.value = recipe_id
+            self._on_recipe_change()
+
+        dataset_id = profile.get("default_dataset_id")
+        if dataset_id in self.dataset.options:
+            self.dataset.value = dataset_id
+
+        merged = {}
+        merged.update(profile.get("recipe_params") or {})
+        merged.update(profile.get("protocol_params") or {})
+        merged.update(profile.get("binding_params") or {})
+
+        for name, value in merged.items():
+            widget = self.param_widgets.get(name) or self.protocol_widgets.get(name)
+            if widget is None:
+                continue
+            try:
+                widget.value = value
+            except Exception:
+                pass
+
+        self.profile_name.value = str(profile.get("name") or "")
+        self._sync_protocol_visibility()
+
+        self.status.alert_type = "success"
+        self.status.object = f"Loaded recipe profile `{profile.get('name') or profile_id}`."
+
     def _run_clicked(self, *_: Any) -> None:
         if self._active_thread and self._active_thread.is_alive():
             self.status.alert_type = "warning"
@@ -882,6 +1005,31 @@ class MLRecipeLauncherPanel:
         except Exception:
             apply()
 
+    def _subscribe_to_profile_events(self) -> None:
+        events = getattr(self.context, "events", None)
+        subscribe = getattr(events, "subscribe", None)
+        if not callable(subscribe):
+            return
+        for topic in ("ml.recipe_profile.saved", "ml.recipe_profiles.changed"):
+            try:
+                self._subscriptions.append(
+                    subscribe(topic, self._on_profile_event, owner_label="ML Recipe Launcher", owner_kind="panel")
+                )
+            except Exception:
+                pass
+
+
+    def _on_profile_event(self, topic: str, payload: Any) -> None:
+        def update():
+            self._refresh_profiles()
+        try:
+            doc = pn.state.curdoc
+            if doc is not None:
+                doc.add_next_tick_callback(update)
+                return
+        except Exception:
+            pass
+        update()
 
 def create_recipe_launcher_panel(context: Any, **kwargs: Any):
     registry = context.services.get("core.ml.recipe_registry")

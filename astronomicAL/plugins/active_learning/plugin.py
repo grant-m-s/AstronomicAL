@@ -5,10 +5,10 @@ from astronomicAL.platform.plugins import PluginManifest
 manifest = PluginManifest(
     id="core.active_learning",
     name="Active Learning",
-    version="0.3.0",
+    version="0.4.3",
     description=(
-        "Active-learning session manager built on ML predictions, ranked query strategies, "
-        "AstronomicAL selection sets, and scratch retraining through core.ml recipes when available."
+        "Small active-learning core: sessions, labels, batch-capable query strategies, "
+        "selection handoff, and an optional core.ml bridge for train/predict/query loops."
     ),
     requires_plugins=[],
     requires=[],
@@ -16,6 +16,7 @@ manifest = PluginManifest(
     capabilities=["panel", "action", "active-learning", "selection", "machine-learning"],
     tags=["core", "active-learning", "ml", "selection", "query-strategy"],
 )
+
 
 def register(api) -> None:
     from . import actions
@@ -27,8 +28,8 @@ def register(api) -> None:
         lazy=True,
         replace=True,
         description=(
-            "Registry for active-learning query strategies. Other plugins can retrieve this "
-            "service and register new QueryStrategy instances."
+            "Registry for active-learning query strategies. Other plugins can retrieve "
+            "core.active_learning.query_strategy_registry and register QueryStrategy instances."
         ),
     )
 
@@ -36,10 +37,7 @@ def register(api) -> None:
         id="start_session",
         title="Start Active-Learning Session",
         handler=actions.start_session_action,
-        description=(
-            "Create an active-learning session and draw an ordered initial random sample "
-            "from the unlabelled pool."
-        ),
+        description="Create an active-learning session and optionally draw an initial random review batch.",
         category="Active Learning",
         icon="playlist_add",
         tags=["active-learning", "random", "selection", "session"],
@@ -52,29 +50,24 @@ def register(api) -> None:
         },
         outputs=[
             {"type": "al.session", "description": "Active-learning session state."},
-            {
-                "type": "ml.active_learning_batch",
-                "description": "Initial random review batch.",
-            },
-            {
-                "type": "selection.ids",
-                "optional": True,
-                "description": "Ordered selection set.",
-            },
+            {"type": "ml.active_learning_batch", "description": "Initial random review batch."},
+            {"type": "selection.ids", "optional": True, "description": "Ordered selection set."},
         ],
         params_schema={
             "type": "object",
             "properties": {
                 "dataset_id": {"type": "string"},
-                "label_options": {"type": "array", "items": {"type": "string"}},
-                "target_column": {"type": "string", "default": "al_label"},
+                "pool_dataset_id": {"type": "string"},
+                "label_options": {"type": "array", "items": {"type": "string"}, "description": "Optional override; otherwise inferred from target_column/label_column."},
+                "target_column": {"type": "string", "description": "Dataset column used to infer labels and as the session target column."},
+                "label_column": {"type": "string", "description": "Alias for target_column."},
+                "infer_labels_from_column": {"type": "boolean", "default": True},
                 "initial_k": {"type": "integer", "minimum": 0, "default": 20},
                 "seed": {"type": "integer", "default": 42},
                 "make_selection": {"type": "boolean", "default": True},
+                "recipe_profile_id": {"type": "string", "description": "Optional saved core.ml recipe profile metadata."},
+                "recipe_id": {"type": "string", "description": "Legacy optional metadata only; not required for sessions."},
                 "session_contract": {"type": "object"},
-                "image_column": {"type": "string"},
-                "mask_column": {"type": "string"},
-                "feature_columns": {"type": "array", "items": {"type": "string"}},
             },
         },
         run_in_job=False,
@@ -84,10 +77,7 @@ def register(api) -> None:
         id="profile_data_contract",
         title="Inspect Active-Learning Data Contract",
         handler=actions.profile_data_contract_action,
-        description=(
-            "Resolve recipe-driven image/tabular/mask bindings, validate pool and holdout "
-            "datasets, and inspect a small image sample."
-        ),
+        description="Lightweight optional inspection of dataset/recipe bindings for the core.ml bridge.",
         category="Active Learning",
         icon="fact_check",
         tags=["active-learning", "recipe", "data-contract", "image", "tabular"],
@@ -101,9 +91,10 @@ def register(api) -> None:
         outputs=[],
         params_schema={
             "type": "object",
-            "required": ["recipe_id"],
             "properties": {
-                "recipe_id": {"type": "string"},
+                "recipe_profile_id": {"type": "string"},
+                "recipe_profile_artifact_id": {"type": "string"},
+                "recipe_id": {"type": "string", "description": "Legacy fallback; prefer recipe_profile_id."},
                 "dataset_id": {"type": "string"},
                 "validation_dataset_id": {"type": "string"},
                 "test_dataset_id": {"type": "string"},
@@ -112,10 +103,7 @@ def register(api) -> None:
                 "image_column": {"type": "string"},
                 "mask_column": {"type": "string"},
                 "recipe_params": {"type": "object"},
-                "protocol_params": {"type": "object"},
                 "labelled_count": {"type": "integer", "minimum": 0},
-                "inspect_images": {"type": "boolean", "default": True},
-                "image_sample_size": {"type": "integer", "minimum": 0, "default": 8},
             },
         },
         run_in_job=True,
@@ -126,9 +114,8 @@ def register(api) -> None:
         title="Create Active-Learning Query Batch",
         handler=actions.query_batch_action,
         description=(
-            "Rank prediction records with a registered query strategy, ignore already "
-            "labelled/unsure rows, and promote the top-k rows to the AstronomicAL selection "
-            "set in informativeness order."
+            "Acquire a ranked query batch from ml.predictions using a registered strategy. "
+            "Strategies can be per-record or full batch-aware."
         ),
         category="Active Learning",
         icon="rule",
@@ -142,15 +129,8 @@ def register(api) -> None:
         },
         outputs=[
             {"type": "al.session", "description": "Updated active-learning session state."},
-            {
-                "type": "ml.active_learning_batch",
-                "description": "Ranked review batch.",
-            },
-            {
-                "type": "selection.ids",
-                "optional": True,
-                "description": "Ordered selection set.",
-            },
+            {"type": "ml.active_learning_batch", "description": "Ranked review batch."},
+            {"type": "selection.ids", "optional": True, "description": "Ordered selection set."},
         ],
         params_schema={
             "type": "object",
@@ -158,9 +138,11 @@ def register(api) -> None:
                 "session_artifact_id": {"type": "string"},
                 "predictions_artifact_id": {"type": "string"},
                 "strategy_id": {"type": "string", "default": "least_confidence"},
+                "strategy_params": {"type": "object"},
                 "k": {"type": "integer", "minimum": 1, "default": 200},
                 "seed": {"type": "integer", "default": 42},
                 "make_selection": {"type": "boolean", "default": True},
+                "exclude_row_ids": {"type": "array", "items": {"type": "string"}},
             },
         },
         run_in_job=True,
@@ -170,22 +152,12 @@ def register(api) -> None:
         id="record_label",
         title="Record Active-Learning Label",
         handler=actions.record_label_action,
-        description=(
-            "Record a label/verification for the focused row. The special Unsure label "
-            "removes a row from the pool but does not add it to the training set."
-        ),
+        description="Record a label/verification for a row. The special Unsure label excludes without training.",
         category="Active Learning",
         icon="label",
         tags=["active-learning", "label", "annotation", "selection"],
-        inputs={
-            "dataset": False,
-            "selection": "optional",
-            "columns": "none",
-            "numeric_columns": "none",
-        },
-        outputs=[
-            {"type": "al.session", "description": "Updated active-learning session state."},
-        ],
+        inputs={"dataset": False, "selection": "optional", "columns": "none", "numeric_columns": "none"},
+        outputs=[{"type": "al.session", "description": "Updated active-learning session state."}],
         params_schema={
             "type": "object",
             "required": ["session_artifact_id", "label"],
@@ -200,65 +172,87 @@ def register(api) -> None:
     )
 
     api.register_action(
+        id="bulk_label_next",
+        title="Bulk Label Next Review Rows",
+        handler=actions.bulk_label_next_action,
+        description="Record each next review row's pre-assigned source value from the session label column.",
+        category="Active Learning",
+        icon="playlist_add_check",
+        tags=["active-learning", "label", "annotation", "bulk"],
+        inputs={"dataset": False, "selection": "optional", "columns": "none", "numeric_columns": "none"},
+        outputs=[{"type": "al.session", "description": "Updated active-learning session state."}],
+        params_schema={
+            "type": "object",
+            "required": ["session_artifact_id"],
+            "properties": {
+                "session_artifact_id": {"type": "string"},
+                "row_id": {"type": "string", "description": "Optional start row; defaults to focused row or first unlabelled batch row."},
+                "label_column": {"type": "string", "description": "Optional override; defaults to the session target/label column."},
+                "n": {"type": "integer", "minimum": 1, "default": 5},
+                "source": {"type": "string", "default": "bulk_column"},
+            },
+        },
+        run_in_job=False,
+    )
+
+    api.register_action(
+        id="materialize_training_set",
+        title="Materialize Active-Learning Training Set",
+        handler=actions.materialize_training_set_action,
+        description="Create a derived dataset/artifact from verified labels without training a model.",
+        category="Active Learning",
+        icon="dataset",
+        tags=["active-learning", "training-set", "dataset"],
+        inputs={"dataset": False, "selection": "none", "columns": "none", "numeric_columns": "none"},
+        outputs=[{"type": "al.training_set", "description": "Training rows and label manifest."}],
+        params_schema={
+            "type": "object",
+            "required": ["session_artifact_id"],
+            "properties": {
+                "session_artifact_id": {"type": "string"},
+                "target_column": {"type": "string", "default": "al_label"},
+                "train_dataset_id": {"type": "string"},
+                "required_columns": {"type": "array", "items": {"type": "string"}},
+                "recipe_params": {"type": "object"},
+            },
+        },
+        run_in_job=True,
+    )
+
+    api.register_action(
         id="train_from_session",
-        title="Train Active-Learning Round From Scratch",
+        title="Train Active-Learning Round Through core.ml",
         handler=actions.train_from_session_action,
         description=(
-            "Materialise verified labels, train from scratch through core.ml, then by default "
-            "predict over the original pool and create the next ranked review batch."
+            "Optional bridge: materialise verified labels, train through core.ml, and optionally "
+            "predict over the pool. Querying is normally performed from the AL Query tab."
         ),
         category="Active Learning",
         icon="model_training",
-        tags=["active-learning", "training", "ml", "recipe", "scratch"],
-        inputs={
-            "dataset": False,
-            "selection": "none",
-            "columns": "none",
-            "numeric_columns": "none",
-        },
+        tags=["active-learning", "training", "ml", "recipe-profile", "scratch"],
+        inputs={"dataset": False, "selection": "none", "columns": "none", "numeric_columns": "none"},
         outputs=[
-            {
-                "type": "al.session",
-                "description": "Updated session with the completed AL round.",
-            },
-            {
-                "type": "al.training_set",
-                "description": "Training rows and label manifest.",
-            },
-            {
-                "type": "ml.run",
-                "optional": True,
-                "description": "core.ml run summary.",
-            },
-            {
-                "type": "ml.model",
-                "optional": True,
-                "description": "Trained model artifact from core.ml.",
-            },
-            {
-                "type": "ml.predictions",
-                "optional": True,
-                "description": "Pool predictions generated after training.",
-            },
-            {
-                "type": "ml.active_learning_batch",
-                "optional": True,
-                "description": "Next ranked review batch generated after prediction.",
-            },
+            {"type": "al.session", "description": "Updated session with the completed AL round."},
+            {"type": "al.training_set", "description": "Training rows and label manifest."},
+            {"type": "ml.run", "optional": True, "description": "core.ml run summary."},
+            {"type": "ml.model", "optional": True, "description": "Trained model artifact from core.ml."},
+            {"type": "ml.predictions", "optional": True, "description": "Pool predictions generated after training."},
         ],
         params_schema={
             "type": "object",
-            "required": ["session_artifact_id", "recipe_id"],
+            "required": ["session_artifact_id"],
             "properties": {
                 "session_artifact_id": {"type": "string"},
-                "recipe_id": {"type": "string"},
+                "recipe_profile_id": {"type": "string", "description": "Saved core.ml recipe profile to use for this AL round."},
+                "recipe_profile_artifact_id": {"type": "string", "description": "Alias for recipe_profile_id when the profile artifact id is used."},
+                "recipe_id": {"type": "string", "description": "Legacy fallback; prefer recipe_profile_id."},
                 "recipe_params": {"type": "object"},
+                "prediction_params": {"type": "object"},
                 "target_column": {"type": "string", "default": "al_label"},
                 "train_dataset_id": {"type": "string"},
                 "seed": {"type": "integer"},
-                "session_contract": {"type": "object"},
                 "auto_predict": {"type": "boolean", "default": True},
-                "auto_query": {"type": "boolean", "default": True},
+                "auto_query": {"type": "boolean", "default": False, "description": "Legacy/advanced option. The panel leaves this false so querying happens only from the Query tab."},
                 "query_strategy_id": {"type": "string", "default": "least_confidence"},
                 "query_k": {"type": "integer", "minimum": 1, "default": 200},
                 "make_selection": {"type": "boolean", "default": True},
@@ -272,28 +266,15 @@ def register(api) -> None:
         title="Active Learning",
         factory=create_active_learning_panel,
         description=(
-            "Manage active-learning sessions, initial random sampling, ranked query batches, "
-            "manual labels including Unsure, and scratch retraining through selectable core.ml "
-            "recipes. Recipes, datasets, recipe-driven image/tabular/mask inputs, labels, "
-            "validation/test sets, and schema-defined recipe parameters are populated from "
-            "platform state where available."
+            "Manage AL sessions, labels, query batches, query strategies, and optional core.ml "
+            "train/predict/query loops."
         ),
         category="Active Learning",
         icon="psychology",
-        tags=["active-learning", "ml", "selection", "annotation"],
+        tags=["active-learning", "ml", "selection", "annotation", "query-strategy"],
         required_mappings=["record_id"],
-        optional_mappings=[
-            "target_label",
-            "image.path",
-            "image.uri",
-            "mask.path",
-            "mask",
-        ],
-        # Descriptive only: the panel should still load when core.ml is disabled.
-        uses_services=[
-            "core.active_learning.query_strategy_registry",
-            "core.ml.recipe_registry",
-        ],
+        optional_mappings=["target_label", "image.path", "image.uri", "mask.path", "mask"],
+        uses_services=["core.active_learning.query_strategy_registry", "core.ml.recipe_profile_store"],
         produces=[
             "al.session",
             "al.training_set",
@@ -302,21 +283,25 @@ def register(api) -> None:
             "al.session.created",
             "al.query_batch.created",
             "al.label.recorded",
+            "al.labels.bulk_recorded",
             "al.round.training_started",
             "al.round.training_finished",
+            "al.round.training_failed",
+            "ml.recipe_run.started",
+            "ml.recipe_run.finished",
+            "ml.training.started",
+            "ml.training.finished",
         ],
         default_layout={"x": 0, "y": 0, "w": 6, "h": 8},
-        state_version=3,
+        state_version=6,
         persist_layout=True,
         persist_state=True,
         restore_policy="best_effort",
     )
 
+
 def create_active_learning_panel(context, **kwargs):
     from . import panel as panel_module
 
-    controller = panel_module.ActiveLearningPanel(
-        context=context,
-        restore_state=kwargs.get("restore_state"),
-    )
+    controller = panel_module.ActiveLearningPanel(context=context, restore_state=kwargs.get("restore_state"))
     return controller.panel(), controller

@@ -165,7 +165,14 @@ class MLTrainingCurvesPanel:
         if not callable(subscribe):
             return
 
-        for topic in ["ml.training_log.created", "ml.training_log.updated"]:
+        for topic in [
+            "ml.training_log.created",
+            "ml.training_log.updated",
+            "ml.recipe_run.started",
+            "ml.recipe_run.finished",
+            "ml.training.started",
+            "ml.training.finished",
+        ]:
             try:
                 sub = subscribe(
                     topic,
@@ -180,7 +187,11 @@ class MLTrainingCurvesPanel:
     def _on_training_log_event(self, topic: str, payload: Any) -> None:
         artifact_id = None
         if isinstance(payload, dict):
-            artifact_id = payload.get("artifact_id") or payload.get("training_log_artifact_id")
+            artifact_id = (
+                payload.get("artifact_id")
+                or payload.get("training_log_artifact_id")
+                or payload.get("final_training_log_artifact_id")
+            )
 
         def update():
             self._load_logs(select_artifact_id=artifact_id)

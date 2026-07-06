@@ -11,13 +11,13 @@ manifest = PluginManifest(
     name="ML Core",
     version="0.5.0",
     description=(
-        "Machine-learning core: code-backed recipes with a protocol-enforcing "
-        "harness, durable model artifacts, compatibility-checked prediction, "
-        "active-learning batches, trained-model cataloguing, and training curves."
+        "Machine-learning core: code-backed recipes, reusable recipe profiles, "
+        "protocol-enforced training, durable model artifacts, compatibility-checked "
+        "prediction, active-learning batches, trained-model cataloguing, and training curves."
     ),
     requires=["scikit-learn>=1.2"],
     optional_requires=["torch", "torchvision", "pillow", "matplotlib", "optuna", "joblib"],
-    capabilities=["panel", "action", "machine-learning", "training", "inference", "artifacts"],
+    capabilities=["panel", "action", "machine-learning", "training", "inference", "artifacts", "recipe-profile",],
     tags=[
         "core",
         "ml",
@@ -38,6 +38,7 @@ def register(api) -> None:
     from . import prediction
     from . import trained_models
     from . import recipe_runner
+    from . import recipe_profiles
 
     api.register_service(
         key="trained_model_catalog",
@@ -56,6 +57,14 @@ def register(api) -> None:
             "Registry of code-backed ML recipes. Recipes expose typed UI parameters "
             "but keep expert dataloaders/training loops in Python."
         ),
+    )
+
+    api.register_service(
+        key="recipe_profile_store",
+        factory=lambda context: recipe_profiles.create_recipe_profile_store(context),
+        lazy=True,
+        replace=True,
+        description="Stores reusable ML recipe profiles/run templates for recipe launcher and active learning.",
     )
 
     api.register_action(
@@ -90,16 +99,44 @@ def register(api) -> None:
         ],
         params_schema={
             "type": "object",
-            "required": ["recipe_id"],
             "properties": {
                 "dataset_id": {"type": "string"},
-                "recipe_id": {"type": "string", "minLength": 1},
+                "recipe_id": {"type": "string"},
+                "recipe_profile_id": {"type": "string"},
+                "recipe_profile_artifact_id": {"type": "string"},
                 "run_id": {"type": "string"},
             },
         },
         run_in_job=True,
         requires=[],
         optional_requires=["torch", "torchvision", "pillow", "scikit-learn"],
+    )
+
+    api.register_action(
+        id="save_recipe_profile",
+        title="Save ML Recipe Profile",
+        handler=recipe_profiles.save_recipe_profile_action,
+        description="Persist a reusable recipe/profile configuration for later launcher or active-learning runs.",
+        category="Machine Learning",
+        icon="save",
+        tags=["ml", "recipe", "profile", "template"],
+        inputs={"dataset": False, "selection": "none", "columns": "none", "numeric_columns": "none"},
+        outputs=[{"type": "ml.recipe_profile", "description": "Saved reusable recipe profile."}],
+        params_schema={
+            "type": "object",
+            "required": ["name", "recipe_id"],
+            "properties": {
+                "profile_id": {"type": "string"},
+                "name": {"type": "string"},
+                "recipe_id": {"type": "string"},
+                "default_dataset_id": {"type": "string"},
+                "recipe_params": {"type": "object"},
+                "protocol_params": {"type": "object"},
+                "binding_params": {"type": "object"},
+                "notes": {"type": "string"},
+            },
+        },
+        run_in_job=False,
     )
 
     api.register_action(
@@ -297,7 +334,6 @@ def create_ml_recipe_registry(context=None):
     registry.register(sklearn_recipes.SklearnTabularRegressorRecipe)
 
     return registry
-
 
 def create_ml_recipe_launcher_panel(context, **kwargs):
     from . import recipe_panel as recipe_panel_module
