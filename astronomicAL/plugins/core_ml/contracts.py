@@ -9,9 +9,10 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 import numpy as np
 import pandas as pd
 
+from .serialization import json_safe
+
 MODEL_CONTRACT_SCHEMA_VERSION = 2
 PREDICTION_SCHEMA_VERSION = 2
-
 
 @dataclass
 class ModelCompatibilityReport:
@@ -35,42 +36,6 @@ class ModelCompatibilityReport:
 
     def to_dict(self) -> Dict[str, Any]:
         return json_safe(asdict(self))
-
-
-def json_safe(value: Any) -> Any:
-    """Convert common scientific Python values into JSON-safe values."""
-
-    if value is None or isinstance(value, (str, bool, int)):
-        return value
-    if isinstance(value, float):
-        if math.isnan(value) or math.isinf(value):
-            return None
-        return value
-    if isinstance(value, np.generic):
-        return json_safe(value.item())
-    if isinstance(value, np.ndarray):
-        return [json_safe(v) for v in value.tolist()]
-    if isinstance(value, pd.Series):
-        return [json_safe(v) for v in value.tolist()]
-    if isinstance(value, pd.Index):
-        return [json_safe(v) for v in value.tolist()]
-    if isinstance(value, pd.DataFrame):
-        return [json_safe(row) for row in value.to_dict(orient="records")]
-    if isinstance(value, Mapping):
-        return {str(k): json_safe(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple, set, frozenset)):
-        return [json_safe(v) for v in value]
-    if hasattr(value, "item") and callable(value.item):
-        try:
-            return json_safe(value.item())
-        except Exception:
-            pass
-    try:
-        if pd.isna(value):
-            return None
-    except Exception:
-        pass
-    return str(value)
 
 def safe_record_id(value: Any) -> str:
     """Return a stable string record id without turning large ints into floats.
@@ -121,7 +86,6 @@ def _as_mapping(value: Any) -> Dict[str, Any]:
         return dict(value)
     return {}
 
-
 def _metadata_with_input_contract(model_payload: Mapping[str, Any]) -> Dict[str, Any]:
     """Merge recipe input_contract into metadata-like lookup state.
 
@@ -145,7 +109,6 @@ def _metadata_with_input_contract(model_payload: Mapping[str, Any]) -> Dict[str,
         merged.setdefault("metrics", metrics)
 
     return merged
-
 
 def _first_non_empty(*values: Any) -> Optional[str]:
     for value in values:
@@ -189,7 +152,6 @@ def ensure_model_contract(
         model_payload["updated_at"] = time.time()
 
     return contract
-
 
 def build_model_contract(
     *,
@@ -347,7 +309,6 @@ def build_model_contract(
     }
 
     return json_safe(contract)
-
 
 def validate_model_for_dataset(
     *,
@@ -514,7 +475,6 @@ def validate_model_for_dataset(
         recommended_prediction_columns=recommended_columns,
     )
 
-
 def build_predictions_payload(
     *,
     context: Any,
@@ -596,7 +556,6 @@ def build_predictions_payload(
         "created_at": time.time(),
     }
     return json_safe(payload)
-
 
 def prediction_table_rows(
     *,
@@ -703,7 +662,6 @@ def prediction_table_rows(
 
     return rows
 
-
 def recommended_prediction_columns(output_schema: Mapping[str, Any]) -> List[str]:
     task = str(output_schema.get("task") or output_schema.get("kind") or "classification").lower()
     if task == "regression":
@@ -713,7 +671,6 @@ def recommended_prediction_columns(output_schema: Mapping[str, Any]) -> List[str
     if isinstance(prob_cols, Mapping):
         columns.extend(str(col) for col in prob_cols.values())
     return list(dict.fromkeys(columns))
-
 
 def dataset_column_names(context: Any, dataset_id: str) -> List[str]:
     datasets = getattr(context, "datasets", None)
@@ -734,7 +691,6 @@ def dataset_column_names(context: Any, dataset_id: str) -> List[str]:
     except Exception:
         return []
 
-
 def dataset_dtypes(context: Any, dataset_id: str) -> Dict[str, str]:
     datasets = getattr(context, "datasets", None)
     method = getattr(datasets, "dtypes", None)
@@ -749,7 +705,6 @@ def dataset_dtypes(context: Any, dataset_id: str) -> Dict[str, str]:
     except Exception:
         return {}
 
-
 def dataset_fingerprint(context: Any, dataset_id: str) -> Optional[str]:
     if not dataset_id:
         return None
@@ -762,7 +717,6 @@ def dataset_fingerprint(context: Any, dataset_id: str) -> Optional[str]:
         pass
     source_key = meta.get("source_path") or meta.get("source") or meta.get("path") or meta.get("backend")
     return _stable_hash({"dataset_id": dataset_id, "row_count": row_count, "columns": cols, "source": source_key})
-
 
 def _tabular_input_schema(
     *,
@@ -873,8 +827,6 @@ def _image_input_schema(
         "accepted_uri_schemes": ["file", "http", "https", "s3", "gs"],
     }
 
-
-
 def _output_schema(*, task: str, classes: Sequence[str], metadata: Mapping[str, Any]) -> Dict[str, Any]:
     task = str(task or "classification").lower()
     if task == "regression":
@@ -898,7 +850,6 @@ def _output_schema(*, task: str, classes: Sequence[str], metadata: Mapping[str, 
         "uncertainty_columns": ["least_confidence", "margin_uncertainty", "entropy"],
         "probability_columns": probability_columns,
     }
-
 
 def _classes_from_payload_or_model(model_payload: Mapping[str, Any], model_object: Any = None) -> List[str]:
     # Recipe artifacts save class_names at the top level.
@@ -939,7 +890,6 @@ def _classes_from_payload_or_model(model_payload: Mapping[str, Any], model_objec
 
     return []
 
-
 def _classes_from_model_object(model: Any) -> List[str]:
     if isinstance(model, Mapping):
         for key in ("class_names", "classes"):
@@ -968,7 +918,6 @@ def _classes_from_model_object(model: Any) -> List[str]:
         except Exception:
             pass
     return []
-
 
 def _target_class_warnings(
     *,
@@ -1007,7 +956,6 @@ def _target_class_warnings(
         )
     return warnings, errors
 
-
 def _dtype_warnings(expected: Mapping[str, str], actual: Mapping[str, str], mapping: Mapping[str, str]) -> List[str]:
     warnings: List[str] = []
     for expected_col, expected_dtype in expected.items():
@@ -1021,7 +969,6 @@ def _dtype_warnings(expected: Mapping[str, str], actual: Mapping[str, str], mapp
             )
     return warnings
 
-
 def _dtype_family(dtype: str) -> str:
     low = str(dtype).lower()
     if any(token in low for token in ("int", "float", "double", "decimal", "number")):
@@ -1032,10 +979,8 @@ def _dtype_family(dtype: str) -> str:
         return "datetime"
     return "categorical"
 
-
 def _artifact_get(context: Any, artifact_id: str) -> Any:
     return context.artifacts.get(artifact_id)
-
 
 def _mapped_column(context: Any, dataset_id: str, semantic_name: str) -> Optional[str]:
     if not dataset_id:
@@ -1045,7 +990,6 @@ def _mapped_column(context: Any, dataset_id: str, semantic_name: str) -> Optiona
         return str(value) if value else None
     except Exception:
         return None
-
 
 def _row_count(context: Any, dataset_id: str) -> Optional[int]:
     if not dataset_id:
@@ -1060,7 +1004,6 @@ def _row_count(context: Any, dataset_id: str) -> Optional[int]:
     except Exception:
         return None
 
-
 def _first_present(candidates: Sequence[Any], column_set: set[str]) -> Optional[str]:
     for candidate in candidates:
         if candidate is None:
@@ -1069,7 +1012,6 @@ def _first_present(candidates: Sequence[Any], column_set: set[str]) -> Optional[
         if candidate in column_set:
             return candidate
     return None
-
 
 def _guess_image_column(columns: Sequence[str]) -> Optional[str]:
     lowered = {str(c).lower(): str(c) for c in columns}
@@ -1082,13 +1024,11 @@ def _guess_image_column(columns: Sequence[str]) -> Optional[str]:
             return str(column)
     return None
 
-
 def _none_if_empty(value: Any) -> Optional[str]:
     if value is None:
         return None
     text = str(value).strip()
     return text or None
-
 
 def _stable_hash(value: Any) -> str:
     import hashlib
@@ -1096,7 +1036,6 @@ def _stable_hash(value: Any) -> str:
 
     raw = json.dumps(json_safe(value), sort_keys=True, default=str).encode("utf-8")
     return hashlib.sha1(raw).hexdigest()
-
 
 def _safe_column_token(value: str) -> str:
     token = re.sub(r"[^0-9A-Za-z_]+", "_", str(value)).strip("_").lower()

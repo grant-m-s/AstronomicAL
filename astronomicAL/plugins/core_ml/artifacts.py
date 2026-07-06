@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -29,7 +28,6 @@ class StoredModelRef:
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
-
 @dataclass(frozen=True)
 class MLArtifactContract:
     """Documented ML artifact types produced and consumed by core.ml."""
@@ -45,62 +43,15 @@ class MLArtifactContract:
     RUN: str = "ml.run"
     ACTIVE_LEARNING_BATCH: str = "ml.active_learning_batch"
 
-
 ARTIFACTS = MLArtifactContract()
 
-
-def json_safe(value: Any) -> Any:
-    """Convert common scientific Python values into JSON-safe objects."""
-
-    if value is None or isinstance(value, (str, bool, int, float)):
-        if isinstance(value, float) and (np.isnan(value) or np.isinf(value)):
-            return None
-        return value
-
-    if isinstance(value, np.generic):
-        return json_safe(value.item())
-
-    if isinstance(value, np.ndarray):
-        return [json_safe(v) for v in value.tolist()]
-
-    if isinstance(value, pd.Series):
-        return [json_safe(v) for v in value.tolist()]
-
-    if isinstance(value, pd.Index):
-        return [json_safe(v) for v in value.tolist()]
-
-    if isinstance(value, pd.DataFrame):
-        return [json_safe(row) for row in value.to_dict(orient="records")]
-
-    if isinstance(value, Mapping):
-        return {str(k): json_safe(v) for k, v in value.items()}
-
-    if isinstance(value, (list, tuple, set, frozenset)):
-        return [json_safe(v) for v in value]
-
-    if hasattr(value, "item") and callable(value.item):
-        try:
-            return json_safe(value.item())
-        except Exception:
-            pass
-
-    try:
-        if pd.isna(value):
-            return None
-    except Exception:
-        pass
-
-    return str(value)
+from .serialization import ensure_json_object, json_safe
 
 
 def ensure_json_safe(payload: Mapping[str, Any]) -> Dict[str, Any]:
     """Return a JSON-safe shallow/deep copy of an artifact payload."""
 
-    safe = json_safe(dict(payload))
-    if not isinstance(safe, dict):
-        raise TypeError("Expected payload to coerce to a JSON object.")
-    safe.setdefault("schema_version", ML_ARTIFACT_SCHEMA_VERSION)
-    return safe
+    return ensure_json_object(payload, schema_version=ML_ARTIFACT_SCHEMA_VERSION)
 
 
 def ml_storage_dir(context: Any, *, kind: str = "models") -> Path:
@@ -212,8 +163,6 @@ def save_model_sidecar(
         created_at=time.time(),
         metadata=json_safe(combined_metadata),
     )
-
-
 
 def load_model_sidecar(model_ref: Mapping[str, Any]) -> Any:
     """Load a persisted model sidecar referenced by an ml.model payload."""
@@ -394,7 +343,6 @@ def _build_recipe_image_model(
 
     raise ValueError(f"Unsupported recipe image architecture: {architecture!r}")
 
-
 def normalize_model_artifact_payload(
     *,
     context: Any,
@@ -438,7 +386,6 @@ def normalize_model_artifact_payload(
 
     return ensure_json_safe(mutable)
 
-
 def persist_existing_model_artifact(*, context: Any, artifact_id: str) -> Dict[str, Any]:
     """Normalize an existing ml.model artifact in-place where possible."""
 
@@ -456,7 +403,6 @@ def persist_existing_model_artifact(*, context: Any, artifact_id: str) -> Dict[s
 
     return normalized
 
-
 def load_model_from_payload(payload: Mapping[str, Any]) -> Any:
     """Load a model from either the new durable payload or an old in-memory payload."""
 
@@ -467,67 +413,6 @@ def load_model_from_payload(payload: Mapping[str, Any]) -> Any:
         return load_model_sidecar(payload["model_ref"])
 
     raise ValueError("ml.model payload has neither `model` nor `model_ref`.")
-
-
-def prediction_payload(
-    *,
-    run_id: str,
-    dataset_id: str,
-    model_artifact_id: str,
-    model_payload: Mapping[str, Any],
-    records: Iterable[Mapping[str, Any]],
-    row_ids: Optional[Iterable[Any]] = None,
-    params: Optional[Mapping[str, Any]] = None,
-) -> Dict[str, Any]:
-    """Build a JSON-safe ml.predictions payload."""
-
-    return ensure_json_safe(
-        {
-            "artifact_type": ARTIFACTS.PREDICTIONS,
-            "schema_version": ML_ARTIFACT_SCHEMA_VERSION,
-            "run_id": run_id,
-            "dataset_id": dataset_id,
-            "model_artifact_id": model_artifact_id,
-            "model_id": model_payload.get("model_id"),
-            "model_title": model_payload.get("model_title"),
-            "framework": model_payload.get("framework"),
-            "task": model_payload.get("task"),
-            "target_column": model_payload.get("target_column"),
-            "feature_columns": list(model_payload.get("feature_columns") or []),
-            "row_ids": list(row_ids or []),
-            "records": list(records),
-            "params": dict(params or {}),
-            "created_at": time.time(),
-        }
-    )
-
-
-def active_learning_batch_payload(
-    *,
-    dataset_id: str,
-    predictions_artifact_id: str,
-    strategy: str,
-    records: Iterable[Mapping[str, Any]],
-    params: Optional[Mapping[str, Any]] = None,
-) -> Dict[str, Any]:
-    """Build a JSON-safe ml.active_learning_batch payload."""
-
-    rows = list(records)
-
-    return ensure_json_safe(
-        {
-            "artifact_type": ARTIFACTS.ACTIVE_LEARNING_BATCH,
-            "schema_version": ML_ARTIFACT_SCHEMA_VERSION,
-            "dataset_id": dataset_id,
-            "predictions_artifact_id": predictions_artifact_id,
-            "strategy": strategy,
-            "count": len(rows),
-            "row_ids": [row.get("row_id") for row in rows if row.get("row_id") is not None],
-            "records": rows,
-            "params": dict(params or {}),
-            "created_at": time.time(),
-        }
-    )
 
 
 def _safe_filename(value: str) -> str:

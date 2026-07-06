@@ -9,7 +9,6 @@ from typing import Any, Dict, List, Optional, Sequence
 import pandas as pd
 import panel as pn
 
-
 class MLTrainingCurvesPanel:
     """Panel for viewing training curves and Optuna trial history."""
 
@@ -615,7 +614,6 @@ class MLTrainingCurvesPanel:
 
         return work
 
-
     def _numeric_metric_columns(self, df: pd.DataFrame) -> List[str]:
         if df.empty:
             return []
@@ -641,7 +639,6 @@ class MLTrainingCurvesPanel:
 
         return columns
 
-
     def _loss_columns(self, columns: Sequence[str]) -> List[str]:
         preferred = [
             "train_loss",
@@ -662,7 +659,6 @@ class MLTrainingCurvesPanel:
                 out.append(key)
 
         return out
-
 
     def _default_metric_columns(self, columns: Sequence[str]) -> List[str]:
         preferred = [
@@ -696,7 +692,6 @@ class MLTrainingCurvesPanel:
 
         return out
 
-
     def _sync_curve_controls(self, epoch_df: pd.DataFrame) -> None:
         numeric_columns = self._numeric_metric_columns(epoch_df)
         loss_columns = self._loss_columns(numeric_columns)
@@ -728,7 +723,6 @@ class MLTrainingCurvesPanel:
             "Use the selectors to add or remove plotted curves."
         )
 
-
     def _filtered_epoch_df(self, epoch_df: pd.DataFrame) -> pd.DataFrame:
         if epoch_df.empty or "epoch" not in epoch_df.columns:
             return epoch_df
@@ -752,7 +746,6 @@ class MLTrainingCurvesPanel:
             work = work[work["epoch"] <= end]
 
         return work
-
 
     def _reset_curve_controls(self) -> None:
         self.loss_metric_select.value = []
@@ -1074,7 +1067,6 @@ class MLTrainingCurvesPanel:
             sizing_mode="stretch_width",
             height=350,
         )
-
 
     def _plot_current_trial_epochs(self, df: pd.DataFrame, *, metric: str):
         try:

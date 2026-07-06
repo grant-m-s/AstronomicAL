@@ -27,7 +27,6 @@ except Exception:  # pragma: no cover
     normalise_dataset_id = None
     replace_dataset_with_dataframe_parquet = None
 
-
 _PROV_META = {
     "novel": ("New data", "the real test — never seen by the model", True),
     "test": ("Held-out test", "the real test — held out during training", True),
@@ -54,7 +53,6 @@ _ATTACH_PRIORITY = list(_ATTACH_FRIENDLY.keys())
 
 _GENERATED_PREDICTION_COLUMNS = set(_ATTACH_FRIENDLY.values())
 
-
 def _is_generated_prediction_column(column: Any) -> bool:
     column = str(column)
 
@@ -70,10 +68,8 @@ def _is_generated_prediction_column(column: Any) -> bool:
 def _quote_identifier(identifier: str) -> str:
     return '"' + str(identifier).replace('"', '""') + '"'
 
-
 def _quote_sql_string(value: Any) -> str:
     return "'" + str(value).replace("'", "''") + "'"
-
 
 def _is_duckdb_relation_source(source: Any) -> bool:
     if source is None:
@@ -81,7 +77,6 @@ def _is_duckdb_relation_source(source: Any) -> bool:
     return (callable(getattr(source, "_connect", None))
             and callable(getattr(source, "_relation_sql", None))
             and callable(getattr(source, "_path_argument", None)))
-
 
 def _duckdb_relation_params(source: Any) -> list:
     if source is None:
@@ -109,7 +104,6 @@ def _duckdb_relation_params(source: Any) -> list:
 
     return _walk(source)
 
-
 def _duckdb_relation_query_sql(source: Any) -> str:
     relation_sql = str(source._relation_sql()).strip()
     lower = relation_sql.lower()
@@ -117,14 +111,11 @@ def _duckdb_relation_query_sql(source: Any) -> str:
         return relation_sql
     return f"SELECT * FROM {relation_sql}"
 
-
 def _duckdb_relation_from_sql(source: Any, *, alias: str = "base") -> str:
     return f"({_duckdb_relation_query_sql(source)}) AS {_quote_identifier(alias)}"
 
-
 def _duckdb_self_from_sql(source: Any, *, alias: str = "src") -> str:
     return f"({source._relation_sql()}) AS {_quote_identifier(alias)}"
-
 
 class LazyPredictionJoinSource:
     """Lazy LEFT JOIN of a predictions parquet onto a DuckDB/Parquet source.
@@ -166,7 +157,7 @@ class LazyPredictionJoinSource:
             for column in base_columns
             if not _is_generated_prediction_column(column)
         ]
-    
+
         self._columns_cache = self._base_columns + added_columns
         self._row_count_cache = int(row_count_hint) if row_count_hint is not None else None
 
@@ -351,7 +342,6 @@ class LazyPredictionJoinSource:
             "replaced_columns": [f for _s, f in self.column_plan],
             "materialized": False,
         }
-
 
 # =============================================================================
 # Panel
@@ -650,7 +640,7 @@ class MLPredictPanel:
         self.status.alert_type = "info"
         self.status.object = "Working…"
 
-        from . import prediction
+        from .. import prediction
 
         submit = getattr(getattr(self.context, "jobs", None), "submit", None)
         key = f"core.ml.predict:{dataset_id}:{model_id}"
@@ -1581,7 +1571,6 @@ class MLPredictPanel:
             if any(t in column.lower() for t in ("image", "img", "path", "uri", "url", "cutout", "jpg", "png")):
                 return column
         return None
-
 
 def create_predict_panel(context: Any, **kwargs: Any):
     controller = MLPredictPanel(context=context, restore_state=kwargs.get("restore_state"))

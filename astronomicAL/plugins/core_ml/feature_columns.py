@@ -3,14 +3,12 @@ from __future__ import annotations
 import json
 from typing import Any, Iterable, List, Mapping, Optional, Sequence
 
-
 _FEATURE_PARAM_KEYS = (
     "feature_columns",
     "input_columns",
     "features",
     "x_columns",
 )
-
 
 def parse_column_list(value: Any) -> List[str]:
     """Normalise a UI/API column-list value into a clean list of column names.
@@ -63,7 +61,6 @@ def parse_column_list(value: Any) -> List[str]:
 
     return columns
 
-
 def feature_columns_from_params(params: Mapping[str, Any]) -> List[str]:
     """Resolve feature columns from any accepted recipe/action parameter key."""
     params = dict(params or {})
@@ -74,7 +71,6 @@ def feature_columns_from_params(params: Mapping[str, Any]) -> List[str]:
             return columns
 
     return []
-
 
 def list_dataset_columns(context: Any, dataset_id: Any) -> List[str]:
     dataset_id = str(dataset_id or "").strip()
@@ -90,7 +86,6 @@ def list_dataset_columns(context: Any, dataset_id: Any) -> List[str]:
         return [str(col) for col in context.datasets.get_df(dataset_id).columns]
     except Exception:
         return []
-
 
 def default_excluded_columns(
     *,
@@ -133,7 +128,6 @@ def default_excluded_columns(
 
     return excluded
 
-
 def default_feature_columns(
     context: Any,
     dataset_id: Any,
@@ -166,15 +160,3 @@ def default_feature_columns(
         if str(column) not in excluded
     ]
 
-
-def normalise_feature_params(params: Mapping[str, Any]) -> dict:
-    """Return params with feature_columns/input_columns/features normalised."""
-    out = dict(params or {})
-    columns = feature_columns_from_params(out)
-
-    if columns:
-        out["feature_columns"] = columns
-        out["input_columns"] = columns
-        out["features"] = columns
-
-    return out

@@ -3,7 +3,6 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
-import threading
 import traceback
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional
@@ -12,11 +11,13 @@ import panel as pn
 
 from astronomicAL.platform.plugins.specs import ActionRequest
 
-from . import recipe_registry as _registry_mod
-from . import recipe_runner as _runner
-from .feature_columns import parse_column_list
+from .. import registry as _registry_mod
+from ..data import dataset_access as _dataset_access
+from .. import recipe_runner as _runner
+from ..feature_columns import parse_column_list
+from ..job_bridge import submit_job
 
-from .recipe_profiles import PROTOCOL_KEYS as _PROTOCOL_KEYS
+from ..profiles import PROTOCOL_KEYS as _PROTOCOL_KEYS
 
 _PROTOCOL_LABELS = {
     "protocol_split_strategy": "Split method for selected dataset",
@@ -31,7 +32,6 @@ _PROTOCOL_LABELS = {
     "protocol_selection_metric": "Best-epoch metric",
     "protocol_random_state": "Random seed",
 }
-
 
 class MLRecipeLauncherPanel:
     def __init__(
@@ -48,8 +48,7 @@ class MLRecipeLauncherPanel:
         # Protocol section (managed recipes only). Empty for freeform recipes.
         self.protocol_widgets: Dict[str, Any] = {}
         self.protocol_fields: Dict[str, Any] = {}
-        self._active_thread: Optional[threading.Thread] = None
-        self._cancel_token: Any = None
+        self._active_handle: Any = None
 
         self.recipe = pn.widgets.Select(name="", options={}, sizing_mode="stretch_width")
         self.dataset = pn.widgets.Select(name="", options=[], sizing_mode="stretch_width")
@@ -251,7 +250,6 @@ class MLRecipeLauncherPanel:
         except Exception:
             return None
 
-
     def _refresh_profiles(self) -> None:
         store = self._profile_store()
         if store is None:
@@ -276,10 +274,10 @@ class MLRecipeLauncherPanel:
         if recipes and not self.recipe.value:
             self.recipe.value = recipes[0].id
 
-        dataset_ids = _registry_mod.list_dataset_ids(self.context)
+        dataset_ids = _dataset_access.list_dataset_ids(self.context)
         self.dataset.options = dataset_ids
 
-        active = _registry_mod.active_dataset_id(self.context)
+        active = _dataset_access.active_dataset_id(self.context)
         if active in dataset_ids:
             self.dataset.value = active
         elif self.dataset.value not in dataset_ids:
@@ -360,12 +358,12 @@ class MLRecipeLauncherPanel:
         if str(getattr(spec.recipe_cls, "execution_mode", "freeform")) != "managed":
             return
 
-        cols = [""] + _registry_mod.list_dataset_columns(
+        cols = [""] + _dataset_access.list_dataset_columns(
             self.context,
             self.dataset.value,
         )
 
-        dataset_ids = _registry_mod.list_dataset_ids(self.context)
+        dataset_ids = _dataset_access.list_dataset_ids(self.context)
         dataset_options = [""] + dataset_ids
 
         self.protocol_widgets = {
@@ -482,7 +480,6 @@ class MLRecipeLauncherPanel:
 
         self._sync_protocol_visibility()
 
-
     def _sync_protocol_visibility(self) -> None:
         if not self.protocol_widgets:
             return
@@ -554,7 +551,7 @@ class MLRecipeLauncherPanel:
         _show("protocol_selection_metric", True)
 
     def _refresh_recipe_column_widgets(self) -> None:
-        columns = list(_registry_mod.list_dataset_columns(self.context, self.dataset.value))
+        columns = list(_dataset_access.list_dataset_columns(self.context, self.dataset.value))
         column_options = [""] + columns
 
         for name, widget in list(self.param_widgets.items()):
@@ -598,12 +595,11 @@ class MLRecipeLauncherPanel:
                     widget.options = column_options
                     widget.value = current if current in column_options else ""
 
-
     def _refresh_protocol_columns(self) -> None:
         if not self.protocol_widgets:
             return
 
-        cols = [""] + _registry_mod.list_dataset_columns(
+        cols = [""] + _dataset_access.list_dataset_columns(
             self.context,
             self.dataset.value,
         )
@@ -617,7 +613,7 @@ class MLRecipeLauncherPanel:
             widget.options = cols
             widget.value = current if current in cols else ""
 
-        dataset_ids = _registry_mod.list_dataset_ids(self.context)
+        dataset_ids = _dataset_access.list_dataset_ids(self.context)
         dataset_options = [""] + dataset_ids
 
         for key in (
@@ -694,7 +690,7 @@ class MLRecipeLauncherPanel:
         widget_kind = str(schema.get("x-widget") or schema.get("widget") or "")
 
         if widget_kind == "dataset_select" or name.endswith("_dataset_id"):
-            dataset_ids = _registry_mod.list_dataset_ids(self.context)
+            dataset_ids = _dataset_access.list_dataset_ids(self.context)
             options = [""] + dataset_ids
             value = default if default in options else ""
             return pn.widgets.Select(
@@ -800,7 +796,7 @@ class MLRecipeLauncherPanel:
         spec = self.registry.get(self.recipe.value)
         params = self._params()
 
-        from .recipe_profiles import split_profile_params
+        from ..profiles import split_profile_params
         recipe_params, protocol_params, binding_params = split_profile_params(params)
 
         name = str(self.profile_name.value or "").strip()
@@ -832,8 +828,14 @@ class MLRecipeLauncherPanel:
             self.status.object = f"Could not save recipe profile: `{exc}`"
             return
 
+        saved_profile_id = ""
+        try:
+            saved_payload = store.get(artifact_id)
+            saved_profile_id = str(saved_payload.get("profile_id") or "")
+        except Exception:
+            saved_profile_id = str(payload.get("profile_id") or existing_profile_id or "")
+
         self._refresh_profiles()
-        saved_profile_id = payload.get("profile_id") or ""
         if saved_profile_id in self.profile.options.values():
             self.profile.value = saved_profile_id
 
@@ -890,7 +892,7 @@ class MLRecipeLauncherPanel:
         self.status.object = f"Loaded recipe profile `{profile.get('name') or profile_id}`."
 
     def _run_clicked(self, *_: Any) -> None:
-        if self._active_thread and self._active_thread.is_alive():
+        if self._active_handle is not None:
             self.status.alert_type = "warning"
             self.status.object = "A recipe is already running from this panel."
             return
@@ -905,7 +907,6 @@ class MLRecipeLauncherPanel:
             self.status.object = "Choose a dataset."
             return
 
-        self._cancel_token = _registry_mod.CancellationToken()
         self._set_running_state(True)
 
         self.status.alert_type = "info"
@@ -923,45 +924,44 @@ class MLRecipeLauncherPanel:
             origin="core.ml.recipe_launcher",
         )
 
-        def worker() -> None:
-            try:
-                result = _runner.run_ml_recipe_action(
-                    self.context,
-                    request,
-                    cancel_token=self._cancel_token,
-                )
-                status = str(result.get("status") or "").lower()
-                self._update_result(
-                    result,
-                    success=status != "cancelled",
-                    cancelled=status == "cancelled",
-                )
-            except Exception as exc:
-                self._update_result(
-                    {
-                        "error": str(exc),
-                        "traceback": traceback.format_exc(),
-                    },
-                    success=False,
-                    cancelled=False,
-                )
-            finally:
-                self._set_running_state(False)
-                self._cancel_token = None
+        def on_done(result: Dict[str, Any]) -> None:
+            status = str(result.get("status") or "").lower()
+            self._active_handle = None
+            self._set_running_state(False)
+            self._update_result(result, success=status != "cancelled", cancelled=status == "cancelled")
 
-        self._active_thread = threading.Thread(target=worker, daemon=True)
-        self._active_thread.start()
+        def on_error(exc: BaseException) -> None:
+            self._active_handle = None
+            self._set_running_state(False)
+            tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+            self._update_result({"error": str(exc), "traceback": tb}, success=False, cancelled=False)
+
+        self._active_handle = submit_job(
+            self.context,
+            _runner.run_ml_recipe_action,
+            title=f"Run ML recipe: {self.recipe.value}",
+            key=f"core.ml.recipe:{params['dataset_id']}:{params['recipe_id']}",
+            on_done=on_done,
+            on_error=on_error,
+            context=self.context,
+            request=request,
+        )
 
     def _cancel_clicked(self, *_: Any) -> None:
-        if self._cancel_token is None:
+        if self._active_handle is None:
             self.status.alert_type = "warning"
             self.status.object = "No recipe run is currently active from this panel."
             return
 
         try:
-            self._cancel_token.cancel("Recipe run cancelled from the ML Recipe Launcher.")
+            self._active_handle.cancel()
         except Exception:
-            pass
+            token = getattr(self._active_handle, "token", None)
+            if token is not None:
+                try:
+                    token.cancel()
+                except Exception:
+                    pass
 
         self.cancel_button.disabled = True
         self.status.alert_type = "warning"
@@ -1017,7 +1017,6 @@ class MLRecipeLauncherPanel:
                 )
             except Exception:
                 pass
-
 
     def _on_profile_event(self, topic: str, payload: Any) -> None:
         def update():

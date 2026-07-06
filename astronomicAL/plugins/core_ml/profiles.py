@@ -7,6 +7,8 @@ from typing import Any, Dict, List, Mapping, Optional
 import time
 import uuid
 
+from .runtime import coerce_action_request
+from .serialization import ensure_json_object
 
 PROFILE_ARTIFACT_TYPE = "ml.recipe_profile"
 
@@ -33,7 +35,6 @@ RUN_ONLY_KEYS = {
     "recipe_profile_id",
     "recipe_profile_artifact_id",
 }
-
 
 @dataclass(frozen=True)
 class RecipeProfile:
@@ -86,9 +87,9 @@ class RecipeProfile:
         params.update(dict(overrides or {}))
         return params
 
-
 def save_recipe_profile_action(context: Any, request: Any, *, cancel_token: Any = None) -> Dict[str, Any]:
-    params = dict(getattr(request, "params", {}) or {})
+    request = coerce_action_request(request)
+    params = dict(request.params or {})
     store = context.services.get("core.ml.recipe_profile_store")
     artifact_id = store.save(params)
     payload = store.get(params.get("profile_id") or artifact_id)
@@ -98,8 +99,6 @@ def save_recipe_profile_action(context: Any, request: Any, *, cancel_token: Any 
         "profile_id": payload.get("profile_id"),
         "profile": payload,
     }
-
-
 
 class RecipeProfileStore:
     def __init__(self, context: Any) -> None:
@@ -170,8 +169,7 @@ class RecipeProfileStore:
 
         now = time.time()
         profile_id = str(payload.get("profile_id") or uuid.uuid4().hex)
-        body = dict(payload)
-        body.setdefault("schema_version", 1)
+        body = ensure_json_object(payload, schema_version=1)
         body["profile_id"] = profile_id
         body["created_at"] = float(body.get("created_at") or now)
         body["updated_at"] = now
@@ -200,10 +198,8 @@ class RecipeProfileStore:
 
         return artifact_id
 
-
 def create_recipe_profile_store(context: Any) -> RecipeProfileStore:
     return RecipeProfileStore(context)
-
 
 def split_profile_params(params: Mapping[str, Any]) -> tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
     recipe_params: Dict[str, Any] = {}

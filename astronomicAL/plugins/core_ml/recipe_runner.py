@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import importlib.util
-import sys
 import time
 import traceback
 from pathlib import Path
@@ -9,35 +7,20 @@ from typing import Any, Dict, Mapping, Optional
 
 from astronomicAL.platform.plugins.specs import ActionRequest
 
-from . import recipe_registry as _registry_mod
+from .data.binding import build_data_binding
+from .recipe_base import make_run_context
+from .registry import schema_defaults, validate_required_params
+from .protocol import ProtocolConfig
+from .serialization import json_safe
+from .runtime import MLRecipeCancelled, coerce_action_request, publish, put_artifact, request_dataset_id
 
 def _coerce_request(request: Any) -> ActionRequest:
-    if isinstance(request, ActionRequest):
-        return request
-
-    if isinstance(request, dict):
-        return ActionRequest.from_dict(request)
-
-    return ActionRequest(
-        dataset_id=getattr(request, "dataset_id", None),
-        row_ids=getattr(request, "row_ids", None),
-        columns=list(getattr(request, "columns", []) or []),
-        params=dict(getattr(request, "params", {}) or {}),
-        artifact_id=getattr(request, "artifact_id", None),
-        origin=getattr(request, "origin", None),
-    )
+    return coerce_action_request(request)
 
 
 def _dataset_id(context: Any, request: ActionRequest, params: Mapping[str, Any]) -> Optional[str]:
-    dataset_id = params.get("dataset_id") or request.dataset_id
-    if dataset_id:
-        return str(dataset_id)
-    return _registry_mod.active_dataset_id(context)
+    return request_dataset_id(context, request, params)
 
-
-def _execution_mode(spec: Any) -> str:
-    """Managed recipes get protocol guarantees; freeform ones keep their freedom."""
-    return str(getattr(spec.recipe_cls, "execution_mode", "freeform") or "freeform")
 
 def _collect_artifact_ids(
     result: Mapping[str, Any],
@@ -76,166 +59,14 @@ def _recipe_framework(spec: Any) -> str:
         return "tensorflow"
     return ""
 
-
 def _build_data_binding(
     context: Any,
     dataset_id: str,
     spec: Any,
     params: Mapping[str, Any],
 ):
-    """Resolve dataset columns for a managed recipe run.
+    return build_data_binding(context, dataset_id, spec, params)
 
-    The important rule is that tabular feature columns are now explicit first:
-    feature_columns/input_columns/features/x_columns. Auto inference is only a
-    fallback when auto_feature_columns=True.
-    """
-    from .feature_columns import (
-        default_feature_columns,
-        feature_columns_from_params,
-        parse_column_list,
-    )
-
-    inferred = _registry_mod.infer_column_bindings(
-        context,
-        dataset_id,
-        spec,
-        params=params,
-    )
-    columns = _registry_mod.list_dataset_columns(context, dataset_id)
-
-    record_id_column = (
-        params.get("record_id_column")
-        or params.get("id_column")
-        or inferred.get("record_id_column")
-        or inferred.get("record_id")
-    )
-    if not record_id_column and "id" in columns:
-        record_id_column = "id"
-
-    target_column = (
-        params.get("target_column")
-        or params.get("label_column")
-        or params.get("target")
-        or params.get("label")
-        or inferred.get("target_column")
-        or inferred.get("target_label")
-    )
-
-    image_column = (
-        params.get("image_column")
-        or params.get("image_path_column")
-        or params.get("image_uri_column")
-        or inferred.get("image_column")
-        or inferred.get("image_path")
-        or inferred.get("image_uri")
-    )
-
-    input_columns = feature_columns_from_params(params)
-
-    if not input_columns:
-        input_columns = (
-            parse_column_list(params.get("input_columns"))
-            or parse_column_list(inferred.get("input_columns"))
-            or parse_column_list(inferred.get("feature_columns"))
-        )
-
-    record_id_column = str(record_id_column) if record_id_column else ""
-    target_column = str(target_column) if target_column else None
-    image_column = str(image_column) if image_column else None
-
-    recipe_cls = getattr(spec, "recipe_cls", None)
-    execution_mode = str(
-        getattr(recipe_cls, "execution_mode", None)
-        or getattr(spec, "execution_mode", "freeform")
-        or "freeform"
-    )
-    task = str(getattr(spec, "task", "") or "").lower()
-    modality = str(getattr(spec, "modality", "") or "").lower()
-
-    def _truthy(value: Any) -> bool:
-        if isinstance(value, str):
-            return value.strip().lower() in {"1", "true", "yes", "y", "on"}
-        return bool(value)
-
-    if (
-        modality == "tabular"
-        and not input_columns
-        and _truthy(params.get("auto_feature_columns"))
-    ):
-        input_columns = default_feature_columns(
-            context,
-            dataset_id,
-            record_id_column=record_id_column,
-            target_column=target_column,
-            image_column=image_column,
-            params=params,
-        )
-
-    if image_column and image_column not in input_columns:
-        input_columns.append(image_column)
-
-    binding = _registry_mod.DataBinding(
-        record_id_column=record_id_column,
-        target_column=target_column,
-        input_columns=[str(column) for column in input_columns if column],
-        image_column=image_column,
-    )
-
-    if execution_mode == "managed":
-        if not binding.record_id_column:
-            raise ValueError(
-                "Managed recipes require a record-id column. "
-                "Set `record_id_column`, map `record_id`, or add an id column."
-            )
-
-        if task == "classification" and not binding.target_column:
-            raise ValueError(
-                "Managed classification recipes require a target column. "
-                "Set `target_column`, map `target_label`, or add a matching "
-                "target/label column to the dataset."
-            )
-
-        if task == "regression" and not binding.target_column:
-            raise ValueError(
-                "Managed regression recipes require a target column. "
-                "Set `target_column`, map `target_label`, or add a matching "
-                "target column to the dataset."
-            )
-
-        if modality == "image" and not binding.image_column:
-            raise ValueError(
-                "Managed image recipes require an image column. "
-                "Set `image_column`, map `image.path`/`image.uri`, or add a "
-                "matching image path column to the dataset."
-            )
-
-        if modality == "tabular" and not binding.input_columns:
-            raise ValueError(
-                "Managed tabular recipes require input feature columns. "
-                "Choose `feature_columns` in the recipe launcher or AL panel, "
-                "or enable `auto_feature_columns`."
-            )
-
-    missing_columns = []
-    for column in (
-        binding.record_id_column,
-        binding.target_column,
-        binding.image_column,
-    ):
-        if column and column not in columns:
-            missing_columns.append(column)
-
-    for column in binding.input_columns:
-        if column and column not in columns:
-            missing_columns.append(column)
-
-    if missing_columns:
-        raise ValueError(
-            "Resolved recipe column(s) are not present in the dataset: "
-            + ", ".join(sorted(set(missing_columns)))
-        )
-
-    return binding
 
 def _resolve_profile_params(context: Any, params: Dict[str, Any]) -> Dict[str, Any]:
     profile_key = (
@@ -274,26 +105,20 @@ def run_ml_recipe_action(
     cancel_token: Any = None,
 ) -> Dict[str, Any]:
     request = _coerce_request(request)
-    params = dict(request.params or {})
+    params = _resolve_profile_params(context, dict(request.params or {}))
 
     recipe_id = str(params.get("recipe_id") or "").strip()
     if not recipe_id:
         raise ValueError("Missing required recipe_id or recipe_profile_id.")
 
-    dataset_id = (
-        params.get("dataset_id")
-        or getattr(request, "dataset_id", None)
-    )
+    dataset_id = _dataset_id(context, request, params)
     if not dataset_id:
         raise ValueError("Missing required dataset_id.")
-
-    params = dict(request.params or {})
-    params = _resolve_profile_params(context, params)
 
     registry = context.services.get("core.ml.recipe_registry")
     spec = registry.get(recipe_id)
 
-    defaults = _registry_mod.schema_defaults(
+    defaults = schema_defaults(
         spec.params_schema or {}
     )
 
@@ -318,7 +143,7 @@ def run_ml_recipe_action(
     if not merged_params.get("modality"):
         merged_params["modality"] = getattr(spec, "modality", "")
 
-    _registry_mod.validate_required_params(
+    validate_required_params(
         spec.params_schema or {},
         merged_params,
     )
@@ -331,7 +156,7 @@ def run_ml_recipe_action(
     binding = None
 
     if execution_mode == "managed":
-        protocol = _registry_mod.ProtocolConfig.from_params(
+        protocol = ProtocolConfig.from_params(
             merged_params
         )
         binding = _build_data_binding(
@@ -341,7 +166,7 @@ def run_ml_recipe_action(
             merged_params,
         )
 
-    run = _registry_mod.make_run_context(
+    run = make_run_context(
         context=context,
         dataset_id=dataset_id,
         recipe_spec=spec,
@@ -378,7 +203,7 @@ def run_ml_recipe_action(
     if protocol is not None:
         start_payload["protocol_id"] = protocol.protocol_id
 
-    _registry_mod.publish(
+    publish(
         context,
         "ml.recipe_run.started",
         start_payload,
@@ -387,7 +212,7 @@ def run_ml_recipe_action(
     run.log(
         message=f"Recipe `{spec.title}` started.",
         status="running",
-        step=0,
+        step=None,
         metrics={},
         extra={
             "phase": "started",
@@ -404,7 +229,7 @@ def run_ml_recipe_action(
         if not isinstance(result, dict):
             result = {"result": result}
 
-        result = _registry_mod.json_safe(dict(result))
+        result = json_safe(dict(result))
 
         artifact_ids = _collect_artifact_ids(
             result,
@@ -422,7 +247,7 @@ def run_ml_recipe_action(
             "recipe_title": spec.title,
             "execution_mode": execution_mode,
             "status": "complete",
-            "params": _registry_mod.json_safe(merged_params),
+            "params": json_safe(merged_params),
             "result": result,
             "artifact_ids": artifact_ids,
             "training_log_artifact_id": run.training_log_artifact_id,
@@ -454,7 +279,7 @@ def run_ml_recipe_action(
                 "image_column": binding.image_column,
             }
 
-        run_artifact_id = _registry_mod.put_artifact(
+        run_artifact_id = put_artifact(
             context,
             "ml.run",
             run_artifact_payload,
@@ -547,7 +372,7 @@ def run_ml_recipe_action(
             "final_training_log_artifact_id": final_training_log_artifact_id,
         }
 
-        _registry_mod.publish(
+        publish(
             context,
             "ml.recipe_run.finished",
             finished_payload,
@@ -568,7 +393,7 @@ def run_ml_recipe_action(
             "final_training_log_artifact_id": final_training_log_artifact_id,
         }
 
-    except _registry_mod.MLRecipeCancelled as exc:
+    except MLRecipeCancelled as exc:
         message = str(exc) or "Recipe run cancelled."
 
         if getattr(run, "logger", None) is not None:
@@ -612,7 +437,7 @@ def run_ml_recipe_action(
             "final_training_log_artifact_id": final_training_log_artifact_id,
         }
 
-        _registry_mod.publish(
+        publish(
             context,
             "ml.recipe_run.finished",
             payload,
@@ -621,8 +446,7 @@ def run_ml_recipe_action(
         return payload
 
     except Exception as exc:
-        import traceback
-
+        
         tb = traceback.format_exc()
         message = str(exc)
 
@@ -647,7 +471,6 @@ def run_ml_recipe_action(
                     "traceback": tb,
                 },
             )
-
 
             if getattr(run, "logger", None) is not None:
                 final_training_log_artifact_id = run.logger.persist_final(
@@ -676,13 +499,10 @@ def run_ml_recipe_action(
             "final_training_log_artifact_id": final_training_log_artifact_id,
         }
 
-        _registry_mod.publish(
+        publish(
             context,
             "ml.recipe_run.finished",
             payload,
         )
 
         raise
-
-
-

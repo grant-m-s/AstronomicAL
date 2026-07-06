@@ -13,7 +13,7 @@ manifest = PluginManifest(
     description=(
         "Machine-learning core: code-backed recipes, reusable recipe profiles, "
         "protocol-enforced training, durable model artifacts, compatibility-checked "
-        "prediction, active-learning batches, trained-model cataloguing, and training curves."
+        "prediction, trained-model cataloguing, and training curves."
     ),
     requires=["scikit-learn>=1.2"],
     optional_requires=["torch", "torchvision", "pillow", "matplotlib", "optuna", "joblib"],
@@ -28,17 +28,15 @@ manifest = PluginManifest(
         "regression",
         "image",
         "tabular",
-        "active-learning",
     ],
 )
 
 def register(api) -> None:
 
-    from . import actions
     from . import prediction
     from . import trained_models
     from . import recipe_runner
-    from . import recipe_profiles
+    from . import profiles
 
     api.register_service(
         key="trained_model_catalog",
@@ -61,7 +59,7 @@ def register(api) -> None:
 
     api.register_service(
         key="recipe_profile_store",
-        factory=lambda context: recipe_profiles.create_recipe_profile_store(context),
+        factory=lambda context: profiles.create_recipe_profile_store(context),
         lazy=True,
         replace=True,
         description="Stores reusable ML recipe profiles/run templates for recipe launcher and active learning.",
@@ -115,7 +113,7 @@ def register(api) -> None:
     api.register_action(
         id="save_recipe_profile",
         title="Save ML Recipe Profile",
-        handler=recipe_profiles.save_recipe_profile_action,
+        handler=profiles.save_recipe_profile_action,
         description="Persist a reusable recipe/profile configuration for later launcher or active-learning runs.",
         category="Machine Learning",
         icon="save",
@@ -188,52 +186,6 @@ def register(api) -> None:
         optional_requires=["torch", "joblib", "pillow"],
     )
 
-    api.register_action(
-        id="create_active_learning_batch",
-        title="Create Active-Learning Batch",
-        handler=actions.create_active_learning_batch_action,
-        description=(
-            "Rank prediction records by uncertainty and optionally promote the top "
-            "rows to the platform selection set for review/annotation."
-        ),
-        category="Machine Learning",
-        icon="rule",
-        tags=["ml", "active-learning", "selection", "uncertainty"],
-        inputs={
-            "dataset": False,
-            "selection": "none",
-            "columns": "none",
-            "numeric_columns": "none",
-            "accepts_artifact_types": ["ml.predictions"],
-        },
-        outputs=[
-            {
-                "type": "ml.active_learning_batch",
-                "description": "Ranked uncertain rows for review.",
-            },
-            {
-                "type": "selection.ids",
-                "optional": True,
-                "description": "Selection set created when make_selection is true.",
-            },
-        ],
-        params_schema={
-            "type": "object",
-            "properties": {
-                "predictions_artifact_id": {"type": "string"},
-                "dataset_id": {"type": "string"},
-                "strategy": {
-                    "type": "string",
-                    "enum": ["least_confidence", "margin", "entropy"],
-                    "default": "least_confidence",
-                },
-                "k": {"type": "integer", "minimum": 1, "default": 50},
-                "make_selection": {"type": "boolean", "default": True},
-            },
-        },
-        run_in_job=False,
-    )
-
     api.register_panel(
         id="recipe_launcher",
         title="ML Recipe Launcher",
@@ -293,9 +245,8 @@ def register(api) -> None:
         default_layout={"x": 0, "y": 7, "w": 5, "h": 5},
     )
 
-
 def create_training_curves_panel(context, **kwargs):
-    from . import curves_panel as curves_module
+    from .panels import training_curves as curves_module
 
     controller = curves_module.MLTrainingCurvesPanel(
         context=context,
@@ -304,20 +255,18 @@ def create_training_curves_panel(context, **kwargs):
 
     return controller.panel(), controller
 
-
 def create_ml_predict_panel(context, **kwargs):
-    from . import predict_panel as predict_panel_module
+    from .panels import predictor as predict_panel_module
 
     return predict_panel_module.create_predict_panel(context=context, **kwargs)
 
-
 def create_ml_recipe_registry(context=None):
-    from . import recipe_registry as registry_module
-    from . import recipes as recipes_module
-    from . import sklearn_harness
-    from . import sklearn_recipes
+    from . import registry as registry_module
+    from .recipes import image as recipes_module
+    from .harnesses import sklearn as sklearn_harness
+    from .recipes import sklearn as sklearn_recipes
 
-    # Register sklearn harness selection with recipe_registry.make_harness().
+    # Register sklearn harness selection with harnesses.make_harness().
     # Idempotent in sklearn_harness.register().
     sklearn_harness.register()
 
@@ -336,6 +285,6 @@ def create_ml_recipe_registry(context=None):
     return registry
 
 def create_ml_recipe_launcher_panel(context, **kwargs):
-    from . import recipe_panel as recipe_panel_module
+    from .panels import recipe_launcher as recipe_panel_module
 
     return recipe_panel_module.create_recipe_launcher_panel(context=context, **kwargs)

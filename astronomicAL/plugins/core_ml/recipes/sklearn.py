@@ -2,8 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .sklearn_harness import SklearnRecipe, fit_warm_start
-
+from ..harnesses.sklearn import SklearnRecipe, fit_warm_start
 
 _FEATURE_COLUMNS_SCHEMA = {
     "type": "array",
@@ -42,7 +41,6 @@ _AUTO_FEATURE_COLUMNS_SCHEMA = {
     ),
     "default": False,
 }
-
 
 class SklearnTabularClassifierRecipe(SklearnRecipe):
     id = "core.ml.sklearn_tabular_classifier"
@@ -228,7 +226,6 @@ class SklearnTabularClassifierRecipe(SklearnRecipe):
             train_loader=train_loader,
             harness=harness,
         )
-
 
 class SklearnTabularRegressorRecipe(SklearnRecipe):
     id = "core.ml.sklearn_tabular_regressor"

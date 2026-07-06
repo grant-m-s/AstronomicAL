@@ -26,9 +26,8 @@ class TrainedModelDescriptor:
     hyperparameter_summary: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
-        from . import model_contract as contract
+        from . import contracts as contract
         return contract.json_safe(asdict(self))
-
 
 class TrainedModelCatalog:
     """Indexes durable ml.model artifacts for reuse in prediction workflows."""
@@ -52,7 +51,7 @@ class TrainedModelCatalog:
         self._subscriptions.clear()
 
     def refresh(self) -> int:
-        from . import model_contract as contract_utils
+        from . import contracts as contract_utils
 
         artifacts = getattr(self.context, "artifacts", None)
         find = getattr(artifacts, "find", None)
@@ -147,7 +146,7 @@ class TrainedModelCatalog:
         return options
 
     def compatibility(self, artifact_id: str, dataset_id: str, **kwargs: Any) -> Dict[str, Any]:
-        from . import model_contract as contract_utils
+        from . import contracts as contract_utils
 
         report = contract_utils.validate_model_for_dataset(
             context=self.context,
@@ -257,10 +256,8 @@ class TrainedModelCatalog:
         except Exception:
             pass
 
-
 def create_trained_model_catalog(context: Any) -> TrainedModelCatalog:
     return TrainedModelCatalog(context)
-
 
 def _summarise_hyperparameters(params: Mapping[str, Any], *, max_items: int = 6) -> str:
     if not isinstance(params, Mapping) or not params:

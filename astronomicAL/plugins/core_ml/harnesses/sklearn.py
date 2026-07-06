@@ -11,18 +11,12 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 import pandas as pd
 
-from .recipe_registry import (
-    ManagedMLRecipe,
-    Partition,
-    Partitions,
-    RunHarness,
-    TargetSpec,
-    TrainingComponents,
-    json_safe,
-    ml_run_artifact_dir,
-    register_harness,
-)
-
+from ..recipe_base import ManagedMLRecipe
+from ..protocol import Partition, Partitions, TargetSpec, TrainingComponents
+from ..serialization import json_safe
+from ..paths import ml_run_artifact_dir
+from .base import RunHarness
+from . import register_harness
 
 @dataclass
 class SklearnBatch:
@@ -32,7 +26,6 @@ class SklearnBatch:
     y: Any
     ids: List[str]
     classes: List[str]
-
 
 # =============================================================================
 # Harness
@@ -348,7 +341,6 @@ class SklearnHarness(RunHarness):
             params=self.run.params,
         )
 
-
 # =============================================================================
 # Base recipe + registration
 # =============================================================================
@@ -380,7 +372,6 @@ class SklearnRecipe(ManagedMLRecipe):
         Xt = harness._fitted_preprocessor.transform(train_loader.X)
         model.fit(Xt, train_loader.y)
         harness.report_epoch(1, model, train_metrics={})
-
 
 def fit_warm_start(run, *, model, components, train_loader, harness, points=10):
     """Grow an n_estimators-based estimator in chunks, reporting val each chunk.
@@ -414,7 +405,6 @@ def fit_warm_start(run, *, model, components, train_loader, harness, points=10):
             pass
         model.fit(Xt, train_loader.y)
         harness.report_epoch(epoch, model, train_metrics={"n_estimators": int(n)})
-
 
 def register() -> None:
     """Register the sklearn harness with make_harness. Idempotent."""

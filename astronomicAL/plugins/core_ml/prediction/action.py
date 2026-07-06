@@ -45,6 +45,9 @@ import pandas as pd
 
 from astronomicAL.platform.plugins.specs import ActionRequest
 
+from ..runtime import check_cancelled, coerce_action_request, request_dataset_id, publish as publish_event
+from ..serialization import json_safe
+
 PREDICTION_SCHEMA_VERSION = 3
 EVALUATION_SCHEMA_VERSION = 3
 
@@ -203,7 +206,6 @@ class ProvenanceIndex:
 
         return PROV_NOVEL
 
-
 def _resolve_provenance_index(
     context: Any,
     model_payload: Mapping[str, Any],
@@ -273,7 +275,6 @@ def _resolve_provenance_index(
         ),
     )
 
-
 def _find_split_spec_by_run(context, *, run_id, protocol_id):
     """Best-effort reverse lookup. Direct model.split_spec_artifact_id is better."""
     if not run_id and not protocol_id:
@@ -291,11 +292,9 @@ def _find_split_spec_by_run(context, *, run_id, protocol_id):
 
     return None, None
 
-
 def _clean_dataset_id(value: Any) -> Optional[str]:
     text = str(value or "").strip()
     return text or None
-
 
 def _dataset_aliases_for_provenance(
     context: Any,
@@ -347,7 +346,6 @@ def _dataset_aliases_for_provenance(
 
     return frozenset(str(alias) for alias in aliases if alias)
 
-
 def _dataset_meta(context: Any, dataset_id: str) -> Dict[str, Any]:
     datasets = getattr(context, "datasets", None)
     if datasets is None or not dataset_id:
@@ -374,7 +372,6 @@ def _dataset_meta(context: Any, dataset_id: str) -> Dict[str, Any]:
             pass
 
     return {}
-
 
 def _al_training_source_aliases(
     context: Any,
@@ -408,7 +405,6 @@ def _al_training_source_aliases(
                 aliases.add(value)
 
     return aliases
-
 
 def _iter_artifact_payloads(context: Any, artifact_type: Optional[str] = None):
     """Yield (artifact_id, payload) across ArtifactStore API variants."""
@@ -476,7 +472,6 @@ def _iter_artifact_payloads(context: Any, artifact_type: Optional[str] = None):
 
             yield aid, payload
 
-
 def _unpack_artifact(context, item):
     """Return (artifact_id, payload) for several ArtifactStore result shapes."""
     if isinstance(item, Mapping):
@@ -511,7 +506,6 @@ def _unpack_artifact(context, item):
 
     return None, None
 
-
 # =============================================================================
 # Reproducibility / integrity
 # =============================================================================
@@ -532,7 +526,6 @@ def _checkpoint_sha256(model_payload: Mapping[str, Any]) -> Optional[str]:
         for chunk in iter(lambda: fh.read(1 << 20), b""):
             h.update(chunk)
     return h.hexdigest()
-
 
 def _check_recipe_version(context: Any, model_payload: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
     recipe_id = model_payload.get("recipe_id")
@@ -564,7 +557,6 @@ def _check_recipe_version(context: Any, model_payload: Mapping[str, Any]) -> Opt
         "reason": "Recipe not registered; reconstruction used the generic fallback builder.",
     }
 
-
 def _reproducibility_manifest(*, model_payload, transform_desc, checkpoint_sha256, recipe_version_check):
     versions: Dict[str, Any] = {"numpy": np.__version__, "pandas": pd.__version__}
     try:
@@ -587,7 +579,6 @@ def _reproducibility_manifest(*, model_payload, transform_desc, checkpoint_sha25
         "generated_at": time.time(),
     }
 
-
 # =============================================================================
 # Recipe replay shim (transform/forward parity)
 # =============================================================================
@@ -606,7 +597,6 @@ class _PredictRunShim:
     def log(self, *args, **kwargs):
         return None
 
-
 def _resolve_recipe(context, recipe_id):
     if not recipe_id:
         return None
@@ -621,7 +611,6 @@ def _resolve_recipe(context, recipe_id):
         except Exception:
             continue
     return None
-
 
 # =============================================================================
 # Predictor base — owns the audit flow; subclasses own the forward pass only
@@ -671,10 +660,10 @@ class Predictor:
 
     # -- the audit flow (not overridable) ------------------------------------
     def run(self) -> Dict[str, Any]:
-        from . import artifacts as artifact_utils
-        from . import model_contract as contract_utils
+        from .. import artifacts as artifact_utils
+        from .. import contracts as contract_utils
 
-        _check_cancelled(self.cancel_token)
+        check_cancelled(self.cancel_token)
         self.reconstruct()
 
         cols = list(dict.fromkeys([c for c in self.read_columns() if c]))
@@ -689,7 +678,7 @@ class Predictor:
         df = self.context.datasets.get_df(self.dataset_id, columns=cols)
         df = _filter_rows(df, self.request, self.binding.get("record_id_column"))
 
-        _check_cancelled(self.cancel_token)
+        check_cancelled(self.cancel_token)
 
         records = self.predict_records(df)
         self._apply_abstention(records)
@@ -989,7 +978,7 @@ class Predictor:
 
     # -- events --------------------------------------------------------------
     def _publish_events(self, artifact_id, derived_dataset_id, payload) -> None:
-        _publish(self.context, "ml.predictions.created", {
+        publish_event(self.context, "ml.predictions.created", {
             "artifact_id": artifact_id,
             "dataset_id": self.dataset_id,
             "derived_dataset_id": derived_dataset_id,
@@ -1005,7 +994,6 @@ class Predictor:
             except Exception:
                 pass
 
-
 # =============================================================================
 # Concrete predictors — forward pass only
 # =============================================================================
@@ -1015,9 +1003,9 @@ class TorchImagePredictor(Predictor):
     modality = "image"
 
     def reconstruct(self) -> None:
-        
-        from . import artifacts as artifact_utils
-        from . import image_sidecar
+
+        from .. import artifacts as artifact_utils
+        from .. import image_sidecar
 
         saved = artifact_utils.load_model_from_payload(self.model_payload)
         if not isinstance(saved, Mapping):
@@ -1036,7 +1024,7 @@ class TorchImagePredictor(Predictor):
         recipe = _resolve_recipe(self.context, str(self.model_payload.get("recipe_id") or "").strip())
         if recipe is not None:
             try:
-                from . import recipe_registry as registry_mod
+                from .. import registry as registry_mod
 
                 binding = registry_mod.DataBinding(
                     record_id_column=str(self.binding.get("record_id_column") or "id"),
@@ -1075,7 +1063,7 @@ class TorchImagePredictor(Predictor):
         def flush():
             if not tensors:
                 return
-            _check_cancelled(self.cancel_token)
+            check_cancelled(self.cancel_token)
             batch = torch.stack(tensors).to(device)
             with torch.no_grad():
                 probs = torch.softmax(self._forward(self._model, batch), dim=1).cpu().numpy()
@@ -1084,7 +1072,7 @@ class TorchImagePredictor(Predictor):
             tensors.clear(); pending.clear()
 
         for idx, row in df.iterrows():
-            _check_cancelled(self.cancel_token)
+            check_cancelled(self.cancel_token)
             rid = str(row[rid_col]) if (rid_col and rid_col in df.columns) else str(idx)
             try:
                 tensors.append(self._transform(self._read(row)))
@@ -1124,7 +1112,6 @@ def _normalise_probability_matrix(values: Any) -> Optional[np.ndarray]:
     probs[~valid] = 1.0 / probs.shape[1]
     return probs
 
-
 def _sigmoid(values: Any) -> np.ndarray:
     values = np.asarray(values, dtype=float)
     values = np.clip(values, -709.0, 709.0)
@@ -1137,7 +1124,6 @@ def _sigmoid(values: Any) -> np.ndarray:
     result[~positive] = exp_values / (1.0 + exp_values)
 
     return result
-
 
 def _decision_scores_to_probability_matrix(
     scores: Any,
@@ -1172,7 +1158,6 @@ def _decision_scores_to_probability_matrix(
     shifted = scores - np.nanmax(scores, axis=1, keepdims=True)
     exponentials = np.exp(np.clip(shifted, -709.0, 0.0))
     return _normalise_probability_matrix(exponentials)
-
 
 def _sklearn_probability_output(
     model: Any,
@@ -1213,7 +1198,7 @@ class SklearnTabularPredictor(Predictor):
     modality = "tabular"
 
     def reconstruct(self) -> None:
-        from . import artifacts as artifact_utils
+        from .. import artifacts as artifact_utils
 
         self._model = artifact_utils.load_model_from_payload(self.model_payload)
         self._features = [str(c) for c in self.binding.get("feature_columns") or []]
@@ -1283,14 +1268,13 @@ class SklearnTabularPredictor(Predictor):
 
         return records
 
-
 class TorchTabularPredictor(Predictor):
     framework = "torch"
     modality = "tabular"
 
     def reconstruct(self) -> None:
-        
-        from . import artifacts as artifact_utils
+
+        from .. import artifacts as artifact_utils
 
         saved = artifact_utils.load_model_from_payload(self.model_payload)
         if not isinstance(saved, Mapping):
@@ -1322,14 +1306,11 @@ class TorchTabularPredictor(Predictor):
                for i in range(len(df))]
         return [_classification_record(rid, probs[i], classes) for i, rid in enumerate(ids)]
 
-
 # Factory mirrors make_harness; extensible via register_predictor.
 _PREDICTORS: List = []
 
-
 def register_predictor(predicate, predictor_cls):
     _PREDICTORS.insert(0, (predicate, predictor_cls))
-
 
 def make_predictor(*, framework, modality, **kwargs) -> Predictor:
     framework = str(framework or "").lower()
@@ -1348,19 +1329,18 @@ def make_predictor(*, framework, modality, **kwargs) -> Predictor:
         return SklearnTabularPredictor(**kwargs)
     raise NotImplementedError(f"No predictor for framework={framework!r}, modality={modality!r}.")
 
-
 # =============================================================================
 # Public actions
 # =============================================================================
 
 def predict_action(context: Any, request: Any, cancel_token: Any = None) -> Dict[str, Any]:
 
-    from . import artifacts as artifact_utils
-    from . import model_contract as contract_utils
+    from .. import artifacts as artifact_utils
+    from .. import contracts as contract_utils
 
-    request = _coerce_request(request)
+    request = coerce_action_request(request)
     params = dict(request.params or {})
-    dataset_id = _dataset_id(context, request, params)
+    dataset_id = request_dataset_id(context, request, params)
     model_artifact_id = str(params.get("model_artifact_id") or request.artifact_id or "").strip()
     if not dataset_id:
         raise ValueError("predict requires a dataset_id.")
@@ -1410,10 +1390,6 @@ def predict_action(context: Any, request: Any, cancel_token: Any = None) -> Dict
     return predictor.run()
 
 
-def predict_tabular_action(context: Any, request: Any, cancel_token: Any = None) -> Dict[str, Any]:
-    return predict_action(context=context, request=request, cancel_token=cancel_token)
-
-
 def register_prediction_table_dataset(*, context, predictions_payload, predictions_artifact_id) -> Optional[str]:
     rows = list((predictions_payload.get("prediction_table") or {}).get("rows") or [])
     if not rows:
@@ -1434,11 +1410,10 @@ def register_prediction_table_dataset(*, context, predictions_payload, predictio
             context.datasets.set_mapping(dataset_id, "record_id", "record_id")
         except Exception:
             pass
-        _publish(context, "dataset.loaded", {"dataset_id": dataset_id, "origin": "core.ml.predictions"})
+        publish_event(context, "dataset.loaded", {"dataset_id": dataset_id, "origin": "core.ml.predictions"})
         return dataset_id
     except Exception:
         return None
-
 
 # =============================================================================
 # Leaf helpers
@@ -1544,7 +1519,6 @@ def _sklearn_classes(model) -> List[str]:
             classes = getattr(est, "classes_", None)
     return [str(c) for c in classes] if classes is not None else []
 
-
 def _torch_device(params):
     import torch
     name = str(params.get("device") or "auto").lower()
@@ -1553,29 +1527,7 @@ def _torch_device(params):
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-def _coerce_request(request):
-    if isinstance(request, ActionRequest):
-        return request
-    if isinstance(request, dict):
-        return ActionRequest.from_dict(request)
-    return ActionRequest(
-        dataset_id=getattr(request, "dataset_id", None),
-        row_ids=getattr(request, "row_ids", None),
-        columns=list(getattr(request, "columns", []) or []),
-        params=dict(getattr(request, "params", {}) or {}),
-        artifact_id=getattr(request, "artifact_id", None),
-        origin=getattr(request, "origin", None),
-    )
 
-
-def _dataset_id(context, request, params):
-    dataset_id = params.get("dataset_id") or request.dataset_id
-    if dataset_id:
-        return str(dataset_id)
-    try:
-        return str(context.datasets.active_id())
-    except Exception:
-        return None
 
 
 def _filter_rows(df, request, record_id_column):
@@ -1595,9 +1547,7 @@ def _filter_rows(df, request, record_id_column):
         limit = int(params.get("max_rows") or params.get("row_limit") or 0)
     except Exception:
         limit = 0
-    if limit > 0:
-        df = df.head(limit)
-    return df
+    return df.head(limit) if limit > 0 else df
 
 
 def _softmax(values):
@@ -1612,37 +1562,9 @@ def _entropy(probs):
 
 
 def _json_scalar(value):
-    if value is None:
-        return None
-    if isinstance(value, np.generic):
-        return value.item()
-    if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
-        return None
-    return value
+    return json_safe(value)
 
 
-def _check_cancelled(cancel_token):
-    if cancel_token is None:
-        return
-    for attr in ("raise_if_cancelled", "throw_if_cancelled", "check_cancelled"):
-        m = getattr(cancel_token, attr, None)
-        if callable(m):
-            m(); return
-    for attr in ("cancelled", "is_cancelled", "cancel_requested"):
-        v = getattr(cancel_token, attr, None)
-        try:
-            if (v() if callable(v) else bool(v)):
-                raise RuntimeError("ML prediction cancelled.")
-        except RuntimeError:
-            raise
-        except Exception:
-            pass
-
-
-def _publish(context, topic, payload):
-    publish = getattr(getattr(context, "events", None), "publish", None)
-    if callable(publish):
-        publish(topic, dict(payload))
 
 
 def _get_trained_model_catalog(context):

@@ -5,23 +5,17 @@ from importlib import import_module
 from pathlib import Path
 from typing import Any, Dict
 
-# Framework types now live in recipe_registry.py. recipes.py holds ONLY
+# Framework types now live in core_ml recipe framework. recipes.py holds ONLY
 # concrete recipes — it must not redefine Partition/Partitions/RunHarness/
 # MLRecipe/TrainingComponents (doing so shadows the real ones and breaks
 # make_harness()).
-from .recipe_registry import (
-    MLRecipe,            # freeform base (overrides run())
-    ManagedMLRecipe,     # protocol-managed base (harness owns run())
-    MLRunContext,
-    RunHarness,
-    TrainingComponents,
-)
-
+from ..recipe_base import MLRecipe, ManagedMLRecipe, MLRunContext
+from ..harnesses.base import RunHarness
+from ..protocol import TrainingComponents
 
 def _import_object(path: str):
     module_name, object_name = path.rsplit(".", 1)
     return getattr(import_module(module_name), object_name)
-
 
 # =============================================================================
 # Freeform escape hatch — NOT protocol-managed. Overrides run() directly and is
@@ -95,11 +89,10 @@ class ExternalPythonRecipe(MLRecipe):
             "import_path must point to an MLRecipe subclass, MLRecipe instance, "
             "or callable accepting MLRunContext.")
 
-
 # =============================================================================
 # kuangliu/pytorch-cifar, protocol-managed. Implements ONLY internals + a loop
 # that delegates selection. Splitting, val/test evaluation, best-epoch
-# selection, and artifact writing are the harness's — see recipe_registry.py.
+# selection, and artifact writing are the harness's — see core_ml recipe framework.
 #
 # What the expert keeps vs the old recipe: model, optimizer, scheduler, loss,
 # augmentation, the training step. What they give up: the test()/best_acc block,
@@ -284,7 +277,6 @@ class CIFARResNetRecipe(ManagedMLRecipe):
 # torch (matching the existing module discipline).
 # =============================================================================
 
-
 # -----------------------------------------------------------------------------
 # Small model/augmentation factories (defined lazily so module import is torch-free)
 # -----------------------------------------------------------------------------
@@ -343,7 +335,6 @@ def _build_wide_resnet(*, depth: int, widen_factor: int, dropout: float, num_cla
 
     return _WideResNet(depth, widen_factor, dropout, num_classes)
 
-
 def _build_tabular_mlp(*, d_in: int, hidden, dropout: float, d_out: int):
     """rtdl-style MLP with input BatchNorm so raw features need no external
     scaler (running stats live in the checkpoint, so train/predict agree)."""
@@ -356,7 +347,6 @@ def _build_tabular_mlp(*, d_in: int, hidden, dropout: float, d_out: int):
         d = h
     layers.append(nn.Linear(d, d_out))
     return nn.Sequential(*layers)
-
 
 class _Cutout:
     """DeVries & Taylor Cutout, applied to a normalised CHW tensor."""
@@ -375,7 +365,6 @@ class _Cutout:
         img[:, y1:y2, x1:x2] = 0.0
         return img
 
-
 def _open_image_from_row(run, row):
     from PIL import Image
     b = run.binding
@@ -386,7 +375,6 @@ def _open_image_from_row(run, row):
     if value.startswith("file://"):
         value = value[7:]
     return Image.open(Path(value)).convert("RGB")
-
 
 def _timm_transform(run, *, is_training: bool, cache_attr_owner=None):
     """timm's own train/eval transform when resolvable, else an ImageNet fallback.
@@ -421,7 +409,6 @@ def _timm_transform(run, *, is_training: bool, cache_attr_owner=None):
             T.ToTensor(), T.Normalize(mean, std),
         ])
 
-
 def _make_optimizer(model, params):
     import torch.optim as optim
     kind = str(params.get("optimizer", "adamw")).lower()
@@ -432,7 +419,6 @@ def _make_optimizer(model, params):
                          weight_decay=wd, nesterov=True)
     return optim.AdamW(model.parameters(), lr=lr, weight_decay=wd)
 
-
 def _regression_criterion(params):
     import torch.nn as nn
     loss = str(params.get("loss", "mse")).lower()
@@ -441,7 +427,6 @@ def _regression_criterion(params):
     if loss in {"huber", "smooth_l1"}:
         return nn.SmoothL1Loss(beta=float(params.get("huber_beta", 1.0)))
     return nn.MSELoss()
-
 
 # =============================================================================
 # 1. timm image classifier  (huggingface/pytorch-image-models)
@@ -537,7 +522,6 @@ class TimmImageClassifierRecipe(ManagedMLRecipe):
             })
             if components.scheduler is not None:
                 components.scheduler.step()
-
 
 # =============================================================================
 # 2. WideResNet on CIFAR-size cutouts  (hysts/pytorch_image_classification)
@@ -648,7 +632,6 @@ class WideResNetCIFARRecipe(ManagedMLRecipe):
             if components.scheduler is not None:
                 components.scheduler.step()
 
-
 # =============================================================================
 # 3. timm image REGRESSOR  (timm backbone, Zoobot-style continuous targets)
 #    e.g. photometric redshift / a morphology score from a cutout.
@@ -742,7 +725,6 @@ class TimmImageRegressorRecipe(ManagedMLRecipe):
             harness.report_epoch(epoch, model, train_metrics={"loss": loss_sum / max(seen, 1)})
             if components.scheduler is not None:
                 components.scheduler.step()
-
 
 # =============================================================================
 # 4. Tabular MLP REGRESSOR  (rtdl baseline / pytorch-tabular family)

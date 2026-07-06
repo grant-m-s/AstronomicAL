@@ -7,13 +7,14 @@ from typing import Any, Dict, Mapping, Optional, Sequence
 
 import numpy as np
 
+from .serialization import json_safe
+
 IMAGE_SIDECAR_SCHEMA_VERSION = 1
 TORCH_IMAGE_CLASSIFIER_FORMAT = "torch_image_classifier"
 DEFAULT_NORMALIZATION = {
     "mean": [0.485, 0.456, 0.406],
     "std": [0.229, 0.224, 0.225],
 }
-
 
 def is_torch_image_bundle(model: Any, metadata: Optional[Mapping[str, Any]] = None) -> bool:
     """Return True when a training result is the image-classifier bundle."""
@@ -33,7 +34,6 @@ def is_torch_image_bundle(model: Any, metadata: Optional[Mapping[str, Any]] = No
         and (model.get("class_names") or metadata.get("class_names"))
         and (model.get("template_id") or metadata.get("template_id"))
     )
-
 
 def save_torch_image_sidecar_file(
     *,
@@ -102,7 +102,6 @@ def save_torch_image_sidecar_file(
         "channels": sidecar["channels"],
     }
 
-
 def load_torch_image_sidecar_file(
     *,
     path: Path,
@@ -161,7 +160,6 @@ def load_torch_image_sidecar_file(
         "sidecar": _json_safe({k: v for k, v in sidecar.items() if k not in {"state_dict"}}),
     }
 
-
 def build_resnet_classifier(*, architecture: str, num_classes: int, pretrained: bool = False):
     """Rebuild the ResNet classifier architecture used by image training."""
 
@@ -191,7 +189,6 @@ def build_resnet_classifier(*, architecture: str, num_classes: int, pretrained: 
     model.fc = nn.Linear(in_features, int(num_classes))
     return model
 
-
 def image_transform(*, image_size: int, normalization: Optional[Mapping[str, Any]] = None):
     from torchvision import transforms
 
@@ -206,7 +203,6 @@ def image_transform(*, image_size: int, normalization: Optional[Mapping[str, Any
             transforms.Normalize(mean=mean, std=std),
         ]
     )
-
 
 def load_image(value: Any):
     """Load a local/remote/bytes image and return RGB PIL Image."""
@@ -233,13 +229,11 @@ def load_image(value: Any):
     path = Path(text).expanduser()
     return Image.open(path).convert("RGB")
 
-
 def infer_resnet_architecture(template_id: str) -> str:
     text = str(template_id or "").lower()
     if "resnet50" in text or "resnet_50" in text:
         return "resnet50"
     return "resnet18"
-
 
 class SimpleLabelEncoder:
     """Small inverse-transform-only label encoder for inference sidecars."""
@@ -253,7 +247,6 @@ class SimpleLabelEncoder:
     def transform(self, values: Sequence[Any]):
         lookup = {str(value): idx for idx, value in enumerate(self.classes_)}
         return np.asarray([lookup[str(value)] for value in values], dtype=int)
-
 
 def _class_names(model: Mapping[str, Any], metadata: Mapping[str, Any]) -> list[str]:
     if model.get("class_names"):
@@ -269,21 +262,5 @@ def _class_names(model: Mapping[str, Any], metadata: Mapping[str, Any]) -> list[
 
     return []
 
-
 def _json_safe(value: Any) -> Any:
-    if value is None or isinstance(value, (str, bool, int, float)):
-        return value
-
-    if isinstance(value, np.generic):
-        return value.item()
-
-    if isinstance(value, np.ndarray):
-        return value.tolist()
-
-    if isinstance(value, Mapping):
-        return {str(k): _json_safe(v) for k, v in value.items()}
-
-    if isinstance(value, (list, tuple, set, frozenset)):
-        return [_json_safe(v) for v in value]
-
-    return str(value)
+    return json_safe(value)
