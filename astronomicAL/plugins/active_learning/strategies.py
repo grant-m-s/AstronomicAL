@@ -400,7 +400,22 @@ class CoreSetStrategy(QueryStrategy):
                 candidate_vectors[row_id] = vector
         if not candidate_vectors:
             candidates = RandomStrategy().acquire(pool, k=k, params=params, seed=seed, cancel_token=cancel_token)
-            return [QueryCandidate(row_id=item.row_id, score=item.score, metadata={**dict(item.metadata or {}), "_al_score_source": "random_fallback_no_embeddings"}) for item in candidates]
+            warning = (
+                "Core-set requires embedding/feature vectors but none were present in the eligible pool; "
+                "the returned order uses deterministic random sampling instead."
+            )
+            return [
+                QueryCandidate(
+                    row_id=item.row_id,
+                    score=item.score,
+                    metadata={
+                        **dict(item.metadata or {}),
+                        "_al_score_source": "random_fallback_no_embeddings",
+                        "_al_warning": warning,
+                    },
+                )
+                for item in candidates
+            ]
         selected_ids = _coreset_farthest_first(candidate_vectors, labelled_vectors, k=max(0, int(k)), seed=seed)
         rows_by_id = {str(row.get("row_id") or row.get("id") or ""): row for row in rows}
         scores = _distance_scores(candidate_vectors, labelled_vectors)
@@ -476,6 +491,20 @@ class QueryStrategyRegistry:
             metadata = dict(candidate.metadata or {})
             source = str(metadata.get("_al_score_source") or "direct_score")
             score_sources[source] = score_sources.get(source, 0) + 1
+        warning = ""
+        if score_sources.get("random_fallback_no_embeddings"):
+            warning = (
+                "Core-set requires embedding/feature vectors but none were present in the eligible pool; "
+                "the returned order used deterministic random sampling."
+            )
+        else:
+            warnings = []
+            for candidate in candidates:
+                metadata = dict(candidate.metadata or {})
+                value = str(metadata.get("_al_warning") or "").strip()
+                if value and value not in warnings:
+                    warnings.append(value)
+            warning = "; ".join(warnings)
         info = strategy.info()
         stats = {
             "strategy_id": strategy.id,
@@ -494,6 +523,9 @@ class QueryStrategyRegistry:
             "required_prediction_fields": list(info.required_prediction_fields or ()),
             "score_source_counts": score_sources,
         }
+        if warning:
+            stats["warning"] = warning
+            stats["warnings"] = [warning]
         self.last_rank_stats = dict(stats)
         return QueryResult(strategy_id=strategy.id, candidates=list(candidates), stats=stats)
 
@@ -660,7 +692,6 @@ def _coreset_farthest_first(vectors: Mapping[str, Sequence[float]], labelled_vec
         for candidate in list(remaining):
             distances[candidate] = min(float(distances.get(candidate, float("inf"))), math.sqrt(_squared_distance(vectors[candidate], vector)))
     return selected
-
 
 def _badge_kmeans_pp(vectors: Mapping[str, Sequence[float]], weights: Mapping[str, float], *, k: int, seed: Optional[int] = None) -> List[str]:
     """BADGE k-means++ initialisation over gradient embeddings.

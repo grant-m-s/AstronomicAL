@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+import html
 import threading
 
 from astronomicAL.platform.plugins.specs import ActionRequest
@@ -18,6 +19,7 @@ except Exception:  # pragma: no cover
 MAX_AUTO_LABEL_SCAN_ROWS = 50000
 XY_DEFAULT_MAX_POINTS = 5000
 XY_COLUMN_SAMPLE_ROWS = 2000
+BUTTON_HEIGHT = 34
 
 class ActiveLearningPanel:
     """Thin UI around AL actions/services.
@@ -185,8 +187,9 @@ class ActiveLearningPanel:
             "label_value": pn.widgets.TextInput(name="Target value", placeholder="numeric regression value"),
             "bulk_n": pn.widgets.IntInput(name="Bulk label next N", value=5, start=1),
             "recipe_profile_id": pn.widgets.Select(name="core.ml recipe profile", options=recipe_options, value=recipe_value),
-            "status": pn.pane.Markdown(self._status_text()),
-            "session_summary": pn.pane.Markdown(self._session_summary_text()),
+            "status": pn.pane.Markdown(self._status_text(), sizing_mode="stretch_width", margin=(0, 0, 4, 0)),
+            "session_summary_left": pn.pane.Markdown("", sizing_mode="stretch_width", margin=(0, 0, 0, 0)),
+            "session_summary_right": pn.pane.Markdown("", sizing_mode="stretch_width", margin=(0, 0, 0, 0)),
             "performance_metric": pn.widgets.Select(name="Performance metric", options={"No metrics yet": ""}, value=""),
             "performance_plot": pn.Column(pn.pane.Markdown("No AL performance points yet."), sizing_mode="stretch_width"),
             "xy_x": pn.widgets.Select(name="X column", options={"Select X column": ""}, value=""),
@@ -207,23 +210,23 @@ class ActiveLearningPanel:
                 options=self._xy_colour_options(),
                 value="prediction_correctness",
             ),
-            "strategy_scores_summary": pn.pane.Markdown("No whole-pool query-strategy scores calculated yet."),
+            "strategy_scores_summary": pn.pane.HTML(self._strategy_scores_empty_html(), sizing_mode="stretch_width", margin=(0, 0, 8, 0)),
             "xy_show_trained": pn.widgets.Checkbox(name="Show trained/labelled overlay", value=True),
             "xy_max_points": pn.widgets.IntInput(name="Max plotted rows", value=XY_DEFAULT_MAX_POINTS, start=100),
             "xy_plot": pn.pane.Matplotlib(None, tight=True, sizing_mode="stretch_width", height=420, min_width=120, min_height=240),
         }
 
-        start_btn = pn.widgets.Button(name="Start session", button_type="primary")
-        query_btn = pn.widgets.Button(name="Create query batch", button_type="primary")
-        label_btn = pn.widgets.Button(name="Record label", button_type="success")
-        bulk_label_btn = pn.widgets.Button(name="Next N labels from column", button_type="success")
-        train_btn = pn.widgets.Button(name="Train via core.ml", button_type="warning")
-        refresh_data_btn = pn.widgets.Button(name="Refresh datasets", button_type="default")
-        refresh_strategy_btn = pn.widgets.Button(name="Refresh strategies", button_type="default")
-        refresh_recipe_btn = pn.widgets.Button(name="Refresh profiles", button_type="default")
-        refresh_performance_btn = pn.widgets.Button(name="Refresh performance", button_type="default")
-        refresh_xy_btn = pn.widgets.Button(name="Refresh XY plot", button_type="default")
-        score_all_btn = pn.widgets.Button(name="Calculate QS scores over pool", button_type="primary")
+        start_btn = self._button("Start session", button_type="primary")
+        query_btn = self._button("Create query batch", button_type="primary")
+        label_btn = self._button("Record label", button_type="success")
+        bulk_label_btn = self._button("Next N labels from column", button_type="success")
+        train_btn = self._button("Train via core.ml", button_type="warning")
+        refresh_data_btn = self._button("Refresh datasets", button_type="default")
+        refresh_strategy_btn = self._button("Refresh strategies", button_type="default")
+        refresh_recipe_btn = self._button("Refresh profiles", button_type="default")
+        refresh_performance_btn = self._button("Refresh performance", button_type="default")
+        refresh_xy_btn = self._button("Refresh XY plot", button_type="default")
+        score_all_btn = self._button("Calculate QS scores over pool", button_type="primary")
         self._widgets.update({
             "start_btn": start_btn,
             "query_btn": query_btn,
@@ -349,11 +352,51 @@ class ActiveLearningPanel:
         return self._scrollable_root(
             self._fixed_header(
                 pn.pane.Markdown("## Active Learning", sizing_mode="stretch_width", margin=(0, 0, 6, 0)),
-                self._widgets["status"],
-                self._widgets["session_summary"],
+                self._header_summary_grid(),
             ),
             self._tabs,
         )
+
+    def _header_summary_grid(self):
+        left = pn.Column(
+            self._widgets["status"],
+            self._widgets["session_summary_left"],
+            sizing_mode="stretch_width",
+            margin=(0, 0, 0, 0),
+        )
+        right = pn.Column(
+            self._widgets["session_summary_right"],
+            sizing_mode="stretch_width",
+            margin=(0, 0, 0, 0),
+        )
+        row = pn.Row(left, right, sizing_mode="stretch_width", margin=(0, 0, 4, 0))
+        for column in (left, right):
+            try:
+                column.styles = {
+                    **dict(getattr(column, "styles", {}) or {}),
+                    "flex": "1 1 16rem",
+                    "min-width": "14rem",
+                    "max-width": "100%",
+                    "box-sizing": "border-box",
+                    "overflow": "visible",
+                }
+            except Exception:
+                pass
+        try:
+            row.styles = {
+                **dict(getattr(row, "styles", {}) or {}),
+                "display": "flex",
+                "flex-wrap": "wrap",
+                "gap": "0.75rem",
+                "width": "100%",
+                "max-width": "100%",
+                "min-width": "0",
+                "box-sizing": "border-box",
+                "overflow": "visible",
+            }
+        except Exception:
+            pass
+        return row
 
     def _fixed_header(self, *objects: Any):
         header = pn.Column(*objects, sizing_mode="stretch_width", margin=(0, 0, 8, 0))
@@ -395,6 +438,37 @@ class ActiveLearningPanel:
         except Exception:
             pass
 
+    def _button(self, name: str, *, button_type: str = "default") -> Any:
+        button = pn.widgets.Button(name=name, button_type=button_type, height=BUTTON_HEIGHT)
+        try:
+            button.min_height = BUTTON_HEIGHT
+            button.max_height = BUTTON_HEIGHT
+        except Exception:
+            pass
+        try:
+            button.height_policy = "fixed"
+        except Exception:
+            pass
+        try:
+            button.sizing_mode = "fixed"
+        except Exception:
+            pass
+        try:
+            button.styles = {
+                **dict(getattr(button, "styles", {}) or {}),
+                "height": f"{BUTTON_HEIGHT}px",
+                "min-height": f"{BUTTON_HEIGHT}px",
+                "max-height": f"{BUTTON_HEIGHT}px",
+                "line-height": f"{BUTTON_HEIGHT - 2}px",
+                "align-self": "flex-start",
+                "flex": "0 0 auto",
+                "overflow": "hidden",
+                "white-space": "nowrap",
+            }
+        except Exception:
+            pass
+        return button
+
     def _compact_row(self, *objects: Any):
         row = pn.Row(*objects, sizing_mode="stretch_width", margin=(0, 0, 8, 0))
         try:
@@ -435,6 +509,26 @@ class ActiveLearningPanel:
         except Exception:
             pass
         if is_button:
+            try:
+                obj.height = BUTTON_HEIGHT
+                obj.height_policy = "fixed"
+                obj.sizing_mode = "fixed"
+            except Exception:
+                pass
+            try:
+                obj.styles = {
+                    **dict(getattr(obj, "styles", {}) or {}),
+                    "height": f"{BUTTON_HEIGHT}px",
+                    "min-height": f"{BUTTON_HEIGHT}px",
+                    "max-height": f"{BUTTON_HEIGHT}px",
+                    "line-height": f"{BUTTON_HEIGHT - 2}px",
+                    "align-self": "flex-start",
+                    "flex": "0 0 auto",
+                    "overflow": "hidden",
+                    "white-space": "nowrap",
+                }
+            except Exception:
+                pass
             return
         try:
             obj.sizing_mode = "stretch_width"
@@ -466,7 +560,29 @@ class ActiveLearningPanel:
             obj.margin = getattr(obj, "margin", None) or (0, 0, 8, 0)
         except Exception:
             pass
-        if not is_row and class_name not in {"markdown", "spacer"}:
+        is_button = class_name.endswith("button")
+        if is_button:
+            try:
+                obj.height = BUTTON_HEIGHT
+                obj.height_policy = "fixed"
+                obj.sizing_mode = "fixed"
+            except Exception:
+                pass
+            try:
+                obj.styles = {
+                    **dict(getattr(obj, "styles", {}) or {}),
+                    "height": f"{BUTTON_HEIGHT}px",
+                    "min-height": f"{BUTTON_HEIGHT}px",
+                    "max-height": f"{BUTTON_HEIGHT}px",
+                    "line-height": f"{BUTTON_HEIGHT - 2}px",
+                    "align-self": "flex-start",
+                    "flex": "0 0 auto",
+                    "overflow": "hidden",
+                    "white-space": "nowrap",
+                }
+            except Exception:
+                pass
+        elif not is_row and class_name not in {"markdown", "spacer"}:
             try:
                 obj.sizing_mode = "stretch_width"
             except Exception:
@@ -954,7 +1070,7 @@ class ActiveLearningPanel:
             session = self._session_payload()
             artifact_id = self._strategy_scores_artifact_id(session)
             if not artifact_id:
-                pane.object = "No whole-pool query-strategy scores calculated yet."
+                pane.object = self._strategy_scores_empty_html()
                 return
             try:
                 payload = self.context.artifacts.get(artifact_id)
@@ -968,26 +1084,104 @@ class ActiveLearningPanel:
                     "stats_by_strategy": payload.get("stats_by_strategy") or {},
                 }
             else:
-                pane.object = f"Latest strategy-score artifact `{artifact_id}` could not be read."
+                pane.object = self._strategy_scores_empty_html(f"Latest strategy-score artifact {artifact_id} could not be read.")
                 return
+        pane.object = self._strategy_scores_summary_html(result)
+
+    def _strategy_scores_empty_html(self, message: str = "No whole-pool query-strategy scores calculated yet.") -> str:
+        return (
+            '<div style="font-size: 0.92em; margin: 0.15rem 0 0.4rem 0;">'
+            f'<span style="color: #666;">{html.escape(str(message))}</span>'
+            '</div>'
+        )
+
+    def _strategy_scores_summary_html(self, result: Mapping[str, Any]) -> str:
         strategy_ids = [str(value) for value in (result.get("strategy_ids") or []) if str(value)]
         eligible = result.get("eligible_pool_count", "?")
-        artifact_id = result.get("strategy_scores_artifact_id")
+        artifact_id = str(result.get("strategy_scores_artifact_id") or "—")
         stats_by_strategy = dict(result.get("stats_by_strategy") or {})
-        lines = [f"Whole-pool scores: `{artifact_id}` — {len(strategy_ids)} strategies × {eligible} eligible rows."]
-        summaries: List[str] = []
+        successes: List[Tuple[str, str, str]] = []
+        failures: List[Tuple[str, str, str]] = []
         for strategy_id in strategy_ids:
             stats = dict(stats_by_strategy.get(strategy_id) or {})
             title = str(stats.get("strategy_title") or strategy_id)
             error = str(stats.get("error") or "").strip()
             if error:
-                summaries.append(f"{title}: not calculated — {error}")
+                failures.append((title, self._score_failure_summary(strategy_id, error), error))
                 continue
-            sources = self._score_source_summary(stats.get("score_source_counts"))
-            summaries.append(f"{title}: {sources or 'direct score'}")
-        if summaries:
-            lines.append("Score sources: " + "; ".join(summaries[:6]))
-        pane.object = "\n\n".join(lines)
+            detail = self._score_source_summary(stats.get("score_source_counts")) or "direct score"
+            warnings = self._score_warning_summary(stats)
+            if warnings:
+                detail = f"{detail}; warning: {warnings}"
+            successes.append((title, detail, detail))
+
+        def list_html(items: Sequence[Tuple[str, str, str]], *, ok: bool) -> str:
+            if not items:
+                label = "No successes" if ok else "No failures"
+                return f'<div style="color: #777; font-size: 0.9em;">{html.escape(label)}</div>'
+            marker = "✓" if ok else "✗"
+            colour = "#207245" if ok else "#9a3412"
+            rows = []
+            for title, detail, full_detail in items:
+                rows.append(
+                    '<li style="margin: 0 0 0.18rem 0; line-height: 1.25;" '
+                    f'title="{html.escape(str(full_detail), quote=True)}">'
+                    f'<span style="color: {colour}; font-weight: 700;">{marker}</span> '
+                    f'<strong>{html.escape(str(title))}</strong>'
+                    f'<br><span style="color: #555; font-size: 0.86em;">{html.escape(str(detail))}</span>'
+                    '</li>'
+                )
+            return '<ul style="margin: 0.25rem 0 0 1.1rem; padding: 0;">' + "".join(rows) + '</ul>'
+
+        header = (
+            '<div style="font-size: 0.92em; margin: 0.1rem 0 0.35rem 0;">'
+            f'<strong>Whole-pool QS scores:</strong> <code>{html.escape(artifact_id)}</code> — '
+            f'{len(successes)} / {len(strategy_ids)} strategies over {html.escape(str(eligible))} eligible rows. '
+            '<span style="color: #666;">Choose a <code>QS score: ...</code> entry in Colour by.</span>'
+            '</div>'
+        )
+        grid = (
+            '<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr)); '
+            'gap: 0.75rem; align-items: start; margin-bottom: 0.4rem;">'
+            '<div style="min-width: 0;">'
+            '<div style="font-weight: 700;">Calculated</div>'
+            f'{list_html(successes, ok=True)}'
+            '</div>'
+            '<div style="min-width: 0;">'
+            '<div style="font-weight: 700;">Not calculated</div>'
+            f'{list_html(failures, ok=False)}'
+            '</div>'
+            '</div>'
+        )
+        return header + grid
+
+    def _score_warning_summary(self, stats: Mapping[str, Any]) -> str:
+        values: List[str] = []
+        raw_values = stats.get("warnings") or []
+        if isinstance(raw_values, str):
+            raw_values = [raw_values]
+        for value in raw_values:
+            text = str(value or "").strip()
+            if text and text not in values:
+                values.append(text)
+        single = str(stats.get("warning") or "").strip()
+        if single and single not in values:
+            values.append(single)
+        return "; ".join(values[:2])
+
+    def _score_failure_summary(self, strategy_id: str, error: str) -> str:
+        text = " ".join(str(error or "").split())
+        lower = text.lower()
+        if strategy_id == "learning_loss" or "learning loss" in lower:
+            return "requires loss-prediction output"
+        if strategy_id == "badge" or "badge" in lower:
+            return "requires gradient embedding, or probabilities + embeddings/features"
+        if strategy_id == "coreset" or "core-set" in lower or "embedding" in lower:
+            return "requires embedding/feature vectors"
+        if not text:
+            return "not calculated"
+        first_sentence = text.split(".", 1)[0].strip() or text
+        return first_sentence[:120] + ("…" if len(first_sentence) > 120 else "")
 
     def _run_train(self) -> None:
         recipe_profile_id = str(self._widgets["recipe_profile_id"].value or "").strip()
@@ -1443,7 +1637,6 @@ class ActiveLearningPanel:
         self._dataset_columns_cache[dataset_id] = columns
         return list(columns)
 
-
     def _infer_label_profile(self, dataset_id: str, label_column: str, *, cheap_only: bool = False) -> Dict[str, Any]:
         if not dataset_id or not label_column:
             return {}
@@ -1878,27 +2071,40 @@ class ActiveLearningPanel:
             pane.object = self._status_text()
 
     def _refresh_session_summary(self, *, status: bool = True) -> None:
-        pane = self._widgets.get("session_summary")
-        if pane is not None:
-            pane.object = self._session_summary_text()
+        left, right = self._session_summary_columns()
+        left_pane = self._widgets.get("session_summary_left")
+        right_pane = self._widgets.get("session_summary_right")
+        if left_pane is not None:
+            left_pane.object = left
+        if right_pane is not None:
+            right_pane.object = right
         if status:
             self._set_status("Session summary refreshed.")
 
     def _session_summary_text(self) -> str:
+        left, right = self._session_summary_columns()
+        return f"{left}  \n{right}"
+
+    def _session_summary_columns(self) -> Tuple[str, str]:
         session = self._session_payload()
         if not session:
-            return "**Session:** none selected  \n**Round:** —  \n**Pool remaining:** —  \n**Labelled since last train:** —  \n**Labelled total:** —"
+            return (
+                "**Session:** none selected  \n**Round:** —  \n**Target type:** —  \n**Pool remaining:** —  \n**Labelled since last train:** —",
+                "**Labelled total:** —  \n**Reviewed total:** —  \n**Unsure:** —  \n**Queued:** —  \n**Model:** —  \n**Predictions:** —",
+            )
         counts = al_state.counts(session)
         latest = dict(session.get("latest") or {})
         model_id = latest.get("model_artifact_id") or "—"
         predictions_id = latest.get("predictions_artifact_id") or "—"
         pool_remaining = self._pool_remaining_summary(session)
-        return (
+        left = (
             f"**Session:** `{session.get('session_id')}`  \n"
             f"**Round:** {session.get('round', 0)}  \n"
             f"**Target type:** {al_state.parse_task_type(session.get('task_type') or session.get('problem_type'))}  \n"
             f"**Pool remaining:** {pool_remaining}  \n"
-            f"**Labelled since last train:** {counts.get('labelled_since_last_train', 0)}  \n"
+            f"**Labelled since last train:** {counts.get('labelled_since_last_train', 0)}"
+        )
+        right = (
             f"**Labelled total:** {counts.get('labelled_or_verified', 0)}  \n"
             f"**Reviewed total:** {counts.get('total_reviewed', 0)}  \n"
             f"**Unsure:** {counts.get('unsure', 0)}  \n"
@@ -1906,6 +2112,7 @@ class ActiveLearningPanel:
             f"**Model:** `{model_id}`  \n"
             f"**Predictions:** `{predictions_id}`"
         )
+        return left, right
 
     def _pool_remaining_summary(self, session_payload: Mapping[str, Any]) -> str:
         remaining, total, source = self._pool_remaining_counts(session_payload)

@@ -45,11 +45,12 @@ def start_session_action(context: Any, request: Any, cancel_token: Any = None) -
     elif not label_options and bool(params.get("infer_labels_from_column", True)) and target_column:
         label_options = infer_label_options_from_column(context, dataset_id=dataset_id, column=target_column)
     make_selection = bool(params.get("make_selection", True))
+    pool_dataset_id = str(params.get("pool_dataset_id") or dataset_id).strip() or dataset_id
 
-    selected_row_ids = acquisition.sample_dataset_row_ids(context, dataset_id=dataset_id, k=initial_k, seed=seed)
+    selected_row_ids = acquisition.sample_dataset_row_ids(context, dataset_id=pool_dataset_id, k=initial_k, seed=seed)
     session = al_state.create_session(
         dataset_id=dataset_id,
-        pool_dataset_id=str(params.get("pool_dataset_id") or dataset_id),
+        pool_dataset_id=pool_dataset_id,
         validation_dataset_id=str(params.get("validation_dataset_id") or ""),
         test_dataset_id=str(params.get("test_dataset_id") or ""),
         recipe_id=str(params.get("recipe_id") or ""),
@@ -66,7 +67,7 @@ def start_session_action(context: Any, request: Any, cancel_token: Any = None) -
 
     records = acquisition.build_initial_records(selected_row_ids)
     batch_payload = acquisition.create_batch_payload(
-        dataset_id=dataset_id,
+        dataset_id=pool_dataset_id,
         session=session,
         strategy_id="initial_random",
         records=records,
@@ -83,7 +84,7 @@ def start_session_action(context: Any, request: Any, cancel_token: Any = None) -
     batch_artifact_id = context.artifacts.put(
         al_state.ARTIFACT_BATCH,
         batch_payload,
-        dataset_id=dataset_id,
+        dataset_id=pool_dataset_id,
         row_ids=selected_row_ids,
         params={"session_id": session["session_id"], "strategy_id": "initial_random", "seed": seed, "k": initial_k},
     )
@@ -99,7 +100,7 @@ def start_session_action(context: Any, request: Any, cancel_token: Any = None) -
     if make_selection and selected_row_ids:
         acquisition.set_ranked_selection(
             context,
-            dataset_id=dataset_id,
+            dataset_id=pool_dataset_id,
             row_ids=selected_row_ids,
             session_artifact_id=session_artifact_id,
             batch_artifact_id=batch_artifact_id,
@@ -114,6 +115,7 @@ def start_session_action(context: Any, request: Any, cancel_token: Any = None) -
             "session_artifact_id": session_artifact_id,
             "session_id": session["session_id"],
             "dataset_id": dataset_id,
+            "pool_dataset_id": pool_dataset_id,
             "initial_count": len(selected_row_ids),
             "task_type": task_type,
             "label_profile": label_profile,
@@ -439,7 +441,6 @@ def bulk_label_next_action(context: Any, request: Any, cancel_token: Any = None)
     publish(context, "al.labels.bulk_recorded", payload)
     return {"ok": True, **payload}
 
-
 def score_pool_action(context: Any, request: Any, cancel_token: Any = None) -> Dict[str, Any]:
     """Score every currently eligible pool row with one or more query strategies.
 
@@ -618,7 +619,6 @@ def score_pool_action(context: Any, request: Any, cancel_token: Any = None) -> D
         }
     )
     new_session_artifact_id = put_session(context, updated, previous_artifact_id=session_artifact_id)
-    recorded_entry = dict((updated.get("labels") or {}).get(str(row_id)) or {})
     payload = {
         "session_artifact_id": new_session_artifact_id,
         "previous_session_artifact_id": session_artifact_id,
@@ -902,7 +902,6 @@ def infer_label_profile_from_column(
         "reason": reason,
     }
 
-
 def bounded_column_values(context: Any, *, dataset_id: str, column: str, limit: int) -> List[Any]:
     dataset_id = str(dataset_id or "").strip()
     column = str(column or "").strip()
@@ -955,7 +954,6 @@ def bounded_column_values(context: Any, *, dataset_id: str, column: str, limit: 
         return []
     values = values_from_column_payload(df, column, limit=limit)
     return values[:limit]
-
 
 def values_from_column_payload(raw: Any, column: str, *, limit: int) -> List[Any]:
     if raw is None:

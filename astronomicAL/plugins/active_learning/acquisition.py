@@ -352,7 +352,6 @@ def set_ranked_selection(
         update_focus_policy=str(update_focus_policy or "first"),
     )
 
-
 def set_focus_row(
     context: Any,
     *,

@@ -370,7 +370,6 @@ def clean_feature_columns(value: Any, *, available_columns: Optional[Sequence[st
             out.append(column)
     return out
 
-
 IMAGE_COLUMN_PARAM_KEYS = (
     "image_column",
     "image_path_column",
@@ -919,10 +918,11 @@ def training_dataframe(
     required_columns: Optional[Sequence[str]] = None,
 ) -> Tuple[pd.DataFrame, Optional[str]]:
     id_column = acquisition.resolve_record_id_column(context, dataset_id)
-    row_ids = [str(item["row_id"]) for item in labelled_items]
-    row_id_set = set(row_ids)
+    row_ids = al_state.stable_unique(str(item["row_id"]) for item in labelled_items if str(item.get("row_id") or ""))
+    if not row_ids:
+        raise ValueError("No labelled row ids were available to materialise an AL training dataset.")
 
-    required = [str(column) for column in (required_columns or []) if column]
+    required = al_state.stable_unique(str(column) for column in (required_columns or []) if column)
     columns: List[str] = []
     if id_column:
         columns.append(id_column)
@@ -930,27 +930,14 @@ def training_dataframe(
         if column not in columns and column != target_column:
             columns.append(column)
 
-    # Materialise only the columns needed by the recipe/profile plus the row id.
-    # The previous code loaded the whole pool dataframe before filtering labelled
-    # rows, which is very expensive for million-row, hundreds-column catalogues.
-    try:
-        source_df = context.datasets.get_df(dataset_id, columns=columns) if columns else context.datasets.get_df(dataset_id)
-    except TypeError:
-        source_df = context.datasets.get_df(dataset_id)
+    # Prefer source-level row lookup APIs so small labelled sets do not scan a
+    # million-row pool.  Fall back to a narrow dataframe materialisation only for
+    # older DatasetManager/Source implementations that do not expose row lookup.
+    source_df = _lookup_training_rows_by_id(context, dataset_id=dataset_id, row_ids=row_ids, columns=columns)
+    if source_df is None or len(source_df.index) == 0:
+        source_df = _materialise_training_columns(context, dataset_id=dataset_id, columns=columns)
 
-    if id_column and id_column in source_df.columns:
-        mask = source_df[id_column].astype(str).isin(row_id_set)
-        df = source_df.loc[mask].copy()
-        df["__al_row_id_order"] = df[id_column].astype(str).map({row_id: idx for idx, row_id in enumerate(row_ids)})
-        df = df.sort_values("__al_row_id_order").drop(columns=["__al_row_id_order"])
-    else:
-        index_lookup = {str(index_value): index_value for index_value in source_df.index.tolist()}
-        matched_index = [index_lookup[row_id] for row_id in row_ids if row_id in index_lookup]
-        df = source_df.loc[matched_index].copy()
-        if not id_column:
-            id_column = "al_record_id"
-            df[id_column] = [str(idx) for idx in df.index]
-
+    df, id_column = _normalise_training_rows(source_df, id_column=id_column, row_ids=row_ids)
     if df.empty:
         raise ValueError("No labelled rows could be matched in the source dataset.")
 
@@ -964,6 +951,102 @@ def training_dataframe(
     if missing:
         raise ValueError("Derived AL training dataset is missing required columns: " + ", ".join(missing))
     return df, id_column
+
+
+def _lookup_training_rows_by_id(
+    context: Any,
+    *,
+    dataset_id: str,
+    row_ids: Sequence[str],
+    columns: Sequence[str],
+) -> Optional[pd.DataFrame]:
+    datasets = getattr(context, "datasets", None)
+    if datasets is None:
+        return None
+    try:
+        source = getattr(datasets, "get_source", lambda *_: None)(dataset_id)
+    except Exception:
+        source = None
+    owners = (datasets, source)
+    methods = ("rows_by_ids", "get_rows_by_ids", "take_ids", "lookup_rows")
+    for owner in owners:
+        if owner is None:
+            continue
+        for method_name in methods:
+            method = getattr(owner, method_name, None)
+            if not callable(method):
+                continue
+            attempts = (
+                lambda: method(dataset_id=dataset_id, row_ids=list(row_ids), columns=list(columns)),
+                lambda: method(dataset_id=dataset_id, ids=list(row_ids), columns=list(columns)),
+                lambda: method(row_ids=list(row_ids), columns=list(columns)),
+                lambda: method(ids=list(row_ids), columns=list(columns)),
+                lambda: method(list(row_ids), columns=list(columns)),
+            )
+            for attempt in attempts:
+                try:
+                    df = _coerce_rows_dataframe(attempt())
+                except TypeError:
+                    continue
+                except Exception:
+                    df = None
+                if df is not None:
+                    return df
+    return None
+
+
+def _coerce_rows_dataframe(rows: Any) -> Optional[pd.DataFrame]:
+    if rows is None:
+        return None
+    if hasattr(rows, "to_pandas"):
+        rows = rows.to_pandas()
+    if isinstance(rows, pd.DataFrame):
+        return rows.copy()
+    if isinstance(rows, Sequence) and not isinstance(rows, (str, bytes, bytearray)):
+        records = [dict(row) for row in rows if isinstance(row, Mapping)]
+        if records:
+            return pd.DataFrame.from_records(records)
+    return None
+
+
+def _materialise_training_columns(context: Any, *, dataset_id: str, columns: Sequence[str]) -> pd.DataFrame:
+    try:
+        return context.datasets.get_df(dataset_id, columns=list(columns)) if columns else context.datasets.get_df(dataset_id)
+    except TypeError:
+        return context.datasets.get_df(dataset_id)
+
+
+def _normalise_training_rows(source_df: pd.DataFrame, *, id_column: Optional[str], row_ids: Sequence[str]) -> Tuple[pd.DataFrame, Optional[str]]:
+    row_id_set = set(row_ids)
+    row_order = {row_id: idx for idx, row_id in enumerate(row_ids)}
+    if id_column and id_column in source_df.columns:
+        df = source_df[source_df[id_column].astype(str).isin(row_id_set)].copy()
+        df["__al_row_id_order"] = df[id_column].astype(str).map(row_order)
+        df = df.sort_values("__al_row_id_order").drop(columns=["__al_row_id_order"])
+        return df, id_column
+
+    index_lookup = {str(index_value): index_value for index_value in source_df.index.tolist()}
+    matched_index = [index_lookup[row_id] for row_id in row_ids if row_id in index_lookup]
+    if matched_index:
+        df = source_df.loc[matched_index].copy()
+        if not id_column:
+            id_column = "al_record_id"
+        if id_column not in df.columns:
+            df[id_column] = [str(idx) for idx in df.index]
+        return df, id_column
+
+    # Some source-level lookup methods return rows in requested order without an
+    # explicit id column.  Preserve those ids instead of discarding a valid narrow
+    # lookup result.
+    if len(source_df) == len(row_ids):
+        df = source_df.copy()
+        if not id_column:
+            id_column = "al_record_id"
+        if id_column not in df.columns:
+            df[id_column] = list(row_ids)
+        return df, id_column
+
+    return source_df.iloc[0:0].copy(), id_column
 
 def resolve_class_labels(*, params: Mapping[str, Any], session: Mapping[str, Any], labelled_items: Sequence[Mapping[str, Any]]) -> List[str]:
     values = parse_string_list(
