@@ -140,12 +140,45 @@ class TorchRegressionHarness(RunHarness):
 
             def __getitem__(self, i):
                 row = frame.iloc[i]
-                x = recipe.load_sample(run, row)          # recipe: row -> raw input
+                x = recipe.load_sample(run, row)
+
                 if transform is not None:
                     x = transform(x)
+
+                shape = tuple(getattr(x, "shape", ()) or ())
+                if len(shape) >= 3:
+                    h, w = int(shape[-2]), int(shape[-1])
+                    if h <= 0 or w <= 0:
+                        raise ValueError(
+                            f"{recipe.id} produced an invalid image tensor shape {shape} "
+                            f"for row {row.get(b.record_id_column)!r}."
+                        )
+
                 vec = read_target(row[target_col], n_outputs) if target_col else [0.0] * n_outputs
-                y = torch.tensor(vec, dtype=torch.float32)  # shape [n_outputs]
+                y = torch.tensor(vec, dtype=torch.float32)
                 return x, y, str(row[b.record_id_column])
+
+        def collate_with_image_size_hint(batch):
+            try:
+                from torch.utils.data._utils.collate import default_collate
+                return default_collate(batch)
+            except RuntimeError as exc:
+                text = str(exc)
+                if "stack expects each tensor to be equal size" not in text:
+                    raise
+
+                shapes = []
+                row_ids = []
+                for x, _y, rid in batch[:8]:
+                    shapes.append(tuple(getattr(x, "shape", ()) or ()))
+                    row_ids.append(str(rid))
+
+                raise ValueError(
+                    "Image tensors in this batch have different shapes, so PyTorch "
+                    "cannot stack them. Image recipes must enforce a fixed output "
+                    "size in both train_transform() and eval_transform(). "
+                    f"First batch shapes: {shapes}; row_ids: {row_ids}"
+                ) from exc
 
         return DataLoader(
             _DS(),
@@ -153,6 +186,7 @@ class TorchRegressionHarness(RunHarness):
             shuffle=bool(train),
             num_workers=int(run.params.get("num_workers", 0)),
             pin_memory=str(self._device()).startswith("cuda"),
+            collate_fn=collate_with_image_size_hint,
         )
 
     def _assert_output_dim(self, model, target: TargetSpec, train_loader):

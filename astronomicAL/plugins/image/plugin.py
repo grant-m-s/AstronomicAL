@@ -16,7 +16,7 @@ slugify = manifest_mod.slugify
 manifest = PluginManifest(
     id="core.image",
     name="Image Assets",
-    version="0.2.3",
+    version="0.2.4",
     description=(
         "Manifest-backed image dataset support. Provides an image asset resolver, "
         "folder-to-manifest builder, full-panel focused image viewer, and "
@@ -111,7 +111,6 @@ IMAGE_OPTIONAL_MAPPINGS = [
     },
 ]
 
-
 def register(api) -> None:
     api.register_service(
         key="asset_resolver",
@@ -177,8 +176,15 @@ def register(api) -> None:
         uses_services=["core.image.asset_resolver"],
         produces=["selection.focus.changed"],
         default_layout={"x": 0, "y": 7, "w": 12, "h": 5},
-        default_open_kwargs={"thumb_size": 112, "max_items": 500, "show_badges": False, "max_in_flight": 8},
-        state_version=4,
+        default_open_kwargs={
+            "thumb_size": 112,
+            "max_items": 240,
+            "show_badges": False,
+            "max_in_flight": 4,
+            "batch_size": 24,
+            "render_interval_ms": 180,
+        },
+        state_version=6,
     )
 
     api.register_action(
@@ -245,7 +251,6 @@ def register(api) -> None:
         priority=10,
     )
 
-
 def on_enable(context: Any, manager: Any = None) -> None:
     services = getattr(context, "services", None)
     if services is not None:
@@ -256,7 +261,6 @@ def on_enable(context: Any, manager: Any = None) -> None:
             owner="core.image",
         )
 
-
 def on_disable(context: Any, manager: Any = None) -> None:
     services = getattr(context, "services", None)
     if services is not None:
@@ -265,13 +269,11 @@ def on_disable(context: Any, manager: Any = None) -> None:
         except Exception:
             pass
 
-
 def create_manifest_builder_panel(context, **kwargs):
     from . import manifest_panel as manifest_panel_mod
 
     controller = manifest_panel_mod.ImageManifestBuilderPanel(context=context)
     return controller.panel(), controller
-
 
 def create_image_viewer_panel(context, **kwargs):
     from . import viewer as viewer_mod
@@ -283,19 +285,19 @@ def create_image_viewer_panel(context, **kwargs):
     )
     return controller.panel(), controller
 
-
 def create_image_gallery_panel(context, **kwargs):
     from . import gallery as gallery_mod
 
     controller = gallery_mod.ImageSelectionGalleryPanel(
         context=context,
         thumb_size=int(kwargs.get("thumb_size", 112)),
-        max_items=int(kwargs.get("max_items", 500)),
+        max_items=int(kwargs.get("max_items", 240)),
         show_badges=bool(kwargs.get("show_badges", False)),
-        max_in_flight=int(kwargs.get("max_in_flight", 8)),
+        max_in_flight=int(kwargs.get("max_in_flight", 4)),
+        batch_size=int(kwargs.get("batch_size", 24)),
+        render_interval_ms=int(kwargs.get("render_interval_ms", 180)),
     )
     return controller.panel(), controller
-
 
 def build_manifest_action(
     context: Any,
@@ -330,7 +332,6 @@ def build_manifest_action(
         set_active=bool(params.get("set_active", True)),
         write_parquet=bool(params.get("write_parquet", True)),
     )
-
 
 def create_image_preview_artifact_viewer(
     context: Any,

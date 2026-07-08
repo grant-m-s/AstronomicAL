@@ -24,7 +24,6 @@ PREDICTION_SEMANTICS = ("prediction", "predicted_label", "ml.prediction", "model
 UNCERTAINTY_SEMANTICS = ("uncertainty", "ml.uncertainty", "prediction_uncertainty")
 AL_STATE_SEMANTICS = ("al.label_state", "label_state", "annotation_state")
 
-
 @dataclass(frozen=True)
 class AssetRef:
     """Lightweight reference to an image/media asset."""
@@ -38,7 +37,6 @@ class AssetRef:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
-
 
 @dataclass(frozen=True)
 class ImagePreview:
@@ -59,7 +57,6 @@ class ImagePreview:
         result = asdict(self)
         result["asset"] = self.asset.to_dict()
         return result
-
 
 class ImageAssetResolver:
     """
@@ -200,6 +197,107 @@ class ImageAssetResolver:
             prefer_thumbnail=prefer_thumbnail,
         )
         return self.load_preview(asset, max_size=max_size, cancel_token=cancel_token)
+
+    def load_previews_for_rows(
+        self,
+        dataset_id: str,
+        row_ids: Sequence[Any],
+        *,
+        role: str = "thumbnail",
+        max_size: int = 160,
+        prefer_thumbnail: bool = True,
+        cancel_token: Any = None,
+    ) -> dict[str, Any]:
+        """Load many row previews in one resolver call.
+
+        Gallery views should use this instead of submitting one platform job per
+        image. The method performs one vector row lookup, then returns per-row
+        previews/errors so one missing or corrupt image does not fail the whole
+        visible gallery batch.
+        """
+
+        def is_cancelled() -> bool:
+            if cancel_token is None:
+                return False
+            cancelled = getattr(cancel_token, "cancelled", None)
+            if callable(cancelled):
+                return bool(cancelled())
+            return bool(cancelled)
+
+        row_ids_str = [str(row_id) for row_id in row_ids if str(row_id)]
+        previews: dict[str, ImagePreview] = {}
+        errors: dict[str, str] = {}
+
+        if not row_ids_str:
+            return {"previews": previews, "errors": errors}
+        if is_cancelled():
+            raise RuntimeError("Image preview batch load cancelled.")
+
+        columns = self._columns_for_asset_lookup(dataset_id, prefer_thumbnail=prefer_thumbnail)
+        frame = self.get_rows(dataset_id, row_ids_str, columns=columns or None)
+
+        id_column = self.get_mapping(dataset_id, RECORD_ID_SEMANTIC) or "record_id"
+        records_by_id: dict[str, Mapping[str, Any]] = {}
+
+        if frame is not None and not frame.empty:
+            records = [row.to_dict() for _, row in frame.iterrows()]
+            if id_column != "Use Index" and id_column in frame.columns:
+                for record in records:
+                    record_id = self._clean_value(record.get(id_column))
+                    if record_id:
+                        records_by_id.setdefault(str(record_id), record)
+            elif len(records) == len(row_ids_str):
+                records_by_id.update(dict(zip(row_ids_str, records)))
+
+        for row_id in row_ids_str:
+            if is_cancelled():
+                raise RuntimeError("Image preview batch load cancelled.")
+
+            try:
+                record = records_by_id.get(row_id)
+                if record is None:
+                    row = self.get_row(dataset_id, row_id, columns=columns or None)
+                    if row is None or row.empty:
+                        raise KeyError(f"Could not find row {row_id!r} in dataset {dataset_id!r}.")
+                    record = row.iloc[0].to_dict()
+
+                uri, source_semantic, source_column = self._resolve_uri_from_record(
+                    dataset_id,
+                    record,
+                    prefer_thumbnail=prefer_thumbnail,
+                )
+                if not uri:
+                    raise ValueError(
+                        "No image asset mapping was found. Map one of 'image.uri', "
+                        "'image.path', 'image.url', or 'image.thumbnail'."
+                    )
+
+                metadata = self._metadata_from_record(dataset_id, record)
+                metadata.update(
+                    {
+                        "source_semantic": source_semantic,
+                        "source_column": source_column,
+                        "prefer_thumbnail": bool(prefer_thumbnail),
+                    }
+                )
+
+                asset = AssetRef(
+                    dataset_id=str(dataset_id),
+                    row_id=str(row_id),
+                    role=str(role or "thumbnail"),
+                    uri=str(uri),
+                    media_type=self._guess_media_type(uri),
+                    metadata=metadata,
+                )
+                previews[row_id] = self.load_preview(
+                    asset,
+                    max_size=max_size,
+                    cancel_token=cancel_token,
+                )
+            except Exception as exc:
+                errors[row_id] = str(exc)
+
+        return {"previews": previews, "errors": errors}
 
     def get_row(
         self,
@@ -588,7 +686,6 @@ class ImageAssetResolver:
         with path.expanduser().open("rb") as handle:
             return handle.read()
 
-
     def _load_cached_preview(
         self,
         asset: AssetRef,
@@ -688,7 +785,6 @@ class ImageAssetResolver:
             pass
         text = str(value).strip()
         return text if text and text.lower() not in {"nan", "none", "null"} else ""
-
 
 def get_image_resolver(context: Any) -> ImageAssetResolver:
     """Fetch the registered resolver, or create a local fallback."""

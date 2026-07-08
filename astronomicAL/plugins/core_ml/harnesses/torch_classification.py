@@ -50,20 +50,54 @@ class TorchClassificationHarness(RunHarness):
 
         recipe, run, b = self.recipe, self.run, self.binding
         frame = self._frame_for(partition).reset_index(drop=True)
-        transform = (recipe.train_transform(run) if train else recipe.eval_transform(run))
+        transform = recipe.train_transform(run) if train else recipe.eval_transform(run)
         class_to_idx = {c: i for i, c in enumerate(partition.classes)}
         self._eval_classes = list(partition.classes)
-        harness = self
 
         class _DS(Dataset):
-            def __len__(self): return len(frame)
+            def __len__(self):
+                return len(frame)
+
             def __getitem__(self, i):
                 row = frame.iloc[i]
-                x = recipe.load_sample(run, row)          # recipe: row -> raw input
+                x = recipe.load_sample(run, row)
+
                 if transform is not None:
                     x = transform(x)
+
+                shape = tuple(getattr(x, "shape", ()) or ())
+                if len(shape) >= 3:
+                    h, w = int(shape[-2]), int(shape[-1])
+                    if h <= 0 or w <= 0:
+                        raise ValueError(
+                            f"{recipe.id} produced an invalid image tensor shape {shape} "
+                            f"for row {row.get(b.record_id_column)!r}."
+                        )
+
                 y = class_to_idx[str(row[b.target_column])] if b.target_column else -1
                 return x, int(y), str(row[b.record_id_column])
+
+        def collate_with_image_size_hint(batch):
+            try:
+                from torch.utils.data._utils.collate import default_collate
+                return default_collate(batch)
+            except RuntimeError as exc:
+                text = str(exc)
+                if "stack expects each tensor to be equal size" not in text:
+                    raise
+
+                shapes = []
+                row_ids = []
+                for x, _y, rid in batch[:8]:
+                    shapes.append(tuple(getattr(x, "shape", ()) or ()))
+                    row_ids.append(str(rid))
+
+                raise ValueError(
+                    "Image tensors in this batch have different shapes, so PyTorch "
+                    "cannot stack them. Image recipes must enforce a fixed output "
+                    "size in both train_transform() and eval_transform(). "
+                    f"First batch shapes: {shapes}; row_ids: {row_ids}"
+                ) from exc
 
         return DataLoader(
             _DS(),
@@ -71,6 +105,7 @@ class TorchClassificationHarness(RunHarness):
             shuffle=bool(train),
             num_workers=int(run.params.get("num_workers", 0)),
             pin_memory=str(self._device()).startswith("cuda"),
+            collate_fn=collate_with_image_size_hint,
         )
 
     def _assert_output_dim(self, model, target, train_loader):

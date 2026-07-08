@@ -28,6 +28,14 @@ Non-ML users launch recipes from the ML Recipe Launcher.
 ML developers write recipes as Python classes and register them in
 `core.ml.recipe_registry`, or use the `External Python ML recipe` bridge.
 
+## External recipe trust boundary
+
+The `External Python ML recipe` imports and executes local Python in the same process as AstronomicAL.
+
+Treat it like running a Python script from your shell: use only code you trust. AstronomicAL does not sandbox this code and does not enforce the managed train/validation/test protocol for it.
+
+Use a managed recipe when you need AstronomicAL to own splitting, validation, test evaluation, provenance, and protocol checks.
+
 ## External recipe example
 
 ```python

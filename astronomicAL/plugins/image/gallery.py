@@ -1,9 +1,8 @@
-
 from __future__ import annotations
 
 from dataclasses import asdict, is_dataclass
 import html
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 
 import panel as pn
 
@@ -15,28 +14,34 @@ except ImportError:
 
 class ImageSelectionGalleryPanel:
     """
-    Scrollable thumbnail gallery for the active platform selection set.
+    Fast thumbnail gallery for the active platform selection set.
 
-    The gallery is tuned for compact square-ish panels: controls wrap, cards have
-    fixed outer dimensions, rows do not overlap, and thumbnail loading is
-    progressive/cancellable so top rows become usable first.
+    This implementation deliberately avoids Panel ReactiveHTML/custom Bokeh
+    models. The gallery itself is one pn.pane.HTML object containing a CSS grid,
+    so large active-learning batches do not create hundreds of Panel/Bokeh card
+    models. Row focus is controlled through a lightweight Select + Button rather
+    than per-card click callbacks.
     """
 
-    state_version = 4
+    state_version = 6
 
     def __init__(
         self,
         context: Any,
         *,
         thumb_size: int = 112,
-        max_items: int = 500,
+        max_items: int = 240,
         show_badges: bool = False,
-        max_in_flight: int = 8,
+        max_in_flight: int = 4,
+        batch_size: int = 24,
+        render_interval_ms: int = 180,
     ) -> None:
         self.context = context
         self.thumb_size = int(thumb_size or 112)
-        self.max_items = int(max_items or 500)
-        self.max_in_flight = max(1, int(max_in_flight or 8))
+        self.max_items = int(max_items or 240)
+        self.max_in_flight = max(1, int(max_in_flight or 4))
+        self.batch_size = max(1, int(batch_size or 24))
+        self.render_interval_ms = max(40, int(render_interval_ms or 180))
 
         self._subscriptions: list[Any] = []
         self._job_handles: list[Any] = []
@@ -63,28 +68,55 @@ class ImageSelectionGalleryPanel:
 
         self.thumb_size_widget = pn.widgets.IntSlider(
             name="Thumbnail size",
-            start=80,
+            start=72,
             end=256,
-            step=16,
+            step=8,
             value=self.thumb_size,
             sizing_mode="stretch_width",
         )
-
         self.max_items_widget = pn.widgets.IntInput(
-            name="Max items", value=self.max_items, start=1, end=5000,
-            width=110, height=50, sizing_mode="fixed",
+            name="Max items",
+            value=self.max_items,
+            start=1,
+            end=5000,
+            width=110,
+            height=50,
+            sizing_mode="fixed",
         )
         self.fit_mode = pn.widgets.Select(
-            name="Card fit", value="Crop", options=["Crop", "Contain"],
-            width=110, height=34, sizing_mode="fixed",
+            name="Card fit",
+            value="Crop",
+            options=["Crop", "Contain"],
+            width=110,
+            height=34,
+            sizing_mode="fixed",
         )
         self.show_badges = pn.widgets.Checkbox(
-            name="Show badges", value=bool(show_badges),
-            width=120, height=34, sizing_mode="fixed",
+            name="Show badges",
+            value=bool(show_badges),
+            width=120,
+            height=34,
+            sizing_mode="fixed",
         )
         self.refresh_button = pn.widgets.Button(
-            name="Refresh", button_type="default",
-            width=90, height=34, sizing_mode="fixed",
+            name="Refresh",
+            button_type="default",
+            width=90,
+            height=34,
+            sizing_mode="fixed",
+        )
+        self.focus_select = pn.widgets.Select(
+            name="Focus row",
+            value=None,
+            options=[],
+            sizing_mode="stretch_width",
+        )
+        self.focus_button = pn.widgets.Button(
+            name="Focus selected row",
+            button_type="primary",
+            width=150,
+            height=34,
+            sizing_mode="fixed",
         )
 
         self.thumb_size_widget.param.watch(self._on_load_options_changed, "value")
@@ -92,6 +124,7 @@ class ImageSelectionGalleryPanel:
         self.fit_mode.param.watch(lambda event: self._schedule_render(), "value")
         self.show_badges.param.watch(lambda event: self._schedule_render(), "value")
         self.refresh_button.on_click(lambda event: self._load_current_rows(force=True))
+        self.focus_button.on_click(lambda event: self._focus_selected_row())
 
         self._toolbar = pn.Column(
             self.thumb_size_widget,
@@ -100,40 +133,27 @@ class ImageSelectionGalleryPanel:
                 self.fit_mode,
                 self.show_badges,
                 self.refresh_button,
-                pn.Spacer(height=5,sizing_mode='fixed'),
                 sizing_mode="stretch_width",
                 height=60,
-                styles={
-                    "align-items": "center",
-                    "gap": "12px",
-                    "overflow": "visible",
-                },
+                styles={"align-items": "center", "gap": "12px", "overflow": "visible"},
+            ),
+            pn.Row(
+                self.focus_select,
+                self.focus_button,
+                sizing_mode="stretch_width",
+                styles={"align-items": "end", "gap": "10px", "overflow": "visible"},
             ),
             sizing_mode="stretch_width",
             margin=(0, 0, 8, 0),
         )
 
-        self._grid = pn.FlexBox(
+        self._grid = pn.pane.HTML(
+            self._empty_html("No active selection set."),
             sizing_mode="stretch_width",
-            styles={
-                "gap": "10px",
-                "row-gap": "10px",
-                "align-content": "flex-start",
-                "align-items": "flex-start",
-                "overflow": "visible",
-                "box-sizing": "border-box",
-                "padding-bottom": "8px",
-            },
+            margin=(0, 0, 0, 0),
         )
-        # Generous trailing space is intentional. In compact gridstack/Panel
-        # layouts, wrapped FlexBox rows can be painted lower than the scroll
-        # container's measured content height. Keeping a large spacer in the
-        # same scrollable column ensures the final row can always be scrolled
-        # fully into view instead of stopping mid-row.
-        self._bottom_spacer = pn.Spacer(height=self._scroll_slack_px(), sizing_mode="stretch_width")
         self._scroller = pn.Column(
             self._grid,
-            self._bottom_spacer,
             sizing_mode="stretch_both",
             styles={
                 "overflow-y": "auto",
@@ -141,12 +161,13 @@ class ImageSelectionGalleryPanel:
                 "height": "100%",
                 "min-height": "240px",
                 "padding": "8px",
-                "scroll-padding-bottom": f"{self._scroll_slack_px()}px",
                 "box-sizing": "border-box",
                 "min-height": "0",
                 "flex": "1 1 0",
                 "max-height": "100%",
-                "background": "#111",
+                "background": "#0f1115",
+                "border-radius": "12px",
+                "border": "1px solid rgba(255,255,255,0.08)",
             },
         )
 
@@ -178,10 +199,11 @@ class ImageSelectionGalleryPanel:
     def dispose(self) -> None:
         self._cancel_current_load()
         events = getattr(self.context, "events", None)
-        if events is not None:
+        unsubscribe = getattr(events, "unsubscribe", None)
+        if callable(unsubscribe):
             for sub in self._subscriptions:
                 try:
-                    events.unsubscribe(sub)
+                    unsubscribe(sub)
                 except Exception:
                     pass
         self._subscriptions.clear()
@@ -194,6 +216,8 @@ class ImageSelectionGalleryPanel:
             "fit_mode": self.fit_mode.value,
             "show_badges": bool(self.show_badges.value),
             "max_in_flight": int(self.max_in_flight),
+            "batch_size": int(self.batch_size),
+            "render_interval_ms": int(self.render_interval_ms),
             "dataset_id": self._dataset_id,
             "row_ids": list(self._row_ids),
             "focused_row_id": self._focused_row_id,
@@ -206,6 +230,8 @@ class ImageSelectionGalleryPanel:
             self.thumb_size_widget.value = int(state.get("thumb_size", self.thumb_size_widget.value))
             self.max_items_widget.value = int(state.get("max_items", self.max_items_widget.value))
             self.max_in_flight = max(1, int(state.get("max_in_flight", self.max_in_flight)))
+            self.batch_size = max(1, int(state.get("batch_size", self.batch_size)))
+            self.render_interval_ms = max(40, int(state.get("render_interval_ms", self.render_interval_ms)))
         except Exception:
             pass
         if state.get("fit_mode") in {"Crop", "Contain"}:
@@ -215,8 +241,10 @@ class ImageSelectionGalleryPanel:
 
     def _subscribe(self) -> None:
         events = getattr(self.context, "events", None)
-        if events is None:
+        subscribe = getattr(events, "subscribe", None)
+        if not callable(subscribe):
             return
+
         for topic, callback in (
             ("selection.set.changed", self.on_selection_set_changed),
             ("selection.set.cleared", self.on_selection_set_cleared),
@@ -226,7 +254,17 @@ class ImageSelectionGalleryPanel:
             ("dataset.mapping.updated", self.on_dataset_mapping_updated),
             ("mapping.resolved", self.on_dataset_mapping_updated),
         ):
-            self._subscriptions.append(events.subscribe(topic, callback))
+            try:
+                sub = subscribe(
+                    topic,
+                    callback,
+                    owner_id="core.image.gallery",
+                    owner_label="Image Selection Gallery",
+                    owner_kind="panel",
+                )
+            except TypeError:
+                sub = subscribe(topic, callback)
+            self._subscriptions.append(sub)
 
     def on_selection_set_changed(self, topic: str, payload: dict[str, Any]) -> None:
         self._dataset_id = str(payload.get("dataset_id") or "") or None
@@ -243,7 +281,8 @@ class ImageSelectionGalleryPanel:
         self._focused_row_id = None
         self._previews.clear()
         self._errors.clear()
-        self._grid.objects = []
+        self._refresh_focus_options()
+        self._grid.object = self._empty_html("Selection cleared.")
         self._status.alert_type = "info"
         self._status.object = "Selection cleared."
 
@@ -256,10 +295,12 @@ class ImageSelectionGalleryPanel:
         if dataset_id and self._dataset_id and str(dataset_id) != self._dataset_id:
             self._refresh_from_selection()
             return
+        self._refresh_focus_options()
         self._schedule_render()
 
     def on_selection_focus_cleared(self, topic: str, payload: dict[str, Any]) -> None:
         self._focused_row_id = None
+        self._refresh_focus_options()
         self._schedule_render()
 
     def on_dataset_changed(self, topic: str, payload: dict[str, Any]) -> None:
@@ -292,7 +333,6 @@ class ImageSelectionGalleryPanel:
     def _load_current_rows(self, *, force: bool = False) -> None:
         self.thumb_size = int(self.thumb_size_widget.value or self.thumb_size)
         self.max_items = int(self.max_items_widget.value or self.max_items)
-        self._sync_scroll_spacer()
         self._cancel_current_load()
         self._request_seq += 1
         request_seq = self._request_seq
@@ -300,7 +340,8 @@ class ImageSelectionGalleryPanel:
         if not self._dataset_id or not self._row_ids:
             self._previews.clear()
             self._errors.clear()
-            self._grid.objects = []
+            self._refresh_focus_options()
+            self._grid.object = self._empty_html("No active selection set. Select or lasso records to populate the gallery.")
             self._status.alert_type = "info"
             self._status.object = "No active selection set. Select or lasso records to populate the gallery."
             return
@@ -318,23 +359,25 @@ class ImageSelectionGalleryPanel:
             for row_id in visible_row_ids
             if (self._dataset_id, row_id, self.thumb_size) in self._preview_cache
         }
-        self._errors = {row_id: error for row_id, error in self._errors.items() if row_id in visible_set and row_id not in self._previews}
+        self._errors = {
+            row_id: error
+            for row_id, error in self._errors.items()
+            if row_id in visible_set and row_id not in self._previews
+        }
+        self._pending_row_ids = [row_id for row_id in visible_row_ids if row_id not in self._previews]
 
         omitted = max(0, len(self._row_ids) - len(visible_row_ids))
         cached = len(self._previews)
         total = len(visible_row_ids)
-        missing_row_ids = [row_id for row_id in visible_row_ids if row_id not in self._previews]
-        self._pending_row_ids = list(missing_row_ids)
-
-        self._status.alert_type = "primary" if missing_row_ids else "success"
+        self._status.alert_type = "primary" if self._pending_row_ids else "success"
         self._status.object = f"Loaded {cached}/{total} thumbnails"
-        if missing_row_ids:
-            self._status.object += f"; loading {len(missing_row_ids)}"
+        if self._pending_row_ids:
+            self._status.object += f"; loading {len(self._pending_row_ids)}"
         if omitted:
             self._status.object += f"; {omitted} omitted"
         self._status.object += "."
 
-        self._sync_scroll_spacer()
+        self._refresh_focus_options()
         self._render_grid()
         self._launch_more(request_seq)
 
@@ -347,70 +390,179 @@ class ImageSelectionGalleryPanel:
 
         jobs = getattr(self.context, "jobs", None)
         resolver = get_image_resolver(self.context)
+        batch_loader = getattr(resolver, "load_previews_for_rows", None)
 
         while self._pending_row_ids and len(self._in_flight) < self.max_in_flight:
-            row_id = self._pending_row_ids.pop(0)
-            if row_id in self._previews:
+            batch: list[str] = []
+            while self._pending_row_ids and len(batch) < self.batch_size:
+                row_id = self._pending_row_ids.pop(0)
+                if row_id in self._previews:
+                    continue
+                batch.append(row_id)
+
+            if not batch:
                 continue
-            self._in_flight.add(row_id)
+
+            for row_id in batch:
+                self._in_flight.add(row_id)
 
             if jobs is None:
                 try:
-                    preview = resolver.load_preview_for_row(
-                        self._dataset_id,
-                        row_id,
+                    result = self._load_batch_sync(resolver, batch, batch_loader=batch_loader)
+                    self._on_preview_batch_loaded(batch, result, request_seq)
+                except Exception as exc:
+                    self._on_preview_batch_error(batch, exc, request_seq)
+                continue
+
+            if callable(batch_loader):
+                first_row = batch[0] if batch else "empty"
+                handle = None
+
+                def done(result: Any, batch=batch, handle_getter=lambda: handle) -> None:
+                    current_handle = handle_getter()
+                    if current_handle is not None:
+                        self._discard_job_handle(current_handle)
+                    self._on_preview_batch_loaded(batch, result, request_seq)
+
+                def failed(exc: BaseException, batch=batch, handle_getter=lambda: handle) -> None:
+                    current_handle = handle_getter()
+                    if current_handle is not None:
+                        self._discard_job_handle(current_handle)
+                    self._on_preview_batch_error(batch, exc, request_seq)
+
+                handle = jobs.submit(
+                    batch_loader,
+                    title=f"Load {len(batch)} image thumbnails",
+                    key=(
+                        f"core.image.thumbs:{self._dataset_id}:{self.thumb_size}:"
+                        f"{request_seq}:{first_row}:{len(batch)}"
+                    ),
+                    on_done=done,
+                    on_error=failed,
+                    dataset_id=self._dataset_id,
+                    row_ids=batch,
+                    role="thumbnail",
+                    max_size=self.thumb_size,
+                    prefer_thumbnail=True,
+                )
+                self._job_handles.append(handle)
+            else:
+                for row_id in list(batch):
+                    handle = None
+
+                    def done(preview: ImagePreview, row_id=row_id, handle_getter=lambda: handle) -> None:
+                        current_handle = handle_getter()
+                        if current_handle is not None:
+                            self._discard_job_handle(current_handle)
+                        self._on_preview_batch_loaded([row_id], {"previews": {row_id: preview}, "errors": {}}, request_seq)
+
+                    def failed(exc: BaseException, row_id=row_id, handle_getter=lambda: handle) -> None:
+                        current_handle = handle_getter()
+                        if current_handle is not None:
+                            self._discard_job_handle(current_handle)
+                        self._on_preview_batch_error([row_id], exc, request_seq)
+
+                    handle = jobs.submit(
+                        resolver.load_preview_for_row,
+                        title="Load image thumbnail",
+                        key=f"core.image.thumb:{self._dataset_id}:{row_id}:{self.thumb_size}:{request_seq}",
+                        on_done=done,
+                        on_error=failed,
+                        dataset_id=self._dataset_id,
+                        row_id=row_id,
                         role="thumbnail",
                         max_size=self.thumb_size,
                         prefer_thumbnail=True,
                     )
-                    self._on_preview_loaded(row_id, preview, request_seq)
-                except Exception as exc:
-                    self._on_preview_error(row_id, exc, request_seq)
-                continue
+                    self._job_handles.append(handle)
 
-            handle = jobs.submit(
-                resolver.load_preview_for_row,
-                title="Load image thumbnail",
-                key=f"core.image.thumb:{self._dataset_id}:{row_id}:{self.thumb_size}:{request_seq}",
-                on_done=lambda preview, row_id=row_id: self._on_preview_loaded(row_id, preview, request_seq),
-                on_error=lambda exc, row_id=row_id: self._on_preview_error(row_id, exc, request_seq),
-                dataset_id=self._dataset_id,
-                row_id=row_id,
+    def _load_batch_sync(self, resolver: Any, batch: list[str], *, batch_loader: Any) -> dict[str, Any]:
+        if callable(batch_loader):
+            return batch_loader(
+                self._dataset_id,
+                batch,
                 role="thumbnail",
                 max_size=self.thumb_size,
                 prefer_thumbnail=True,
             )
-            self._job_handles.append(handle)
 
-    def _on_preview_loaded(self, row_id: str, preview: ImagePreview, request_seq: int) -> None:
-        row_id = str(row_id)
+        previews: dict[str, ImagePreview] = {}
+        errors: dict[str, str] = {}
+        for row_id in batch:
+            try:
+                previews[row_id] = resolver.load_preview_for_row(
+                    self._dataset_id,
+                    row_id,
+                    role="thumbnail",
+                    max_size=self.thumb_size,
+                    prefer_thumbnail=True,
+                )
+            except Exception as exc:
+                errors[row_id] = str(exc)
+        return {"previews": previews, "errors": errors}
+
+    def _on_preview_batch_loaded(self, row_ids: list[str], result: Any, request_seq: int) -> None:
         if request_seq != self._request_seq:
             return
-        self._in_flight.discard(row_id)
-        self._previews[row_id] = preview
-        if self._dataset_id:
-            self._preview_cache[(self._dataset_id, row_id, self.thumb_size)] = preview
-        self._errors.pop(row_id, None)
+
+        row_ids = [str(row_id) for row_id in row_ids]
+        for row_id in row_ids:
+            self._in_flight.discard(row_id)
+
+        payload = result if isinstance(result, Mapping) else {}
+        previews = payload.get("previews") if isinstance(payload.get("previews"), Mapping) else {}
+        errors = payload.get("errors") if isinstance(payload.get("errors"), Mapping) else {}
+
+        for row_id, preview in previews.items():
+            row_id = str(row_id)
+            if preview is None:
+                continue
+            self._previews[row_id] = preview
+            if self._dataset_id:
+                self._preview_cache[(self._dataset_id, row_id, self.thumb_size)] = preview
+            self._errors.pop(row_id, None)
+
+        for row_id, error in errors.items():
+            row_id = str(row_id)
+            if row_id not in self._previews:
+                self._errors[row_id] = str(error)
+
+        for row_id in row_ids:
+            if row_id not in self._previews and row_id not in self._errors:
+                self._errors[row_id] = "No preview returned."
+
         self._update_progress_status()
         self._schedule_render()
         self._launch_more(request_seq)
 
-    def _on_preview_error(self, row_id: str, exc: BaseException, request_seq: int) -> None:
-        row_id = str(row_id)
+    def _on_preview_batch_error(self, row_ids: list[str], exc: BaseException, request_seq: int) -> None:
         if request_seq != self._request_seq:
             return
-        self._in_flight.discard(row_id)
-        self._errors[row_id] = str(exc)
+
+        message = str(exc)
+        for row_id in row_ids:
+            row_id = str(row_id)
+            self._in_flight.discard(row_id)
+            if row_id not in self._previews:
+                self._errors[row_id] = message
+
         self._update_progress_status()
         self._schedule_render()
         self._launch_more(request_seq)
+
+    def _discard_job_handle(self, handle: Any) -> None:
+        try:
+            self._job_handles.remove(handle)
+        except ValueError:
+            pass
 
     def _update_progress_status(self) -> None:
         total = len(self._visible_row_ids())
         if total <= 0:
             return
-        loaded = len([row_id for row_id in self._visible_row_ids() if row_id in self._previews])
-        failed = len([row_id for row_id in self._visible_row_ids() if row_id in self._errors])
+        visible = self._visible_row_ids()
+        loaded = len([row_id for row_id in visible if row_id in self._previews])
+        failed = len([row_id for row_id in visible if row_id in self._errors])
         remaining = max(0, total - loaded - failed)
         omitted = max(0, len(self._row_ids) - total)
 
@@ -428,99 +580,207 @@ class ImageSelectionGalleryPanel:
 
     def _render_grid(self) -> None:
         if not self._row_ids:
-            self._grid.objects = []
+            self._grid.object = self._empty_html("No active selection set.")
             return
-        self._sync_scroll_spacer()
-        self._grid.objects = [self._card_for_row(row_id) for row_id in self._visible_row_ids()]
 
-    def _card_for_row(self, row_id: str) -> pn.Column:
+        visible = self._visible_row_ids()
+        css = self._css()
+        cards = "".join(self._card_html(row_id) for row_id in visible)
+        omitted = max(0, len(self._row_ids) - len(visible))
+        omitted_html = ""
+        if omitted:
+            omitted_html = (
+                f"<div class='aical-gallery-omitted'>"
+                f"Showing {len(visible):,} of {len(self._row_ids):,} selected rows; "
+                f"{omitted:,} omitted by Max items."
+                f"</div>"
+            )
+        self._grid.object = f"{css}<div class='aical-gallery-grid'>{cards}</div>{omitted_html}"
+
+    def _css(self) -> str:
+        size = max(48, int(self.thumb_size))
+        fit = "cover" if self.fit_mode.value == "Crop" else "contain"
+        return f"""
+<style>
+.aical-gallery-grid {{
+  --thumb-size: {size}px;
+  --image-fit: {fit};
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(calc(var(--thumb-size) + 30px), 1fr));
+  gap: 14px;
+  align-items: start;
+  padding: 4px 4px 18px 4px;
+  box-sizing: border-box;
+  width: 100%;
+}}
+.aical-gallery-card {{
+  position: relative;
+  min-width: 0;
+  border: 1px solid rgba(255,255,255,0.10);
+  border-radius: 14px;
+  background: linear-gradient(180deg, rgba(255,255,255,0.075), rgba(255,255,255,0.035));
+  box-shadow: 0 12px 30px rgba(0,0,0,0.24);
+  overflow: hidden;
+}}
+.aical-gallery-card.is-focused {{
+  border-color: rgba(86,166,255,0.95);
+  box-shadow: 0 0 0 2px rgba(86,166,255,0.42), 0 18px 34px rgba(0,0,0,0.32);
+}}
+.aical-gallery-card.is-error {{
+  border-color: rgba(255,107,107,0.75);
+}}
+.aical-gallery-image-frame {{
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  background:
+    radial-gradient(circle at 30% 20%, rgba(255,255,255,0.13), transparent 30%),
+    linear-gradient(135deg, #1f2631, #11141b 55%, #080a0f);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}}
+.aical-gallery-image-frame img {{
+  width: 100%;
+  height: 100%;
+  object-fit: var(--image-fit);
+  display: block;
+}}
+.aical-gallery-placeholder {{
+  width: 46%;
+  height: 46%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, rgba(255,255,255,0.08), rgba(255,255,255,0.20), rgba(255,255,255,0.08));
+  animation: aical-gallery-pulse 1.2s ease-in-out infinite;
+}}
+@keyframes aical-gallery-pulse {{
+  0%, 100% {{ opacity: 0.45; transform: scale(0.96); }}
+  50% {{ opacity: 0.95; transform: scale(1.03); }}
+}}
+.aical-gallery-error {{
+  color: #ffb4b4;
+  font-size: 12px;
+  line-height: 1.3;
+  text-align: center;
+  padding: 12px;
+  word-break: break-word;
+}}
+.aical-gallery-meta {{
+  padding: 9px 10px 10px 10px;
+  box-sizing: border-box;
+}}
+.aical-gallery-row-id {{
+  color: rgba(255,255,255,0.88);
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 1.25;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}}
+.aical-gallery-subtitle {{
+  color: rgba(255,255,255,0.50);
+  font-size: 10.5px;
+  line-height: 1.25;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-top: 3px;
+}}
+.aical-gallery-badges {{
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 8px;
+  max-height: 48px;
+  overflow: hidden;
+}}
+.aical-gallery-badge {{
+  max-width: 100%;
+  border-radius: 999px;
+  padding: 2px 7px;
+  background: rgba(255,255,255,0.10);
+  color: rgba(255,255,255,0.78);
+  font-size: 10px;
+  line-height: 1.35;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}}
+.aical-gallery-focus-pill {{
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  border-radius: 999px;
+  padding: 4px 8px;
+  font-size: 10px;
+  font-weight: 700;
+  color: white;
+  background: rgba(38,132,255,0.92);
+  box-shadow: 0 4px 16px rgba(0,0,0,0.24);
+}}
+.aical-gallery-omitted {{
+  margin: 4px 4px 18px 4px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(255,255,255,0.06);
+  color: rgba(255,255,255,0.66);
+  font-size: 12px;
+}}
+</style>
+"""
+
+    def _empty_html(self, message: str) -> str:
+        safe_message = html.escape(str(message))
+        return f"""
+{self._css()}
+<div class='aical-gallery-omitted'>{safe_message}</div>
+"""
+
+    def _card_html(self, row_id: str) -> str:
         focused = self._focused_row_id is not None and row_id == str(self._focused_row_id)
         preview = self._previews.get(row_id)
         error = self._errors.get(row_id)
-        size = int(self.thumb_size)
-        show_badges = bool(self.show_badges.value)
-        label_height = 24
-        badge_height = 44 if show_badges else 0
-        body_height = size + label_height + badge_height
-        button_height = 30
-        inner_width = size
-        card_padding = 6
-        border_allowance = 6
-        card_width = inner_width + (2 * card_padding) + border_allowance
-        card_height = body_height + button_height + 22
-        object_fit = "cover" if self.fit_mode.value == "Crop" else "contain"
-        safe_row = html.escape(row_id)
-        border = self._border_for_row(preview, error, focused)
+        safe_row = html.escape(str(row_id), quote=True)
+        card_classes = ["aical-gallery-card"]
+        if focused:
+            card_classes.append("is-focused")
+        if error:
+            card_classes.append("is-error")
+
+        focus_html = "<div class='aical-gallery-focus-pill'>Focused</div>" if focused else ""
+        subtitle = "Loading thumbnail…"
+        image_html = "<div class='aical-gallery-placeholder'></div>"
+        badges = ""
+        title = safe_row
 
         if preview is not None:
             metadata = preview.asset.metadata or {}
-            badges = self._badges_html(metadata) if show_badges else ""
             title = html.escape(self._title_for_preview(preview), quote=True)
-            image_html = f"""
-            <div title="{title}" style="width:{size}px; height:{body_height}px; box-sizing:border-box; overflow:hidden;">
-              <div style="width:{size}px; height:{size}px; background:#000; display:flex; align-items:center; justify-content:center; overflow:hidden;">
-                <img src="{preview.data_uri}" alt="{safe_row}" style="width:100%; height:100%; object-fit:{object_fit}; display:block;" />
-              </div>
-              <div style="height:{label_height}px; line-height:{label_height}px; padding:0 2px; color:#ddd; font-size:11px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; box-sizing:border-box;" title="{safe_row}">{safe_row}</div>
-              {badges}
-            </div>
-            """
+            src = html.escape(preview.data_uri, quote=True)
+            alt = html.escape(str(preview.asset.row_id), quote=True)
+            subtitle = self._subtitle_for_metadata(metadata)
+            image_html = f"<img src='{src}' alt='{alt}' loading='lazy' decoding='async'>"
+            badges = self._badges_html(metadata) if bool(self.show_badges.value) else ""
         elif error:
-            safe_error = html.escape(error, quote=True)
-            image_html = f"""
-            <div title="{safe_error}" style="width:{size}px; height:{body_height}px; background:#220; color:#f99; display:flex; align-items:center; justify-content:center; text-align:center; padding:8px; box-sizing:border-box; font-size:11px; overflow:hidden;">
-              Failed<br>{safe_row}
-            </div>
-            """
-        else:
-            image_html = f"""
-            <div style="width:{size}px; height:{body_height}px; background:#222; color:#aaa; display:flex; align-items:center; justify-content:center; text-align:center; padding:8px; box-sizing:border-box; font-size:11px; overflow:hidden;">
-              Loading<br>{safe_row}
-            </div>
-            """
+            subtitle = "Preview failed"
+            safe_error = html.escape(str(error), quote=True)
+            title = f"{safe_row}\n{safe_error}"
+            image_html = f"<div class='aical-gallery-error'>Failed<br>{safe_row}</div>"
 
-        body = pn.pane.HTML(
-            image_html,
-            sizing_mode="fixed",
-            width=size,
-            height=body_height,
-            margin=(0, 0, 6, 0),
-        )
+        return f"""
+<div class='{' '.join(card_classes)}' title='{title}'>
+  {focus_html}
+  <div class='aical-gallery-image-frame'>{image_html}</div>
+  <div class='aical-gallery-meta'>
+    <div class='aical-gallery-row-id'>{safe_row}</div>
+    <div class='aical-gallery-subtitle'>{html.escape(subtitle)}</div>
+    {badges}
+  </div>
+</div>
+"""
 
-        focus_button = pn.widgets.Button(
-            name="Focused" if focused else "Focus",
-            button_type="primary" if focused else "default",
-            width=size,
-            height=button_height,
-            margin=(0, 0, 0, 0),
-        )
-        focus_button.on_click(lambda event, row_id=row_id: self._focus_row(row_id))
-
-        return pn.Column(
-            body,
-            focus_button,
-            sizing_mode="fixed",
-            width=card_width,
-            height=card_height,
-            margin=(0, 0, 0, 0),
-            styles={
-                "border": border,
-                "border-radius": "6px",
-                "padding": f"{card_padding}px",
-                "background": "#181818",
-                "box-sizing": "border-box",
-                "overflow": "hidden",
-                "flex": f"0 0 {card_width}px",
-                "width": f"{card_width}px",
-                "min-width": f"{card_width}px",
-                "max-width": f"{card_width}px",
-                "height": f"{card_height}px",
-                "min-height": f"{card_height}px",
-                "max-height": f"{card_height}px",
-            },
-        )
-
-    def _badges_html(self, metadata: dict[str, Any]) -> str:
+    def _badges_html(self, metadata: Mapping[str, Any]) -> str:
         parts: list[str] = []
         for label, key in (
             ("Label", "target_label"),
@@ -532,27 +792,18 @@ class ImageSelectionGalleryPanel:
             value = str(metadata.get(key) or "").strip()
             if value:
                 parts.append(
-                    f"<span style='display:block; max-width:100%; margin:1px 0; padding:1px 4px; border-radius:4px; background:#333; color:#ddd; font-size:10px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; box-sizing:border-box;'>{html.escape(label)}: {html.escape(value)}</span>"
+                    "<span class='aical-gallery-badge'>"
+                    f"{html.escape(label)}: {html.escape(value)}"
+                    "</span>"
                 )
-        return f"<div style='height:44px; overflow:hidden; line-height:1.2;'>{''.join(parts)}</div>" if parts else ""
+        return f"<div class='aical-gallery-badges'>{''.join(parts)}</div>" if parts else ""
 
-    def _border_for_row(
-        self,
-        preview: Optional[ImagePreview],
-        error: Optional[str],
-        focused: bool,
-    ) -> str:
-        if focused:
-            return "3px solid #4da3ff"
-        if error:
-            return "2px solid #bb4444"
-        if preview is not None:
-            state = str((preview.asset.metadata or {}).get("label_state") or "").lower()
-            if state in {"unsure", "uncertain"}:
-                return "2px dashed #d1a21b"
-            if state in {"labelled", "labeled", "reviewed"}:
-                return "2px solid #4a8f4a"
-        return "1px solid #555"
+    def _subtitle_for_metadata(self, metadata: Mapping[str, Any]) -> str:
+        for key in ("target_label", "prediction", "label_state", "filename"):
+            value = str(metadata.get(key) or "").strip()
+            if value:
+                return value
+        return "Loaded"
 
     def _title_for_preview(self, preview: ImagePreview) -> str:
         metadata = preview.asset.metadata or {}
@@ -568,6 +819,25 @@ class ImageSelectionGalleryPanel:
             if value:
                 pieces.append(f"{label}: {value}")
         return "\n".join(pieces)
+
+    def _refresh_focus_options(self) -> None:
+        visible = self._visible_row_ids() if self._row_ids else []
+        current = self._focused_row_id if self._focused_row_id in visible else None
+        try:
+            self.focus_select.options = visible
+            if current is not None:
+                self.focus_select.value = current
+            elif visible and self.focus_select.value not in visible:
+                self.focus_select.value = visible[0]
+            elif not visible:
+                self.focus_select.value = None
+        except Exception:
+            pass
+
+    def _focus_selected_row(self) -> None:
+        row_id = self.focus_select.value
+        if row_id is not None:
+            self._focus_row(str(row_id))
 
     def _focus_row(self, row_id: str) -> None:
         if not self._dataset_id:
@@ -585,25 +855,8 @@ class ImageSelectionGalleryPanel:
             except Exception:
                 pass
         self._focused_row_id = str(row_id)
+        self._refresh_focus_options()
         self._schedule_render()
-
-    def _scroll_slack_px(self) -> int:
-        # Needs to be substantially larger than one card row because Panel
-        # gridstack containers can under-measure wrapped FlexBox content. The
-        # slack is only empty scroll room after the final card, not visual space
-        # between rows.
-        return max(720, int(self.thumb_size) * 5)
-
-    def _sync_scroll_spacer(self) -> None:
-        slack = self._scroll_slack_px()
-        try:
-            self._bottom_spacer.height = slack
-        except Exception:
-            pass
-        try:
-            self._scroller.styles["scroll-padding-bottom"] = f"{slack}px"
-        except Exception:
-            pass
 
     def _cancel_current_load(self) -> None:
         self._request_seq += 1
@@ -619,7 +872,6 @@ class ImageSelectionGalleryPanel:
     def _on_load_options_changed(self, event: Any) -> None:
         self.thumb_size = int(self.thumb_size_widget.value or self.thumb_size)
         self.max_items = int(self.max_items_widget.value or self.max_items)
-        self._sync_scroll_spacer()
         self._cancel_current_load()
         self._status.alert_type = "primary"
         self._status.object = "Updating gallery…"
@@ -645,7 +897,7 @@ class ImageSelectionGalleryPanel:
             self._render_scheduled = False
             self._render_grid()
 
-        self._schedule(run, delay_ms=40)
+        self._schedule(run, delay_ms=int(self.render_interval_ms))
 
     def _get_current_focus(self) -> Optional[dict[str, Any]]:
         selection = getattr(self.context, "selection", None)

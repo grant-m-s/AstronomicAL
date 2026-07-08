@@ -807,10 +807,24 @@ def _safe_float(value: Any) -> Optional[float]:
 def _check_cancelled(cancel_token: Any) -> None:
     if cancel_token is None:
         return
+
     for attr in ("raise_if_cancelled", "throw_if_cancelled", "check_cancelled"):
         method = getattr(cancel_token, attr, None)
         if callable(method):
             method()
             return
-    if getattr(cancel_token, "cancelled", False) or getattr(cancel_token, "is_cancelled", False):
-        raise RuntimeError("Operation cancelled.")
+
+    for attr in ("cancelled", "is_cancelled"):
+        value = getattr(cancel_token, attr, None)
+        if value is None:
+            continue
+
+        try:
+            cancelled = bool(value() if callable(value) else value)
+        except TypeError:
+            cancelled = bool(value)
+        except Exception:
+            cancelled = False
+
+        if cancelled:
+            raise RuntimeError("Operation cancelled.")

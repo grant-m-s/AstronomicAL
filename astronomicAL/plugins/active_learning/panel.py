@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 import html
-import threading
 
 from astronomicAL.platform.plugins.specs import ActionRequest
 
@@ -36,15 +35,7 @@ class ActiveLearningPanel:
         "dataset.removed",
         "dataset.active.changed",
         "dataset.columns.changed",
-        "dataset.mapping.changed",
-        "datasets.registered",
-        "datasets.updated",
-        "datasets.removed",
-        "datasets.active.changed",
-        "datasets.columns.changed",
-        "datasets.mapping.changed",
-        "dataset.*",
-        "datasets.*",
+        "dataset.mapping.updated",
     )
     RECIPE_REFRESH_TOPICS = (
         "plugin.enabled",
@@ -100,6 +91,8 @@ class ActiveLearningPanel:
         self._tab_index: Dict[str, int] = {}
         self._widgets: Dict[str, Any] = {}
         self._subscriptions: List[Any] = []
+        self._job_handles: List[Any] = []
+        self._disposed = False
         self._performance_event_rows: List[Dict[str, Any]] = []
         self._pending_refresh = False
         self._doc = None
@@ -148,13 +141,30 @@ class ActiveLearningPanel:
         self.recipe_profile_id = str(state.get("recipe_profile_id") or state.get("recipe_id") or "")
         self.recipe_id = str(state.get("recipe_id") or "")
 
-    def close(self) -> None:
-        for subscription in self._subscriptions:
-            if callable(subscription):
+    def dispose(self) -> None:
+        self._disposed = True
+
+        for handle in list(self._job_handles):
+            cancel = getattr(handle, "cancel", None)
+            if callable(cancel):
                 try:
-                    subscription()
+                    cancel()
                 except Exception:
                     pass
+        self._job_handles.clear()
+
+        events = getattr(self.context, "events", None)
+        unsubscribe = getattr(events, "unsubscribe", None)
+
+        for subscription in list(self._subscriptions):
+            try:
+                if callable(unsubscribe):
+                    unsubscribe(subscription)
+                elif callable(subscription):
+                    subscription()
+            except Exception:
+                pass
+
         self._subscriptions.clear()
 
     def _build_view(self):
@@ -277,9 +287,19 @@ class ActiveLearningPanel:
         )
         query_tab = self._scrollable_tab(
             "### Query",
-            self._widgets["session_id"],
-            self._widgets["model_id"],
-            self._widgets["predictions_id"],
+            pn.Accordion(
+                (
+                    "Advanced artifact ids",
+                    pn.Column(
+                        self._widgets["session_id"],
+                        self._widgets["model_id"],
+                        self._widgets["predictions_id"],
+                        sizing_mode="stretch_width",
+                    ),
+                ),
+                active=[],
+                sizing_mode="stretch_width",
+            ),
             self._compact_row(self._widgets["strategy"], refresh_strategy_btn),
             self._widgets["query_strategy_info"],
             self._widgets["query_k"],
@@ -838,42 +858,129 @@ class ActiveLearningPanel:
         finally:
             self._set_button_busy("start_btn", False)
 
+    def _track_job_handle(self, handle: Any) -> None:
+        if handle is None:
+            return
+
+        cancel = getattr(handle, "cancel", None)
+        if callable(cancel) and handle not in self._job_handles:
+            self._job_handles.append(handle)
+
+    def _discard_job_handle(self, handle: Any) -> None:
+        try:
+            self._job_handles.remove(handle)
+        except ValueError:
+            pass
+
+    def _run_plugin_action(
+        self,
+        action_id: str,
+        request: ActionRequest,
+        *,
+        on_done: Any,
+        on_error: Any,
+    ) -> Any:
+        plugins = getattr(self.context, "plugins", None)
+        run_action = getattr(plugins, "run_action", None)
+
+        if not callable(run_action):
+            raise RuntimeError(
+                "Plugin manager is not available on context; active-learning "
+                "panel actions must run through context.plugins.run_action()."
+            )
+
+        handle = run_action(
+            action_id,
+            self.context,
+            request,
+            on_done=on_done,
+            on_error=on_error,
+        )
+        self._track_job_handle(handle)
+        return handle
+
     def _run_query(self) -> None:
         self._set_status("Creating query batch from the selected predictions and strategy...")
         self._set_button_busy("query_btn", True)
+
         try:
-            session_id = self._widgets["session_id"].value.strip()
-            predictions_id = self._widgets["predictions_id"].value.strip()
-            result = actions.query_batch_action(
-                self.context,
-                ActionRequest(
-                    dataset_id=None,
-                    row_ids=None,
-                    columns=[],
-                    params={
-                        "session_artifact_id": session_id,
-                        "predictions_artifact_id": predictions_id,
-                        "strategy_id": self._widgets["strategy"].value,
-                        "k": self._widgets["query_k"].value,
-                        "seed": self._widgets["seed"].value,
-                        "make_selection": True,
-                    },
-                    artifact_id=predictions_id or None,
-                    origin="core.active_learning.panel",
-                ),
+            session_id = str(self._widget_value("session_id", "") or "").strip()
+            predictions_id = str(self._widget_value("predictions_id", "") or "").strip()
+
+            if not session_id:
+                raise ValueError("Start or select an active-learning session before creating a query batch.")
+            if not predictions_id:
+                raise ValueError("Train/predict first, or enter an ml.predictions artifact id.")
+
+            request = ActionRequest(
+                dataset_id=None,
+                row_ids=None,
+                columns=[],
+                params={
+                    "session_artifact_id": session_id,
+                    "predictions_artifact_id": predictions_id,
+                    "strategy_id": self._widget_value("strategy", "least_confidence"),
+                    "k": int(self._widget_value("query_k", 200) or 200),
+                    "seed": int(self._widget_value("seed", 42) or 42),
+                    "make_selection": True,
+                },
+                artifact_id=predictions_id or None,
+                origin="core.active_learning.panel",
             )
-            self._set_session_id(result.get("session_artifact_id"))
-            self._refresh_session_summary(status=False)
-            self._refresh_performance(status=False)
-            row_ids = [str(row_id) for row_id in (result.get("row_ids") or []) if str(row_id)]
-            if row_ids:
-                self._set_review_row(row_ids[0])
-            self._refresh_xy_plot(status=False)
-            self._set_status(self._query_feedback_text(result))
         except Exception as exc:
-            self._set_status(f"Error: {exc}")
-        finally:
             self._set_button_busy("query_btn", False)
+            self._set_status(f"Error: {exc}")
+            return
+
+        handle = None
+
+        def done(result: Any) -> None:
+            if handle is not None:
+                self._discard_job_handle(handle)
+
+            payload = dict(result or {}) if isinstance(result, Mapping) else {}
+
+            def update() -> None:
+                if self._disposed:
+                    return
+
+                self._set_button_busy("query_btn", False)
+                self._set_session_id(payload.get("session_artifact_id"))
+                self._refresh_session_summary(status=False)
+                self._refresh_performance(status=False)
+
+                row_ids = [str(row_id) for row_id in (payload.get("row_ids") or []) if str(row_id)]
+                if row_ids:
+                    self._set_review_row(row_ids[0])
+
+                self._refresh_xy_plot(status=False)
+                self._set_status(self._query_feedback_text(payload))
+
+            self._next_tick(update)
+
+        def failed(exc: BaseException) -> None:
+            if handle is not None:
+                self._discard_job_handle(handle)
+
+            def update() -> None:
+                if self._disposed:
+                    return
+
+                self._set_button_busy("query_btn", False)
+                self._set_status(f"Error: {exc}")
+
+            self._next_tick(update)
+
+        try:
+            handle = self._run_plugin_action(
+                "core.active_learning.query_batch",
+                request,
+                on_done=done,
+                on_error=failed,
+            )
+        except Exception as exc:
+            self._set_button_busy("query_btn", False)
+            self._set_status(f"Error: {exc}")
 
     def _current_label_value(self) -> str:
         if self.task_type == al_state.TASK_REGRESSION:
@@ -962,6 +1069,7 @@ class ActiveLearningPanel:
     def _run_score_pool(self) -> None:
         session_id = str(self._widget_value("session_id", "") or "").strip()
         predictions_id = str(self._widget_value("predictions_id", "") or "").strip()
+
         if not session_id:
             self._set_status("Error: Start or select an active-learning session before calculating query-strategy scores.")
             return
@@ -969,47 +1077,68 @@ class ActiveLearningPanel:
             self._set_status("Error: Select pool predictions before calculating query-strategy scores.")
             return
 
-        strategies = list(self._strategy_options().values())
+        strategies = [str(value) for value in self._strategy_options().values() if str(value)]
         self._set_status(
             f"Calculating query-strategy scores for {len(strategies)} strategies over the eligible pool. "
             "This uses the current prediction artifact; it does not retrain the model."
         )
         self._set_button_busy("score_all_btn", True)
 
-        def work() -> None:
-            try:
-                result = actions.score_pool_action(
-                    self.context,
-                    ActionRequest(
-                        dataset_id=None,
-                        row_ids=None,
-                        columns=[],
-                        params={
-                            "session_artifact_id": session_id,
-                            "predictions_artifact_id": predictions_id,
-                            "strategy_ids": strategies,
-                            "seed": self._widgets["seed"].value,
-                        },
-                        artifact_id=predictions_id or None,
-                        origin="core.active_learning.panel",
-                    ),
-                )
+        request = ActionRequest(
+            dataset_id=None,
+            row_ids=None,
+            columns=[],
+            params={
+                "session_artifact_id": session_id,
+                "predictions_artifact_id": predictions_id,
+                "strategy_ids": strategies,
+                "seed": int(self._widget_value("seed", 42) or 42),
+            },
+            artifact_id=predictions_id or None,
+            origin="core.active_learning.panel",
+        )
 
-                def done() -> None:
-                    self._set_button_busy("score_all_btn", False)
-                    self._apply_score_pool_result(result)
+        handle = None
 
-                self._next_tick(done)
-            except Exception as exc:
-                def failed(exc: Exception = exc) -> None:
-                    self._set_button_busy("score_all_btn", False)
-                    self._set_status(f"Strategy-score calculation failed: {exc}")
-                    self._refresh_session_summary(status=False)
+        def done(result: Any) -> None:
+            if handle is not None:
+                self._discard_job_handle(handle)
 
-                self._next_tick(failed)
+            payload = dict(result or {}) if isinstance(result, Mapping) else {}
 
-        thread = threading.Thread(target=work, name="ActiveLearningScorePool", daemon=True)
-        thread.start()
+            def update() -> None:
+                if self._disposed:
+                    return
+
+                self._set_button_busy("score_all_btn", False)
+                self._apply_score_pool_result(payload)
+
+            self._next_tick(update)
+
+        def failed(exc: BaseException) -> None:
+            if handle is not None:
+                self._discard_job_handle(handle)
+
+            def update() -> None:
+                if self._disposed:
+                    return
+
+                self._set_button_busy("score_all_btn", False)
+                self._set_status(f"Strategy-score calculation failed: {exc}")
+                self._refresh_session_summary(status=False)
+
+            self._next_tick(update)
+
+        try:
+            handle = self._run_plugin_action(
+                "core.active_learning.score_pool",
+                request,
+                on_done=done,
+                on_error=failed,
+            )
+        except Exception as exc:
+            self._set_button_busy("score_all_btn", False)
+            self._set_status(f"Strategy-score calculation failed: {exc}")
 
     def _apply_score_pool_result(self, result: Mapping[str, Any]) -> None:
         self._set_session_id(result.get("session_artifact_id"))
@@ -1184,64 +1313,93 @@ class ActiveLearningPanel:
         return first_sentence[:120] + ("…" if len(first_sentence) > 120 else "")
 
     def _run_train(self) -> None:
-        recipe_profile_id = str(self._widgets["recipe_profile_id"].value or "").strip()
-        if not recipe_profile_id:
-            self._set_status("Error: Select a saved core.ml recipe profile before training.")
-            return
-        session_id = str(self._widgets["session_id"].value or "").strip()
-        if not session_id:
-            self._set_status("Error: Start or select an active-learning session before training.")
-            return
-
-        seed_value = self._widgets["seed"].value
-        self.recipe_profile_id = recipe_profile_id
-        self.recipe_id = ""
-        self._set_status(
-            f"Training active-learning round with recipe profile `{recipe_profile_id}`. This may take a while; the train button will stay busy until the workflow finishes."
-        )
         self._set_button_busy("train_btn", True)
+        self._set_status("Training from active-learning session...")
 
-        def work() -> None:
-            try:
-                result = actions.train_from_session_action(
-                    self.context,
-                    ActionRequest(
-                        dataset_id=None,
-                        row_ids=None,
-                        columns=[],
-                        params={
-                            "session_artifact_id": session_id,
-                            "recipe_profile_id": recipe_profile_id,
-                            "target_column": self.label_column,
-                            "task_type": self.task_type,
-                            "problem_type": self.task_type,
-                            "label_profile": dict(self.label_profile or {}),
-                            "seed": seed_value,
-                            "auto_predict": True,
-                            "auto_query": False,
-                            "make_selection": False,
-                        },
-                        artifact_id=None,
-                        origin="core.active_learning.panel",
-                    ),
-                )
+        try:
+            session_id = str(self._widget_value("session_id", "") or "").strip()
+            recipe_profile_id = str(self._widget_value("recipe_profile_id", "") or "").strip()
+            label_column = str(self._widget_value("label_column", self.label_column) or "").strip()
 
-                def done() -> None:
-                    self._set_button_busy("train_btn", False)
-                    self._apply_training_result(result)
+            if not session_id:
+                raise ValueError("Start or select an active-learning session before training.")
+            if not recipe_profile_id:
+                raise ValueError("Select a saved core.ml recipe profile before training.")
+            if not label_column:
+                raise ValueError("Select a label column before training.")
 
-                self._next_tick(done)
-            except Exception as exc:
-                def failed(exc: Exception = exc) -> None:
-                    self._set_button_busy("train_btn", False)
-                    self._set_status(f"Training failed: {exc}")
-                    self._refresh_session_summary(status=False)
-                    self._refresh_performance(status=False)
+            seed_value = int(self._widget_value("seed", 42) or 42)
 
-                self._next_tick(failed)
+            self.recipe_profile_id = recipe_profile_id
+            self.recipe_id = ""
 
-        thread = threading.Thread(target=work, name="ActiveLearningTraining", daemon=True)
-        thread.start()
+            request = ActionRequest(
+                dataset_id=None,
+                row_ids=None,
+                columns=[],
+                params={
+                    "session_artifact_id": session_id,
+                    "recipe_profile_id": recipe_profile_id,
+                    "target_column": label_column,
+                    "label_column": label_column,
+                    "task_type": self.task_type,
+                    "problem_type": self.task_type,
+                    "label_profile": dict(self.label_profile or {}),
+                    "seed": seed_value,
+                    "auto_predict": True,
+                    "auto_query": False,
+                    "make_selection": False,
+                },
+                artifact_id=None,
+                origin="core.active_learning.panel",
+            )
+        except Exception as exc:
+            self._set_button_busy("train_btn", False)
+            self._set_status(f"Training failed: {exc}")
+            return
+
+        handle = None
+
+        def done(result: Any) -> None:
+            if handle is not None:
+                self._discard_job_handle(handle)
+
+            payload = dict(result or {}) if isinstance(result, Mapping) else {}
+
+            def update() -> None:
+                if self._disposed:
+                    return
+
+                self._set_button_busy("train_btn", False)
+                self._apply_training_result(payload)
+
+            self._next_tick(update)
+
+        def failed(exc: BaseException) -> None:
+            if handle is not None:
+                self._discard_job_handle(handle)
+
+            def update() -> None:
+                if self._disposed:
+                    return
+
+                self._set_button_busy("train_btn", False)
+                self._set_status(f"Training failed: {exc}")
+                self._refresh_session_summary(status=False)
+                self._refresh_performance(status=False)
+
+            self._next_tick(update)
+
+        try:
+            handle = self._run_plugin_action(
+                "core.active_learning.train_from_session",
+                request,
+                on_done=done,
+                on_error=failed,
+            )
+        except Exception as exc:
+            self._set_button_busy("train_btn", False)
+            self._set_status(f"Training failed: {exc}")
 
     def _apply_training_result(self, result: Mapping[str, Any]) -> None:
         self._set_session_id(result.get("session_artifact_id"))

@@ -460,10 +460,15 @@ class MLPredictPanel:
             """
             <div style="font-size:19px;font-weight:700;margin:0 0 4px;">Run a model on your data</div>
             <div style="font-size:13px;color:#444;margin:0 0 10px;">
-              Pick a trained model, choose your data, and press Run. The predictions
-              are added as new columns on your dataset so you can plot them.
+            Pick a trained model, choose your data, and press Run. Predictions are
+            stored as an <code>ml.predictions</code> artifact and prediction-table
+            dataset; optionally, they can also be attached as columns to the selected
+            dataset.
             </div>
-            """, sizing_mode="stretch_width", margin=(0, 0, 6, 0))
+            """,
+            sizing_mode="stretch_width",
+            margin=(0, 0, 6, 0),
+        )
 
     def _spaced(self, *objects, gap: int = 8):
         items = []
@@ -880,13 +885,26 @@ class MLPredictPanel:
             cache_dir=self._cache_dir(), **meta)
 
     def _emit_dataset_updated(self, dataset_id, added_columns) -> None:
+        columns = list(added_columns or [])
+        if not columns:
+            return
+
         publish = getattr(getattr(self.context, "events", None), "publish", None)
-        if callable(publish):
+        if not callable(publish):
+            return
+
+        payload = {
+            "dataset_id": dataset_id,
+            "change": "column.added",
+            "added_columns": columns,
+            "changed_columns": columns,
+            "schema_changed": True,
+            "origin": "core.ml.predict_panel",
+        }
+
+        for topic in ("dataset.columns.changed", "dataset.updated"):
             try:
-                publish("dataset.updated", {
-                    "dataset_id": dataset_id, "change": "column.added",
-                    "added_columns": list(added_columns), "changed_columns": list(added_columns),
-                    "schema_changed": True, "origin": "core.ml.predict_panel"})
+                publish(topic, dict(payload))
             except Exception:
                 pass
 

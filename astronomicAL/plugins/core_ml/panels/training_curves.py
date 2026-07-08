@@ -1,8 +1,7 @@
-#BUG: Doesnt provide result metrics even when groundtruth provided
-#BUG: Flicker When training round is fast
-
 from __future__ import annotations
 
+import base64
+from io import BytesIO
 import time
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -17,13 +16,9 @@ class MLTrainingCurvesPanel:
 
         self.log_select = pn.widgets.Select(name="", options={})
         self.refresh = pn.widgets.Button(name="Refresh logs", button_type="light")
-        self.reset_curve_controls = pn.widgets.Button(
-            name="Reset metric selections",
-            button_type="light",
-        )
+        self.reset_curve_controls = pn.widgets.Button(name="Reset metric selections", button_type="light")
 
         self.summary = pn.pane.Markdown("")
-
         self.curve_help = pn.pane.Alert(
             "Select a training log to configure visible curves.",
             alert_type="info",
@@ -37,7 +32,6 @@ class MLTrainingCurvesPanel:
             placeholder="Choose loss columns",
             sizing_mode="stretch_width",
         )
-
         self.metric_select = pn.widgets.MultiChoice(
             name="",
             options=[],
@@ -45,28 +39,18 @@ class MLTrainingCurvesPanel:
             placeholder="Choose metric columns",
             sizing_mode="stretch_width",
         )
-
         self.y_scale = pn.widgets.Select(
             name="",
-            options={
-                "Auto": "auto",
-                "Linear": "linear",
-                "Log": "log",
-            },
+            options={"Auto": "auto", "Linear": "linear", "Log": "log"},
             value="auto",
             sizing_mode="stretch_width",
         )
-
         self.x_scale = pn.widgets.Select(
             name="",
-            options={
-                "Linear": "linear",
-                "Log": "log",
-            },
+            options={"Linear": "linear", "Log": "log"},
             value="linear",
             sizing_mode="stretch_width",
         )
-
         self.smoothing_window = pn.widgets.IntInput(
             name="",
             value=1,
@@ -74,35 +58,47 @@ class MLTrainingCurvesPanel:
             end=500,
             sizing_mode="stretch_width",
         )
-
         self.epoch_start = pn.widgets.IntInput(
             name="",
             value=0,
             start=0,
             sizing_mode="stretch_width",
         )
-
         self.epoch_end = pn.widgets.IntInput(
             name="",
             value=0,
             start=0,
             sizing_mode="stretch_width",
         )
-
         self.show_points = pn.widgets.Checkbox(
             name="Show point markers",
             value=False,
             sizing_mode="stretch_width",
         )
 
-        self.loss_plot = pn.Column(sizing_mode="stretch_width")
-        self.metric_plot = pn.Column(sizing_mode="stretch_width")
-
-        self.epoch_table = pn.pane.DataFrame(
-            pd.DataFrame(),
-            height=260,
+        self.loss_plot_html = pn.pane.HTML(
+            self._plot_message_html("Loss curves will appear after epoch metrics are produced."),
+            height=380,
             sizing_mode="stretch_width",
+            margin=(0, 0, 0, 0),
         )
+        self.metric_plot_html = pn.pane.HTML(
+            self._plot_message_html("Metric curves will appear after epoch metrics are produced."),
+            height=380,
+            sizing_mode="stretch_width",
+            margin=(0, 0, 0, 0),
+        )
+        self.loss_plot = pn.Column(
+            self.loss_plot_html,
+            sizing_mode="stretch_width",
+            styles={"min-height": "380px", "background": "#f7f7f7"},
+        )
+        self.metric_plot = pn.Column(
+            self.metric_plot_html,
+            sizing_mode="stretch_width",
+            styles={"min-height": "380px", "background": "#f7f7f7"},
+        )
+        self.epoch_table = pn.pane.DataFrame(pd.DataFrame(), height=260, sizing_mode="stretch_width")
 
         self.tuning_summary = pn.pane.Markdown(
             "No tuning information for the selected run.",
@@ -113,31 +109,20 @@ class MLTrainingCurvesPanel:
             sizing_mode="stretch_width",
         )
         self.current_trial_plot = pn.Column(sizing_mode="stretch_width")
-        self.current_trial_table = pn.pane.DataFrame(
-            pd.DataFrame(),
-            height=220,
-            sizing_mode="stretch_width",
-        )
+        self.current_trial_table = pn.pane.DataFrame(pd.DataFrame(), height=220, sizing_mode="stretch_width")
         self.tuning_plot = pn.Column(sizing_mode="stretch_width")
-        self.tuning_table = pn.pane.DataFrame(
-            pd.DataFrame(),
-            height=280,
-            sizing_mode="stretch_width",
-        )
+        self.tuning_table = pn.pane.DataFrame(pd.DataFrame(), height=280, sizing_mode="stretch_width")
 
         self.log_select.sizing_mode = "stretch_width"
         self.log_select.height = 38
-
         self.refresh.sizing_mode = "stretch_width"
         self.refresh.height = 34
-
         self.reset_curve_controls.sizing_mode = "stretch_width"
         self.reset_curve_controls.height = 34
 
-        self.refresh.on_click(lambda *_: self._load_logs())
+        self.refresh.on_click(lambda *_: self._load_logs(force_render=True))
         self.reset_curve_controls.on_click(lambda *_: self._reset_curve_controls())
-
-        self.log_select.param.watch(lambda *_: self._render_selected(), "value")
+        self.log_select.param.watch(lambda *_: self._render_selected(force_render=True), "value")
 
         for widget in [
             self.loss_metric_select,
@@ -149,11 +134,29 @@ class MLTrainingCurvesPanel:
             self.epoch_end,
             self.show_points,
         ]:
-            widget.param.watch(lambda *_: self._render_selected(sync_controls=False), "value")
+            widget.param.watch(
+                lambda *_: self._render_selected(sync_controls=False, force_render=True),
+                "value",
+            )
 
-        self._subscriptions = []
+        self._pending_log_event_artifact_id: Optional[str] = None
+        self._pending_log_event_force = False
+        self._pending_log_event_scheduled = False
+        self._last_log_refresh_at = 0.0
+        self._last_rendered_epoch_count_by_artifact: Dict[str, int] = {}
+        self._last_rendered_status_by_artifact: Dict[str, str] = {}
+
+        # Event-driven curve redraw cadence. Manual widget changes and finished
+        # events still render immediately.
+        self._event_refresh_min_interval_seconds = 2.0
+        self._event_refresh_epoch_step = 3
+
+        self._has_loss_plot = False
+        self._has_metric_plot = False
+
+        self._subscriptions: List[Any] = []
         self._subscribe_to_training_log_events()
-        self._load_logs()
+        self._load_logs(force_render=True)
 
         if restore_state:
             self.restore_state(restore_state)
@@ -179,9 +182,11 @@ class MLTrainingCurvesPanel:
                     owner_label="ML Training Curves",
                     owner_kind="panel",
                 )
-                self._subscriptions.append(sub)
+            except TypeError:
+                sub = subscribe(topic, self._on_training_log_event)
             except Exception:
-                pass
+                continue
+            self._subscriptions.append(sub)
 
     def _on_training_log_event(self, topic: str, payload: Any) -> None:
         artifact_id = None
@@ -192,18 +197,101 @@ class MLTrainingCurvesPanel:
                 or payload.get("final_training_log_artifact_id")
             )
 
-        def update():
-            self._load_logs(select_artifact_id=artifact_id)
+        topic_text = str(topic or "")
+        force = topic_text.endswith(".finished") or topic_text.endswith(".created")
 
+        if artifact_id:
+            self._pending_log_event_artifact_id = str(artifact_id)
+        self._pending_log_event_force = bool(self._pending_log_event_force or force)
+
+        if self._pending_log_event_scheduled:
+            return
+
+        self._pending_log_event_scheduled = True
+
+        def update() -> None:
+            self._pending_log_event_scheduled = False
+
+            selected = self._pending_log_event_artifact_id
+            force_render = bool(self._pending_log_event_force)
+
+            self._pending_log_event_artifact_id = None
+            self._pending_log_event_force = False
+
+            try:
+                should_render = force_render or self._should_refresh_for_artifact(selected)
+            except Exception:
+                should_render = force_render
+
+            if not should_render:
+                self._refresh_summary_only(select_artifact_id=selected)
+                return
+
+            self._last_log_refresh_at = time.time()
+            self._load_logs(select_artifact_id=selected, force_render=force_render)
+
+        delay_ms = 0 if force else 500
         try:
             doc = pn.state.curdoc
             if doc is not None:
-                doc.add_next_tick_callback(update)
+                doc.add_timeout_callback(update, delay_ms)
                 return
         except Exception:
             pass
 
         update()
+
+    def _should_refresh_for_artifact(self, artifact_id: Optional[str]) -> bool:
+        now = time.time()
+        if now - float(self._last_log_refresh_at or 0.0) < float(self._event_refresh_min_interval_seconds):
+            return False
+
+        artifact_id = str(artifact_id or self.log_select.value or "")
+        if not artifact_id:
+            return True
+
+        try:
+            payload = self.context.artifacts.get(artifact_id)
+        except Exception:
+            return True
+
+        status = str(payload.get("status", "") or "")
+        epochs = payload.get("epochs", []) or []
+        epoch_count = len(epochs)
+
+        previous_status = self._last_rendered_status_by_artifact.get(artifact_id)
+        terminal_statuses = {"finished", "complete", "completed", "failed", "error", "cancelled"}
+        if status and status != previous_status and status in terminal_statuses:
+            return True
+
+        previous_epoch_count = int(self._last_rendered_epoch_count_by_artifact.get(artifact_id, 0))
+        if epoch_count <= 0:
+            return previous_epoch_count <= 0 and not (self._has_loss_plot or self._has_metric_plot)
+
+        return epoch_count - previous_epoch_count >= int(self._event_refresh_epoch_step)
+
+    def _refresh_summary_only(self, select_artifact_id: Optional[str] = None) -> None:
+        artifact_id = str(select_artifact_id or self.log_select.value or "")
+        if not artifact_id:
+            return
+
+        try:
+            payload = self.context.artifacts.get(artifact_id)
+        except Exception:
+            return
+
+        if select_artifact_id and select_artifact_id in self.log_select.options.values():
+            try:
+                self.log_select.value = select_artifact_id
+            except Exception:
+                pass
+
+        tuning = payload.get("tuning") or {}
+        tuning_trials = payload.get("tuning_trials") or []
+        try:
+            self.summary.object = self._summary_markdown(payload, tuning, tuning_trials)
+        except Exception:
+            pass
 
     def dispose(self) -> None:
         events = getattr(self.context, "events", None)
@@ -218,7 +306,7 @@ class MLTrainingCurvesPanel:
 
     def panel(self):
         header = pn.pane.HTML(
-            "<h3 style='margin:0'>ML training curves</h3>",
+            "<h3 style='margin:0;'>ML training curves</h3>",
             height=32,
             sizing_mode="stretch_width",
             margin=(0, 0, 8, 0),
@@ -227,27 +315,16 @@ class MLTrainingCurvesPanel:
         selector_block = pn.Column(
             header,
             self._field("Training log", self.log_select),
-            pn.Row(
-                self.refresh,
-                self.reset_curve_controls,
-                sizing_mode="stretch_width",
-            ),
+            pn.Row(self.refresh, self.reset_curve_controls, sizing_mode="stretch_width"),
             sizing_mode="stretch_width",
             margin=(0, 0, 10, 0),
-            styles={
-                "box-sizing": "border-box",
-                "overflow": "visible",
-            },
+            styles={"box-sizing": "border-box", "overflow": "visible"},
         )
 
         summary_tab = pn.Column(
             self.summary,
             sizing_mode="stretch_width",
-            styles={
-                "box-sizing": "border-box",
-                "padding": "8px 4px 14px 0",
-                "overflow": "visible",
-            },
+            styles={"box-sizing": "border-box", "padding": "8px 4px 14px 0", "overflow": "visible"},
         )
 
         controls_tab = pn.Column(
@@ -270,31 +347,19 @@ class MLTrainingCurvesPanel:
             ),
             self.show_points,
             sizing_mode="stretch_width",
-            styles={
-                "box-sizing": "border-box",
-                "padding": "8px 4px 14px 0",
-                "overflow": "visible",
-            },
+            styles={"box-sizing": "border-box", "padding": "8px 4px 14px 0", "overflow": "visible"},
         )
 
         loss_tab = pn.Column(
             self.loss_plot,
             sizing_mode="stretch_width",
-            styles={
-                "box-sizing": "border-box",
-                "padding": "8px 4px 14px 0",
-                "overflow": "visible",
-            },
+            styles={"box-sizing": "border-box", "padding": "8px 4px 14px 0", "overflow": "visible"},
         )
 
         metrics_tab = pn.Column(
             self.metric_plot,
             sizing_mode="stretch_width",
-            styles={
-                "box-sizing": "border-box",
-                "padding": "8px 4px 14px 0",
-                "overflow": "visible",
-            },
+            styles={"box-sizing": "border-box", "padding": "8px 4px 14px 0", "overflow": "visible"},
         )
 
         optuna_tab = pn.Column(
@@ -309,21 +374,13 @@ class MLTrainingCurvesPanel:
             self.tuning_plot,
             self.tuning_table,
             sizing_mode="stretch_width",
-            styles={
-                "box-sizing": "border-box",
-                "padding": "8px 4px 14px 0",
-                "overflow": "visible",
-            },
+            styles={"box-sizing": "border-box", "padding": "8px 4px 14px 0", "overflow": "visible"},
         )
 
         epochs_tab = pn.Column(
             self.epoch_table,
             sizing_mode="stretch_width",
-            styles={
-                "box-sizing": "border-box",
-                "padding": "8px 4px 14px 0",
-                "overflow": "visible",
-            },
+            styles={"box-sizing": "border-box", "padding": "8px 4px 14px 0", "overflow": "visible"},
         )
 
         body_tabs = pn.Tabs(
@@ -336,10 +393,7 @@ class MLTrainingCurvesPanel:
             dynamic=True,
             sizing_mode="stretch_width",
             margin=(0, 0, 12, 0),
-            styles={
-                "box-sizing": "border-box",
-                "overflow": "visible",
-            },
+            styles={"box-sizing": "border-box", "overflow": "visible"},
         )
 
         return pn.Column(
@@ -391,9 +445,7 @@ class MLTrainingCurvesPanel:
             except Exception:
                 pass
 
-        # Metric selections are restored after the selected log has populated
-        # available metric options.
-        self._render_selected(sync_controls=True)
+        self._render_selected(sync_controls=True, force_render=True)
 
         for widget, key in [
             (self.loss_metric_select, "loss_metrics"),
@@ -408,12 +460,12 @@ class MLTrainingCurvesPanel:
             except Exception:
                 pass
 
-        self._render_selected(sync_controls=False)
+        self._render_selected(sync_controls=False, force_render=True)
 
     def _field(self, label: str, widget):
         return pn.Column(
             pn.pane.HTML(
-                f"<div style='font-size:12px;font-weight:600;margin-bottom:2px'>{label}</div>",
+                f"<div style='font-size:12px;font-weight:600;color:#555;margin-bottom:2px;'>{label}</div>",
                 height=18,
                 sizing_mode="stretch_width",
                 margin=(0, 0, 2, 0),
@@ -421,16 +473,70 @@ class MLTrainingCurvesPanel:
             widget,
             sizing_mode="stretch_width",
             margin=(0, 0, 8, 0),
-            styles={
-                "box-sizing": "border-box",
-                "overflow": "visible",
-            },
+            styles={"box-sizing": "border-box", "overflow": "visible"},
         )
 
-    def _load_logs(self, select_artifact_id: Optional[str] = None) -> None:
+    def _plot_message_html(self, message: str) -> str:
+        safe = str(message).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        return f"""
+            <div style="
+            min-height: 350px;
+            height: 350px;
+            width: 100%;
+            box-sizing: border-box;
+            border-radius: 12px;
+            border: 1px solid rgba(0,0,0,0.08);
+            background: linear-gradient(180deg, #fbfbfb, #f2f2f2);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #555;
+            font-size: 13px;
+            text-align: center;
+            padding: 18px;
+            ">
+            <div>{safe}</div>
+            </div>
+        """
+
+    def _figure_to_img_html(self, fig, *, alt: str) -> str:
+        buffer = BytesIO()
+        fig.savefig(buffer, format="png", dpi=120, bbox_inches="tight", facecolor=fig.get_facecolor())
+        data = base64.b64encode(buffer.getvalue()).decode("ascii")
+        safe_alt = str(alt).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        return f"""
+            <div style="
+            min-height: 350px;
+            width: 100%;
+            box-sizing: border-box;
+            border-radius: 12px;
+            border: 1px solid rgba(0,0,0,0.08);
+            background: #f7f7f7;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            overflow: hidden;
+            padding: 4px;
+            ">
+            <img
+                src="data:image/png;base64,{data}"
+                alt="{safe_alt}"
+                style="
+                display: block;
+                width: 100%;
+                height: auto;
+                max-height: 350px;
+                object-fit: contain;
+                border-radius: 8px;
+                background: #ffffff;
+                "
+            />
+            </div>
+        """
+
+    def _load_logs(self, select_artifact_id: Optional[str] = None, *, force_render: bool = False) -> None:
         artifacts = getattr(self.context, "artifacts", None)
         find = getattr(artifacts, "find", None)
-
         if not callable(find):
             self.log_select.options = {}
             self.summary.object = "Artifact store is not available."
@@ -455,34 +561,36 @@ class MLTrainingCurvesPanel:
             dataset_id = str(payload.get("dataset_id", ref.dataset_id))
             status = str(payload.get("status", "unknown"))
             created = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ref.created_at))
-
             tuning = payload.get("tuning") or {}
             tuning_flag = " | Optuna" if tuning.get("enabled") or payload.get("tuning_trials") else ""
-
             label = f"{created} | {model_title} | {dataset_id} | {status}{tuning_flag} | {run_id[:8]}"
             options[label] = ref.artifact_id
 
         current = self.log_select.value
-        self.log_select.options = options
+        previous_options = dict(self.log_select.options or {})
+        if previous_options != options:
+            self.log_select.options = options
 
         if select_artifact_id in options.values():
             self.log_select.value = select_artifact_id
         elif current in options.values():
             self.log_select.value = current
-        elif options:
+        elif options and not self.log_select.value:
             self.log_select.value = next(iter(options.values()))
-        else:
+        elif not options:
             self.log_select.value = None
 
-        self._render_selected()
+        self._render_selected(force_render=force_render)
 
-    def _render_selected(self, sync_controls: bool = True) -> None:
+    def _render_selected(self, sync_controls: bool = True, *, force_render: bool = False) -> None:
         artifact_id = self.log_select.value
 
         if not artifact_id:
-            self.summary.object = "No training logs yet. Train a model first."
-            self.loss_plot.objects = []
-            self.metric_plot.objects = []
+            self.summary.object = "No training logs yet.\nTrain a model first."
+            if not self._has_loss_plot:
+                self.loss_plot_html.object = self._plot_message_html("Loss curves will appear after training starts.")
+            if not self._has_metric_plot:
+                self.metric_plot_html.object = self._plot_message_html("Metric curves will appear after training starts.")
             self.tuning_plot.objects = []
             self.current_trial_plot.objects = []
             self.current_trial_summary.object = "No current Optuna trial."
@@ -510,61 +618,77 @@ class MLTrainingCurvesPanel:
         tuning_trials = payload.get("tuning_trials") or []
         tuning_df = pd.DataFrame(tuning_trials)
         self.tuning_table.object = tuning_df
-
         self.summary.object = self._summary_markdown(payload, tuning, tuning_trials)
 
+        status = str(payload.get("status", "unknown") or "unknown")
+        self._last_rendered_status_by_artifact[str(artifact_id)] = status
+
         if filtered_epoch_df.empty or "epoch" not in filtered_epoch_df.columns:
-            status = payload.get("status", "unknown")
             message = payload.get("message", "Waiting for epoch data...")
-            self.loss_plot.objects = [
-                pn.pane.Alert(
-                    f"{status}: {message}",
-                    alert_type="info" if status in {"queued", "running", "tuning"} else "warning",
-                )
-            ]
-            self.metric_plot.objects = [
-                pn.pane.Alert(
-                    "Curves will appear after epoch-level metrics are produced.",
-                    alert_type="info",
-                )
-            ]
-        else:
-            loss_keys = list(self.loss_metric_select.value or [])
-            metric_keys = list(self.metric_select.value or [])
 
-            self.loss_plot.objects = [
-                self._plot(
-                    filtered_epoch_df,
-                    keys=loss_keys,
-                    title="Loss over epochs",
-                    ylabel="Loss",
-                    y_scale=str(self.y_scale.value or "auto"),
-                    x_scale=str(self.x_scale.value or "linear"),
-                    smoothing_window=int(self.smoothing_window.value or 1),
-                    show_points=bool(self.show_points.value),
-                )
-            ]
+            if not self._has_loss_plot:
+                self.loss_plot_html.object = self._plot_message_html(f"{status}: {message}")
 
-            self.metric_plot.objects = [
-                self._plot(
-                    filtered_epoch_df,
-                    keys=metric_keys,
-                    title="Metrics over epochs",
-                    ylabel="Metric",
-                    y_scale=str(self.y_scale.value or "auto"),
-                    x_scale=str(self.x_scale.value or "linear"),
-                    smoothing_window=int(self.smoothing_window.value or 1),
-                    show_points=bool(self.show_points.value),
+            if not self._has_metric_plot:
+                self.metric_plot_html.object = self._plot_message_html(
+                    "Curves will appear after epoch-level metrics are produced."
                 )
-            ]
+
+            self._render_tuning(payload, tuning, tuning_df)
+            return
+
+        latest_epoch_count = len(filtered_epoch_df)
+        previous_epoch_count = int(self._last_rendered_epoch_count_by_artifact.get(str(artifact_id), 0))
+        finished = status in {"finished", "complete", "completed", "failed", "error", "cancelled"}
+
+        should_update_plots = (
+            force_render
+            or finished
+            or previous_epoch_count <= 0
+            or latest_epoch_count - previous_epoch_count >= int(self._event_refresh_epoch_step)
+        )
+
+        if not should_update_plots:
+            self._render_tuning(payload, tuning, tuning_df)
+            return
+
+        loss_keys = list(self.loss_metric_select.value or [])
+        metric_keys = list(self.metric_select.value or [])
+
+        new_loss_plot = self._plot(
+            filtered_epoch_df,
+            keys=loss_keys,
+            title="Loss over epochs",
+            ylabel="Loss",
+            y_scale=str(self.y_scale.value or "auto"),
+            x_scale=str(self.x_scale.value or "linear"),
+            smoothing_window=int(self.smoothing_window.value or 1),
+            show_points=bool(self.show_points.value),
+        )
+        new_metric_plot = self._plot(
+            filtered_epoch_df,
+            keys=metric_keys,
+            title="Metrics over epochs",
+            ylabel="Metric",
+            y_scale=str(self.y_scale.value or "auto"),
+            x_scale=str(self.x_scale.value or "linear"),
+            smoothing_window=int(self.smoothing_window.value or 1),
+            show_points=bool(self.show_points.value),
+        )
+
+        self.loss_plot_html.object = new_loss_plot
+        self.metric_plot_html.object = new_metric_plot
+        self._has_loss_plot = True
+        self._has_metric_plot = True
+        self._last_rendered_epoch_count_by_artifact[str(artifact_id)] = latest_epoch_count
 
         self._render_tuning(payload, tuning, tuning_df)
 
     def _normalise_epoch_df(self, df: pd.DataFrame) -> pd.DataFrame:
         """Flatten nested metric dictionaries and coerce plottable columns.
 
-        Older recipe logs may store values under a nested `metrics` dict.
-        Newer logs should already have flat columns. This method supports both.
+        Older recipe logs may store values under a nested `metrics` dict. Newer
+        logs should already have flat columns. This method supports both.
         """
         if df.empty:
             return df
@@ -586,23 +710,10 @@ class MLTrainingCurvesPanel:
             work["epoch"] = pd.to_numeric(work["epoch"], errors="coerce")
 
         for column in work.columns:
-            if column in {
-                "time",
-                "elapsed_seconds",
-                "step",
-                "total",
-                "epoch",
-            }:
+            if column in {"time", "elapsed_seconds", "step", "total", "epoch"}:
                 work[column] = pd.to_numeric(work[column], errors="coerce")
                 continue
-
-            if column in {
-                "status",
-                "message",
-                "metrics",
-                "split",
-                "trial_state",
-            }:
+            if column in {"status", "message", "metrics", "split", "trial_state"}:
                 continue
 
             converted = pd.to_numeric(work[column], errors="coerce")
@@ -618,18 +729,9 @@ class MLTrainingCurvesPanel:
         if df.empty:
             return []
 
-        ignored = {
-            "time",
-            "elapsed_seconds",
-            "step",
-            "total",
-            "epoch",
-            "status",
-            "message",
-            "metrics",
-        }
-
+        ignored = {"time", "elapsed_seconds", "step", "total", "epoch", "status", "message", "metrics"}
         columns: List[str] = []
+
         for column in df.columns:
             if column in ignored:
                 continue
@@ -640,15 +742,9 @@ class MLTrainingCurvesPanel:
         return columns
 
     def _loss_columns(self, columns: Sequence[str]) -> List[str]:
-        preferred = [
-            "train_loss",
-            "validation_loss",
-            "val_loss",
-            "test_loss",
-            "loss",
-        ]
-
+        preferred = ["train_loss", "validation_loss", "val_loss", "test_loss", "loss"]
         out: List[str] = []
+
         for key in preferred:
             if key in columns and key not in out:
                 out.append(key)
@@ -687,7 +783,21 @@ class MLTrainingCurvesPanel:
             lowered = key.lower()
             if key in out or key in loss_columns:
                 continue
-            if any(token in lowered for token in ["acc", "f1", "auc", "r2", "mae", "rmse", "precision", "recall", "lr", "learning_rate"]):
+            if any(
+                token in lowered
+                for token in [
+                    "acc",
+                    "f1",
+                    "auc",
+                    "r2",
+                    "mae",
+                    "rmse",
+                    "precision",
+                    "recall",
+                    "lr",
+                    "learning_rate",
+                ]
+            ):
                 out.append(key)
 
         return out
@@ -704,22 +814,18 @@ class MLTrainingCurvesPanel:
         self.metric_select.options = metric_columns
 
         if previous_loss:
-            self.loss_metric_select.value = [
-                column for column in previous_loss if column in loss_columns
-            ]
+            self.loss_metric_select.value = [column for column in previous_loss if column in loss_columns]
         else:
             self.loss_metric_select.value = loss_columns[:4]
 
         if previous_metrics:
-            self.metric_select.value = [
-                column for column in previous_metrics if column in metric_columns
-            ]
+            self.metric_select.value = [column for column in previous_metrics if column in metric_columns]
         else:
             self.metric_select.value = self._default_metric_columns(metric_columns)[:6]
 
         self.curve_help.object = (
             f"Detected `{len(loss_columns)}` loss column(s) and "
-            f"`{len(metric_columns)}` other numeric metric column(s). "
+            f"`{len(metric_columns)}` other numeric metric column(s).\n"
             "Use the selectors to add or remove plotted curves."
         )
 
@@ -741,7 +847,6 @@ class MLTrainingCurvesPanel:
 
         if start > 0:
             work = work[work["epoch"] >= start]
-
         if end > 0:
             work = work[work["epoch"] <= end]
 
@@ -756,7 +861,7 @@ class MLTrainingCurvesPanel:
         self.epoch_start.value = 0
         self.epoch_end.value = 0
         self.show_points.value = True
-        self._render_selected(sync_controls=True)
+        self._render_selected(sync_controls=True, force_render=True)
 
     def _summary_markdown(
         self,
@@ -765,7 +870,6 @@ class MLTrainingCurvesPanel:
         tuning_trials: List[Dict[str, Any]],
     ) -> str:
         tuning_enabled = bool(tuning.get("enabled") or tuning_trials)
-
         lines = [
             f"**Model:** {payload.get('model_title', 'unknown')}",
             f"**Run:** `{payload.get('run_id', '')}`",
@@ -785,11 +889,7 @@ class MLTrainingCurvesPanel:
 
     def _render_tuning(self, payload: Dict[str, Any], tuning: Dict[str, Any], tuning_df: pd.DataFrame) -> None:
         current_trial = payload.get("tuning_current_trial") or {}
-        current_trial_epochs = (
-            payload.get("tuning_current_trial_epochs")
-            or payload.get("tuning_last_trial_epochs")
-            or []
-        )
+        current_trial_epochs = payload.get("tuning_current_trial_epochs") or payload.get("tuning_last_trial_epochs") or []
         current_trial_df = pd.DataFrame(current_trial_epochs)
 
         self._render_current_optuna_trial(
@@ -801,9 +901,7 @@ class MLTrainingCurvesPanel:
 
         if not tuning and tuning_df.empty and not current_trial:
             self.tuning_summary.object = "Optuna tuning was not enabled for this run."
-            self.tuning_plot.objects = [
-                pn.pane.Alert("No Optuna trials are available.", alert_type="info")
-            ]
+            self.tuning_plot.objects = [pn.pane.Alert("No Optuna trials are available.", alert_type="info")]
             return
 
         best_params = payload.get("tuning_best_params") or {}
@@ -818,7 +916,7 @@ class MLTrainingCurvesPanel:
                 row = completed.loc[idx]
                 if isinstance(row.get("params"), dict):
                     best_params = row.get("params")
-                best_value = row.get("value")
+                    best_value = row.get("value")
 
         lines = [
             "### Optuna tuning",
@@ -845,9 +943,7 @@ class MLTrainingCurvesPanel:
         self.tuning_summary.object = "\n".join(lines)
 
         if tuning_df.empty or "number" not in tuning_df.columns or "value" not in tuning_df.columns:
-            self.tuning_plot.objects = [
-                pn.pane.Alert("No numeric Optuna trial values to plot yet.", alert_type="info")
-            ]
+            self.tuning_plot.objects = [pn.pane.Alert("No numeric Optuna trial values to plot yet.", alert_type="info")]
             return
 
         self.tuning_plot.objects = [
@@ -877,8 +973,8 @@ class MLTrainingCurvesPanel:
                 )
                 self.current_trial_plot.objects = [
                     pn.pane.Alert(
-                        "Waiting for current-trial epoch metrics. "
-                        "For ResNet tuning, this should update after each trial epoch. "
+                        "Waiting for current-trial epoch metrics.\n"
+                        "For ResNet tuning, this should update after each trial epoch.\n"
                         "If it does not, the image tuning code is not publishing "
                         "`tuning_current_trial_epochs` yet.",
                         alert_type="warning",
@@ -886,10 +982,7 @@ class MLTrainingCurvesPanel:
                 ]
             else:
                 self.current_trial_summary.object = "No current Optuna trial."
-                self.current_trial_plot.objects = [
-                    pn.pane.Alert("No current-trial epoch data.", alert_type="info")
-                ]
-
+                self.current_trial_plot.objects = [pn.pane.Alert("No current-trial epoch data.", alert_type="info")]
             self.current_trial_table.object = pd.DataFrame()
             return
 
@@ -905,9 +998,7 @@ class MLTrainingCurvesPanel:
         ]
 
         if current_trial.get("epoch") is not None and current_trial.get("total_epochs") is not None:
-            lines.append(
-                f"**Epoch progress:** `{current_trial.get('epoch')}` / `{current_trial.get('total_epochs')}`"
-            )
+            lines.append(f"**Epoch progress:** `{current_trial.get('epoch')}` / `{current_trial.get('total_epochs')}`")
 
         if current_trial.get("value") is not None:
             lines.append(f"**Latest objective value:** `{current_trial.get('value')}`")
@@ -929,7 +1020,7 @@ class MLTrainingCurvesPanel:
         if current_trial_df.empty:
             self.current_trial_plot.objects = [
                 pn.pane.Alert(
-                    "Current trial is running. Waiting for the first epoch to finish...",
+                    "Current trial is running.\nWaiting for the first epoch to finish...",
                     alert_type="info",
                 )
             ]
@@ -953,14 +1044,14 @@ class MLTrainingCurvesPanel:
         x_scale: str = "linear",
         smoothing_window: int = 1,
         show_points: bool = True,
-    ):
+    ) -> str:
         try:
             from matplotlib.figure import Figure
         except Exception as exc:
-            return pn.pane.Alert(f"Matplotlib is not available: {exc}", alert_type="danger")
+            return self._plot_message_html(f"Matplotlib is not available: {exc}")
 
         if df.empty or "epoch" not in df.columns:
-            return pn.pane.Alert("No epoch data available.", alert_type="info")
+            return self._plot_message_html("No epoch data available.")
 
         available = []
         for key in keys:
@@ -971,28 +1062,19 @@ class MLTrainingCurvesPanel:
                 available.append(key)
 
         if not available:
-            return pn.pane.Alert(
-                "No selected metric columns contain numeric data.",
-                alert_type="warning",
-            )
+            return self._plot_message_html("No selected metric columns contain numeric data.")
 
-        fig = Figure(figsize=(7.4, 3.4))
+        fig = Figure(figsize=(7.4, 3.4), facecolor="white")
         ax = fig.subplots()
 
         x = pd.to_numeric(df["epoch"], errors="coerce")
         marker = "o" if show_points else None
-
         plotted_series = []
 
         for key in available:
             y = pd.to_numeric(df[key], errors="coerce")
-
             if smoothing_window and smoothing_window > 1:
-                y_plot = y.rolling(
-                    window=int(smoothing_window),
-                    min_periods=1,
-                    center=False,
-                ).mean()
+                y_plot = y.rolling(window=int(smoothing_window), min_periods=1, center=False).mean()
                 label = f"{key} — smoothed {int(smoothing_window)}"
             else:
                 y_plot = y
@@ -1002,20 +1084,11 @@ class MLTrainingCurvesPanel:
             if not valid.any():
                 continue
 
-            ax.plot(
-                x[valid],
-                y_plot[valid],
-                marker=marker,
-                linewidth=1.5,
-                label=label,
-            )
+            ax.plot(x[valid], y_plot[valid], marker=marker, linewidth=1.5, label=label)
             plotted_series.append(y_plot[valid])
 
         if not plotted_series:
-            return pn.pane.Alert(
-                "Selected metric columns did not contain plottable values.",
-                alert_type="warning",
-            )
+            return self._plot_message_html("Selected metric columns did not contain plottable values.")
 
         ax.set_title(title)
         ax.set_xlabel("Epoch")
@@ -1028,10 +1101,7 @@ class MLTrainingCurvesPanel:
                 if x.dropna().min() > 0:
                     ax.set_xscale("log")
                 else:
-                    return pn.pane.Alert(
-                        "Log x-axis requires epoch values greater than zero.",
-                        alert_type="warning",
-                    )
+                    return self._plot_message_html("Log x-axis requires epoch values greater than zero.")
             except Exception:
                 pass
 
@@ -1045,28 +1115,20 @@ class MLTrainingCurvesPanel:
                 if not y_values.empty and y_values.min() > 0:
                     ax.set_yscale("log")
                 else:
-                    return pn.pane.Alert(
-                        "Log y-axis requires all selected plotted values to be greater than zero.",
-                        alert_type="warning",
+                    return self._plot_message_html(
+                        "Log y-axis requires all selected plotted values to be greater than zero."
                     )
             except Exception:
                 pass
         elif y_scale == "auto":
-
             try:
                 if not y_values.empty and y_values.min() > 0 and "loss" in ylabel.lower():
                     ax.set_yscale("log")
-            except Exception as e:
-                print(f"y_scale auto exception - {e}")
+            except Exception:
                 pass
 
         fig.tight_layout()
-        return pn.pane.Matplotlib(
-            fig,
-            tight=True,
-            sizing_mode="stretch_width",
-            height=350,
-        )
+        return self._figure_to_img_html(fig, alt=title)
 
     def _plot_current_trial_epochs(self, df: pd.DataFrame, *, metric: str):
         try:
@@ -1136,7 +1198,6 @@ class MLTrainingCurvesPanel:
                 [pd.to_numeric(work[key], errors="coerce") for key in available],
                 ignore_index=True,
             ).dropna()
-
             y_scale = str(self.y_scale.value or "auto")
             if y_scale == "log":
                 if not y_values.empty and y_values.min() > 0:
@@ -1158,7 +1219,6 @@ class MLTrainingCurvesPanel:
 
         work = df.copy()
         work = work[pd.notna(work.get("value"))]
-
         if work.empty:
             return pn.pane.Alert("No completed Optuna trials to plot.", alert_type="info")
 
@@ -1172,6 +1232,7 @@ class MLTrainingCurvesPanel:
             metric = ylabel.lower()
             minimize = any(token in metric for token in ("loss", "error", "mae", "mse", "rmse"))
             best = None
+
             for value in work["value"]:
                 value = float(value)
                 if best is None:
@@ -1181,6 +1242,7 @@ class MLTrainingCurvesPanel:
                 else:
                     best = max(best, value)
                 running_best.append(best)
+
             ax.plot(work["number"], running_best, marker=None, linewidth=1.2, label="best so far")
         except Exception:
             pass

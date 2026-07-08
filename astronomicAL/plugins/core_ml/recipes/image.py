@@ -35,10 +35,12 @@ class ExternalPythonRecipe(MLRecipe):
     author = "AstronomicAL"
     description = (
         "Run a recipe implemented in an installed/local Python module. "
-        "This is the unmanaged escape hatch: it bypasses the validation "
-        "protocol and is trusted to manage its own splits and evaluation."
+        "This executes arbitrary local Python in the current process. Use only "
+        "trusted code. It is unmanaged: AstronomicAL does not enforce the normal "
+        "split/validation/test protocol, so the recipe must manage its own "
+        "scientific validity, evaluation, and provenance."
     )
-    tags = ["expert", "python", "extension", "recipe"]
+    tags = ["expert", "python", "extension", "recipe", "unmanaged", "trusted-code"]
     required_mappings: list = []
     optional_mappings = ["record_id", "target_label", "image.path", "image.uri"]
     produces = ["ml.run", "ml.training_log"]
@@ -50,13 +52,20 @@ class ExternalPythonRecipe(MLRecipe):
             "import_path": {
                 "type": "string",
                 "title": "Import path",
-                "description": "Dotted path to an MLRecipe subclass/instance or callable.",
+                "description": (
+                    "Dotted path to an MLRecipe subclass/instance or callable. "
+                    "This imports and executes arbitrary local Python in the current "
+                    "AstronomicAL process; use only trusted code."
+                ),
             },
             "kwargs_json": {
                 "type": "string",
-                "title": "Extra kwargs JSON",
+                "title": "Keyword arguments JSON",
                 "default": "{}",
-                "description": "Optional JSON object merged into run.params before execution.",
+                "description": (
+                    "JSON object passed to a callable/class constructor or recipe "
+                    "factory. Values are interpreted by the external recipe code."
+                ),
             },
         },
     }
@@ -131,6 +140,7 @@ class CIFARResNetRecipe(ManagedMLRecipe):
                              "enum": ["resnet18", "resnet34", "custom_import"],
                              "default": "resnet18"},
             "custom_model_import": {"type": "string", "default": ""},
+            "input_size": {"type": "integer", "default": 32, "minimum": 16},
             "epochs": {"type": "integer", "default": 200, "minimum": 1},
             "batch_size": {"type": "integer", "default": 128, "minimum": 1},
             "num_workers": {"type": "integer", "default": 0, "minimum": 0},
@@ -186,19 +196,39 @@ class CIFARResNetRecipe(ManagedMLRecipe):
 
     def train_transform(self, run):
         from torchvision import transforms as T
-        ops = []
+
+        size = int(run.params.get("input_size", 32) or 32)
         aug = str(run.params.get("augmentation", "cifar_standard"))
+
+        ops = []
         if aug == "cifar_standard":
-            ops += [T.RandomCrop(32, padding=4), T.RandomHorizontalFlip()]
+            ops += [
+                T.Resize((size, size)),
+                T.RandomCrop(size, padding=max(1, size // 8)),
+                T.RandomHorizontalFlip(),
+            ]
         elif aug == "randaugment":
-            ops += [T.RandAugment(), T.RandomHorizontalFlip()]
-        ops += [T.ToTensor(),
-                T.Normalize([0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010])]
+            ops += [
+                T.Resize((size, size)),
+                T.RandAugment(),
+                T.Resize((size, size)),
+                T.RandomHorizontalFlip(),
+            ]
+        else:
+            ops += [T.Resize((size, size))]
+
+        ops += [
+            T.ToTensor(),
+            T.Normalize([0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010]),
+        ]
         return T.Compose(ops)
 
     def eval_transform(self, run):
         from torchvision import transforms as T
+
+        size = int(run.params.get("input_size", 32) or 32)
         return T.Compose([
+            T.Resize((size, size)),
             T.ToTensor(),
             T.Normalize([0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010]),
         ])
@@ -377,37 +407,34 @@ def _open_image_from_row(run, row):
     return Image.open(Path(value)).convert("RGB")
 
 def _timm_transform(run, *, is_training: bool, cache_attr_owner=None):
-    """timm's own train/eval transform when resolvable, else an ImageNet fallback.
-    Self-contained so it also works at predict time (build_model is not called
-    there)."""
-    name = str(run.params.get("model_name", "resnet50"))
+    """Deterministic timm-compatible image transform.
+
+    Do not rely on timm.create_transform here. The platform contract is that
+    every image recipe returns fixed-size tensors before DataLoader collation.
+    Users can still choose the model architecture through timm; preprocessing
+    size is controlled by the recipe's input_size parameter.
+    """
+    from torchvision import transforms as T
+
     size = int(run.params.get("input_size", 224) or 224)
-    try:
-        import timm
-        from timm.data import resolve_data_config, create_transform
-        cfg = None
-        if cache_attr_owner is not None and getattr(cache_attr_owner, "_timm_cfg", None):
-            cfg = cache_attr_owner._timm_cfg
-        if cfg is None:
-            probe = timm.create_model(name, pretrained=False)
-            cfg = resolve_data_config({}, model=probe)
-            if size:
-                cfg["input_size"] = (cfg["input_size"][0], size, size)
-            if cache_attr_owner is not None:
-                cache_attr_owner._timm_cfg = cfg
-        return create_transform(**cfg, is_training=is_training)
-    except Exception:
-        from torchvision import transforms as T
-        mean, std = [0.485, 0.456, 0.406], [0.229, 0.224, 0.225]
-        if is_training:
-            return T.Compose([
-                T.RandomResizedCrop(size), T.RandomHorizontalFlip(),
-                T.ToTensor(), T.Normalize(mean, std),
-            ])
+    resize_size = max(size, int(round(size * 1.15)))
+    mean, std = [0.485, 0.456, 0.406], [0.229, 0.224, 0.225]
+
+    if is_training:
         return T.Compose([
-            T.Resize(int(round(size * 1.15))), T.CenterCrop(size),
-            T.ToTensor(), T.Normalize(mean, std),
+            T.Resize((resize_size, resize_size)),
+            T.RandomResizedCrop(size),
+            T.RandomHorizontalFlip(),
+            T.ToTensor(),
+            T.Normalize(mean, std),
         ])
+
+    return T.Compose([
+        T.Resize((resize_size, resize_size)),
+        T.CenterCrop(size),
+        T.ToTensor(),
+        T.Normalize(mean, std),
+    ])
 
 def _make_optimizer(model, params):
     import torch.optim as optim
@@ -555,6 +582,7 @@ class WideResNetCIFARRecipe(ManagedMLRecipe):
             "depth": {"type": "integer", "default": 28, "minimum": 10},
             "widen_factor": {"type": "integer", "default": 10, "minimum": 1},
             "dropout": {"type": "number", "default": 0.3, "minimum": 0.0},
+            "input_size": {"type": "integer", "default": 32, "minimum": 16},
             "epochs": {"type": "integer", "default": 200, "minimum": 1},
             "batch_size": {"type": "integer", "default": 128, "minimum": 1},
             "num_workers": {"type": "integer", "default": 4, "minimum": 0},
@@ -593,15 +621,30 @@ class WideResNetCIFARRecipe(ManagedMLRecipe):
 
     def train_transform(self, run):
         from torchvision import transforms as T
-        ops = [T.RandomCrop(32, padding=4), T.RandomHorizontalFlip(),
-               T.ToTensor(), T.Normalize(self._MEAN, self._STD)]
+
+        size = int(run.params.get("input_size", 32) or 32)
+        ops = [
+            T.Resize((size, size)),
+            T.RandomCrop(size, padding=max(1, size // 8)),
+            T.RandomHorizontalFlip(),
+            T.ToTensor(),
+            T.Normalize(self._MEAN, self._STD),
+        ]
+
         if bool(run.params.get("cutout", True)):
-            ops.append(_Cutout(int(run.params.get("cutout_size", 16))))
+            ops.append(_Cutout(int(run.params.get("cutout_size", max(1, size // 2)))))
+
         return T.Compose(ops)
 
     def eval_transform(self, run):
         from torchvision import transforms as T
-        return T.Compose([T.ToTensor(), T.Normalize(self._MEAN, self._STD)])
+
+        size = int(run.params.get("input_size", 32) or 32)
+        return T.Compose([
+            T.Resize((size, size)),
+            T.ToTensor(),
+            T.Normalize(self._MEAN, self._STD),
+        ])
 
     def load_sample(self, run, row):
         return _open_image_from_row(run, row)
