@@ -141,6 +141,27 @@ class CIFARResNetRecipe(ManagedMLRecipe):
                              "default": "resnet18"},
             "custom_model_import": {"type": "string", "default": ""},
             "input_size": {"type": "integer", "default": 32, "minimum": 16},
+            "normalization": {
+                "type": "string",
+                "enum": ["cifar", "imagenet", "custom", "none"],
+                "default": "cifar",
+                "title": "Normalisation preset",
+                "description": "Use CIFAR, ImageNet, custom mean/std, or no input normalisation.",
+            },
+            "normalize_mean": {
+                "type": "array",
+                "items": {"type": "number"},
+                "default": [0.4914, 0.4822, 0.4465],
+                "title": "Normalisation mean",
+                "description": "RGB channel means in 0..1. Used when normalisation preset is custom.",
+            },
+            "normalize_std": {
+                "type": "array",
+                "items": {"type": "number"},
+                "default": [0.2023, 0.1994, 0.2010],
+                "title": "Normalisation std",
+                "description": "RGB channel standard deviations in 0..1. Used when normalisation preset is custom.",
+            },
             "epochs": {"type": "integer", "default": 200, "minimum": 1},
             "batch_size": {"type": "integer", "default": 128, "minimum": 1},
             "num_workers": {"type": "integer", "default": 0, "minimum": 0},
@@ -217,21 +238,34 @@ class CIFARResNetRecipe(ManagedMLRecipe):
         else:
             ops += [T.Resize((size, size))]
 
-        ops += [
-            T.ToTensor(),
-            T.Normalize([0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010]),
-        ]
+        ops.append(T.ToTensor())
+        _append_normalize(
+            ops,
+            T,
+            run,
+            default_mode="cifar",
+            default_mean=[0.4914, 0.4822, 0.4465],
+            default_std=[0.2023, 0.1994, 0.2010],
+        )
         return T.Compose(ops)
 
     def eval_transform(self, run):
         from torchvision import transforms as T
 
         size = int(run.params.get("input_size", 32) or 32)
-        return T.Compose([
+        ops = [
             T.Resize((size, size)),
             T.ToTensor(),
-            T.Normalize([0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010]),
-        ])
+        ]
+        _append_normalize(
+            ops,
+            T,
+            run,
+            default_mode="cifar",
+            default_mean=[0.4914, 0.4822, 0.4465],
+            default_std=[0.2023, 0.1994, 0.2010],
+        )
+        return T.Compose(ops)
 
     def load_sample(self, run, row):
         """row -> raw input. The harness passes a dataframe row and handles the
@@ -405,36 +439,118 @@ def _open_image_from_row(run, row):
     if value.startswith("file://"):
         value = value[7:]
     return Image.open(Path(value)).convert("RGB")
+def _parse_float_list(value, default, *, expected_len: int = 3):
+    if value is None or value == "":
+        values = list(default)
+    elif isinstance(value, str):
+        import json
+        import re
+
+        text = value.strip()
+        if not text:
+            values = list(default)
+        else:
+            try:
+                parsed = json.loads(text)
+                values = list(parsed)
+            except Exception:
+                values = [part for part in re.split(r"[,\s]+", text) if part.strip()]
+    else:
+        values = list(value)
+
+    out = [float(item) for item in values]
+    if len(out) != expected_len:
+        raise ValueError(f"Expected {expected_len} normalisation values, got {len(out)}: {out!r}")
+    return out
+
+
+def _normalization_params(run, *, default_mode: str, default_mean, default_std):
+    params = getattr(run, "params", {}) or {}
+
+    mode = str(
+        params.get("normalization")
+        or params.get("normalisation")
+        or default_mode
+        or "custom"
+    ).strip().lower()
+
+    if mode in {"none", "off", "false", "no", "disabled"}:
+        return None
+
+    if mode in {"imagenet", "image_net"}:
+        return [0.485, 0.456, 0.406], [0.229, 0.224, 0.225]
+
+    if mode in {"cifar", "cifar10", "cifar_10"}:
+        return [0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010]
+
+    mean = _parse_float_list(
+        params.get("normalize_mean")
+        or params.get("normalization_mean")
+        or params.get("normalisation_mean"),
+        default_mean,
+    )
+    std = _parse_float_list(
+        params.get("normalize_std")
+        or params.get("normalization_std")
+        or params.get("normalisation_std"),
+        default_std,
+    )
+
+    if any(float(value) <= 0 for value in std):
+        raise ValueError(f"Normalisation std values must be > 0, got {std!r}")
+
+    return mean, std
+
+
+def _append_normalize(ops, T, run, *, default_mode: str, default_mean, default_std) -> None:
+    resolved = _normalization_params(
+        run,
+        default_mode=default_mode,
+        default_mean=default_mean,
+        default_std=default_std,
+    )
+    if resolved is None:
+        return
+
+    mean, std = resolved
+    ops.append(T.Normalize(mean, std))
+
 
 def _timm_transform(run, *, is_training: bool, cache_attr_owner=None):
     """Deterministic timm-compatible image transform.
 
-    Do not rely on timm.create_transform here. The platform contract is that
-    every image recipe returns fixed-size tensors before DataLoader collation.
-    Users can still choose the model architecture through timm; preprocessing
-    size is controlled by the recipe's input_size parameter.
+    The platform contract is that every image recipe returns fixed-size tensors
+    before DataLoader collation. Users can choose normalisation separately from
+    architecture.
     """
     from torchvision import transforms as T
 
     size = int(run.params.get("input_size", 224) or 224)
     resize_size = max(size, int(round(size * 1.15)))
-    mean, std = [0.485, 0.456, 0.406], [0.229, 0.224, 0.225]
 
     if is_training:
-        return T.Compose([
+        ops = [
             T.Resize((resize_size, resize_size)),
             T.RandomResizedCrop(size),
             T.RandomHorizontalFlip(),
             T.ToTensor(),
-            T.Normalize(mean, std),
-        ])
+        ]
+    else:
+        ops = [
+            T.Resize((resize_size, resize_size)),
+            T.CenterCrop(size),
+            T.ToTensor(),
+        ]
 
-    return T.Compose([
-        T.Resize((resize_size, resize_size)),
-        T.CenterCrop(size),
-        T.ToTensor(),
-        T.Normalize(mean, std),
-    ])
+    _append_normalize(
+        ops,
+        T,
+        run,
+        default_mode="imagenet",
+        default_mean=[0.485, 0.456, 0.406],
+        default_std=[0.229, 0.224, 0.225],
+    )
+    return T.Compose(ops)
 
 def _make_optimizer(model, params):
     import torch.optim as optim
@@ -487,6 +603,24 @@ class TimmImageClassifierRecipe(ManagedMLRecipe):
             "model_name": {"type": "string", "default": "resnet50"},
             "pretrained": {"type": "boolean", "default": True},
             "input_size": {"type": "integer", "default": 224, "minimum": 16},
+            "normalization": {
+                "type": "string",
+                "enum": ["imagenet", "cifar", "custom", "none"],
+                "default": "imagenet",
+                "title": "Normalisation preset",
+            },
+            "normalize_mean": {
+                "type": "array",
+                "items": {"type": "number"},
+                "default": [0.485, 0.456, 0.406],
+                "title": "Normalisation mean",
+            },
+            "normalize_std": {
+                "type": "array",
+                "items": {"type": "number"},
+                "default": [0.229, 0.224, 0.225],
+                "title": "Normalisation std",
+            },
             "epochs": {"type": "integer", "default": 30, "minimum": 1},
             "batch_size": {"type": "integer", "default": 64, "minimum": 1},
             "num_workers": {"type": "integer", "default": 4, "minimum": 0},
@@ -583,6 +717,24 @@ class WideResNetCIFARRecipe(ManagedMLRecipe):
             "widen_factor": {"type": "integer", "default": 10, "minimum": 1},
             "dropout": {"type": "number", "default": 0.3, "minimum": 0.0},
             "input_size": {"type": "integer", "default": 32, "minimum": 16},
+            "normalization": {
+                "type": "string",
+                "enum": ["cifar", "imagenet", "custom", "none"],
+                "default": "cifar",
+                "title": "Normalisation preset",
+            },
+            "normalize_mean": {
+                "type": "array",
+                "items": {"type": "number"},
+                "default": [0.4914, 0.4822, 0.4465],
+                "title": "Normalisation mean",
+            },
+            "normalize_std": {
+                "type": "array",
+                "items": {"type": "number"},
+                "default": [0.2470, 0.2435, 0.2616],
+                "title": "Normalisation std",
+            },
             "epochs": {"type": "integer", "default": 200, "minimum": 1},
             "batch_size": {"type": "integer", "default": 128, "minimum": 1},
             "num_workers": {"type": "integer", "default": 4, "minimum": 0},
@@ -628,8 +780,16 @@ class WideResNetCIFARRecipe(ManagedMLRecipe):
             T.RandomCrop(size, padding=max(1, size // 8)),
             T.RandomHorizontalFlip(),
             T.ToTensor(),
-            T.Normalize(self._MEAN, self._STD),
         ]
+
+        _append_normalize(
+            ops,
+            T,
+            run,
+            default_mode="cifar",
+            default_mean=self._MEAN,
+            default_std=self._STD,
+        )
 
         if bool(run.params.get("cutout", True)):
             ops.append(_Cutout(int(run.params.get("cutout_size", max(1, size // 2)))))
@@ -640,11 +800,21 @@ class WideResNetCIFARRecipe(ManagedMLRecipe):
         from torchvision import transforms as T
 
         size = int(run.params.get("input_size", 32) or 32)
-        return T.Compose([
+        ops = [
             T.Resize((size, size)),
             T.ToTensor(),
-            T.Normalize(self._MEAN, self._STD),
-        ])
+        ]
+
+        _append_normalize(
+            ops,
+            T,
+            run,
+            default_mode="cifar",
+            default_mean=self._MEAN,
+            default_std=self._STD,
+        )
+
+        return T.Compose(ops)
 
     def load_sample(self, run, row):
         return _open_image_from_row(run, row)
@@ -708,6 +878,24 @@ class TimmImageRegressorRecipe(ManagedMLRecipe):
             "model_name": {"type": "string", "default": "efficientnet_b0"},
             "pretrained": {"type": "boolean", "default": True},
             "input_size": {"type": "integer", "default": 224, "minimum": 16},
+            "normalization": {
+                "type": "string",
+                "enum": ["imagenet", "cifar", "custom", "none"],
+                "default": "imagenet",
+                "title": "Normalisation preset",
+            },
+            "normalize_mean": {
+                "type": "array",
+                "items": {"type": "number"},
+                "default": [0.485, 0.456, 0.406],
+                "title": "Normalisation mean",
+            },
+            "normalize_std": {
+                "type": "array",
+                "items": {"type": "number"},
+                "default": [0.229, 0.224, 0.225],
+                "title": "Normalisation std",
+            },
             "n_outputs": {"type": "integer", "default": 1, "minimum": 1},
             "loss": {"type": "string", "enum": ["mse", "mae", "huber"], "default": "mse"},
             "epochs": {"type": "integer", "default": 30, "minimum": 1},

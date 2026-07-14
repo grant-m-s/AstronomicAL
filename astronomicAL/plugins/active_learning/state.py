@@ -55,8 +55,42 @@ LATEST_REFERENCE_KEYS = (
 def now() -> float:
     return time.time()
 
+def is_missing_label_value(value: Any) -> bool:
+    """Return True for None, '', pandas.NA, NaN, NaT, and similar missing scalars.
+
+    Do not use `value or ""` or `value in (...)` for label values; pandas.NA
+    raises "boolean value of NA is ambiguous".
+    """
+    if value is None:
+        return True
+
+    if isinstance(value, str):
+        return value.strip() == ""
+
+    try:
+        import pandas as pd
+
+        missing = pd.isna(value)
+        if isinstance(missing, bool):
+            return missing
+        if hasattr(missing, "item"):
+            return bool(missing.item())
+    except Exception:
+        pass
+
+    try:
+        return value != value  # NaN
+    except Exception:
+        return False
+
+
+def label_text(value: Any) -> str:
+    if is_missing_label_value(value):
+        return ""
+    return str(value).strip()
+
 def normalise_label(label: Any) -> str:
-    value = str(label or "").strip()
+    value = label_text(label)
     if value.lower() in {"unsure", "uncertain", "unknown", "skip", UNSURE_LABEL.lower()}:
         return UNSURE_LABEL
     return value
@@ -79,17 +113,22 @@ def is_regression_task(session_payload: Mapping[str, Any]) -> bool:
     return parse_task_type(dict(session_payload or {}).get("task_type"), default=TASK_CLASSIFICATION) == TASK_REGRESSION
 
 def normalise_regression_label(label: Any) -> float:
-    text = str(label or "").strip()
+    text = label_text(label)
+
     if text.lower() in {"unsure", "uncertain", "unknown", "skip", UNSURE_LABEL.lower()}:
         raise ValueError("Use the Unsure label instead of a numeric value to skip a regression row.")
+
     if not text:
         raise ValueError("A numeric regression target value is required.")
+
     try:
         value = float(text)
     except Exception as exc:
         raise ValueError(f"Regression target values must be numeric; got {text!r}.") from exc
+
     if value != value or value in (float("inf"), float("-inf")):
         raise ValueError("Regression target values must be finite numbers.")
+
     return value
 
 def display_regression_label(label: Any) -> str:
@@ -102,26 +141,39 @@ def display_regression_label(label: Any) -> str:
 def parse_label_options(value: Any) -> List[str]:
     if value is None:
         return []
+
     if isinstance(value, str):
-        parts = [part.strip() for part in value.replace("\n", ",").split(",")]
+        raw_parts = value.replace("\n", ",").split(",")
     elif isinstance(value, Iterable):
-        parts = [str(part).strip() for part in value]
+        raw_parts = list(value)
     else:
-        parts = [str(value).strip()]
+        raw_parts = [value]
 
     out: List[str] = []
-    for label in parts:
-        if not label or normalise_label(label) == UNSURE_LABEL:
+    for raw_label in raw_parts:
+        label = normalise_label(raw_label)
+        if not label or label == UNSURE_LABEL:
             continue
         if label not in out:
             out.append(label)
+
     return out
 
 def _blank_latest() -> Dict[str, Optional[str]]:
     return {key: None for key in LATEST_REFERENCE_KEYS}
 
 def stable_unique(values: Iterable[Any]) -> List[str]:
-    return list(dict.fromkeys(str(value) for value in values if value not in (None, "")))
+    out: List[str] = []
+    seen = set()
+
+    for value in values:
+        text = label_text(value)
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        out.append(text)
+
+    return out
 
 def create_session(
     *,
@@ -282,7 +334,7 @@ def record_label(
 ) -> Dict[str, Any]:
     session = coerce_session(session_payload)
     row_id_str = str(row_id or "").strip()
-    raw_label_text = str(label or "").strip()
+    raw_label_text = label_text(label)
     is_unsure = raw_label_text.lower() in {"unsure", "uncertain", "unknown", "skip", UNSURE_LABEL.lower()}
     if not row_id_str:
         raise ValueError("row_id is required.")

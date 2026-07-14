@@ -644,7 +644,7 @@ class MLTrainingCurvesPanel:
         should_update_plots = (
             force_render
             or finished
-            or previous_epoch_count <= 0
+            or previous_epoch_count <= 1
             or latest_epoch_count - previous_epoch_count >= int(self._event_refresh_epoch_step)
         )
 

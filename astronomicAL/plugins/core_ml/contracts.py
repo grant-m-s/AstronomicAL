@@ -194,9 +194,21 @@ def build_model_contract(
     ).lower()
 
     training_dataset_id = str(
-        model_payload.get("dataset_id")
+        model_payload.get("train_dataset_id")
+        or model_payload.get("training_dataset_id")
+        or input_contract.get("train_dataset_id")
         or input_contract.get("dataset_id")
+        or training.get("train_dataset_id")
         or training.get("dataset_id")
+        or model_payload.get("dataset_id")
+        or ""
+    )
+
+    source_dataset_id = str(
+        model_payload.get("source_dataset_id")
+        or input_contract.get("source_dataset_id")
+        or training.get("source_dataset_id")
+        or model_payload.get("dataset_id")
         or ""
     )
 
@@ -265,6 +277,7 @@ def build_model_contract(
         "modality": modality,
         "trained_on": {
             "dataset_id": training_dataset_id,
+            "source_dataset_id": source_dataset_id or None,
             "dataset_fingerprint": (
                 dataset_fingerprint(context, training_dataset_id)
                 if training_dataset_id

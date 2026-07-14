@@ -312,24 +312,24 @@ def record_label_action(context: Any, request: Any, cancel_token: Any = None) ->
 def bulk_label_next_action(context: Any, request: Any, cancel_token: Any = None) -> Dict[str, Any]:
     """Label the next N unlabelled review rows from the source label column.
 
-    The selected label column is stored on the session as ``target_column``.
-    Bulk review uses that column value per row, so a batch containing cat/dog/star
-    rows records cat/dog/star respectively instead of repeating the current UI
-    dropdown value.  Rows with blank labels, the special Unsure value, or labels
-    outside the session label set are skipped and the scan continues until N rows
-    are recorded or the current batch is exhausted.
+    Missing, ambiguous, unsure, invalid-regression, and out-of-session labels are
+    skipped and left unverified. They are not recorded as Unsure automatically,
+    because problematic labels are exactly what AL review is meant to preserve.
     """
 
     request = coerce_request(request)
     params = dict(request.params or {})
+
     session_artifact_id = str(params.get("session_artifact_id") or "").strip()
     if not session_artifact_id:
         raise ValueError("bulk_label_next requires session_artifact_id.")
 
     n = max(1, int(params.get("n") or params.get("count") or 1))
     session = al_state.coerce_session(context.artifacts.get(session_artifact_id))
+
     dataset_id = str(session.get("pool_dataset_id") or session.get("dataset_id") or "").strip()
     label_column = str(params.get("label_column") or session.get("target_column") or "").strip()
+
     if not dataset_id:
         raise ValueError("bulk_label_next could not determine the session dataset.")
     if not label_column:
@@ -344,31 +344,85 @@ def bulk_label_next_action(context: Any, request: Any, cancel_token: Any = None)
         _, focused = focused_row_ref(context)
         start_row_id = str(focused or "").strip()
 
-    candidate_row_ids = next_unlabelled_batch_row_ids(session, row_ids=row_ids, start_row_id=start_row_id, n=len(row_ids))
-    labels_by_row_id = dataset_label_values_by_row_id(context, dataset_id=dataset_id, row_ids=candidate_row_ids, label_column=label_column)
-    allowed_labels = set() if al_state.is_regression_task(session) else {al_state.normalise_label(value) for value in (session.get("label_options") or []) if value not in (None, "")}
+    candidate_row_ids = next_unlabelled_batch_row_ids(
+        session,
+        row_ids=row_ids,
+        start_row_id=start_row_id,
+        n=len(row_ids),
+    )
+
+    labels_by_row_id = dataset_label_values_by_row_id(
+        context,
+        dataset_id=dataset_id,
+        row_ids=candidate_row_ids,
+        label_column=label_column,
+    )
+
+    is_regression = al_state.is_regression_task(session)
+
+    allowed_labels = set()
+    if not is_regression:
+        for value in session.get("label_options") or []:
+            label = al_state.normalise_label(value)
+            if label and label != al_state.UNSURE_LABEL:
+                allowed_labels.add(label)
 
     selected_row_ids: List[str] = []
-    selected_labels: Dict[str, str] = {}
+    selected_labels: Dict[str, Any] = {}
     skipped: List[Dict[str, str]] = []
+
     for row_id in candidate_row_ids:
-        raw_label = labels_by_row_id.get(str(row_id))
+        row_id = str(row_id)
+        raw_label = labels_by_row_id.get(row_id)
+
+        if al_state.is_missing_label_value(raw_label):
+            skipped.append({"row_id": row_id, "reason": "missing_label"})
+            continue
+
         label = al_state.normalise_label(raw_label)
+
         if not label:
-            skipped.append({"row_id": str(row_id), "reason": "blank_label"})
+            skipped.append({"row_id": row_id, "reason": "blank_label"})
             continue
+
         if label == al_state.UNSURE_LABEL:
-            skipped.append({"row_id": str(row_id), "reason": "unsure_label"})
+            skipped.append({"row_id": row_id, "reason": "unsure_or_ambiguous_label"})
             continue
-        if allowed_labels and label not in allowed_labels:
-            skipped.append({"row_id": str(row_id), "reason": "label_not_in_session", "label": label})
-            continue
-        selected_row_ids.append(str(row_id))
-        selected_labels[str(row_id)] = label
+
+        if is_regression:
+            try:
+                selected_label: Any = al_state.normalise_regression_label(raw_label)
+            except Exception:
+                skipped.append(
+                    {
+                        "row_id": row_id,
+                        "reason": "invalid_regression_label",
+                        "label": al_state.label_text(raw_label),
+                    }
+                )
+                continue
+        else:
+            if allowed_labels and label not in allowed_labels:
+                skipped.append(
+                    {
+                        "row_id": row_id,
+                        "reason": "label_not_in_session",
+                        "label": label,
+                    }
+                )
+                continue
+            selected_label = label
+
+        selected_row_ids.append(row_id)
+        selected_labels[row_id] = selected_label
+
         if len(selected_row_ids) >= n:
             break
 
     if not selected_row_ids:
+        remaining_row_ids = remaining_review_row_ids(session, row_ids=row_ids)
+        next_row_id = next_review_row_id(session, row_ids=row_ids, after_row_id=start_row_id)
+
         return {
             "ok": True,
             "session_artifact_id": session_artifact_id,
@@ -381,6 +435,9 @@ def bulk_label_next_action(context: Any, request: Any, cancel_token: Any = None)
             "skipped": skipped,
             "count": 0,
             "requested_count": n,
+            "remaining_row_ids": remaining_row_ids,
+            "remaining_count": len(remaining_row_ids),
+            "next_row_id": next_row_id,
             "counts": al_state.counts(session),
         }
 
@@ -397,6 +454,7 @@ def bulk_label_next_action(context: Any, request: Any, cancel_token: Any = None)
 
     remaining_row_ids = remaining_review_row_ids(updated, row_ids=row_ids)
     next_row_id = next_review_row_id(updated, row_ids=row_ids, after_row_id=selected_row_ids[-1])
+
     selection_updated = False
     if bool(params.get("update_selection", True)):
         last_batch = dict(updated.get("last_batch") or session.get("last_batch") or {})
@@ -411,16 +469,16 @@ def bulk_label_next_action(context: Any, request: Any, cancel_token: Any = None)
             update_focus_policy="first",
         )
         selection_updated = True
-        if next_row_id:
-            acquisition.set_focus_row(
-                context,
-                dataset_id=dataset_id,
-                row_id=next_row_id,
-                origin=f"{ORIGIN}.bulk_label_next",
-                metadata={"session_artifact_id": new_session_artifact_id, "reason": "bulk_labelled_next_unverified"},
-            )
 
-    recorded_entry = dict((updated.get("labels") or {}).get(str(row_id)) or {})
+    if next_row_id:
+        acquisition.set_focus_row(
+            context,
+            dataset_id=dataset_id,
+            row_id=next_row_id,
+            origin=f"{ORIGIN}.bulk_label_next",
+            metadata={"session_artifact_id": new_session_artifact_id, "reason": "bulk_labelled_next_unverified"},
+        )
+
     payload = {
         "session_artifact_id": new_session_artifact_id,
         "previous_session_artifact_id": session_artifact_id,
@@ -438,6 +496,7 @@ def bulk_label_next_action(context: Any, request: Any, cancel_token: Any = None)
         "selection_updated": selection_updated,
         "counts": al_state.counts(updated),
     }
+
     publish(context, "al.labels.bulk_recorded", payload)
     return {"ok": True, **payload}
 

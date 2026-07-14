@@ -41,6 +41,9 @@ class ProtocolConfig:
     validation_size: float = 0.1
     test_size: float = 0.2
 
+    materialize_split_datasets: bool = True
+    split_dataset_prefix: Optional[str] = None
+
     selection_metric: str = "val_accuracy"
     selection_mode: str = "auto"
     random_state: int = 42
@@ -84,6 +87,13 @@ class ProtocolConfig:
             ),
             validation_size=num("protocol_validation_size", 0.1),
             test_size=num("protocol_test_size", 0.2),
+            materialize_split_datasets=_bool_param(
+                params.get("protocol_materialize_split_datasets"),
+                True,
+            ),
+            split_dataset_prefix=(
+                params.get("protocol_split_dataset_prefix") or None
+            ),
             selection_metric=str(
                 params.get("protocol_selection_metric", "val_accuracy")
             ),
@@ -200,6 +210,21 @@ class ProtocolConfig:
         cfg.protocol_id = _stable_protocol_id(cfg)
         return cfg
 
+def _bool_param(value: Any, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+
+    if value is None:
+        return default
+
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off"}:
+        return False
+
+    return default
+
 def _stable_protocol_id(cfg: ProtocolConfig) -> str:
     import hashlib
 
@@ -246,7 +271,6 @@ class Partition:
         return len(self.record_ids)
 
 @dataclass
-@dataclass
 class Partitions:
     train: Partition
     val: Partition
@@ -262,6 +286,7 @@ class Partitions:
     train_dataset_id: Optional[str] = None
     validation_dataset_id: Optional[str] = None
     test_dataset_id: Optional[str] = None
+    materialized_split_dataset_ids: Dict[str, str] = field(default_factory=dict)
 
 @dataclass
 class TrainingComponents:

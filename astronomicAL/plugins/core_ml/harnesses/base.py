@@ -7,6 +7,7 @@ from ..data.dataset_access import get_dataset_frame
 from ..protocol import DataBinding, Partition, Partitions, ProtocolConfig, TargetSpec
 from ..runtime import check_cancelled, put_artifact
 from ..serialization import json_safe
+from ..split_datasets import materialize_split_datasets
 
 class RunHarness:
     """Owns partitioning, selection, test evaluation, and the audit artifacts.
@@ -202,6 +203,11 @@ class RunHarness:
             "evaluation_report_artifact_id": eval_id,
             "predictions_artifact_id": predictions_id,
             "split_spec_artifact_id": split_spec_id,
+            "source_dataset_id": self.run.dataset_id,
+            "train_dataset_id": parts.train_dataset_id,
+            "validation_dataset_id": parts.validation_dataset_id,
+            "test_dataset_id": parts.test_dataset_id,
+            "split_dataset_ids": dict(parts.materialized_split_dataset_ids or {}),
             "best_epoch": self._best_epoch,
             "best_score": self._best_score,
             "selection_metric": self.protocol.selection_metric,
@@ -653,6 +659,7 @@ class RunHarness:
             train_dataset_id=train_dataset_id,
             validation_dataset_id=val_dataset_id,
             test_dataset_id=test_dataset_id,
+            materialized_split_dataset_ids={},
         )
 
 # ---- partitioning (modality-agnostic) ----------------------------------
@@ -768,6 +775,60 @@ class RunHarness:
         if len(val_p) == 0:
             raise ValueError("Validation partition is empty.")
 
+        split_dataset_ids: Dict[str, str] = {}
+
+        # Only materialise partitions that were actually split from the selected
+        # source dataset. External validation/test datasets are already explicit
+        # platform datasets.
+        split_partitions = {}
+        split_frames = {}
+
+        if val_from_split or test_from_split:
+            split_partitions["train"] = train_p
+            split_frames["train"] = train_df
+
+        if val_from_split:
+            split_partitions["validation"] = val_p
+            split_frames["validation"] = val_df
+
+        if test_from_split and test_p is not None and test_df is not None:
+            split_partitions["test"] = test_p
+            split_frames["test"] = test_df
+
+        if split_partitions:
+            split_dataset_ids = materialize_split_datasets(
+                context=self.run.context,
+                source_dataset_id=self.run.dataset_id,
+                run_id=self.run.run_id,
+                recipe_id=self.run.recipe_id,
+                recipe_version=self.run.recipe_version,
+                protocol=p,
+                binding=b,
+                params=self.run.params,
+                partitions=split_partitions,
+                fallback_frames=split_frames,
+            )
+
+            if split_dataset_ids.get("train"):
+                train_p.dataset_id = split_dataset_ids["train"]
+                train_p.source = "materialized_split"
+
+            if split_dataset_ids.get("validation"):
+                val_p.dataset_id = split_dataset_ids["validation"]
+                val_p.source = "materialized_split"
+
+            if test_p is not None and split_dataset_ids.get("test"):
+                test_p.dataset_id = split_dataset_ids["test"]
+                test_p.source = "materialized_split"
+
+            self.run.params["train_dataset_id"] = train_p.dataset_id
+            self.run.params["validation_dataset_id"] = val_p.dataset_id
+            self.run.params["test_dataset_id"] = (
+                test_p.dataset_id if test_p is not None else None
+            )
+            self.run.params["split_dataset_ids"] = dict(split_dataset_ids)
+
+
         self._frame = train_df
         self._partition_frames = {
             "train": train_df,
@@ -788,9 +849,10 @@ class RunHarness:
             protocol_id=p.protocol_id,
             target_column=b.target_column or "",
             record_id_column=b.record_id_column,
-            train_dataset_id=self.run.dataset_id,
+            train_dataset_id=train_p.dataset_id,
             validation_dataset_id=val_p.dataset_id,
             test_dataset_id=test_p.dataset_id if test_p is not None else None,
+            materialized_split_dataset_ids=split_dataset_ids,
         )
 
     def _random_indices(self, idx, labels, p):
@@ -1030,12 +1092,24 @@ class RunHarness:
         return self.run.put_artifact(
             "ml.split_spec",
             {
-                "schema_version": 2,
+                "schema_version": 3,
                 "run_id": self.run.run_id,
                 "dataset_id": self.run.dataset_id,
+                "source_dataset_id": self.run.dataset_id,
                 "train_dataset_id": parts.train_dataset_id,
                 "validation_dataset_id": parts.validation_dataset_id,
                 "test_dataset_id": parts.test_dataset_id,
+                "split_dataset_ids": dict(parts.materialized_split_dataset_ids or {}),
+                "partition_dataset_ids": {
+                    "train": parts.train_dataset_id,
+                    "validation": parts.validation_dataset_id,
+                    "test": parts.test_dataset_id,
+                },
+                "partition_sources": {
+                    "train": parts.train.source,
+                    "validation": parts.val.source,
+                    "test": parts.test.source if parts.test else "none",
+                },
                 "protocol_id": parts.protocol_id,
                 "split_strategy": parts.strategy,
                 "validation_source": parts.validation_source,
@@ -1056,6 +1130,7 @@ class RunHarness:
                     "test_used_in_training": False,
                     "test_used_in_selection": False,
                     "selection_partition": "validation",
+                    "explicit_split_datasets": bool(parts.materialized_split_dataset_ids),
                 },
             },
         )

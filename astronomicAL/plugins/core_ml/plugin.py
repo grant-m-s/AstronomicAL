@@ -90,6 +90,7 @@ def register(api) -> None:
         outputs=[
             {"type": "ml.training_log", "description": "Live recipe progress and metrics."},
             {"type": "ml.split_spec", "description": "Train/validation/test split row ids and protocol."},
+            {"type": "dataset", "description": "Optional materialised train/validation/test split datasets."},
             {"type": "ml.model", "description": "Durable trained model artifact."},
             {"type": "ml.predictions", "description": "Optional prediction artifact."},
             {"type": "ml.evaluation_report", "description": "Optional evaluation report."},
@@ -103,6 +104,20 @@ def register(api) -> None:
                 "recipe_profile_id": {"type": "string"},
                 "recipe_profile_artifact_id": {"type": "string"},
                 "run_id": {"type": "string"},
+                "protocol_materialize_split_datasets": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": "Register split-derived train/validation/test partitions as explicit AstronomicAL datasets.",
+                },
+                "protocol_split_dataset_prefix": {
+                    "type": "string",
+                    "description": "Optional dataset-id prefix for materialised split datasets.",
+                },
+                "protocol_split_dataset_columns": {
+                    "type": "string",
+                    "default": "all",
+                    "description": "'all', 'training', or a comma/JSON list of columns to include in split datasets.",
+                },
             },
         },
         run_in_job=True,
@@ -202,6 +217,7 @@ def register(api) -> None:
         optional_mappings=["target_label", "image.path", "image.uri"],
         uses_services=["core.ml.recipe_registry"],
         produces=[
+            "dataset",
             "ml.training_log",
             "ml.split_spec",
             "ml.model",

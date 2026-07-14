@@ -11,6 +11,10 @@ from ..paths import ml_run_artifact_dir
 from ..protocol import Partition, Partitions, TargetSpec, _stable_protocol_id
 from ..runtime import put_artifact
 from ..serialization import json_safe
+from ..normalization import (
+    apply_train_split_image_normalization,
+    should_compute_train_split_normalization,
+)
 from .base import RunHarness
 
 class TorchRegressionHarness(RunHarness):
@@ -84,6 +88,183 @@ class TorchRegressionHarness(RunHarness):
             return torch.device("cpu")
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+
+    def _ensure_train_split_normalization(self, partition: Partition) -> None:
+        """Compute image mean/std once, after splitting, using train rows only."""
+
+        if getattr(self, "_train_split_normalization_done", False):
+            return
+
+        if not should_compute_train_split_normalization(self.run.params):
+            self._train_split_normalization_done = True
+            return
+
+        train_partition = self._resolve_train_partition(partition)
+        if train_partition is None:
+            return
+
+        info = apply_train_split_image_normalization(
+            context=self.run.context,
+            params=self.run.params,
+            source_dataset_id=self.run.dataset_id,
+            train_dataset_id=(
+                getattr(train_partition, "dataset_id", None)
+                or self.run.params.get("train_dataset_id")
+            ),
+            train_row_ids=list(train_partition.record_ids),
+            record_id_column=self.binding.record_id_column,
+            image_column=(
+                self.binding.image_column
+                or self.run.params.get("image_column")
+                or self.run.params.get("image_path_column")
+            ),
+            cancel_token=getattr(self.run, "cancel_token", None),
+        )
+
+        self._train_split_normalization_info = info
+        self._train_split_normalization_done = True
+
+        if info:
+            self.run.log(
+                message="Calculated image mean/std from training split.",
+                status="running",
+                extra={
+                    "phase": "normalization",
+                    "normalization": info,
+                },
+            )
+
+    def _resolve_train_partition(self, partition: Partition) -> Optional[Partition]:
+        if getattr(partition, "name", None) == "train":
+            return partition
+
+        parts = (
+            getattr(self, "_parts", None)
+            or getattr(self, "_partitions", None)
+            or getattr(self, "partitions", None)
+        )
+
+        train_partition = getattr(parts, "train", None)
+        if train_partition is not None:
+            return train_partition
+
+        return None
+
+    def _transform_metadata(self) -> Dict[str, Any]:
+        params = dict(self.run.params or {})
+        transform_meta: Dict[str, Any] = {}
+
+        image_size = (
+            params.get("image_size")
+            or params.get("input_size")
+            or params.get("resize")
+        )
+
+        if image_size is not None and image_size != "":
+            try:
+                transform_meta["image_size"] = int(image_size)
+            except Exception:
+                transform_meta["image_size"] = image_size
+
+        mean = self._vector_param(
+            params,
+            (
+                "normalization_mean",
+                "normalization_means",
+                "image_mean",
+                "normalize_mean",
+                "mean",
+            ),
+        )
+
+        std = self._vector_param(
+            params,
+            (
+                "normalization_std",
+                "normalization_stds",
+                "image_std",
+                "normalize_std",
+                "std",
+            ),
+        )
+
+        normalization = params.get("normalization")
+        if isinstance(normalization, Mapping):
+            transform_meta["normalization"] = dict(normalization)
+
+        if mean or std:
+            existing = dict(transform_meta.get("normalization") or {})
+            if mean:
+                existing["mean"] = mean
+                transform_meta["mean"] = mean
+            if std:
+                existing["std"] = std
+                transform_meta["std"] = std
+            transform_meta["normalization"] = existing
+
+        computed = params.get("computed_normalization")
+        if isinstance(computed, Mapping):
+            transform_meta["computed_normalization"] = json_safe(dict(computed))
+
+        return json_safe(transform_meta)
+
+    def _vector_param(
+        self,
+        params: Mapping[str, Any],
+        keys: Sequence[str],
+    ) -> List[float]:
+        for key in keys:
+            value = params.get(key)
+            if value is None or value == "":
+                continue
+
+            parsed = self._parse_vector(value)
+            if parsed:
+                return parsed
+
+        normalization = params.get("normalization")
+        if isinstance(normalization, Mapping):
+            for key in keys:
+                value = normalization.get(key)
+                if value is None or value == "":
+                    continue
+
+                parsed = self._parse_vector(value)
+                if parsed:
+                    return parsed
+
+        return []
+
+    def _parse_vector(self, value: Any) -> List[float]:
+        if value is None:
+            return []
+
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return []
+
+            try:
+                value = json.loads(text)
+            except Exception:
+                value = [
+                    part.strip()
+                    for chunk in text.splitlines()
+                    for part in chunk.split(",")
+                    if part.strip()
+                ]
+
+        if isinstance(value, Mapping):
+            return []
+
+        try:
+            return [float(item) for item in value]
+        except Exception:
+            try:
+                return [float(value)]
+            except Exception:
+                return []
+
     def _frame_for(self, partition: Partition):
         b = self.binding
         frame = (
@@ -128,6 +309,9 @@ class TorchRegressionHarness(RunHarness):
         from torch.utils.data import DataLoader, Dataset
 
         recipe, run, b = self.recipe, self.run, self.binding
+
+        self._ensure_train_split_normalization(partition)
+
         frame = self._frame_for(partition).reset_index(drop=True)
         transform = recipe.train_transform(run) if train else recipe.eval_transform(run)
         n_outputs = self._n_outputs()
@@ -303,15 +487,10 @@ class TorchRegressionHarness(RunHarness):
         architecture = str(self.run.params.get("architecture") or "custom")
         custom_model_import = str(self.run.params.get("custom_model_import") or "").strip()
 
-        # Only record transform hints the recipe actually supplied; do not invent
-        # CIFAR defaults — a regression recipe may be tabular, not image.
-        transform_meta: Dict[str, Any] = {}
-        image_size = self.run.params.get("image_size")
-        normalization = self.run.params.get("normalization")
-        if image_size is not None:
-            transform_meta["image_size"] = image_size
-        if isinstance(normalization, Mapping):
-            transform_meta["normalization"] = dict(normalization)
+        # Only record transform hints the recipe actually supplied. If automatic
+        # mean/std was enabled, these values were calculated from the training
+        # split before transforms/loaders were built.
+        transform_meta = self._transform_metadata()
 
         target_columns = [parts.target_column] if parts.target_column else []
 
@@ -325,7 +504,9 @@ class TorchRegressionHarness(RunHarness):
             "recipe_id": self.run.recipe_id,
             "recipe_version": self.run.recipe_version,
             "run_id": self.run.run_id,
-            "dataset_id": self.run.dataset_id,
+            "source_dataset_id": self.run.dataset_id,
+            "dataset_id": parts.train_dataset_id or self.run.dataset_id,
+            "split_dataset_ids": dict(parts.materialized_split_dataset_ids or {}),
             "protocol_id": parts.protocol_id,
             "framework": "torch",
             "task": self.recipe.task,
@@ -362,7 +543,9 @@ class TorchRegressionHarness(RunHarness):
             "task": self.recipe.task,
             "modality": self.recipe.modality,
             "run_id": self.run.run_id,
-            "dataset_id": self.run.dataset_id,
+            "source_dataset_id": self.run.dataset_id,
+            "dataset_id": parts.train_dataset_id or self.run.dataset_id,
+            "split_dataset_ids": dict(parts.materialized_split_dataset_ids or {}),
             "recipe_id": self.run.recipe_id,
             "recipe_version": self.run.recipe_version,
             "protocol_id": parts.protocol_id,
@@ -421,6 +604,7 @@ class TorchRegressionHarness(RunHarness):
             "model_title": getattr(self.recipe, "title", self.run.recipe_id),
             "architecture": architecture,
             "custom_model_import": custom_model_import,
+            "transform": transform_meta,
             "metrics": {
                 "best_score": self._best_score,
                 "selection_metric": self.protocol.selection_metric,

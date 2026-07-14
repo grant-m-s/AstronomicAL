@@ -2143,30 +2143,36 @@ class ActiveLearningPanel:
 
     def _sync_review_label_to_source(self, row_id: Any) -> None:
         label = self._source_label_for_row(str(row_id or "").strip())
-        if not label:
-            return
+
         if self.task_type == al_state.TASK_REGRESSION:
             value_widget = self._widgets.get("label_value")
             if value_widget is not None:
-                value_widget.value = str(label)
+                value_widget.value = "" if label == al_state.UNSURE_DISPLAY else str(label or "")
             return
+
         label_widget = self._widgets.get("label")
         if label_widget is None:
             return
+
         options = dict(getattr(label_widget, "options", {}) or {})
         allowed = set(str(value) for value in options.values())
-        if str(label) not in allowed:
-            return
-        label_widget.value = str(label)
+
+        if label and str(label) in allowed:
+            label_widget.value = str(label)
+        else:
+            label_widget.value = al_state.UNSURE_DISPLAY
 
     def _source_label_for_row(self, row_id: str) -> str:
         row_id = str(row_id or "").strip()
         if not row_id:
-            return ""
+            return al_state.UNSURE_DISPLAY
+
         dataset_id = self._session_dataset_id() or str(self._widget_value("dataset_id", "") or "")
         label_column = self._session_label_column()
+
         if not dataset_id or not label_column:
-            return ""
+            return al_state.UNSURE_DISPLAY
+
         try:
             values = actions.dataset_label_values_by_row_id(
                 self.context,
@@ -2175,9 +2181,19 @@ class ActiveLearningPanel:
                 label_column=label_column,
             )
         except Exception:
-            return ""
-        label = al_state.normalise_label(values.get(row_id))
-        return "" if label == al_state.UNSURE_LABEL else label
+            return al_state.UNSURE_DISPLAY
+
+        raw_label = values.get(row_id)
+
+        if al_state.is_missing_label_value(raw_label):
+            return al_state.UNSURE_DISPLAY
+
+        label = al_state.normalise_label(raw_label)
+
+        if not label or label == al_state.UNSURE_LABEL:
+            return al_state.UNSURE_DISPLAY
+
+        return label
 
     def _session_payload(self, session_artifact_id: Any = None) -> Dict[str, Any]:
         artifact_id = str(session_artifact_id or self._widget_value("session_id", "") or self.session_artifact_id or "").strip()

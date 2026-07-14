@@ -22,6 +22,9 @@ PROTOCOL_KEYS = (
     "protocol_split_column",
     "protocol_validation_size",
     "protocol_test_size",
+    "protocol_materialize_split_datasets",
+    "protocol_split_dataset_prefix",
+    "protocol_split_dataset_columns",
     "protocol_selection_metric",
     "protocol_random_state",
 )
@@ -34,6 +37,15 @@ RUN_ONLY_KEYS = {
     "profile_artifact_id",
     "recipe_profile_id",
     "recipe_profile_artifact_id",
+
+    # Dataset/run-specific label bindings. These must not be stored in recipe
+    # profiles because profiles should be reusable across datasets and AL rounds.
+    "target_column",
+    "label_column",
+    "class_column",
+    "target",
+    "label",
+    "labels",
 }
 
 @dataclass(frozen=True)

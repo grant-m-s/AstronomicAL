@@ -231,6 +231,29 @@ def run_ml_recipe_action(
 
         result = json_safe(dict(result))
 
+        split_dataset_ids = dict(result.get("split_dataset_ids") or {})
+
+        train_dataset_id = (
+            result.get("train_dataset_id")
+            or split_dataset_ids.get("train")
+        )
+        validation_dataset_id = (
+            result.get("validation_dataset_id")
+            or split_dataset_ids.get("validation")
+            or split_dataset_ids.get("val")
+        )
+        test_dataset_id = (
+            result.get("test_dataset_id")
+            or split_dataset_ids.get("test")
+        )
+
+        if train_dataset_id and "train" not in split_dataset_ids:
+            split_dataset_ids["train"] = train_dataset_id
+        if validation_dataset_id and "validation" not in split_dataset_ids:
+            split_dataset_ids["validation"] = validation_dataset_id
+        if test_dataset_id and "test" not in split_dataset_ids:
+            split_dataset_ids["test"] = test_dataset_id
+
         artifact_ids = _collect_artifact_ids(
             result,
             training_log_artifact_id=run.training_log_artifact_id,
@@ -240,6 +263,11 @@ def run_ml_recipe_action(
             "schema_version": 2,
             "run_id": run.run_id,
             "dataset_id": dataset_id,
+            "source_dataset_id": dataset_id,
+            "train_dataset_id": train_dataset_id,
+            "validation_dataset_id": validation_dataset_id,
+            "test_dataset_id": test_dataset_id,
+            "split_dataset_ids": json_safe(split_dataset_ids),
             "profile_id": merged_params.get("recipe_profile_id"),
             "profile_name": merged_params.get("recipe_profile_name"),
             "recipe_id": spec.id,
@@ -261,6 +289,16 @@ def run_ml_recipe_action(
                 "test_source": protocol.test_source,
                 "validation_dataset_id": protocol.validation_dataset_id,
                 "test_dataset_id": protocol.test_dataset_id,
+                "materialize_split_datasets": getattr(
+                    protocol,
+                    "materialize_split_datasets",
+                    True,
+                ),
+                "split_dataset_prefix": getattr(
+                    protocol,
+                    "split_dataset_prefix",
+                    None,
+                ),
                 "group_column": protocol.group_column,
                 "split_column": protocol.split_column,
                 "validation_size": protocol.validation_size,
@@ -306,6 +344,10 @@ def run_ml_recipe_action(
                     or getattr(protocol, "protocol_id", None)
                 ),
                 split_spec_artifact_id=result.get("split_spec_artifact_id"),
+                split_dataset_ids=split_dataset_ids,
+                train_dataset_id=train_dataset_id,
+                validation_dataset_id=validation_dataset_id,
+                test_dataset_id=test_dataset_id,
                 model_artifact_id=result.get("model_artifact_id"),
                 evaluation_report_artifact_id=result.get(
                     "evaluation_report_artifact_id"
@@ -321,6 +363,10 @@ def run_ml_recipe_action(
             extra={
                 "phase": "complete",
                 "artifact_ids": artifact_ids,
+                "split_dataset_ids": split_dataset_ids,
+                "train_dataset_id": train_dataset_id,
+                "validation_dataset_id": validation_dataset_id,
+                "test_dataset_id": test_dataset_id,
             },
         )
 
@@ -343,6 +389,10 @@ def run_ml_recipe_action(
                         or getattr(protocol, "protocol_id", None)
                     ),
                     "split_spec_artifact_id": result.get("split_spec_artifact_id"),
+                    "split_dataset_ids": split_dataset_ids,
+                    "train_dataset_id": train_dataset_id,
+                    "validation_dataset_id": validation_dataset_id,
+                    "test_dataset_id": test_dataset_id,
                     "model_artifact_id": result.get("model_artifact_id"),
                     "evaluation_report_artifact_id": result.get(
                         "evaluation_report_artifact_id"
@@ -353,11 +403,18 @@ def run_ml_recipe_action(
             )
 
             if final_training_log_artifact_id:
-                artifact_ids["final_training_log_artifact_id"] = final_training_log_artifact_id
+                artifact_ids["final_training_log_artifact_id"] = (
+                    final_training_log_artifact_id
+                )
 
         finished_payload = {
             "run_id": run.run_id,
             "dataset_id": dataset_id,
+            "source_dataset_id": dataset_id,
+            "train_dataset_id": train_dataset_id,
+            "validation_dataset_id": validation_dataset_id,
+            "test_dataset_id": test_dataset_id,
+            "split_dataset_ids": split_dataset_ids,
             "recipe_profile_id": merged_params.get("recipe_profile_id"),
             "recipe_profile_name": merged_params.get("recipe_profile_name"),
             "recipe_id": spec.id,
@@ -382,6 +439,11 @@ def run_ml_recipe_action(
             "status": "complete",
             "run_id": run.run_id,
             "dataset_id": dataset_id,
+            "source_dataset_id": dataset_id,
+            "train_dataset_id": train_dataset_id,
+            "validation_dataset_id": validation_dataset_id,
+            "test_dataset_id": test_dataset_id,
+            "split_dataset_ids": split_dataset_ids,
             "recipe_id": spec.id,
             "recipe_version": spec.version,
             "recipe_title": spec.title,

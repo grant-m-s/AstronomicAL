@@ -10,6 +10,10 @@ from ..paths import ml_run_artifact_dir
 from ..protocol import Partition, Partitions, TargetSpec
 from ..runtime import put_artifact
 from ..serialization import json_safe
+from ..normalization import (
+    apply_train_split_image_normalization,
+    should_compute_train_split_normalization,
+)
 from .base import RunHarness
 
 class TorchClassificationHarness(RunHarness):
@@ -26,6 +30,184 @@ class TorchClassificationHarness(RunHarness):
         if req == "cuda":
             return torch.device("cuda" if torch.cuda.is_available() else "cpu")
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+    def _ensure_train_split_normalization(self, partition: Partition) -> None:
+        """Compute image mean/std once, after splitting, using train rows only.
+
+        This runs before recipe.train_transform/eval_transform is created. That
+        keeps automatic mean/std out of the launcher and avoids calculating
+        normalisation over validation/test rows.
+        """
+
+        if getattr(self, "_train_split_normalization_done", False):
+            return
+
+        if not should_compute_train_split_normalization(self.run.params):
+            self._train_split_normalization_done = True
+            return
+
+        train_partition = self._resolve_train_partition(partition)
+        if train_partition is None:
+            # If a non-train loader is somehow built first, wait until the train
+            # partition is available rather than computing against the wrong set.
+            return
+
+        info = apply_train_split_image_normalization(
+            context=self.run.context,
+            params=self.run.params,
+            source_dataset_id=self.run.dataset_id,
+            train_dataset_id=(
+                getattr(train_partition, "dataset_id", None)
+                or self.run.params.get("train_dataset_id")
+            ),
+            train_row_ids=list(train_partition.record_ids),
+            record_id_column=self.binding.record_id_column,
+            image_column=(
+                self.binding.image_column
+                or self.run.params.get("image_column")
+                or self.run.params.get("image_path_column")
+            ),
+            cancel_token=getattr(self.run, "cancel_token", None),
+        )
+
+        self._train_split_normalization_info = info
+        self._train_split_normalization_done = True
+
+        if info:
+            self.run.log(
+                message="Calculated image mean/std from training split.",
+                status="running",
+                extra={
+                    "phase": "normalization",
+                    "normalization": info,
+                },
+            )
+
+    def _resolve_train_partition(self, partition: Partition) -> Optional[Partition]:
+        if getattr(partition, "name", None) == "train":
+            return partition
+
+        parts = (
+            getattr(self, "_parts", None)
+            or getattr(self, "_partitions", None)
+            or getattr(self, "partitions", None)
+        )
+
+        train_partition = getattr(parts, "train", None)
+        if train_partition is not None:
+            return train_partition
+
+        return None
+
+    def _transform_metadata(self) -> Dict[str, Any]:
+        params = dict(self.run.params or {})
+
+        image_size = (
+            params.get("image_size")
+            or params.get("input_size")
+            or params.get("resize")
+            or 32
+        )
+
+        mean = self._vector_param(
+            params,
+            (
+                "normalization_mean",
+                "normalization_means",
+                "image_mean",
+                "normalize_mean",
+                "mean",
+            ),
+            default=[0.4914, 0.4822, 0.4465],
+        )
+
+        std = self._vector_param(
+            params,
+            (
+                "normalization_std",
+                "normalization_stds",
+                "image_std",
+                "normalize_std",
+                "std",
+            ),
+            default=[0.2023, 0.1994, 0.2010],
+        )
+
+        transform = {
+            "image_size": int(image_size),
+            "mean": mean,
+            "std": std,
+            "normalization": {
+                "mean": mean,
+                "std": std,
+            },
+        }
+
+        computed = params.get("computed_normalization")
+        if isinstance(computed, Mapping):
+            transform["computed_normalization"] = json_safe(dict(computed))
+
+        return json_safe(transform)
+
+    def _vector_param(
+        self,
+        params: Mapping[str, Any],
+        keys: Sequence[str],
+        *,
+        default: Sequence[float],
+    ) -> List[float]:
+        for key in keys:
+            value = params.get(key)
+            if value is None or value == "":
+                continue
+
+            parsed = self._parse_vector(value)
+            if parsed:
+                return parsed
+
+        normalization = params.get("normalization")
+        if isinstance(normalization, Mapping):
+            for key in keys:
+                value = normalization.get(key)
+                if value is None or value == "":
+                    continue
+
+                parsed = self._parse_vector(value)
+                if parsed:
+                    return parsed
+
+        return [float(value) for value in default]
+
+    def _parse_vector(self, value: Any) -> List[float]:
+        if value is None:
+            return []
+
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return []
+
+            try:
+                value = json.loads(text)
+            except Exception:
+                value = [
+                    part.strip()
+                    for chunk in text.splitlines()
+                    for part in chunk.split(",")
+                    if part.strip()
+                ]
+
+        if isinstance(value, Mapping):
+            return []
+
+        try:
+            return [float(item) for item in value]
+        except Exception:
+            try:
+                return [float(value)]
+            except Exception:
+                return []
 
     def _frame_for(self, partition: Partition):
         b = self.binding
@@ -49,6 +231,9 @@ class TorchClassificationHarness(RunHarness):
         from torch.utils.data import DataLoader, Dataset
 
         recipe, run, b = self.recipe, self.run, self.binding
+
+        self._ensure_train_split_normalization(partition)
+
         frame = self._frame_for(partition).reset_index(drop=True)
         transform = recipe.train_transform(run) if train else recipe.eval_transform(run)
         class_to_idx = {c: i for i, c in enumerate(partition.classes)}
@@ -211,6 +396,8 @@ class TorchClassificationHarness(RunHarness):
         else:
             architecture_ref = architecture
 
+        transform_meta = self._transform_metadata()
+
         checkpoint_payload = {
             "schema_version": 2,
             "state_dict": m.state_dict(),
@@ -220,7 +407,9 @@ class TorchClassificationHarness(RunHarness):
             "recipe_id": self.run.recipe_id,
             "recipe_version": self.run.recipe_version,
             "run_id": self.run.run_id,
-            "dataset_id": self.run.dataset_id,
+            "source_dataset_id": self.run.dataset_id,
+            "dataset_id": parts.train_dataset_id or self.run.dataset_id,
+            "split_dataset_ids": dict(parts.materialized_split_dataset_ids or {}),
             "protocol_id": parts.protocol_id,
             "framework": "torch",
             "task": self.recipe.task,
@@ -243,11 +432,7 @@ class TorchClassificationHarness(RunHarness):
                 "best_score": self._best_score,
                 "selection_metric": self.protocol.selection_metric,
             },
-            "transform": {
-                "image_size": 32,
-                "mean": [0.4914, 0.4822, 0.4465],
-                "std": [0.2023, 0.1994, 0.2010],
-            },
+            "transform": transform_meta,
         }
 
         # Atomic-ish write: write temp, then replace final checkpoint.
@@ -261,7 +446,9 @@ class TorchClassificationHarness(RunHarness):
             "task": self.recipe.task,
             "modality": self.recipe.modality,
             "run_id": self.run.run_id,
-            "dataset_id": self.run.dataset_id,
+            "source_dataset_id": self.run.dataset_id,
+            "dataset_id": parts.train_dataset_id or self.run.dataset_id,
+            "split_dataset_ids": dict(parts.materialized_split_dataset_ids or {}),
             "recipe_id": self.run.recipe_id,
             "recipe_version": self.run.recipe_version,
             "protocol_id": parts.protocol_id,
@@ -292,11 +479,9 @@ class TorchClassificationHarness(RunHarness):
                     "run_id": self.run.run_id,
                     "architecture": architecture_ref,
                     "custom_model_import": custom_model_import,
-                    "image_size": 32,
-                    "normalization": {
-                        "mean": [0.4914, 0.4822, 0.4465],
-                        "std": [0.2023, 0.1994, 0.2010],
-                    },
+                    "image_size": transform_meta.get("image_size"),
+                    "normalization": transform_meta.get("normalization"),
+                    "computed_normalization": transform_meta.get("computed_normalization"),
                 }
             },
             "input_contract": {
@@ -320,6 +505,7 @@ class TorchClassificationHarness(RunHarness):
             "model_title": getattr(self.recipe, "title", self.run.recipe_id),
             "architecture": architecture_ref,
             "custom_model_import": custom_model_import,
+            "transform": transform_meta,
             "metrics": {
                 "best_score": self._best_score,
                 "selection_metric": self.protocol.selection_metric,
