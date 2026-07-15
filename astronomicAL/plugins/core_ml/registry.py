@@ -79,7 +79,6 @@ class RecipeSpec:
     optional_mappings: List[str]
     produces: List[str]
     params_schema: Dict[str, Any]
-    execution_mode: str
 
     @classmethod
     def from_recipe_cls(cls, recipe_cls: type) -> "RecipeSpec":
@@ -115,7 +114,6 @@ class RecipeSpec:
             params_schema=dict(
                 g("params_schema", {"type": "object", "properties": {}}) or {}
             ),
-            execution_mode=str(g("execution_mode", "freeform") or "freeform"),
         )
 
 class MLRecipeRegistry:
@@ -132,9 +130,20 @@ class MLRecipeRegistry:
             self.register_many(recipes)
 
     def register(self, recipe_cls: type, *, replace: bool = True) -> RecipeSpec:
+        from .recipe_base import ManagedMLRecipe
+
+        if not isinstance(recipe_cls, type) or not issubclass(
+            recipe_cls, ManagedMLRecipe
+        ):
+            raise TypeError(
+                f"{recipe_cls!r} must be a ManagedMLRecipe subclass."
+            )
+
         spec = RecipeSpec.from_recipe_cls(recipe_cls)
+
         if spec.id in self._specs and not replace:
             raise ValueError(f"Recipe id {spec.id!r} is already registered.")
+
         self._specs[spec.id] = spec
         return spec
 

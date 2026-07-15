@@ -20,74 +20,18 @@ are for setups that need real code:
 
 ## User model
 
-A recipe exposes a small typed schema to the UI, but the implementation remains
-Python code.
+A recipe exposes a small typed schema to the UI, while the implementation
+remains Python code.
 
 Non-ML users launch recipes from the ML Recipe Launcher.
 
-ML developers write recipes as Python classes and register them in
-`core.ml.recipe_registry`, or use the `External Python ML recipe` bridge.
+ML developers implement recipes by subclassing `ManagedMLRecipe` and
+registering the class with `core.ml.recipe_registry`.
 
-## External recipe trust boundary
-
-The `External Python ML recipe` imports and executes local Python in the same process as AstronomicAL.
-
-Treat it like running a Python script from your shell: use only code you trust. AstronomicAL does not sandbox this code and does not enforce the managed train/validation/test protocol for it.
-
-Use a managed recipe when you need AstronomicAL to own splitting, validation, test evaluation, provenance, and protocol checks.
-
-## External recipe example
-
-```python
-from astronomicAL.plugins.core_ml.recipe_registry import MLRecipe, MLRunContext
-
-
-class MyRecipe(MLRecipe):
-    id = "my_lab.my_recipe"
-    title = "My lab recipe"
-    version = "0.1.0"
-    task = "classification"
-    modality = "image"
-
-    params_schema = {
-        "type": "object",
-        "required": ["image_column", "target_column"],
-        "properties": {
-            "image_column": {
-                "type": "string",
-                "default": "",
-            },
-            "target_column": {
-                "type": "string",
-                "default": "",
-            },
-            "epochs": {
-                "type": "integer",
-                "default": 50,
-            },
-        },
-    }
-
-    def run(self, run: MLRunContext):
-        run.log(message="Starting custom training loop.")
-
-        # Implement arbitrary PyTorch/sklearn/domain code here.
-        # Use run.context.datasets, run.put_artifact(), run.log(),
-        # run.publish(), and run.check_cancelled() to integrate with
-        # AstronomicAL.
-
-        return {
-            "status": "complete",
-        }
-```
-
-Then launch it from the **ML Recipe Launcher** panel with:
-
-```text
-Recipe: External Python ML recipe
-import_path: my_package.my_module.MyRecipe
-kwargs_json: {}
-```
+AstronomicAL owns dataset binding, splitting, validation, model selection,
+test evaluation, artifacts and provenance. The recipe owns model
+construction, transforms, training components, sample loading and the
+training loop.
 
 ## CIFAR-style recipe usage
 

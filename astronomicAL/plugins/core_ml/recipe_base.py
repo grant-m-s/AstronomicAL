@@ -40,7 +40,6 @@ def make_run_context(
         training_log_artifact_id=training_log_artifact_id,
         recipe_spec=recipe_spec,
         params=params,
-        execution_mode=getattr(recipe_spec, "execution_mode", "freeform"),
     )
 
     return MLRunContext(
@@ -73,28 +72,10 @@ class MLRecipe:
     produces: list = []
     params_schema: Dict[str, Any] = {"type": "object", "properties": {}}
 
-    # Freeform by default: the recipe owns its own run() and makes no
-    # scientific-validity promise. ManagedMLRecipe overrides this to "managed".
-    execution_mode: str = "freeform"
-
     @classmethod
     def spec(cls) -> "RecipeSpec":
         from .registry import RecipeSpec
         return RecipeSpec.from_recipe_cls(cls)
-
-    # --- top-level entry point ----------------------------------------------
-    def run(self, run) -> Dict[str, Any]:
-        """Execute the recipe and return a result dict.
-
-        The base does not implement this. Freeform recipes (e.g.
-        ExternalPythonRecipe) override run() directly; managed recipes inherit
-        ManagedMLRecipe.run(), which delegates to a harness.
-        """
-        raise NotImplementedError(
-            f"{type(self).__name__} does not implement run(). Override run() "
-            "for a freeform recipe, or subclass ManagedMLRecipe and implement "
-            "the internals (build_model / configure_training / load_sample / fit)."
-        )
 
     # --- internals: the expert's contribution (managed recipes) -------------
     # The harness calls these; it never lets the recipe touch the protocol.
@@ -212,8 +193,6 @@ class ManagedMLRecipe(MLRecipe):  # noqa: F821  (MLRecipe defined above in this 
     selects the best epoch, or writes the scientific artifacts. The harness does
     all of that and refuses to delegate it.
     """
-
-    execution_mode = "managed"
 
     def run(self, run) -> Dict[str, Any]:
         from .harnesses import make_harness

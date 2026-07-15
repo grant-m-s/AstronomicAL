@@ -9,17 +9,8 @@ from .runtime import publish
 from .serialization import json_safe
 
 class MLRunLogger:
-    """Artifact-backed logger for long recipe runs.
-
-    The logger records progress and keeps the live ml.training_log artifact
-    curve-friendly. It does not own the scientific protocol.
-
-    Managed recipes:
-        - RunHarness owns split, validation selection, best_epoch, test metrics.
-        - Logger mirrors those facts when the runner/harness provides them.
-
-    Freeform recipes:
-        - Logger can infer optimize_metric/best_epoch as a fallback.
+    """
+    Records recipe progress, metrics, selection information and final run state.
     """
 
     def __init__(
@@ -33,7 +24,6 @@ class MLRunLogger:
         params: Optional[Mapping[str, Any]] = None,
         protocol: Any = None,
         binding: Any = None,
-        execution_mode: str = "freeform",
     ) -> None:
         self.context = context
         self.run_id = str(run_id)
@@ -43,7 +33,6 @@ class MLRunLogger:
         self.params = dict(params or {})
         self.protocol = protocol
         self.binding = binding
-        self.execution_mode = str(execution_mode or "freeform")
         self.started_at = time.time()
 
         # Full chronological event stream.
@@ -163,7 +152,6 @@ class MLRunLogger:
         *,
         protocol: Any = None,
         binding: Any = None,
-        execution_mode: Optional[str] = None,
     ) -> None:
         """Attach protocol/binding once the runner has resolved them."""
 
@@ -172,9 +160,6 @@ class MLRunLogger:
 
         if binding is not None:
             self.binding = binding
-
-        if execution_mode:
-            self.execution_mode = str(execution_mode)
 
         self._update_training_log(
             self._payload(
@@ -280,40 +265,6 @@ class MLRunLogger:
             step=step,
             total=total,
             metrics=metrics_dict,
-        )
-
-    def metric(
-        self,
-        *,
-        epoch: int,
-        split: str,
-        metrics: Mapping[str, Any],
-    ) -> None:
-        """Convenience helper for freeform recipes.
-
-        Example:
-            logger.metric(epoch=3, split="val", metrics={"loss": 0.2})
-
-        Produces:
-            epoch=3, val_loss=0.2
-        """
-
-        split_name = str(split or "").strip()
-        prefixed = {
-            f"{split_name}_{key}": value
-            for key, value in dict(metrics or {}).items()
-        }
-        prefixed["epoch"] = int(epoch)
-
-        self.log(
-            message=f"{split_name} metrics for epoch {epoch}.",
-            status="running",
-            step=int(epoch),
-            metrics=prefixed,
-            extra={
-                "epoch": int(epoch),
-                "split": split_name,
-            },
         )
 
     def finish(
@@ -446,7 +397,6 @@ class MLRunLogger:
                 "modality",
                 self.params.get("modality", ""),
             ),
-            "execution_mode": self.execution_mode,
             "status": status,
             "message": message,
             "optimize_metric": optimize_metric,
@@ -727,7 +677,6 @@ class MLRunLogger:
                 "modality",
                 self.params.get("modality", ""),
             ),
-            "execution_mode": self.execution_mode,
             "status": "queued",
             "message": "Recipe run initialised.",
             "started_at": self.started_at,

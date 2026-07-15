@@ -148,23 +148,13 @@ def run_ml_recipe_action(
         merged_params,
     )
 
-    execution_mode = str(
-        getattr(spec, "execution_mode", "freeform") or "freeform"
+    protocol = ProtocolConfig.from_params(merged_params)
+    binding = _build_data_binding(
+        context,
+        dataset_id,
+        spec,
+        merged_params,
     )
-
-    protocol = None
-    binding = None
-
-    if execution_mode == "managed":
-        protocol = ProtocolConfig.from_params(
-            merged_params
-        )
-        binding = _build_data_binding(
-            context,
-            dataset_id,
-            spec,
-            merged_params,
-        )
 
     run = make_run_context(
         context=context,
@@ -175,17 +165,13 @@ def run_ml_recipe_action(
         run_id=merged_params.get("run_id"),
     )
 
-    if protocol is not None:
-        run.protocol = protocol
-
-    if binding is not None:
-        run.binding = binding
+    run.protocol = protocol
+    run.binding = binding
 
     if getattr(run, "logger", None) is not None:
         run.logger.set_run_metadata(
             protocol=protocol,
             binding=binding,
-            execution_mode=execution_mode,
         )
 
     recipe = spec.recipe_cls()
@@ -196,7 +182,6 @@ def run_ml_recipe_action(
         "recipe_id": spec.id,
         "recipe_version": spec.version,
         "recipe_title": spec.title,
-        "execution_mode": execution_mode,
         "training_log_artifact_id": run.training_log_artifact_id,
     }
 
@@ -214,10 +199,7 @@ def run_ml_recipe_action(
         status="running",
         step=None,
         metrics={},
-        extra={
-            "phase": "started",
-            "execution_mode": execution_mode,
-        },
+        extra={"phase": "started"},
     )
 
     try:
@@ -273,7 +255,6 @@ def run_ml_recipe_action(
             "recipe_id": spec.id,
             "recipe_version": spec.version,
             "recipe_title": spec.title,
-            "execution_mode": execution_mode,
             "status": "complete",
             "params": json_safe(merged_params),
             "result": result,
@@ -420,7 +401,6 @@ def run_ml_recipe_action(
             "recipe_id": spec.id,
             "recipe_version": spec.version,
             "recipe_title": spec.title,
-            "execution_mode": execution_mode,
             "status": "complete",
             "result": result,
             "artifact_ids": artifact_ids,
@@ -447,7 +427,6 @@ def run_ml_recipe_action(
             "recipe_id": spec.id,
             "recipe_version": spec.version,
             "recipe_title": spec.title,
-            "execution_mode": execution_mode,
             "result": result,
             "artifact_ids": artifact_ids,
             "run_artifact_id": run_artifact_id,
@@ -492,7 +471,6 @@ def run_ml_recipe_action(
             "recipe_id": spec.id,
             "recipe_version": spec.version,
             "recipe_title": spec.title,
-            "execution_mode": execution_mode,
             "status": "cancelled",
             "message": message,
             "training_log_artifact_id": run.training_log_artifact_id,
@@ -553,7 +531,6 @@ def run_ml_recipe_action(
             "recipe_id": spec.id,
             "recipe_version": spec.version,
             "recipe_title": spec.title,
-            "execution_mode": execution_mode,
             "status": "failed",
             "error": message,
             "traceback": tb,

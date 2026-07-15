@@ -1,102 +1,19 @@
 from __future__ import annotations
 
-import json
 from importlib import import_module
 from pathlib import Path
-from typing import Any, Dict
 
 # Framework types now live in core_ml recipe framework. recipes.py holds ONLY
 # concrete recipes — it must not redefine Partition/Partitions/RunHarness/
 # MLRecipe/TrainingComponents (doing so shadows the real ones and breaks
 # make_harness()).
-from ..recipe_base import MLRecipe, ManagedMLRecipe, MLRunContext
+from ..recipe_base import ManagedMLRecipe
 from ..harnesses.base import RunHarness
 from ..protocol import TrainingComponents
 
 def _import_object(path: str):
     module_name, object_name = path.rsplit(".", 1)
     return getattr(import_module(module_name), object_name)
-
-# =============================================================================
-# Freeform escape hatch — NOT protocol-managed. Overrides run() directly and is
-# trusted to do its own thing. The launcher does not offer it the protocol UI,
-# and the runner does not enforce record_id on it, precisely because it makes
-# no scientific-validity promise. Use it to bridge arbitrary expert code.
-# =============================================================================
-
-class ExternalPythonRecipe(MLRecipe):
-    id = "core.ml.external_python_recipe"
-    title = "External Python ML recipe"
-    version = "0.2.0"
-    task = "custom"
-    modality = "custom"
-    complexity = "expert"
-    execution_mode = "freeform"
-    author = "AstronomicAL"
-    description = (
-        "Run a recipe implemented in an installed/local Python module. "
-        "This executes arbitrary local Python in the current process. Use only "
-        "trusted code. It is unmanaged: AstronomicAL does not enforce the normal "
-        "split/validation/test protocol, so the recipe must manage its own "
-        "scientific validity, evaluation, and provenance."
-    )
-    tags = ["expert", "python", "extension", "recipe", "unmanaged", "trusted-code"]
-    required_mappings: list = []
-    optional_mappings = ["record_id", "target_label", "image.path", "image.uri"]
-    produces = ["ml.run", "ml.training_log"]
-
-    params_schema = {
-        "type": "object",
-        "required": ["import_path"],
-        "properties": {
-            "import_path": {
-                "type": "string",
-                "title": "Import path",
-                "description": (
-                    "Dotted path to an MLRecipe subclass/instance or callable. "
-                    "This imports and executes arbitrary local Python in the current "
-                    "AstronomicAL process; use only trusted code."
-                ),
-            },
-            "kwargs_json": {
-                "type": "string",
-                "title": "Keyword arguments JSON",
-                "default": "{}",
-                "description": (
-                    "JSON object passed to a callable/class constructor or recipe "
-                    "factory. Values are interpreted by the external recipe code."
-                ),
-            },
-        },
-    }
-
-    def run(self, run: MLRunContext) -> Dict[str, Any]:
-        import_path = str(run.params.get("import_path") or "").strip()
-        if not import_path:
-            raise ValueError("ExternalPythonRecipe requires import_path.")
-
-        kwargs_json = str(run.params.get("kwargs_json") or "{}").strip() or "{}"
-        try:
-            extra = json.loads(kwargs_json)
-        except Exception as exc:
-            raise ValueError(f"kwargs_json is not valid JSON: {exc}") from exc
-        if not isinstance(extra, dict):
-            raise ValueError("kwargs_json must decode to a JSON object.")
-
-        run.params.update(extra)
-        obj = _import_object(import_path)
-        run.log(message=f"Loaded external recipe object `{import_path}`.")
-
-        if isinstance(obj, type) and issubclass(obj, MLRecipe):
-            return obj().run(run)
-        if isinstance(obj, MLRecipe):
-            return obj.run(run)
-        if callable(obj):
-            return dict(obj(run) or {})
-
-        raise TypeError(
-            "import_path must point to an MLRecipe subclass, MLRecipe instance, "
-            "or callable accepting MLRunContext.")
 
 # =============================================================================
 # kuangliu/pytorch-cifar, protocol-managed. Implements ONLY internals + a loop

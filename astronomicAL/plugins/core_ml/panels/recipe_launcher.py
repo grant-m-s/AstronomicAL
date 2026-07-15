@@ -473,14 +473,7 @@ class MLRecipeLauncherPanel:
             return
 
         spec = self.registry.get(recipe_id)
-        managed = str(getattr(spec.recipe_cls, "execution_mode", "freeform")) == "managed"
-        protocol_note = (
-            "Validation, best-epoch selection and test evaluation are enforced "
-            "by AstronomicAL's protocol (below)."
-            if managed
-            else "Freeform recipe: manages its own splits and evaluation; no "
-            "protocol is enforced."
-        )
+
         self.recipe_card.object = (
             f"**{spec.title}** \n"
             f"`{spec.id}` v{spec.version} \n\n"
@@ -488,7 +481,7 @@ class MLRecipeLauncherPanel:
             f"- Task: `{spec.task}`\n"
             f"- Modality: `{spec.modality}`\n"
             f"- Complexity: `{spec.complexity}`\n"
-            f"- Mode: `{'managed' if managed else 'freeform'}` — {protocol_note}\n"
+            "- Protocol: AstronomicAL manages splitting, validation, model selection, and test evaluation\n"
             f"- Required mappings: `{', '.join(spec.required_mappings) or 'none'}`\n"
             f"- Produces: `{', '.join(spec.produces) or 'none'}`"
         )
@@ -530,9 +523,6 @@ class MLRecipeLauncherPanel:
     def _build_protocol_section(self, spec: Any) -> None:
         self.protocol_widgets = {}
         self.protocol_fields = {}
-
-        if str(getattr(spec.recipe_cls, "execution_mode", "freeform")) != "managed":
-            return
 
         cols = [""] + _dataset_access.list_dataset_columns(
             self.context,
@@ -858,8 +848,7 @@ class MLRecipeLauncherPanel:
         if any(key in properties for key in _RUN_ONLY_LABEL_KEYS):
             return True
 
-        recipe_cls = getattr(spec, "recipe_cls", None)
-        return str(getattr(recipe_cls, "execution_mode", "freeform")) == "managed"
+        return False
 
     def _sync_label_column_visibility(self, spec: Any) -> None:
         self.label_column_field.visible = self._recipe_uses_label_column(spec)
