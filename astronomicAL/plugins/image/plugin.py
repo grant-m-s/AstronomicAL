@@ -66,51 +66,6 @@ IMAGE_URI_MAPPING = {
     ],
 }
 
-IMAGE_OPTIONAL_MAPPINGS = [
-    {
-        "semantic_name": "image.path",
-        "display_name": "Image path",
-        "description": "Optional explicit local image path column.",
-        "aliases": ["image_path", "path", "filepath", "file_path", "filename"],
-    },
-    {
-        "semantic_name": "image.url",
-        "display_name": "Image URL",
-        "description": "Optional explicit remote image URL column.",
-        "aliases": ["image_url", "url", "href"],
-    },
-    {
-        "semantic_name": "image.thumbnail",
-        "display_name": "Thumbnail image",
-        "description": "Optional smaller thumbnail URI/path used by gallery views.",
-        "aliases": ["thumbnail", "thumbnail_path", "thumbnail_uri", "thumb", "thumb_uri"],
-    },
-    {
-        "semantic_name": "target_label",
-        "display_name": "Label",
-        "description": "Optional class/label column.",
-        "aliases": ["target_label", "label", "labels", "class", "classification"],
-    },
-    {
-        "semantic_name": "prediction",
-        "display_name": "Prediction",
-        "description": "Optional model prediction column used as a gallery badge.",
-        "aliases": ["prediction", "predicted_label", "pred", "ml_prediction"],
-    },
-    {
-        "semantic_name": "uncertainty",
-        "display_name": "Uncertainty",
-        "description": "Optional uncertainty/acquisition score column used as a gallery badge.",
-        "aliases": ["uncertainty", "prediction_uncertainty", "entropy", "margin", "least_confidence"],
-    },
-    {
-        "semantic_name": "label_state",
-        "display_name": "Label state",
-        "description": "Optional active-learning/review state column.",
-        "aliases": ["label_state", "al_label_state", "annotation_state", "review_state"],
-    },
-]
-
 def register(api) -> None:
     api.register_service(
         key="asset_resolver",
@@ -151,7 +106,7 @@ def register(api) -> None:
         icon="photo",
         tags=["core", "image", "selection", "viewer"],
         required_mappings=[RECORD_ID_MAPPING, IMAGE_URI_MAPPING],
-        optional_mappings=IMAGE_OPTIONAL_MAPPINGS,
+        optional_mappings=[],
         uses_services=["core.image.asset_resolver"],
         produces=["artifact.created", "image.preview"],
         default_layout={"x": 5, "y": 0, "w": 7, "h": 7},
@@ -172,7 +127,7 @@ def register(api) -> None:
         icon="photo",
         tags=["core", "image", "selection", "gallery", "active-learning"],
         required_mappings=[RECORD_ID_MAPPING, IMAGE_URI_MAPPING],
-        optional_mappings=IMAGE_OPTIONAL_MAPPINGS,
+        optional_mappings=[],
         uses_services=["core.image.asset_resolver"],
         produces=["selection.focus.changed"],
         default_layout={"x": 0, "y": 7, "w": 12, "h": 5},

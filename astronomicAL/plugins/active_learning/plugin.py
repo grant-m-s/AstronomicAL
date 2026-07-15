@@ -315,7 +315,7 @@ def register(api) -> None:
         icon="psychology",
         tags=["active-learning", "ml", "selection", "annotation", "query-strategy"],
         required_mappings=["record_id"],
-        optional_mappings=["target_label", "image.path", "image.uri", "mask.path", "mask"],
+        optional_mappings=[],
         uses_services=["core.active_learning.query_strategy_registry", "core.ml.recipe_profile_store"],
         produces=[
             "al.session",

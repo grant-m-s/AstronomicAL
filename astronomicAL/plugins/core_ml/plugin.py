@@ -85,7 +85,7 @@ def register(api) -> None:
             "columns": "optional",
             "numeric_columns": "none",
             "required_mappings": ["record_id"],
-            "optional_mappings": ["target_label", "image.path", "image.uri"],
+            "optional_mappings": [],
         },
         outputs=[
             {"type": "ml.training_log", "description": "Live recipe progress and metrics."},
@@ -214,7 +214,7 @@ def register(api) -> None:
         icon="integration_instructions",
         tags=["ml", "recipes", "training", "torch", "sklearn", "expert"],
         required_mappings=["record_id"],
-        optional_mappings=["target_label", "image.path", "image.uri"],
+        optional_mappings=[],
         uses_services=["core.ml.recipe_registry"],
         produces=[
             "dataset",
@@ -243,7 +243,7 @@ def register(api) -> None:
         icon="batch_prediction",
         tags=["ml", "prediction", "inference", "trained-model", "visualisation"],
         required_mappings=["record_id"],
-        optional_mappings=["target_label", "image.path", "image.uri"],
+        optional_mappings=[],
         uses_services=["core.ml.trained_model_catalog"],
         produces=["ml.predictions", "dataset"],
         default_layout={"x": 5, "y": 7, "w": 5, "h": 5},
