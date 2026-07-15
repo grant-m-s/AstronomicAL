@@ -2011,6 +2011,7 @@ class ScatterPanel(BaseVisualisationPanel):
         self._clear_stream_watchers()
 
         data = self._scatter_data_for_render()
+        preserved_range_opts = dict(self._current_range_opts(include_y=True))
         prepared_key = getattr(self, "_last_prepared_cache_key", None)
 
         last_key = getattr(self, "_last_interactive_prepared_key", None)
@@ -2136,13 +2137,14 @@ class ScatterPanel(BaseVisualisationPanel):
             show_grid=True,
             toolbar="right",
             hooks=[
-                deduplicate_toolbar_tools_hook, 
+                deduplicate_toolbar_tools_hook,
                 keep_pan_tool_active_hook,
                 self._scatter_focus_bokeh_hook,
-                ],
+            ],
             shared_axes=False,
             axiswise=True,
             framewise=True,
+            **preserved_range_opts,
         )
 
         t4 = time.perf_counter()
