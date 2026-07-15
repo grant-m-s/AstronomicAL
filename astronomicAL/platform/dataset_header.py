@@ -318,7 +318,7 @@ class DatasetHeaderController:
         optimise_data: bool,
         set_active: bool = True,
     ) -> dict:
-        previous_dataset_id = self._active_dataset_id_or_none()
+
         lower_filename = str(filename).lower()
         cache_dir = self._cache_dir_for_file(filename)
 
@@ -426,24 +426,16 @@ class DatasetHeaderController:
         )
 
         if set_active:
-            self.context.datasets.set_active(dataset_id)
             self._clear_selection_for_dataset_switch()
-            self._publish(
-                "dataset.active.changed",
-                {
-                    "dataset_id": dataset_id,
-                    "previous_dataset_id": previous_dataset_id,
-                    "source": "DatasetHeaderController",
-                },
+            self.context.datasets.set_active(
+                dataset_id,
+                origin="platform.dataset_header",
             )
 
         return result
 
 
     def _set_active_dataset(self, dataset_id: str) -> None:
-        previous_dataset_id = self._active_dataset_id_or_none()
-
-        self.context.datasets.set_active(dataset_id)
 
         try:
             dataset = self.context.datasets.get(dataset_id)
@@ -467,16 +459,10 @@ class DatasetHeaderController:
         )
 
         self._clear_selection_for_dataset_switch()
-
-        self._publish(
-            "dataset.active.changed",
-            {
-                "dataset_id": dataset_id,
-                "previous_dataset_id": previous_dataset_id,
-                "source": "DatasetHeaderController",
-            },
+        self.context.datasets.set_active(
+            dataset_id,
+            origin="platform.dataset_header",
         )
-
         self._refresh_header()
 
     # ------------------------------------------------------------------

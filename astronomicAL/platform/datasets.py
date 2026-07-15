@@ -78,9 +78,11 @@ class DatasetManager:
         - Dataset.df still works but should be treated as legacy.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, events: Any = None) -> None:
         self._datasets: Dict[str, Dataset] = {}
         self._active_id: Optional[str] = None
+        self._events = events
+        self._last_published_active_id: Optional[str] = None
         self._pending_restore_items = []
         self._pending_active_id = None
 
@@ -272,15 +274,66 @@ class DatasetManager:
             raise RuntimeError("No active dataset set.")
         return self._active_id
 
-    def set_active(self, dataset_id: str) -> None:
+    def _publish_active_changed(
+        self,
+        *,
+        dataset_id: str,
+        previous_dataset_id: Optional[str],
+        origin: str,
+    ) -> bool:
+        events = getattr(self, "_events", None)
+        if events is None:
+            return False
+
+        try:
+            events.publish(
+                "dataset.active.changed",
+                {
+                    "dataset_id": dataset_id,
+                    "previous_dataset_id": previous_dataset_id,
+                    "origin": origin,
+                },
+            )
+        except Exception:
+            return False
+
+        self._last_published_active_id = dataset_id
+        return True
+
+    def set_active(
+        self,
+        dataset_id: str,
+        *,
+        origin: str = "platform.datasets",
+        publish: bool = True,
+        force: bool = False,
+    ) -> bool:
         if dataset_id not in self._datasets:
             raise KeyError(f"Unknown dataset_id: {dataset_id}")
+
+        previous_dataset_id = self._active_id
+        changed = previous_dataset_id != dataset_id
 
         self._active_id = dataset_id
 
         apply_pending = getattr(self, "_apply_pending_restore_to_dataset", None)
         if callable(apply_pending):
             apply_pending(dataset_id)
+
+        should_publish = publish and (
+            changed
+            or force
+            or self._last_published_active_id != dataset_id
+        )
+
+        if should_publish:
+            self._publish_active_changed(
+                dataset_id=dataset_id,
+                previous_dataset_id=previous_dataset_id,
+                origin=origin,
+            )
+
+        return changed
 
     def get(self, dataset_id: Optional[str] = None) -> Dataset:
         if dataset_id is None:
@@ -718,10 +771,13 @@ class DatasetManager:
             and str(self._pending_active_id) == str(dataset_id)
         ):
             try:
-                self.set_active(dataset_id)
+                self.set_active(
+                    dataset_id,
+                    origin="workspace.restore",
+                    publish=False,
+                )
             except Exception:
                 pass
-            self._pending_active_id = None
 
     # ------------------------------------------------------------------
     # Workspace snapshot / restore
@@ -822,7 +878,11 @@ class DatasetManager:
         active_id = snapshot.get("active_id")
         if active_id and str(active_id) in self._datasets:
             try:
-                self.set_active(str(active_id))
+                self.set_active(
+                    str(active_id),
+                    origin="workspace.restore",
+                    publish=False,
+                )
             except Exception:
                 pass
 

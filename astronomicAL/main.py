@@ -223,7 +223,7 @@ jobs = JobManager(
     history_limit=1000,
 )
 artifacts = ArtifactStore(cache_dir="data/cache_artifacts")
-datasets = DatasetManager()
+datasets = DatasetManager(events=events)
 workspace = WorkspaceManager(react_template=react, grid=grid)
 selection = SelectionManager(events=events, artifacts=artifacts)
 services = ServiceRegistry()

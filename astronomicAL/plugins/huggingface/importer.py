@@ -548,12 +548,6 @@ def register_manifest_dataset(
         except Exception:
             pass
 
-    if set_active:
-        try:
-            datasets.set_active(dataset_id)
-        except Exception:
-            pass
-
     events = getattr(context, "events", None)
     if events is not None:
         events.publish(
@@ -579,14 +573,12 @@ def register_manifest_dataset(
                 "origin": "integrations.huggingface",
             },
         )
-        if set_active:
-            events.publish(
-                "dataset.active.changed",
-                {
-                    "dataset_id": dataset_id,
-                    "origin": "integrations.huggingface",
-                },
-            )
+
+    if set_active:
+        datasets.set_active(
+            dataset_id,
+            origin="integrations.huggingface",
+        )
 
     return {
         "dataset_id": dataset_id,
