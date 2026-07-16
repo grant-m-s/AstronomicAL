@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from importlib import import_module
 from pathlib import Path
 
@@ -241,21 +242,8 @@ class CIFARResNetRecipe(ManagedMLRecipe):
         # No return — the harness restored best-epoch weights after fit.
 
 # =============================================================================
-# Add to recipes.py. Four protocol-managed recipes:
-#
-#   TimmImageClassifierRecipe   timm (huggingface/pytorch-image-models)  image / classification
-#   WideResNetCIFARRecipe       hysts/pytorch_image_classification       image / classification
-#   TimmImageRegressorRecipe    timm backbone, Zoobot-style targets      image / regression
-#   TabularMLPRegressorRecipe   rtdl / pytorch-tabular deep baseline     tabular / regression
-#
-# Each implements ONLY internals (build_model / configure_training / transforms /
-# load_sample / fit). Splitting, validation selection, best-epoch choice, test
-# evaluation and artifact writing belong to the harness:
-#   classification -> TorchClassificationHarness
-#   regression     -> TorchRegressionHarness  (selected by _is_torch_regression)
-#
-# Torch/timm imports stay inside methods so importing recipes.py never requires
-# torch (matching the existing module discipline).
+# Shared image model and augmentation helpers. Imports of optional ML frameworks
+# remain inside methods so importing the recipe registry stays lightweight.
 # =============================================================================
 
 # -----------------------------------------------------------------------------
@@ -316,19 +304,6 @@ def _build_wide_resnet(*, depth: int, widen_factor: int, dropout: float, num_cla
 
     return _WideResNet(depth, widen_factor, dropout, num_classes)
 
-def _build_tabular_mlp(*, d_in: int, hidden, dropout: float, d_out: int):
-    """rtdl-style MLP with input BatchNorm so raw features need no external
-    scaler (running stats live in the checkpoint, so train/predict agree)."""
-    import torch.nn as nn
-    layers = [nn.BatchNorm1d(d_in)]
-    d = d_in
-    for h in hidden:
-        h = int(h)
-        layers += [nn.Linear(d, h), nn.ReLU(), nn.BatchNorm1d(h), nn.Dropout(dropout)]
-        d = h
-    layers.append(nn.Linear(d, d_out))
-    return nn.Sequential(*layers)
-
 class _Cutout:
     """DeVries & Taylor Cutout, applied to a normalised CHW tensor."""
     def __init__(self, size: int):
@@ -380,7 +355,6 @@ def _parse_float_list(value, default, *, expected_len: int = 3):
         raise ValueError(f"Expected {expected_len} normalisation values, got {len(out)}: {out!r}")
     return out
 
-
 def _normalization_params(run, *, default_mode: str, default_mean, default_std):
     params = getattr(run, "params", {}) or {}
 
@@ -418,7 +392,6 @@ def _normalization_params(run, *, default_mode: str, default_mean, default_std):
 
     return mean, std
 
-
 def _append_normalize(ops, T, run, *, default_mode: str, default_mean, default_std) -> None:
     resolved = _normalization_params(
         run,
@@ -431,7 +404,6 @@ def _append_normalize(ops, T, run, *, default_mode: str, default_mean, default_s
 
     mean, std = resolved
     ops.append(T.Normalize(mean, std))
-
 
 def _timm_transform(run, *, is_training: bool, cache_attr_owner=None):
     """Deterministic timm-compatible image transform.
@@ -874,177 +846,425 @@ class TimmImageRegressorRecipe(ManagedMLRecipe):
             if components.scheduler is not None:
                 components.scheduler.step()
 
+
 # =============================================================================
-# 4. Tabular MLP REGRESSOR  (rtdl baseline / pytorch-tabular family)
-#    Photometry/catalogue features -> continuous target. Input BatchNorm means
-#    no external scaler is needed. Selects TorchRegressionHarness.
+# Specialised image recipes built on the core image baselines.
 # =============================================================================
 
-class TabularMLPRegressorRecipe(ManagedMLRecipe):
-    id = "core.ml.tabular_mlp_regressor"
-    title = "Tabular MLP regressor (rtdl baseline)"
-    version = "0.1.0"
-    task = "regression"
-    modality = "tabular"
-    framework = "torch"
-    complexity = "intermediate"
-    author = "AstronomicAL"
-    description = (
-        "Strong rtdl/pytorch-tabular-style MLP baseline for tabular regression "
-        "(e.g. photo-z from photometry). Input BatchNorm normalises raw features "
-        "in-model, so no external scaler is required. Protocol owns "
-        "splitting/selection/test; selection defaults to val_loss (min)."
+def _with_properties(schema, **properties):
+    updated = deepcopy(schema)
+    updated.setdefault("properties", {}).update(properties)
+    return updated
+
+def _cutmix_batch(inputs, targets, *, alpha: float):
+    import torch
+
+    if alpha <= 0.0 or int(inputs.size(0)) < 2:
+        return inputs, targets, targets, 1.0
+
+    lam = float(torch.distributions.Beta(alpha, alpha).sample().item())
+    permutation = torch.randperm(inputs.size(0), device=inputs.device)
+    height, width = int(inputs.size(-2)), int(inputs.size(-1))
+    cut_ratio = float((1.0 - lam) ** 0.5)
+    cut_h = int(height * cut_ratio)
+    cut_w = int(width * cut_ratio)
+    center_y = int(torch.randint(0, height, (1,), device=inputs.device).item())
+    center_x = int(torch.randint(0, width, (1,), device=inputs.device).item())
+    y1 = max(0, center_y - cut_h // 2)
+    y2 = min(height, center_y + cut_h // 2)
+    x1 = max(0, center_x - cut_w // 2)
+    x2 = min(width, center_x + cut_w // 2)
+
+    mixed = inputs.clone()
+    mixed[:, :, y1:y2, x1:x2] = inputs[permutation, :, y1:y2, x1:x2]
+    area = max(0, y2 - y1) * max(0, x2 - x1)
+    adjusted_lam = 1.0 - (area / max(height * width, 1))
+    return mixed, targets, targets[permutation], float(adjusted_lam)
+
+def _set_batch_norm_running_stats(model, *, enabled: bool) -> None:
+    for module in model.modules():
+        if not hasattr(module, "momentum"):
+            continue
+        if enabled:
+            if hasattr(module, "_astronomical_backup_momentum"):
+                module.momentum = module._astronomical_backup_momentum
+        else:
+            if not hasattr(module, "_astronomical_backup_momentum"):
+                module._astronomical_backup_momentum = module.momentum
+            module.momentum = 0
+
+def _make_sam_optimizer(model, params):
+    import torch
+
+    class SAM(torch.optim.Optimizer):
+        def __init__(self, parameters, *, rho, adaptive, **kwargs):
+            if rho < 0.0:
+                raise ValueError(f"SAM rho must be non-negative, got {rho}.")
+            defaults = dict(rho=float(rho), adaptive=bool(adaptive), **kwargs)
+            super().__init__(parameters, defaults)
+            self.base_optimizer = torch.optim.SGD(self.param_groups, **kwargs)
+            self.param_groups = self.base_optimizer.param_groups
+            self.defaults.update(defaults)
+
+        @torch.no_grad()
+        def first_step(self, *, zero_grad: bool = False) -> None:
+            grad_norm = self._grad_norm()
+            for group in self.param_groups:
+                scale = group["rho"] / (grad_norm + 1e-12)
+                for parameter in group["params"]:
+                    if parameter.grad is None:
+                        continue
+                    multiplier = parameter.abs() if group["adaptive"] else 1.0
+                    perturbation = multiplier * parameter.grad * scale.to(parameter)
+                    parameter.add_(perturbation)
+                    self.state[parameter]["sam_perturbation"] = perturbation
+            if zero_grad:
+                self.zero_grad(set_to_none=True)
+
+        @torch.no_grad()
+        def second_step(self, *, zero_grad: bool = False) -> None:
+            for group in self.param_groups:
+                for parameter in group["params"]:
+                    perturbation = self.state[parameter].pop("sam_perturbation", None)
+                    if perturbation is not None:
+                        parameter.sub_(perturbation)
+            self.base_optimizer.step()
+            if zero_grad:
+                self.zero_grad(set_to_none=True)
+
+        def step(self, closure=None):
+            if closure is None:
+                raise RuntimeError("SAM.step requires a closure with a forward/backward pass.")
+            closure = torch.enable_grad()(closure)
+            self.first_step(zero_grad=True)
+            closure()
+            self.second_step(zero_grad=True)
+
+        def _grad_norm(self):
+            shared_device = self.param_groups[0]["params"][0].device
+            norms = []
+            for group in self.param_groups:
+                for parameter in group["params"]:
+                    if parameter.grad is None:
+                        continue
+                    multiplier = parameter.abs() if group["adaptive"] else 1.0
+                    norms.append((multiplier * parameter.grad).norm(p=2).to(shared_device))
+            if not norms:
+                return torch.zeros((), device=shared_device)
+            return torch.norm(torch.stack(norms), p=2)
+
+        def load_state_dict(self, state_dict):
+            super().load_state_dict(state_dict)
+            self.base_optimizer.param_groups = self.param_groups
+
+    return SAM(
+        model.parameters(),
+        rho=float(params.get("rho", 0.05)),
+        adaptive=bool(params.get("adaptive", False)),
+        lr=float(params.get("learning_rate", 0.1)),
+        momentum=float(params.get("momentum", 0.9)),
+        weight_decay=float(params.get("weight_decay", 5e-4)),
+        nesterov=True,
     )
-    tags = ["torch", "tabular", "regression", "mlp", "photoz"]
-    required_mappings = ["record_id"]
-    optional_mappings = ["target_label"]
-    produces = ["ml.split_spec", "ml.model", "ml.evaluation_report",
-                "ml.predictions", "ml.training_log", "ml.run"]
 
-    params_schema = {
-        "type": "object",
-        "required": ["feature_columns"],
-        "properties": {
-            "record_id_column": {
-                "type": "string",
-                "title": "Record ID column",
-                "description": "Stable row/object identifier column.",
-                "default": "",
-                "x-widget": "column_select",
-            },
-            "target_column": {
-                "type": "string",
-                "title": "Target / label column",
-                "description": "Continuous regression target column.",
-                "default": "",
-                "x-widget": "column_select",
-            },
-            "feature_columns": {
-                "type": "array",
-                "items": {"type": "string"},
-                "title": "Input feature columns",
-                "description": (
-                    "Numeric dataset columns used as model inputs. "
-                    "For this torch MLP recipe, selected values must be "
-                    "convertible to float."
-                ),
-                "default": [],
-                "x-widget": "column_multichoice",
-            },
-            "auto_feature_columns": {
-                "type": "boolean",
-                "title": "Auto-select feature columns if none are chosen",
-                "description": (
-                    "Fallback only. Explicit feature selection is recommended."
-                ),
-                "default": False,
-            },
-            "hidden_layers": {
-                "type": "array",
-                "items": {"type": "integer"},
-                "default": [256, 256, 128],
-            },
-            "dropout": {
-                "type": "number",
-                "default": 0.1,
-                "minimum": 0.0,
-            },
-            "n_outputs": {
-                "type": "integer",
-                "default": 1,
-                "minimum": 1,
-            },
-            "loss": {
-                "type": "string",
-                "enum": ["mse", "mae", "huber"],
-                "default": "mse",
-            },
-            "epochs": {
-                "type": "integer",
-                "default": 200,
-                "minimum": 1,
-            },
-            "batch_size": {
-                "type": "integer",
-                "default": 256,
-                "minimum": 1,
-            },
-            "num_workers": {
-                "type": "integer",
-                "default": 0,
-                "minimum": 0,
-            },
-            "learning_rate": {
-                "type": "number",
-                "default": 1e-3,
-            },
-            "weight_decay": {
-                "type": "number",
-                "default": 1e-5,
-            },
+class CutMixTimmClassifierRecipe(TimmImageClassifierRecipe):
+    id = "core.ml.cutmix_timm_classifier"
+    title = "timm image classifier with CutMix"
+    version = "0.1.0"
+    complexity = "advanced"
+    description = (
+        "Fine-tune a timm image classifier with the official CutMix minibatch "
+        "mixing rule. AstronomicAL still owns validation, best-epoch selection, "
+        "test evaluation, and artifact production."
+    )
+    tags = ["torch", "timm", "image", "classification", "cutmix", "regularization"]
+    source_urls = [
+        "https://github.com/clovaai/CutMix-PyTorch",
+        "https://github.com/huggingface/pytorch-image-models",
+    ]
+    source_reference = (
+        "CutMix sampling and area-corrected lambda are adapted from the official "
+        "CutMix-PyTorch training loop; model construction remains timm-backed."
+    )
+    params_schema = _with_properties(
+        TimmImageClassifierRecipe.params_schema,
+        cutmix_alpha={
+            "type": "number",
+            "default": 1.0,
+            "minimum": 0.0,
+            "title": "CutMix beta-distribution alpha",
         },
-    }
-
-    def _hidden(self, run):
-        h = run.params.get("hidden_layers", [256, 256, 128])
-        if isinstance(h, str):
-            import re
-            h = [int(x) for x in re.split(r"[,\s]+", h) if x.strip()]
-        return [int(x) for x in h] or [256, 128]
-
-    def build_model(self, run, *, num_classes: int):
-        d_in = len([c for c in (run.binding.input_columns or []) if c])
-        if d_in == 0:
-            raise ValueError(
-                "Tabular regression resolved zero feature columns. Map a "
-                "record_id + target, leaving the numeric features unmapped."
-            )
-        return _build_tabular_mlp(
-            d_in=d_in, hidden=self._hidden(run),
-            dropout=float(run.params.get("dropout", 0.1)),
-            d_out=int(num_classes),
-        )
-
-    def configure_training(self, run, model) -> TrainingComponents:
-        import torch.optim as optim
-        p = run.params
-        optimizer = optim.AdamW(model.parameters(), lr=float(p.get("learning_rate", 1e-3)),
-                                weight_decay=float(p.get("weight_decay", 1e-5)))
-        scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=int(p.get("epochs", 200)))
-        return TrainingComponents(optimizer=optimizer, scheduler=scheduler,
-                                  criterion=_regression_criterion(p))
-
-    def train_transform(self, run):
-        return None        # load_sample already returns a ready feature tensor
-
-    def eval_transform(self, run):
-        return None
-
-    def load_sample(self, run, row):
-        import torch
-        feats = [c for c in (run.binding.input_columns or []) if c]
-        return torch.tensor([float(row[c]) for c in feats], dtype=torch.float32)
+        cutmix_probability={
+            "type": "number",
+            "default": 0.5,
+            "minimum": 0.0,
+            "maximum": 1.0,
+            "title": "CutMix probability",
+        },
+        gradient_clip_norm={
+            "type": "number",
+            "default": 0.0,
+            "minimum": 0.0,
+            "title": "Gradient clipping norm (0 disables)",
+        },
+    )
 
     def fit(self, run, *, model, components: TrainingComponents, train_loader, harness: RunHarness):
         import torch
+
         device = harness.device
         model.to(device)
-        for epoch in range(1, int(run.params.get("epochs", 200)) + 1):
+        epochs = int(run.params.get("epochs", 30))
+        probability = float(run.params.get("cutmix_probability", 0.5))
+        alpha = float(run.params.get("cutmix_alpha", 1.0))
+        clip_norm = float(run.params.get("gradient_clip_norm", 0.0))
+
+        for epoch in range(1, epochs + 1):
             run.check_cancelled()
             model.train()
-            loss_sum = seen = 0
+            loss_sum = 0.0
+            weighted_correct = 0.0
+            seen = 0
             for inputs, targets, _ids in train_loader:
                 inputs = inputs.to(device)
-                targets = targets.to(device).float()        # [B, n_outputs]
+                targets = targets.to(device).long()
+                use_cutmix = alpha > 0.0 and float(torch.rand(()).item()) < probability
+                if use_cutmix:
+                    mixed, target_a, target_b, lam = _cutmix_batch(inputs, targets, alpha=alpha)
+                else:
+                    mixed, target_a, target_b, lam = inputs, targets, targets, 1.0
+
                 components.optimizer.zero_grad(set_to_none=True)
-                out = model(inputs)
-                if out.dim() == 1:
-                    out = out.unsqueeze(1)
-                loss = components.criterion(out, targets)
+                logits = model(mixed)
+                loss = (
+                    lam * components.criterion(logits, target_a)
+                    + (1.0 - lam) * components.criterion(logits, target_b)
+                )
+                loss.backward()
+                if clip_norm > 0.0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), clip_norm)
+                components.optimizer.step()
+
+                batch_size = int(targets.size(0))
+                predictions = logits.argmax(1)
+                loss_sum += float(loss.detach()) * batch_size
+                weighted_correct += lam * float(predictions.eq(target_a).sum())
+                weighted_correct += (1.0 - lam) * float(predictions.eq(target_b).sum())
+                seen += batch_size
+
+            harness.report_epoch(
+                epoch,
+                model,
+                train_metrics={
+                    "loss": loss_sum / max(seen, 1),
+                    "accuracy": weighted_correct / max(seen, 1),
+                },
+            )
+            if components.scheduler is not None:
+                components.scheduler.step()
+
+class SAMWideResNetCIFARRecipe(WideResNetCIFARRecipe):
+    id = "core.ml.sam_wideresnet_cifar"
+    title = "WideResNet with SAM (CIFAR-style)"
+    version = "0.1.0"
+    complexity = "advanced"
+    description = (
+        "Train the existing CIFAR WideResNet with Sharpness-Aware Minimization "
+        "using the two-step SAM update and batch-normalization handling from the "
+        "reference PyTorch implementation."
+    )
+    tags = ["torch", "image", "classification", "cifar", "wideresnet", "sam"]
+    source_urls = [
+        "https://github.com/davda54/sam",
+        "https://github.com/hysts/pytorch_image_classification",
+    ]
+    source_reference = (
+        "Uses the SAM two-forward-pass optimizer pattern with rho=0.05 by default, "
+        "on AstronomicAL's existing WideResNet/Cutout recipe."
+    )
+    params_schema = _with_properties(
+        WideResNetCIFARRecipe.params_schema,
+        rho={"type": "number", "default": 0.05, "minimum": 0.0, "title": "SAM rho"},
+        adaptive={"type": "boolean", "default": False, "title": "Use adaptive SAM"},
+        label_smoothing={
+            "type": "number",
+            "default": 0.1,
+            "minimum": 0.0,
+            "maximum": 1.0,
+        },
+    )
+
+    def configure_training(self, run, model) -> TrainingComponents:
+        import torch.nn as nn
+        import torch.optim as optim
+
+        optimizer = _make_sam_optimizer(model, run.params)
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=int(run.params.get("epochs", 200)),
+        )
+        criterion = nn.CrossEntropyLoss(
+            label_smoothing=float(run.params.get("label_smoothing", 0.1))
+        )
+        return TrainingComponents(optimizer=optimizer, scheduler=scheduler, criterion=criterion)
+
+    def fit(self, run, *, model, components: TrainingComponents, train_loader, harness: RunHarness):
+        device = harness.device
+        model.to(device)
+        epochs = int(run.params.get("epochs", 200))
+
+        for epoch in range(1, epochs + 1):
+            run.check_cancelled()
+            model.train()
+            loss_sum = 0.0
+            correct = 0
+            seen = 0
+            for inputs, targets, _ids in train_loader:
+                inputs = inputs.to(device)
+                targets = targets.to(device).long()
+
+                _set_batch_norm_running_stats(model, enabled=True)
+                logits = model(inputs)
+                loss = components.criterion(logits, targets)
+                loss.backward()
+                components.optimizer.first_step(zero_grad=True)
+
+                _set_batch_norm_running_stats(model, enabled=False)
+                second_logits = model(inputs)
+                second_loss = components.criterion(second_logits, targets)
+                second_loss.backward()
+                components.optimizer.second_step(zero_grad=True)
+                _set_batch_norm_running_stats(model, enabled=True)
+
+                batch_size = int(targets.size(0))
+                loss_sum += float(loss.detach()) * batch_size
+                correct += int(logits.argmax(1).eq(targets).sum())
+                seen += batch_size
+
+            harness.report_epoch(
+                epoch,
+                model,
+                train_metrics={
+                    "loss": loss_sum / max(seen, 1),
+                    "accuracy": correct / max(seen, 1),
+                },
+            )
+            if components.scheduler is not None:
+                components.scheduler.step()
+
+class ZoobotFineTuneImageRegressorRecipe(TimmImageRegressorRecipe):
+    id = "core.ml.zoobot_finetune_regressor"
+    title = "Zoobot-style image regressor fine-tuning"
+    version = "0.1.0"
+    complexity = "advanced"
+    description = (
+        "Fine-tune an ImageNet-pretrained timm encoder for continuous image targets "
+        "with astronomy-friendly rotations/flips and an optional frozen-backbone "
+        "warm-up. This follows Zoobot's reusable encoder/fine-tuning approach while "
+        "retaining AstronomicAL's managed evaluation protocol."
+    )
+    tags = ["torch", "timm", "image", "regression", "zoobot", "astronomy", "transfer-learning"]
+    source_urls = [
+        "https://github.com/mwalmsley/zoobot",
+        "https://github.com/huggingface/pytorch-image-models",
+    ]
+    source_reference = (
+        "Inspired by Zoobot's pretrained-encoder fine-tuning workflow and support "
+        "for regression tasks; implemented with a timm backbone inside AstronomicAL."
+    )
+    params_schema = _with_properties(
+        TimmImageRegressorRecipe.params_schema,
+        model_name={"type": "string", "default": "convnext_tiny"},
+        epochs={"type": "integer", "default": 40, "minimum": 1},
+        batch_size={"type": "integer", "default": 32, "minimum": 1},
+        learning_rate={"type": "number", "default": 3e-4},
+        freeze_backbone_epochs={
+            "type": "integer",
+            "default": 3,
+            "minimum": 0,
+            "title": "Frozen-backbone warm-up epochs",
+        },
+        random_rotation_degrees={
+            "type": "number",
+            "default": 180.0,
+            "minimum": 0.0,
+            "maximum": 180.0,
+        },
+        vertical_flip={"type": "boolean", "default": True},
+    )
+
+    def build_model(self, run, *, num_classes: int):
+        model = super().build_model(run, num_classes=num_classes)
+        freeze_epochs = int(run.params.get("freeze_backbone_epochs", 3))
+        if freeze_epochs <= 0:
+            return model
+        for parameter in model.parameters():
+            parameter.requires_grad = False
+        classifier = model.get_classifier()
+        if classifier is None:
+            raise ValueError("Selected timm model does not expose a classifier head.")
+        for parameter in classifier.parameters():
+            parameter.requires_grad = True
+        return model
+
+    def train_transform(self, run):
+        from torchvision import transforms as T
+
+        size = int(run.params.get("input_size", 224) or 224)
+        resize_size = max(size, int(round(size * 1.15)))
+        ops = [
+            T.Resize((resize_size, resize_size)),
+            T.RandomResizedCrop(size),
+            T.RandomHorizontalFlip(),
+        ]
+        if bool(run.params.get("vertical_flip", True)):
+            ops.append(T.RandomVerticalFlip())
+        rotation = float(run.params.get("random_rotation_degrees", 180.0))
+        if rotation > 0.0:
+            ops.append(T.RandomRotation(rotation))
+        ops.append(T.ToTensor())
+        _append_normalize(
+            ops,
+            T,
+            run,
+            default_mode="imagenet",
+            default_mean=[0.485, 0.456, 0.406],
+            default_std=[0.229, 0.224, 0.225],
+        )
+        return T.Compose(ops)
+
+    def fit(self, run, *, model, components: TrainingComponents, train_loader, harness: RunHarness):
+        device = harness.device
+        model.to(device)
+        epochs = int(run.params.get("epochs", 40))
+        freeze_epochs = int(run.params.get("freeze_backbone_epochs", 3))
+
+        for epoch in range(1, epochs + 1):
+            run.check_cancelled()
+            if epoch == freeze_epochs + 1:
+                for parameter in model.parameters():
+                    parameter.requires_grad = True
+            model.train()
+            loss_sum = 0.0
+            seen = 0
+            for inputs, targets, _ids in train_loader:
+                inputs = inputs.to(device)
+                targets = targets.to(device).float()
+                components.optimizer.zero_grad(set_to_none=True)
+                output = model(inputs)
+                if output.dim() == 1:
+                    output = output.unsqueeze(1)
+                loss = components.criterion(output, targets)
                 loss.backward()
                 components.optimizer.step()
-                loss_sum += float(loss.detach()) * int(targets.size(0))
-                seen += int(targets.size(0))
-            harness.report_epoch(epoch, model, train_metrics={"loss": loss_sum / max(seen, 1)})
+                batch_size = int(targets.size(0))
+                loss_sum += float(loss.detach()) * batch_size
+                seen += batch_size
+
+            harness.report_epoch(
+                epoch,
+                model,
+                train_metrics={"loss": loss_sum / max(seen, 1)},
+            )
             if components.scheduler is not None:
                 components.scheduler.step()
