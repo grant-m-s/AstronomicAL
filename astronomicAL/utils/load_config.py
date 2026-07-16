@@ -16,6 +16,7 @@ from astronomicAL.platform.dataset_header import DatasetHeaderController
 from astronomicAL.platform.mapping_header import MappingAlertController
 from astronomicAL.platform.modal_utils import ensure_template_modal_host
 from astronomicAL.platform.runtime_status_box import RuntimeStatusBox
+from astronomicAL.platform.application_toolbar import ApplicationToolbarController
 
 DEFAULT_BREAKPOINTS = {"lg": 1500, "md": 1050, "sm": 0}
 DEFAULT_COLS_BY_BREAKPOINT = {"lg": 12, "md": 12, "sm": 12}
@@ -80,7 +81,11 @@ def create_header(
         raise ValueError("create_header requires context.config.")
 
     if not hasattr(react, "_header_box"):
-        react._header_box = pn.Row(sizing_mode="stretch_width")
+        react._header_box = pn.Row(
+            sizing_mode="stretch_width",
+            margin=(0, 0, 0, 0),
+            styles={"overflow": "visible"},
+        )
         react.header.append(react._header_box)
 
     react.config.raw_css.append(
@@ -181,6 +186,37 @@ def create_header(
     )
     react._runtime_status_box = runtime_status_box
 
+    old_application_toolbar = getattr(react, "_application_toolbar", None)
+    if old_application_toolbar is not None and hasattr(
+        old_application_toolbar,
+        "dispose",
+    ):
+        try:
+            old_application_toolbar.dispose()
+        except Exception:
+            pass
+
+    # The toolbar is a separate fixed root. Removing the previous root avoids
+    # duplicate toolbars if create_header() is called again during development
+    # or a live reload.
+    old_toolbar_view = getattr(old_application_toolbar, "view", None)
+    if old_toolbar_view is not None:
+        try:
+            react.header.remove(old_toolbar_view)
+        except (ValueError, AttributeError):
+            pass
+
+    application_toolbar = ApplicationToolbarController(
+        context=context,
+        template=react,
+    )
+    react._application_toolbar = application_toolbar
+
+    # ReactTemplate embeds header roots inside #header-items. The toolbar root
+    # is position: fixed, so it does not increase the blue header height. Its
+    # stylesheet reserves matching space at the top of #main.
+    react.header.append(application_toolbar.view)
+
     header_row = pn.Row(
         layout_controls,
         dataset_header.view,
@@ -200,6 +236,7 @@ def create_header(
     )
 
     react._header_box[:] = [header_row]
+
     return react
 
 def _build_export_labelled_data_button(context: Any):

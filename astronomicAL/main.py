@@ -101,6 +101,7 @@ from astronomicAL.platform.artifacts import ArtifactStore
 from astronomicAL.platform.datasets import DatasetManager
 from astronomicAL.platform.workspace import WorkspaceManager
 from astronomicAL.platform.selection import SelectionManager
+from astronomicAL.platform.record_navigation import RecordNavigationManager
 from astronomicAL.platform.services import ServiceRegistry
 from astronomicAL.platform.plugins import PluginManager
 from astronomicAL.platform.persistence import WorkspacePersistence
@@ -226,6 +227,7 @@ artifacts = ArtifactStore(cache_dir="data/cache_artifacts")
 datasets = DatasetManager(events=events)
 workspace = WorkspaceManager(react_template=react, grid=grid)
 selection = SelectionManager(events=events, artifacts=artifacts)
+navigation = RecordNavigationManager(datasets=datasets, selection=selection, events=events)
 services = ServiceRegistry()
 
 # Make the status service available both directly on context and through the
@@ -233,6 +235,11 @@ services = ServiceRegistry()
 services.set(
     "platform.runtime_status",
     runtime_status,
+    owner="platform",
+)
+services.set(
+    "platform.record_navigation",
+    navigation,
     owner="platform",
 )
 
@@ -244,6 +251,7 @@ boot_print(f"main.py: datasets={type(datasets).__name__}")
 boot_print(f"main.py: workspace={type(workspace).__name__}")
 boot_print(f"main.py: selection={type(selection).__name__}")
 boot_print(f"main.py: services={type(services).__name__}")
+boot_print(f"main.py: navigation={type(navigation).__name__}")
 boot_print(f"main.py: runtime_status={type(runtime_status).__name__}")
 
 
@@ -265,6 +273,7 @@ context = AppContext(
     workspace=workspace,
     selection=selection,
     services=services,
+    navigation=navigation,
     config=config,
     plugins=plugins,
     runtime_status=runtime_status,
@@ -295,6 +304,7 @@ context.config.layout_directory = getattr(
 context.config.plugins = plugins
 context.config.app_context = context
 context.config.runtime_status = runtime_status
+context.config.navigation = navigation
 
 react._app_context = context
 
@@ -306,6 +316,7 @@ required = [
     "datasets",
     "workspace",
     "selection",
+    "navigation",
     "services",
     "plugins",
     "persistence",
