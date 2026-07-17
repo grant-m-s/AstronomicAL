@@ -278,43 +278,15 @@ def create_ml_predict_panel(context, **kwargs):
 
 def create_ml_recipe_registry(context=None):
     from . import registry as registry_module
-    from .recipes import image as recipes_module
-    from .recipes import image as recipe_image
-    from .recipes import tabular as recipe_tabular
-    from .recipes import sklearn as recipe_sklearn
-    from .recipes import image as recipes_module
-
     from .harnesses import sklearn as sklearn_harness
-    from .recipes import sklearn as sklearn_recipes
+    from .recipes import BUILTIN_RECIPE_CLASSES
 
-    # Register sklearn harness selection with harnesses.make_harness().
-    # Idempotent in sklearn_harness.register().
     sklearn_harness.register()
 
     registry = registry_module.MLRecipeRegistry()
+    for recipe_class in BUILTIN_RECIPE_CLASSES:
+        registry.register(recipe_class, replace=False)
 
-    registry.register(recipes_module.CIFARResNetRecipe)
-    registry.register(recipes_module.TimmImageClassifierRecipe)
-    registry.register(recipes_module.WideResNetCIFARRecipe)
-    registry.register(recipes_module.TimmImageRegressorRecipe)
-
-    registry.register(recipe_image.CutMixTimmClassifierRecipe)
-    registry.register(recipe_image.SAMWideResNetCIFARRecipe)
-    registry.register(recipe_image.TimmImageClassifierRecipe)
-    registry.register(recipe_image.TimmImageRegressorRecipe)
-    registry.register(recipe_image.WideResNetCIFARRecipe)
-    registry.register(recipe_image.ZoobotFineTuneImageRegressorRecipe)
-
-    registry.register(recipe_tabular.FTTransformerClassifierRecipe)
-    registry.register(recipe_tabular.FTTransformerRegressorRecipe)
-    registry.register(recipe_tabular.TabularResNetClassifierRecipe)
-    registry.register(recipe_tabular.TabularResNetRegressorRecipe)
-    registry.register(recipe_tabular.TabularMLPRegressorRecipe)
-
-    registry.register(recipe_sklearn.XGBoostTabularRegressorRecipe)
-    registry.register(recipe_sklearn.XGBoostTabularClassifierRecipe)
-    registry.register(recipe_sklearn.SklearnTabularClassifierRecipe)
-    registry.register(recipe_sklearn.SklearnTabularRegressorRecipe)
 
     return registry
 
