@@ -47,7 +47,7 @@ class EuclidCutoutsClass:
         euclid_filters: Optional[Iterable[str]] = None,
         save_dir: str = DEFAULT_SAVE_DIR,
         context: Any = None,
-        check_moc_coverage: bool = True,
+        check_moc_coverage: bool = False,
         moc_survey: str = "Euclid_Q1",
         moc_path: str = DEFAULT_MOC_PATH,
     ) -> None:
@@ -89,7 +89,7 @@ class EuclidCutoutsClass:
             except Exception:
                 pass
 
-        client = EuclidClass(environment="PDR")
+        client = EuclidClass(environment=self.environment)
         print("Initialized EuclidClass")
 
         if services is not None:
@@ -116,7 +116,7 @@ class EuclidCutoutsClass:
         )
 
         self.client = EuclidClass(environment=environment)
-
+ 
         if environment != "PDR":
             if credentials_filepath is not None:
                 self.client.login(user=None, password=None, credentials_file=credentials_filepath)
@@ -224,7 +224,11 @@ class EuclidCutoutsClass:
         matching = cone_results[cone_results["filter_name"] == filter_name]
         if len(matching) == 0:
             raise KeyError(f"No Euclid cone-search product found for filter {filter_name!r}")
-
+        try:
+            matching.sort("processing_mode" ) #First DEEP then WIDE in DR1
+        except ValueError:
+            #No processing_mode column in Q1 table
+            pass
         line = matching[0]
         file_path = os.path.join(str(line["file_path"]), str(line["file_name"]))
         instrument = line["instrument_name"]
