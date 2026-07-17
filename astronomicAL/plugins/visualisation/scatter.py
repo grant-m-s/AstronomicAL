@@ -1,7 +1,3 @@
-# BUG: Assign Label col slow
-# BUG: Individual legend "on off" colour turns all colours off - works correctly in hist
-# BUG: If label set, changing label name or colour (re-apply label settings) no update happens.
-
 from __future__ import annotations
 
 import time
@@ -16,7 +12,12 @@ import panel as pn
 from holoviews import streams
 from holoviews.operation.datashader import rasterize
 
-from bokeh.models import ColumnDataSource
+from bokeh.models import (
+    BoxSelectTool,
+    ColumnDataSource,
+    LassoSelectTool,
+    TapTool,
+)
 
 from .base import BaseVisualisationPanel
 from .constants import (
@@ -1704,6 +1705,25 @@ class ScatterPanel(BaseVisualisationPanel):
                 flush=True,
             )
 
+    def _scatter_selection_tools_hook(self, plot, element) -> None:
+        """Keep selection tools attached only to the base scatter renderer."""
+        try:
+            figure = plot.state
+            scatter_renderers = [
+                renderer
+                for renderer in figure.renderers
+                if getattr(renderer, "name", None) == SCATTER_RENDERER
+            ]
+        except Exception:
+            return
+
+        if not scatter_renderers:
+            return
+
+        for tool in figure.tools:
+            if isinstance(tool, (TapTool, BoxSelectTool, LassoSelectTool)):
+                tool.renderers = scatter_renderers
+
     def _scatter_focus_stream_signature(self):
         return (
             str(self._dataset_id()),
@@ -2140,6 +2160,7 @@ class ScatterPanel(BaseVisualisationPanel):
                 deduplicate_toolbar_tools_hook,
                 keep_pan_tool_active_hook,
                 self._scatter_focus_bokeh_hook,
+                self._scatter_selection_tools_hook,
             ],
             shared_axes=False,
             axiswise=True,
@@ -3268,10 +3289,10 @@ class ScatterPanel(BaseVisualisationPanel):
             size=self.state.point_size,
             alpha=self.state.point_alpha,
             line_alpha=0,
-            selection_alpha=1.0,
-            selection_color="orange",
-            selection_line_color="black",
-            nonselection_alpha=0.18,
+            selection_alpha=self.state.point_alpha,
+            selection_line_alpha=0.0,
+            nonselection_alpha=self.state.point_alpha,
+            nonselection_line_alpha=0.0,
             muted_alpha=0.03,
             **self._base_opts(
                 xlabel=self.state.x,
@@ -3700,7 +3721,6 @@ class ScatterPanel(BaseVisualisationPanel):
             f"panel_id={self.panel_id}",
             flush=True,
         )
-        self._schedule_post_selection_refresh(delay_ms=120)
 
     @staticmethod
     def _is_single_focus_selection(
