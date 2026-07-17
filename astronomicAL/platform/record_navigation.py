@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from numbers import Integral, Real
 from threading import RLock
 from typing import Any, Iterable, Literal, Optional
+from uuid import UUID
 
 NavigationScope = Literal["dataset", "selection"]
-
+RecordIdKey = tuple[str, Any]
 
 class NavigationError(RuntimeError):
     """Raised when a requested record-navigation operation is unavailable."""
@@ -57,7 +59,8 @@ class RecordNavigationManager:
         self.events = events
         self._lock = RLock()
         self._scope: NavigationScope = "dataset"
-        self._position_cache: dict[tuple[str, str], int] = {}
+        self._position_cache: dict[tuple[str, RecordIdKey], int] = {}
+        self._dataset_revisions: dict[str, int] = {}
         self._subscriptions: list[Any] = []
         self._disposed = False
         self._state = NavigationState()
@@ -147,6 +150,7 @@ class RecordNavigationManager:
                 "index": dataset_position,
                 "navigation_position": position,
                 "navigation_scope": state.scope,
+                "navigation_revision": self._dataset_revision(state.dataset_id),
                 "id_column": state.id_column,
             },
         )
@@ -180,34 +184,53 @@ class RecordNavigationManager:
     def find_position(self, row_id: Any) -> Optional[int]:
         """Return a zero-based position in the current scope.
 
-        This may query the dataset backend and is therefore suitable for a
-        JobManager worker when called from a UI controller.
+        Text entered by the toolbar is converted to the concrete record-ID
+        type used by the active dataset before lookup.
         """
         state = self.refresh()
         if state.dataset_id is None or state.id_column is None:
             return None
+
+        lookup_id = self._coerce_lookup_id(state, row_id)
+
         if state.scope == "selection":
-            wanted = str(row_id)
-            for position, candidate in enumerate(self._selection_row_ids(state.dataset_id)):
-                if str(candidate) == wanted:
-                    return position
-            return None
+            return self._index_of_id(
+                self._selection_row_ids(state.dataset_id),
+                lookup_id,
+            )
+
         position = self.datasets.find_position_by_id(
             state.dataset_id,
-            row_id,
+            lookup_id,
             id_column=state.id_column,
         )
+
         if position is not None:
-            self._remember_position(state.dataset_id, row_id, int(position))
+            self._remember_position(
+                state.dataset_id,
+                lookup_id,
+                int(position),
+            )
+
         return None if position is None else int(position)
 
-    def go_to_id(self, row_id: Any, *, origin: str = "toolbar") -> NavigationState:
-        query = str(row_id).strip()
-        if not query:
+    def go_to_id(
+        self,
+        row_id: Any,
+        *,
+        origin: str = "toolbar",
+    ) -> NavigationState:
+        if isinstance(row_id, str) and not row_id.strip():
             raise NavigationError("Enter a record ID.")
-        position = self.find_position(query)
+        if row_id is None:
+            raise NavigationError("Enter a record ID.")
+
+        position = self.find_position(row_id)
         if position is None:
-            raise NavigationError(f"No record with ID {query!r} was found in this scope.")
+            raise NavigationError(
+                f"No record with ID {row_id!r} was found in this scope."
+            )
+
         return self.go_to_position(position, origin=origin)
 
     def resolve_focus_position(self) -> NavigationState:
@@ -253,7 +276,7 @@ class RecordNavigationManager:
         row_ids = [
             candidate
             for candidate in self._selection_row_ids(state.dataset_id)
-            if str(candidate) != str(state.row_id)
+            if not self._ids_equal(candidate, state.row_id)
         ]
         if row_ids:
             self.selection.set_selection_set(
@@ -320,7 +343,17 @@ class RecordNavigationManager:
                 position = self._index_of_id(selected_ids, row_id)
             else:
                 metadata_position = metadata.get("index")
-                if isinstance(metadata_position, int) and 0 <= metadata_position < dataset_row_count:
+                metadata_revision = metadata.get("navigation_revision")
+                current_revision = self._dataset_revision(dataset_id)
+
+                index_is_current = (
+                    isinstance(metadata_position, int)
+                    and 0 <= metadata_position < dataset_row_count
+                    and metadata_revision == current_revision
+                    and metadata.get("id_column") == id_column
+                )
+
+                if index_is_current:
                     position = metadata_position
                 else:
                     position = self._cached_position(dataset_id, row_id)
@@ -393,9 +426,176 @@ class RecordNavigationManager:
             raise NavigationError(f"Mapped record ID column {id_column!r} is unavailable.")
         return frame.iloc[0][id_column]
 
-    def _on_platform_event(self, _topic: str, _payload: Any) -> None:
-        if not self._disposed:
-            self.refresh()
+    def _coerce_lookup_id(
+        self,
+        state: NavigationState,
+        row_id: Any,
+    ) -> Any:
+        if not isinstance(row_id, str):
+            return self._python_scalar(row_id)
+
+        text = row_id.strip()
+        if not text:
+            return text
+
+        sample = self._sample_record_id(state)
+        if sample is None:
+            return text
+
+        sample = self._python_scalar(sample)
+
+        try:
+            if isinstance(sample, str):
+                return text
+
+            if isinstance(sample, bool):
+                lowered = text.casefold()
+                if lowered == "true":
+                    return True
+                if lowered == "false":
+                    return False
+                return text
+
+            if isinstance(sample, Integral):
+                return int(text, 10)
+
+            if isinstance(sample, Real):
+                return float(text)
+
+            if isinstance(sample, UUID):
+                return UUID(text)
+        except (TypeError, ValueError, OverflowError):
+            return text
+
+        return text
+
+    def _sample_record_id(
+        self,
+        state: NavigationState,
+    ) -> Any:
+        if (
+            state.dataset_id is None
+            or state.id_column is None
+            or state.dataset_row_count <= 0
+        ):
+            return None
+
+        sample_count = min(state.dataset_row_count, 32)
+        for position in range(sample_count):
+            try:
+                candidate = self._row_id_at_dataset_position(
+                    state.dataset_id,
+                    position,
+                    state.id_column,
+                )
+            except Exception:
+                continue
+
+            if candidate is not None:
+                return candidate
+
+        return None
+
+    @staticmethod
+    def _python_scalar(value: Any) -> Any:
+        item = getattr(value, "item", None)
+        if not callable(item):
+            return value
+
+        try:
+            converted = item()
+        except (TypeError, ValueError):
+            return value
+
+        if isinstance(converted, (list, tuple, dict, set)):
+            return value
+
+        return converted
+
+    @classmethod
+    def _record_id_key(cls, value: Any) -> RecordIdKey:
+        value = cls._python_scalar(value)
+        type_name = (
+            f"{type(value).__module__}."
+            f"{type(value).__qualname__}"
+        )
+
+        try:
+            hash(value)
+            normalized = value
+        except TypeError:
+            normalized = repr(value)
+
+        return type_name, normalized
+
+    @classmethod
+    def _ids_equal(cls, left: Any, right: Any) -> bool:
+        return cls._record_id_key(left) == cls._record_id_key(right)
+
+    def _on_platform_event(self, topic: str, payload: Any) -> None:
+        if self._disposed:
+            return
+
+        if topic == "dataset.active.changed":
+            self._invalidate_all_positions()
+        elif topic in {"dataset.updated", "dataset.mapping.updated"}:
+            dataset_id = self._dataset_id_from_event(payload)
+            if dataset_id is None:
+                try:
+                    dataset_id = self.datasets.active_id()
+                except Exception:
+                    dataset_id = None
+
+            if dataset_id is not None:
+                self._invalidate_dataset_positions(str(dataset_id))
+
+        self.refresh()
+
+    def _dataset_revision(self, dataset_id: Any) -> int:
+        key = str(dataset_id)
+        with self._lock:
+            return self._dataset_revisions.get(key, 0)
+
+    def _invalidate_dataset_positions(self, dataset_id: str) -> None:
+        dataset_key = str(dataset_id)
+
+        with self._lock:
+            stale_keys = [
+                cache_key
+                for cache_key in self._position_cache
+                if cache_key[0] == dataset_key
+            ]
+            for cache_key in stale_keys:
+                self._position_cache.pop(cache_key, None)
+
+            self._dataset_revisions[dataset_key] = (
+                self._dataset_revisions.get(dataset_key, 0) + 1
+            )
+
+    def _invalidate_all_positions(self) -> None:
+        with self._lock:
+            known_dataset_ids = {
+                dataset_id for dataset_id, _row_id in self._position_cache
+            }
+            known_dataset_ids.update(self._dataset_revisions)
+
+            self._position_cache.clear()
+
+            for dataset_id in known_dataset_ids:
+                self._dataset_revisions[dataset_id] = (
+                    self._dataset_revisions.get(dataset_id, 0) + 1
+                )
+
+    @staticmethod
+    def _dataset_id_from_event(payload: Any) -> Optional[str]:
+        if isinstance(payload, dict):
+            value = payload.get("dataset_id")
+            if value is None:
+                value = payload.get("id")
+            return None if value is None else str(value)
+
+        value = getattr(payload, "dataset_id", None)
+        return None if value is None else str(value)
 
     def _remember_position(
         self,
@@ -405,7 +605,7 @@ class RecordNavigationManager:
     ) -> None:
         if position is None:
             return
-        key = (str(dataset_id), str(row_id))
+        key = (str(dataset_id), self._record_id_key(row_id))
         with self._lock:
             if len(self._position_cache) >= 8192:
                 # Dicts preserve insertion order. Remove the oldest quarter rather
@@ -415,18 +615,20 @@ class RecordNavigationManager:
             self._position_cache[key] = int(position)
 
     def _cached_position(self, dataset_id: str, row_id: Any) -> Optional[int]:
+        key = (str(dataset_id), self._record_id_key(row_id))
         with self._lock:
-            return self._position_cache.get((str(dataset_id), str(row_id)))
+            return self._position_cache.get(key)
 
-    @staticmethod
-    def _contains_id(row_ids: Iterable[Any], row_id: Any) -> bool:
-        wanted = str(row_id)
-        return any(str(candidate) == wanted for candidate in row_ids)
+    @classmethod
+    def _contains_id(cls, row_ids: Iterable[Any], row_id: Any) -> bool:
+        return any(
+            cls._ids_equal(candidate, row_id)
+            for candidate in row_ids
+        )
 
-    @staticmethod
-    def _index_of_id(row_ids: Iterable[Any], row_id: Any) -> Optional[int]:
-        wanted = str(row_id)
+    @classmethod
+    def _index_of_id(cls, row_ids: Iterable[Any], row_id: Any) -> Optional[int]:
         for position, candidate in enumerate(row_ids):
-            if str(candidate) == wanted:
+            if cls._ids_equal(candidate, row_id):
                 return position
         return None
