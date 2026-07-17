@@ -40,20 +40,70 @@ class DynamicReactGrid(ReactComponent):
             width: 100%;
             height: 100%;
             min-height: 600px;
+            background-color: #f3f5f8;
         }
 
         .pn-dynamic-rgl-bottom-spacer {
             height: 260px;
             min-height: 260px;
             pointer-events: none;
+            background-color: #f3f5f8;
         }
 
-        .tile { border: 1px solid rgba(0,0,0,0.15); border-radius: 8px; overflow: hidden; height: 100%; display:flex; flex-direction:column; }
-        .tile-header { padding: 6px 10px; font-size: 12px; user-select:none; cursor:grab; border-bottom:1px solid rgba(0,0,0,0.10); background:rgba(0,0,0,0.06); display:flex; align-items:center; justify-content:space-between; gap:8px; }
-        .tile-title { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-        .tile-close { border:none; background:transparent; cursor:pointer; font-size:16px; line-height:1; padding:2px 6px; border-radius:6px; }
-        .tile-close:hover { background: rgba(0,0,0,0.10); }
-        .tile-body { padding: 8px; overflow:auto; flex:1; min-height:0; }
+        .tile {
+            display: flex;
+            flex-direction: column;
+            height: 100%;
+            overflow: hidden;
+            border: 1px solid #cbd5e1;
+            border-radius: 8px;
+            background-color: #ffffff;
+        }
+
+        .pn-dynamic-rgl .tile > .tile-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            padding: 6px 10px;
+            border-bottom: 1px solid #cbd5e1;
+            background: #e2e8f0 !important;
+            color: #263244;
+            font-size: 12px;
+            cursor: grab;
+            user-select: none;
+        }
+
+        .tile-title {
+            flex: 1;
+            overflow: hidden;
+            color: #263244;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .tile-close {
+            padding: 2px 6px;
+            border: none;
+            border-radius: 6px;
+            background: transparent;
+            color: #263244;
+            font-size: 16px;
+            line-height: 1;
+            cursor: pointer;
+        }
+
+        .tile-close:hover {
+            background-color: rgba(38, 50, 68, 0.08);
+        }
+
+        .tile-body {
+            flex: 1;
+            min-height: 0;
+            padding: 8px;
+            overflow: auto;
+            background-color: #ffffff;
+        }
         """,
     ]
 

@@ -1,38 +1,14 @@
 from __future__ import annotations
 
+from astronomicAL.platform.application_chrome_styles import APPLICATION_CHROME_CSS
 
-
-TOOLBAR_CSS = """
+TOOLBAR_CSS = APPLICATION_CHROME_CSS + """
 :root {
   --al-toolbar-v8: 1;
-  --al-toolbar-card: #ffffff;
-  --al-toolbar-page: #f3f5f8;
-  --al-toolbar-border: #d8dee8;
-  --al-toolbar-divider: #e2e7ee;
-  --al-toolbar-text: #263244;
-  --al-toolbar-muted: #687386;
-  --al-toolbar-accent: #0f6fbd;
-  --al-toolbar-accent-soft: rgba(15, 111, 189, 0.10);
-  --al-toolbar-control: #f7f8fa;
-  --al-toolbar-control-hover: #edf1f5;
-}
-
-/*
- * The ReactTemplate header sits outside #main, while #main is the scrolling
- * element. Mount the toolbar as a zero-height header root and fix the toolbar
- * immediately below the one-row application header. This avoids relying on
- * position: sticky through Panel's responsive-grid wrappers.
- */
-:root {
-  --al-application-header-height: 64px;
-  --al-application-toolbar-height: 62px;
-}
-
-#header {
-  box-sizing: border-box;
-  height: var(--al-application-header-height);
-  min-height: var(--al-application-header-height);
-  max-height: var(--al-application-header-height);
+  --al-toolbar-v9: 1;
+  --al-toolbar-v10: 1;
+  --al-toolbar-v11: 1;
+  --al-toolbar-connected: 1;
 }
 
 #content {
@@ -69,9 +45,9 @@ TOOLBAR_CSS = """
   min-width: 0;
   height: var(--al-application-toolbar-height);
   min-height: var(--al-application-toolbar-height);
-  padding: 8px 12px 10px;
+  padding: 0 8px 6px;
   border: 0;
-  background: var(--al-toolbar-page);
+  background: var(--al-chrome-page);
   overflow: visible !important;
 }
 
@@ -80,15 +56,14 @@ TOOLBAR_CSS = """
   width: 100%;
   max-width: 100%;
   min-width: 0;
-  height: 44px;
-  min-height: 44px;
-  padding: 6px 10px;
-  border: 1px solid var(--al-toolbar-border);
-  border-radius: 11px;
-  background: var(--al-toolbar-card);
-  box-shadow:
-    0 1px 2px rgba(15, 23, 42, 0.05),
-    0 3px 10px rgba(15, 23, 42, 0.045);
+  height: 42px;
+  min-height: 42px;
+  padding: 5px 10px;
+  border: 1px solid var(--al-chrome-border);
+  border-top-color: var(--al-chrome-divider);
+  border-radius: 0 0 var(--al-chrome-radius) var(--al-chrome-radius);
+  background: var(--al-chrome-toolbar-tier);
+  box-shadow: var(--al-chrome-shadow);
   overflow: visible !important;
 }
 
@@ -100,16 +75,16 @@ TOOLBAR_CSS = """
 }
 
 .al-toolbar-group {
+  box-sizing: border-box;
   display: flex;
   align-items: center;
+  flex-wrap: nowrap;
   gap: 3px;
   min-width: 0;
   max-width: 100%;
   height: 30px;
   min-height: 30px;
   max-height: 30px;
-  box-sizing: border-box;
-  flex-wrap: nowrap;
   overflow: visible;
 }
 
@@ -137,7 +112,7 @@ TOOLBAR_CSS = """
   min-width: 1px;
   height: 20px;
   margin: 0 4px;
-  background: var(--al-toolbar-divider);
+  background: var(--al-chrome-divider);
 }
 
 .al-toolbar-icon-only,
@@ -184,12 +159,12 @@ TOOLBAR_CSS = """
   min-width: 90px;
   height: 30px !important;
   max-height: 30px !important;
-  white-space: nowrap;
-  color: var(--al-toolbar-text);
+  color: var(--al-chrome-text);
   font-size: 11px;
   font-variant-numeric: tabular-nums;
   line-height: 30px;
   text-align: center;
+  white-space: nowrap;
   overflow: hidden;
 }
 
@@ -199,279 +174,435 @@ TOOLBAR_CSS = """
 
 .al-toolbar-position .al-position-separator,
 .al-toolbar-position .al-position-total {
-  color: var(--al-toolbar-muted);
+  color: var(--al-chrome-muted);
 }
 
 .al-toolbar-busy {
   cursor: progress;
 }
 
-/*
- * Popup menus are ordinary Panel layouts rather than Bokeh MenuButton popups.
- * This avoids the native dropdown width/inheritance problems seen inside the
- * fixed ReactTemplate header root. Each popup is independently sized and
- * right-aligned to its trigger.
- */
 .al-toolbar-menu-wrapper {
-  position: relative !important;
-  min-width: 0 !important;
-  height: 30px !important;
-  min-height: 30px !important;
-  max-height: 30px !important;
-  overflow: visible !important;
-}
-
-.al-toolbar-popover,
-.al-toolbar-popover > div,
-.al-toolbar-popover .bk-Column {
-  box-sizing: border-box !important;
+  border: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
   overflow: visible !important;
 }
 
 .al-toolbar-popover {
-  position: absolute !important;
-  top: 34px !important;
-  right: 0 !important;
-  z-index: 2400 !important;
-  width: 204px !important;
-  min-width: 204px !important;
-  max-width: min(260px, calc(100vw - 24px)) !important;
-  height: auto !important;
-  min-height: 0 !important;
-  max-height: min(420px, calc(100vh - 150px)) !important;
-  margin: 0 !important;
-  padding: 5px !important;
-  border: 1px solid var(--al-toolbar-border) !important;
-  border-radius: 9px !important;
-  background: #ffffff !important;
-  box-shadow: 0 12px 32px rgba(15, 23, 42, 0.18) !important;
-  overflow-x: hidden !important;
-  overflow-y: auto !important;
+  box-sizing: border-box;
+  isolation: isolate;
+  padding: 0 !important;
+  border: 1px solid var(--al-chrome-border);
+  border-radius: 10px;
+  background: var(--al-chrome-card);
+  box-shadow:
+    0 10px 28px rgba(15, 23, 42, 0.12),
+    0 2px 8px rgba(15, 23, 42, 0.08);
+  overflow: hidden !important;
 }
 
-.al-toolbar-overflow-popover {
-  width: 188px !important;
-  min-width: 188px !important;
+.al-toolbar-popover > div,
+.al-toolbar-popover > .bk-Column,
+.al-toolbar-popover > .bk-column {
+  border: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+.al-toolbar-popover::before,
+.al-toolbar-popover::after,
+.al-toolbar-menu-wrapper::before,
+.al-toolbar-menu-wrapper::after {
+  display: none !important;
+  content: none !important;
+  width: 0 !important;
+  height: 0 !important;
+  border: 0 !important;
+  box-shadow: none !important;
 }
 
 .al-toolbar-popover-divider {
-  width: calc(100% - 12px) !important;
+  box-sizing: border-box;
   height: 1px !important;
   min-height: 1px !important;
   max-height: 1px !important;
-  margin: 4px 6px !important;
-  padding: 0 !important;
-  background: var(--al-toolbar-divider) !important;
+  background: var(--al-chrome-divider);
 }
 
-@media (max-width: 1120px) {
-  .al-toolbar-selection-button { display: none !important; }
+.al-toolbar-layout-popover {
+  left: auto !important;
+  right: 0 !important;
+  min-width: 224px !important;
+  width: 224px !important;
+  max-width: calc(100vw - 24px) !important;
+  transform: none !important;
+}
+
+.al-toolbar-overflow-popover {
+  position: absolute !important;
+  top: 34px !important;
+  left: auto !important;
+  right: 0 !important;
+  inset-inline-start: auto !important;
+  inset-inline-end: 0 !important;
+  min-width: 188px !important;
+  width: 188px !important;
+  max-width: calc(100vw - 24px) !important;
+  transform: none !important;
+  overflow: hidden !important;
+}
+
+.al-toolbar-empty-state {
+  opacity: 0.48 !important;
+  filter: saturate(0.72);
+  transition: opacity 120ms ease;
+}
+
+.al-toolbar-empty-state:hover,
+.al-toolbar-empty-state:focus-within {
+  opacity: 0.62 !important;
+}
+
+.al-toolbar-popover-heading {
+  box-sizing: border-box;
+  height: 22px !important;
+  min-height: 22px !important;
+  margin: 0 !important;
+  padding: 5px 10px 0 !important;
+  color: var(--al-chrome-muted);
+  font-size: 9.5px;
+  font-weight: 750;
+  letter-spacing: 0.07em;
+  line-height: 20px;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+@media (max-width: 920px) {
   .al-toolbar-scope-group {
     flex-basis: 112px !important;
     width: 112px !important;
   }
+
+  .al-toolbar-selection-button {
+    display: none !important;
+  }
+}
+
+@media (max-width: 720px) {
+  .al-application-toolbar-shell {
+    padding-left: 6px;
+    padding-right: 6px;
+  }
+
+  .al-application-toolbar {
+    padding-left: 7px;
+    padding-right: 7px;
+  }
+
+  .al-toolbar-scope-group {
+    display: none !important;
+  }
+
+  .al-toolbar-search {
+    min-width: 80px !important;
+  }
+
   .al-toolbar-position {
     flex-basis: 72px !important;
-    min-width: 72px !important;
     width: 72px !important;
-  }
-}
-
-@media (max-width: 920px) {
-  .al-toolbar-scope-group { display: none !important; }
-}
-
-@media (max-width: 680px) {
-  .al-application-toolbar-shell {
-    padding-left: 8px;
-    padding-right: 8px;
-  }
-  .al-toolbar-position { display: none !important; }
-  .al-toolbar-search { min-width: 80px !important; }
-  .al-toolbar-menu:not(.al-toolbar-icon-only) { display: none !important; }
-  .al-toolbar-workspace-group {
-    flex-basis: 35px !important;
-    width: 35px !important;
+    min-width: 72px !important;
   }
 }
 """
-
 
 _TOOLBAR_BUTTON_STYLESHEET = """
 :host {
-  box-sizing: border-box;
-  height: 30px;
-  min-height: 30px;
-  max-height: 30px;
-  overflow: visible;
+  box-sizing: border-box !important;
+  color: #263244 !important;
 }
 button.bk-btn {
   box-sizing: border-box !important;
-  height: 30px !important;
   min-height: 30px !important;
+  height: 30px !important;
   max-height: 30px !important;
-  border: 0 !important;
-  border-radius: 6px !important;
-  background: transparent !important;
+  padding: 0 9px !important;
+  border: 1px solid #d8dee8 !important;
+  border-radius: 7px !important;
+  background: #f7f8fa !important;
   box-shadow: none !important;
   color: #263244 !important;
   font-size: 12px !important;
+  font-weight: 550 !important;
+  line-height: 28px !important;
+  white-space: nowrap !important;
+}
+button.bk-btn:hover:not(:disabled) {
+  border-color: #c8d0dc !important;
+  background: #edf1f5 !important;
+  color: #263244 !important;
+}
+button.bk-btn:focus-visible {
+  outline: 2px solid rgba(15, 111, 189, 0.35) !important;
+  outline-offset: 1px !important;
+}
+button.bk-btn:disabled {
+  border-color: #e2e7ee !important;
+  background: #f7f8fa !important;
+  color: #9aa3b2 !important;
+  opacity: 1 !important;
+}
+"""
+
+_TOOLBAR_ICON_BUTTON_STYLESHEET = """
+:host {
+  box-sizing: border-box !important;
+  width: 30px !important;
+  min-width: 30px !important;
+  max-width: 30px !important;
+  height: 30px !important;
+  color: #4d5a6d !important;
+}
+button.bk-btn {
+  box-sizing: border-box !important;
+  width: 30px !important;
+  min-width: 30px !important;
+  max-width: 30px !important;
+  height: 30px !important;
+  min-height: 30px !important;
+  max-height: 30px !important;
+  padding: 0 !important;
+  border: 1px solid transparent !important;
+  border-radius: 7px !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  color: #4d5a6d !important;
   line-height: 28px !important;
 }
 button.bk-btn:hover:not(:disabled) {
+  border-color: #d8dee8 !important;
+  background: #edf1f5 !important;
+  color: #263244 !important;
+}
+button.bk-btn:focus-visible {
+  outline: 2px solid rgba(15, 111, 189, 0.35) !important;
+  outline-offset: 1px !important;
+}
+button.bk-btn:disabled {
+  border-color: transparent !important;
+  background: transparent !important;
+  color: #a2aab7 !important;
+  opacity: 1 !important;
+}
+"""
+
+_TOOLBAR_MENU_STYLESHEET = """
+:host {
+  box-sizing: border-box !important;
+  color: #263244 !important;
+}
+button.bk-btn {
+  box-sizing: border-box !important;
+  min-height: 30px !important;
+  height: 30px !important;
+  max-height: 30px !important;
+  padding: 0 10px !important;
+  border: 1px solid #d8dee8 !important;
+  border-radius: 7px !important;
+  background: #f7f8fa !important;
+  box-shadow: none !important;
+  color: #263244 !important;
+  font-size: 12px !important;
+  font-weight: 600 !important;
+  line-height: 28px !important;
+  white-space: nowrap !important;
+}
+button.bk-btn:hover:not(:disabled) {
+  border-color: #c8d0dc !important;
   background: #edf1f5 !important;
 }
 button.bk-btn:focus-visible {
-  outline: 2px solid rgba(15, 111, 189, 0.36) !important;
-  outline-offset: -2px !important;
+  outline: 2px solid rgba(15, 111, 189, 0.35) !important;
+  outline-offset: 1px !important;
 }
 button.bk-btn:disabled {
-  opacity: 0.42 !important;
+  color: #9aa3b2 !important;
+  opacity: 1 !important;
 }
 """
 
-
-_TOOLBAR_ICON_BUTTON_STYLESHEET = _TOOLBAR_BUTTON_STYLESHEET + """
+_TOOLBAR_SELECTION_STYLESHEET = """
 :host {
-  width: 30px !important;
-  min-width: 30px !important;
-  max-width: 30px !important;
+  box-sizing: border-box !important;
+  color: #263244 !important;
 }
 button.bk-btn {
-  width: 30px !important;
-  min-width: 30px !important;
-  max-width: 30px !important;
-  padding: 0 !important;
-}
-"""
-
-
-
-_TOOLBAR_MENU_STYLESHEET = _TOOLBAR_BUTTON_STYLESHEET + """
-button.bk-btn {
+  box-sizing: border-box !important;
+  min-height: 30px !important;
+  height: 30px !important;
+  max-height: 30px !important;
   padding: 0 9px !important;
+  border: 1px solid #d8dee8 !important;
+  border-radius: 7px !important;
+  background: #ffffff !important;
+  box-shadow: none !important;
+  color: #263244 !important;
+  font-size: 12px !important;
+  font-weight: 600 !important;
+  line-height: 28px !important;
   white-space: nowrap !important;
 }
-"""
-
-_TOOLBAR_SELECTION_STYLESHEET = _TOOLBAR_BUTTON_STYLESHEET + """
-button.bk-btn {
-  border: 1px solid transparent !important;
-  padding: 0 9px !important;
+button.bk-btn:hover:not(:disabled) {
+  border-color: #a9bfd2 !important;
+  background: #f3f8fc !important;
 }
-:host(.al-is-selected) button.bk-btn {
-  border-color: rgba(15, 111, 189, 0.18) !important;
-  color: #0f6fbd !important;
+:host(.al-is-selected) button.bk-btn,
+.al-is-selected button.bk-btn {
+  border-color: #9dc6e5 !important;
   background: rgba(15, 111, 189, 0.10) !important;
+  color: #0f5f9f !important;
+}
+button.bk-btn:focus-visible {
+  outline: 2px solid rgba(15, 111, 189, 0.35) !important;
+  outline-offset: 1px !important;
+}
+button.bk-btn:disabled {
+  border-color: #e2e7ee !important;
+  background: #f7f8fa !important;
+  color: #9aa3b2 !important;
+  opacity: 1 !important;
 }
 """
 
 _TOOLBAR_TEXT_INPUT_STYLESHEET = """
 :host {
-  box-sizing: border-box;
-  height: 30px;
-  min-height: 30px;
-  max-height: 30px;
-  overflow: visible;
-}
-input.bk-input {
   box-sizing: border-box !important;
-  width: 100% !important;
+  color: #263244 !important;
+}
+.bk-input-group {
+  box-sizing: border-box !important;
+  height: 30px !important;
+  min-height: 30px !important;
+  max-height: 30px !important;
+  margin: 0 !important;
+}
+input,
+input.bk-input,
+.bk-input {
+  box-sizing: border-box !important;
   height: 30px !important;
   min-height: 30px !important;
   max-height: 30px !important;
   margin: 0 !important;
   padding: 0 9px !important;
   border: 1px solid #d8dee8 !important;
-  border-radius: 6px !important;
+  border-radius: 7px !important;
   background: #f7f8fa !important;
   box-shadow: none !important;
   color: #263244 !important;
   font-size: 12px !important;
   line-height: 28px !important;
 }
-input.bk-input:hover:not(:disabled) {
-  border-color: #c6ced9 !important;
+input::placeholder,
+.bk-input::placeholder {
+  color: #8993a3 !important;
+  opacity: 1 !important;
+}
+input:hover:not(:disabled),
+.bk-input:hover:not(:disabled) {
+  border-color: #c8d0dc !important;
+  background: #edf1f5 !important;
+}
+input:focus,
+.bk-input:focus {
+  border-color: #0f6fbd !important;
   background: #ffffff !important;
+  box-shadow: 0 0 0 2px rgba(15, 111, 189, 0.14) !important;
+  outline: none !important;
 }
-input.bk-input:focus-visible {
-  outline: 2px solid rgba(15, 111, 189, 0.36) !important;
-  outline-offset: -2px !important;
-}
-input.bk-input:disabled {
-  opacity: 0.42 !important;
-}
-input.bk-input::placeholder {
-  color: #8b95a5;
+input:disabled,
+.bk-input:disabled {
+  border-color: #e2e7ee !important;
+  background: #f7f8fa !important;
+  color: #9aa3b2 !important;
+  opacity: 1 !important;
 }
 """
 
-
 _TOOLBAR_SELECT_STYLESHEET = """
 :host {
-  box-sizing: border-box;
-  height: 30px;
-  min-height: 30px;
-  max-height: 30px;
-  overflow: visible;
-}
-select.bk-input {
   box-sizing: border-box !important;
-  width: 100% !important;
+  color: #263244 !important;
+}
+.bk-input-group {
+  box-sizing: border-box !important;
   height: 30px !important;
   min-height: 30px !important;
   max-height: 30px !important;
   margin: 0 !important;
-  padding: 0 24px 0 9px !important;
+}
+select,
+select.bk-input,
+.bk-input {
+  box-sizing: border-box !important;
+  height: 30px !important;
+  min-height: 30px !important;
+  max-height: 30px !important;
+  margin: 0 !important;
+  padding: 0 28px 0 9px !important;
   border: 1px solid #d8dee8 !important;
-  border-radius: 6px !important;
+  border-radius: 7px !important;
   background-color: #f7f8fa !important;
   box-shadow: none !important;
   color: #263244 !important;
   font-size: 12px !important;
+  font-weight: 550 !important;
   line-height: 28px !important;
 }
-select.bk-input:hover:not(:disabled) {
-  border-color: #c6ced9 !important;
+select:hover:not(:disabled),
+.bk-input:hover:not(:disabled) {
+  border-color: #c8d0dc !important;
+  background-color: #edf1f5 !important;
+}
+select:focus,
+.bk-input:focus {
+  border-color: #0f6fbd !important;
   background-color: #ffffff !important;
+  box-shadow: 0 0 0 2px rgba(15, 111, 189, 0.14) !important;
+  outline: none !important;
 }
-select.bk-input:focus-visible {
-  outline: 2px solid rgba(15, 111, 189, 0.36) !important;
-  outline-offset: -2px !important;
+select:disabled,
+.bk-input:disabled {
+  border-color: #e2e7ee !important;
+  background-color: #f7f8fa !important;
+  color: #9aa3b2 !important;
+  opacity: 1 !important;
 }
-select.bk-input:disabled {
-  opacity: 0.42 !important;
+option {
+  background: #ffffff !important;
+  color: #263244 !important;
 }
 """
 
-
 _TOOLBAR_POPUP_ITEM_STYLESHEET = """
 :host {
-  box-sizing: border-box;
-  width: 100%;
-  min-width: 0;
-  height: 32px;
-  min-height: 32px;
-  max-height: 32px;
-  margin: 0;
-  overflow: visible;
+  box-sizing: border-box !important;
+  color: #263244 !important;
 }
 button.bk-btn {
   box-sizing: border-box !important;
   width: 100% !important;
-  min-width: 0 !important;
-  height: 32px !important;
   min-height: 32px !important;
+  height: 32px !important;
   max-height: 32px !important;
-  margin: 0 !important;
-  padding: 0 10px !important;
+  padding: 0 9px !important;
   border: 0 !important;
   border-radius: 6px !important;
-  background: #ffffff !important;
+  background: transparent !important;
   box-shadow: none !important;
   color: #263244 !important;
   font-size: 12px !important;
-  font-weight: 400 !important;
+  font-weight: 450 !important;
   line-height: 30px !important;
   text-align: left !important;
   justify-content: flex-start !important;
@@ -484,12 +615,12 @@ button.bk-btn:hover:not(:disabled) {
   color: #263244 !important;
 }
 button.bk-btn:focus-visible {
-  outline: 2px solid rgba(15, 111, 189, 0.36) !important;
+  outline: 2px solid rgba(15, 111, 189, 0.35) !important;
   outline-offset: -2px !important;
 }
 button.bk-btn:disabled {
+  background: transparent !important;
   color: #9aa3b2 !important;
-  background: #ffffff !important;
   opacity: 1 !important;
 }
 """
@@ -499,8 +630,8 @@ __all__ = [
     "_TOOLBAR_BUTTON_STYLESHEET",
     "_TOOLBAR_ICON_BUTTON_STYLESHEET",
     "_TOOLBAR_MENU_STYLESHEET",
-    "_TOOLBAR_SELECTION_STYLESHEET",
-    "_TOOLBAR_TEXT_INPUT_STYLESHEET",
-    "_TOOLBAR_SELECT_STYLESHEET",
     "_TOOLBAR_POPUP_ITEM_STYLESHEET",
+    "_TOOLBAR_SELECTION_STYLESHEET",
+    "_TOOLBAR_SELECT_STYLESHEET",
+    "_TOOLBAR_TEXT_INPUT_STYLESHEET",
 ]

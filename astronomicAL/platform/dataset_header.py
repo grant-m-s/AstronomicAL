@@ -9,105 +9,123 @@ from typing import Any, Dict, Optional
 import pandas as pd
 import panel as pn
 
-from astronomicAL.platform.modal_utils import (
-    open_template_modal,
-    close_template_modal,
+from astronomicAL.platform.application_chrome_styles import (
+    APPLICATION_CHROME_CSS,
+    HEADER_BUTTON_STYLESHEET,
+    HEADER_PRIMARY_BUTTON_STYLESHEET,
+    HEADER_SELECT_STYLESHEET,
 )
-
-from astronomicAL.settings.data_selection import DataSelection
 from astronomicAL.platform.fits_import import register_fits_table
+from astronomicAL.platform.modal_utils import close_template_modal, open_template_modal
+from astronomicAL.settings.data_selection import DataSelection
+
 
 _MODAL_SELECT_STYLESHEET = """
 :host {
-    color: #172B4D !important;
+  color: #172B4D !important;
 }
-
 .bk-input-group {
-    margin: 0 !important;
-    color: #172B4D !important;
+  margin: 0 !important;
+  color: #172B4D !important;
 }
-
 label {
-    color: #172B4D !important;
+  color: #172B4D !important;
 }
-
 select,
 select.bk-input,
 .bk-input {
-    background-color: #ffffff !important;
-    color: #172B4D !important;
-    border: 1px solid #A6B1C2 !important;
-    border-radius: 4px !important;
-    box-shadow: none !important;
-    outline: none !important;
-    padding-right: 28px !important;
+  background-color: #ffffff !important;
+  color: #172B4D !important;
+  border: 1px solid #A6B1C2 !important;
+  border-radius: 4px !important;
+  box-shadow: none !important;
+  outline: none !important;
+  padding-right: 28px !important;
 }
-
 select:focus,
 select.bk-input:focus,
 .bk-input:focus {
-    background-color: #ffffff !important;
-    color: #172B4D !important;
-    border-color: #4C9AFF !important;
-    box-shadow: 0 0 0 2px rgba(76, 154, 255, 0.22) !important;
+  background-color: #ffffff !important;
+  color: #172B4D !important;
+  border-color: #4C9AFF !important;
+  box-shadow: 0 0 0 2px rgba(76, 154, 255, 0.22) !important;
 }
-
 option {
-    background-color: #ffffff !important;
-    color: #172B4D !important;
+  background-color: #ffffff !important;
+  color: #172B4D !important;
 }
 """
 
 _MODAL_CHECKBOX_STYLESHEET = """
 :host {
-    color: #172B4D !important;
+  color: #172B4D !important;
 }
-
 .bk-input-group,
 label,
 span {
-    color: #172B4D !important;
+  color: #172B4D !important;
 }
-
 input[type="checkbox"] {
-    background-color: #ffffff !important;
+  background-color: #ffffff !important;
 }
 """
 
 
-def _append_stylesheet(widget, stylesheet: str) -> None:
+def _append_stylesheet(widget: Any, stylesheet: str) -> None:
     try:
         stylesheets = list(getattr(widget, "stylesheets", []) or [])
         if stylesheet not in stylesheets:
             stylesheets.append(stylesheet)
-            widget.stylesheets = stylesheets
+        widget.stylesheets = stylesheets
     except Exception:
         pass
 
+
+def _install_application_chrome_css() -> None:
+    marker = "--al-application-chrome-v7"
+    if any(marker in css for css in pn.config.raw_css):
+        return
+    pn.config.raw_css.append(APPLICATION_CHROME_CSS)
+
+
 class DatasetHeaderController:
-    """Global dataset header control.
+    """Global dataset switcher and dataset-loading modal controller."""
 
-    The header owns:
-    - quick switching between loaded datasets
-    - opening the dataset loading modal
-
-    The modal body deliberately reuses the existing DataSelection settings UI
-    so the loading experience matches the old Exploration entry screen.
-    """
-
-    def __init__(self, context, template) -> None:
+    def __init__(self, context: Any, template: Any) -> None:
         self.context = context
         self.template = template
-        self._subs = []
+        self._subs: list[Any] = []
         self._updating_select = False
 
+        _install_application_chrome_css()
+
+        self.context_label = pn.pane.HTML(
+            '<span aria-hidden="true">Dataset</span>',
+            width=52,
+            height=30,
+            sizing_mode="fixed",
+            margin=(0, 0, 0, 0),
+            css_classes=["al-dataset-context-label"],
+        )
         self.active_dataset_select = pn.widgets.Select(
             name="",
             options=OrderedDict({"No dataset loaded": ""}),
             value="",
-            width=200,
-            height=34,
-            margin=(0, 4, 6, 8),
+            width=270,
+            height=30,
+            margin=(0, 0, 0, 0),
+            css_classes=["al-header-dataset-select"],
+            stylesheets=[HEADER_SELECT_STYLESHEET],
+        )
+        self.active_dataset_select.description = "Switch the active dataset"
+        self.dataset_stats = pn.pane.HTML(
+            "",
+            width=178,
+            height=30,
+            sizing_mode="fixed",
+            margin=(0, 0, 0, 0),
+            visible=True,
+            css_classes=["al-dataset-stats"],
         )
         self.active_dataset_select.param.watch(
             self._on_active_dataset_select_changed,
@@ -115,19 +133,28 @@ class DatasetHeaderController:
         )
 
         self.button = pn.widgets.Button(
-            name="Add Data",
+            name="Add data",
+            icon="database-plus",
             button_type="default",
-            width=92,
-            height=34,
-            margin=(0, 8, 6, 4),
+            width=98,
+            height=30,
+            margin=(0, 0, 0, 0),
+            css_classes=["al-header-add-data"],
+            stylesheets=[HEADER_BUTTON_STYLESHEET],
         )
+        self.button.description = "Load and register another dataset"
         self.button.on_click(self._open_modal)
 
         self.view = pn.Row(
+            self.context_label,
             self.active_dataset_select,
             self.button,
+            self.dataset_stats,
             sizing_mode="fixed",
+            height=30,
             margin=(0, 0, 0, 0),
+            css_classes=["al-dataset-header"],
+            styles={"overflow": "visible", "min-width": "0"},
         )
 
         self.close_button = pn.widgets.Button(
@@ -137,7 +164,9 @@ class DatasetHeaderController:
             height=38,
             margin=(8, 20, 8, 20),
         )
-        self.close_button.on_click(lambda _event: close_template_modal(self.template))
+        self.close_button.on_click(
+            lambda _event: close_template_modal(self.template)
+        )
 
         self.data_selection = HeaderDataSelection(
             src=self._legacy_source(),
@@ -146,7 +175,6 @@ class DatasetHeaderController:
             close_settings_button=self.close_button,
             on_dataset_loaded=self._on_dataset_loaded_from_modal,
         )
-
         self.modal_root = self._build_modal_root()
 
         self._subscribe()
@@ -182,10 +210,10 @@ class DatasetHeaderController:
             self._subs.append(sub)
 
     def _on_dataset_event(self, topic: str, payload: Any) -> None:
+        del payload
         if topic == "dataset.open_requested":
             self._open_modal()
             return
-
         self._refresh_header()
 
     def dispose(self) -> None:
@@ -216,60 +244,90 @@ class DatasetHeaderController:
                 )
                 self.active_dataset_select.value = ""
                 self.active_dataset_select.disabled = True
+                self.active_dataset_select.description = "No dataset is loaded"
+                self.dataset_stats.object = ""
+                self.dataset_stats.visible = False
+                self.button.button_type = "primary"
+                self.button.stylesheets = [HEADER_PRIMARY_BUTTON_STYLESHEET]
+                self.button.description = "Load the first dataset"
                 return
 
-            options = OrderedDict()
-            for dataset_id in ids:
-                options[self._dataset_label(dataset_id)] = dataset_id
-
+            options = self._dataset_option_labels(ids)
             self.active_dataset_select.options = options
             self.active_dataset_select.disabled = False
-
-            if active_id in ids:
-                self.active_dataset_select.value = active_id
-            else:
-                self.active_dataset_select.value = ids[0]
-
+            self.active_dataset_select.value = (
+                active_id if active_id in ids else ids[0]
+            )
+            selected_id = str(self.active_dataset_select.value)
+            name = self._dataset_name(selected_id)
+            dimensions = self._dataset_dimensions(selected_id)
+            self.active_dataset_select.description = (
+                f"Active dataset: {name}"
+                + (f" ({dimensions})" if dimensions else "")
+            )
+            self.dataset_stats.object = (
+                dimensions
+                if dimensions
+                else '<span aria-hidden="true">&nbsp;</span>'
+            )
+            self.dataset_stats.visible = True
+            self.button.button_type = "default"
+            self.button.stylesheets = [HEADER_BUTTON_STYLESHEET]
+            self.button.description = "Load and register another dataset"
         finally:
             self._updating_select = False
 
-    def _on_active_dataset_select_changed(self, event) -> None:
+    def _on_active_dataset_select_changed(self, event: Any) -> None:
         if self._updating_select:
             return
-
         dataset_id = event.new
         if not dataset_id:
             return
-
         self._set_active_dataset(dataset_id)
 
-    def _dataset_label(self, dataset_id: str) -> str:
+    def _dataset_option_labels(self, dataset_ids: list[str]) -> OrderedDict:
+        names = [self._dataset_name(dataset_id) for dataset_id in dataset_ids]
+        counts: dict[str, int] = {}
+        for name in names:
+            counts[name] = counts.get(name, 0) + 1
+
+        options: OrderedDict[str, str] = OrderedDict()
+        for dataset_id, name in zip(dataset_ids, names):
+            label = name if counts[name] == 1 else f"{name} · {dataset_id}"
+            options[label] = dataset_id
+        return options
+
+    def _dataset_name(self, dataset_id: str) -> str:
         try:
             dataset = self.context.datasets.get(dataset_id)
-
-            try:
-                rows = self.context.datasets.row_count(dataset_id)
-            except Exception:
-                rows = None
-
-            try:
-                columns = self.context.datasets.list_columns(dataset_id)
-                cols = len(columns)
-            except Exception:
-                cols = None
-
-            if rows is not None and cols is not None:
-                return f"{dataset.name} · {rows:,} × {cols:,}"
-
-            if cols is not None:
-                return f"{dataset.name} · ? × {cols:,}"
-
-            return dataset.name
-
+            return str(getattr(dataset, "name", None) or dataset_id)
         except Exception:
-            return dataset_id
+            return str(dataset_id)
 
-    def _cache_dir_for_file(self, filename: str) -> Path:
+    def _dataset_dimensions(self, dataset_id: str) -> str:
+        try:
+            rows = self.context.datasets.row_count(dataset_id)
+        except Exception:
+            rows = None
+        try:
+            columns = self.context.datasets.list_columns(dataset_id)
+            cols = len(columns)
+        except Exception:
+            cols = None
+
+        if rows is not None and cols is not None:
+            return f"{rows:,} rows · {cols:,} cols"
+        if rows is not None:
+            return f"{rows:,} rows"
+        if cols is not None:
+            return f"{cols:,} cols"
+        return ""
+
+    def _dataset_label(self, dataset_id: str) -> str:
+        return self._dataset_name(dataset_id)
+
+    @staticmethod
+    def _cache_dir_for_file(filename: str) -> Path:
         try:
             return Path(filename).expanduser().resolve().parent / ".astronomical_cache"
         except Exception:
@@ -279,8 +337,12 @@ class DatasetHeaderController:
     # Modal
     # ------------------------------------------------------------------
 
-    def _open_modal(self, _event=None) -> None:
-        open_template_modal(self.template, self.modal_root, close_on_backdrop=True)
+    def _open_modal(self, _event: Any = None) -> None:
+        open_template_modal(
+            self.template,
+            self.modal_root,
+            close_on_backdrop=True,
+        )
 
     def _on_dataset_loaded_from_modal(
         self,
@@ -290,7 +352,7 @@ class DatasetHeaderController:
         filename: str,
         optimise_data: bool,
         df: pd.DataFrame | None = None,
-    ) -> dict:
+    ) -> dict[str, Any]:
         result = self._register_loaded_dataset(
             dataset_id=dataset_id,
             dataset_name=dataset_name,
@@ -306,8 +368,6 @@ class DatasetHeaderController:
     # Dataset operations
     # ------------------------------------------------------------------
 
-
-
     def _register_loaded_dataset(
         self,
         *,
@@ -317,12 +377,14 @@ class DatasetHeaderController:
         df: pd.DataFrame | None = None,
         optimise_data: bool,
         set_active: bool = True,
-    ) -> dict:
-
+    ) -> dict[str, Any]:
         lower_filename = str(filename).lower()
         cache_dir = self._cache_dir_for_file(filename)
 
-        print("[AstronomicAL loader] --------------------------------------------------", flush=True)
+        print(
+            "[AstronomicAL loader] --------------------------------------------------",
+            flush=True,
+        )
         print(f"[AstronomicAL loader] Loading dataset: {dataset_name}", flush=True)
         print(f"[AstronomicAL loader] Dataset id: {dataset_id}", flush=True)
         print(f"[AstronomicAL loader] Source file: {filename}", flush=True)
@@ -331,7 +393,6 @@ class DatasetHeaderController:
 
         if lower_filename.endswith((".fits", ".fit", ".fits.gz", ".fit.gz")):
             print("[AstronomicAL loader] Detected FITS input.", flush=True)
-
             result = register_fits_table(
                 self.context.datasets,
                 filename,
@@ -341,11 +402,12 @@ class DatasetHeaderController:
                 name=dataset_name,
                 overwrite=False,
             )
-
         elif lower_filename.endswith((".parquet", ".pq")):
             print("[AstronomicAL loader] Detected Parquet input.", flush=True)
-            print("[AstronomicAL loader] Registering Parquet lazily with DuckDB.", flush=True)
-
+            print(
+                "[AstronomicAL loader] Registering Parquet lazily with DuckDB.",
+                flush=True,
+            )
             self.context.datasets.register_parquet(
                 dataset_id,
                 filename,
@@ -359,17 +421,17 @@ class DatasetHeaderController:
                 "parquet_path": filename,
                 "created": False,
             }
-
         else:
-            print("[AstronomicAL loader] Falling back to pandas registration.", flush=True)
-
+            print(
+                "[AstronomicAL loader] Falling back to pandas registration.",
+                flush=True,
+            )
             if df is None:
                 raise ValueError(
                     "This large-data loading path currently supports FITS and "
                     "Parquet directly. Non-FITS/non-Parquet loaders must pass a "
                     "DataFrame during the transition."
                 )
-
             self.context.datasets.register(
                 dataset_id,
                 df,
@@ -386,22 +448,25 @@ class DatasetHeaderController:
                 "created": True,
             }
 
-        print("[AstronomicAL loader] Dataset backend registration complete.", flush=True)
+        print(
+            "[AstronomicAL loader] Dataset backend registration complete.",
+            flush=True,
+        )
 
         try:
             rows = self.context.datasets.row_count(dataset_id)
         except Exception:
             rows = len(df) if df is not None else None
-
         try:
             columns = self.context.datasets.list_columns(dataset_id)
         except Exception:
             columns = list(df.columns) if df is not None else []
-
         try:
             preview_df = self.context.datasets.head(dataset_id, n=1)
         except Exception:
-            preview_df = df.head(1) if df is not None else pd.DataFrame(columns=columns)
+            preview_df = (
+                df.head(1) if df is not None else pd.DataFrame(columns=columns)
+            )
 
         self._sync_legacy_config(
             dataset_id=dataset_id,
@@ -410,7 +475,6 @@ class DatasetHeaderController:
             columns=columns,
             optimise_data=optimise_data,
         )
-
         self._publish(
             "dataset.loaded",
             {
@@ -421,7 +485,9 @@ class DatasetHeaderController:
                 "source_path": filename,
                 "loader_id": "settings.data_selection",
                 "optimise_data": optimise_data,
-                "backend": self.context.datasets.get_meta(dataset_id).get("backend"),
+                "backend": self.context.datasets.get_meta(dataset_id).get(
+                    "backend"
+                ),
             },
         )
 
@@ -431,12 +497,9 @@ class DatasetHeaderController:
                 dataset_id,
                 origin="platform.dataset_header",
             )
-
         return result
 
-
     def _set_active_dataset(self, dataset_id: str) -> None:
-
         try:
             dataset = self.context.datasets.get(dataset_id)
             filename = dataset.meta.get("source_path", "")
@@ -445,19 +508,18 @@ class DatasetHeaderController:
             filename = ""
             optimise_data = True
 
-        columns = []
         try:
             columns = self.context.datasets.list_columns(dataset_id)
         except Exception:
-            pass
+            columns = []
 
         self._sync_legacy_config(
             dataset_id=dataset_id,
             filename=filename,
             df=pd.DataFrame(columns=columns),
+            columns=columns,
             optimise_data=optimise_data,
         )
-
         self._clear_selection_for_dataset_switch()
         self.context.datasets.set_active(
             dataset_id,
@@ -469,7 +531,7 @@ class DatasetHeaderController:
     # Legacy compatibility
     # ------------------------------------------------------------------
 
-    def _legacy_source(self):
+    def _legacy_source(self) -> Any:
         config = getattr(self.context, "config", None)
         if config is not None:
             try:
@@ -478,36 +540,27 @@ class DatasetHeaderController:
                 pass
         return None
 
+    @staticmethod
     def _normalise_columns(
-        self,
         *,
         df: pd.DataFrame | None = None,
         columns: object | None = None,
     ) -> list[str]:
         if columns is None:
-            if df is None:
-                raw_columns = []
-            else:
-                raw_columns = getattr(df, "columns", [])
+            raw_columns = [] if df is None else getattr(df, "columns", [])
         else:
             raw_columns = columns
 
         if raw_columns is None:
             return []
-
-        # Handles pandas Index cleanly.
         if isinstance(raw_columns, pd.Index):
             raw_columns = raw_columns.tolist()
 
         normalised: list[str] = []
-
         for col in list(raw_columns):
-            # Useful if you accidentally pass metadata entries like {"name": "..."}.
             if isinstance(col, dict) and "name" in col:
                 col = col["name"]
-
             normalised.append(str(col))
-
         return normalised
 
     def _sync_legacy_config(
@@ -526,23 +579,23 @@ class DatasetHeaderController:
         if not hasattr(config, "settings") or config.settings is None:
             config.settings = {}
 
-        columns = self._normalise_columns(df=df, columns=columns)
-
+        normalised_columns = self._normalise_columns(df=df, columns=columns)
         config.settings["dataset_filepath"] = filename
         config.settings["optimise_data"] = optimise_data
         config.settings["active_dataset_id"] = dataset_id
 
-        # Very important for Parquet-backed datasets:
-        # do not store the full dataframe in legacy config.
+        # Do not retain the complete data frame for lazy sources.
         try:
-            config.main_df = pd.DataFrame(columns=columns)
+            config.main_df = pd.DataFrame(columns=normalised_columns)
+        except Exception:
+            pass
+        try:
+            config.source.data = {
+                str(column): [] for column in normalised_columns
+            }
         except Exception:
             pass
 
-        try:
-            config.source.data = {str(col): [] for col in columns}
-        except Exception:
-            pass
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
@@ -556,16 +609,25 @@ class DatasetHeaderController:
         selection = getattr(self.context, "selection", None)
         if selection is None:
             return
-
         try:
             selection.clear_focus(origin="dataset.active.changed")
         except Exception:
             pass
-
         try:
             selection.clear_selection_set(origin="dataset.active.changed")
         except Exception:
             pass
+
+
+    def has_active_dataset(self) -> bool:
+        """Return whether an active dataset is registered with the manager."""
+        dataset_id = self._active_dataset_id_or_none()
+        if dataset_id in (None, ""):
+            return False
+        try:
+            return dataset_id in self.context.datasets.list_ids()
+        except Exception:
+            return False
 
     def _dataset_ids(self) -> list[str]:
         try:
@@ -579,13 +641,7 @@ class DatasetHeaderController:
         except Exception:
             return None
 
-    def _build_modal_root(self):
-        """
-        Build the Add Data modal using the shared AstronomicAL modal card styling.
-
-        The body is intentionally shorter than the card so the footer remains
-        visible and the Close button has room below it.
-        """
+    def _build_modal_root(self) -> pn.Column:
         close_settings_button = pn.widgets.Button(
             name="Close",
             button_type="default",
@@ -593,8 +649,9 @@ class DatasetHeaderController:
             height=36,
             margin=(8, 20, 10, 0),
         )
-        close_settings_button.on_click(lambda _event: close_template_modal(self.template))
-
+        close_settings_button.on_click(
+            lambda _event: close_template_modal(self.template)
+        )
         self.modal_close_button = close_settings_button
 
         try:
@@ -611,19 +668,16 @@ class DatasetHeaderController:
 
         header = pn.pane.HTML(
             """
-            <div class="al-modal-titlebar">
-                <div class="al-modal-heading">Select your data</div>
-                <div class="al-modal-subtitle">
-                    Load a dataset into the platform, optionally using an existing
-                    configuration or layout.
-                </div>
+            <div class="al-modal-heading">Select your data</div>
+            <div class="al-modal-subheading">
+              Load a dataset into the platform, optionally using an existing
+              configuration or layout.
             </div>
             """,
             sizing_mode="stretch_width",
             height=58,
             margin=(0, 0, 10, 0),
         )
-
         body = pn.Column(
             data_selection_view,
             sizing_mode="fixed",
@@ -639,7 +693,6 @@ class DatasetHeaderController:
             },
             css_classes=["al-modal-body", "al-dataset-modal-body"],
         )
-
         footer = pn.Row(
             pn.layout.HSpacer(),
             self.modal_close_button,
@@ -654,7 +707,6 @@ class DatasetHeaderController:
             },
             css_classes=["al-modal-footer"],
         )
-
         return pn.Column(
             header,
             body,
@@ -663,31 +715,22 @@ class DatasetHeaderController:
             width=690,
             height=558,
             margin=(0, 0, 0, 0),
-            styles={
-                "box-sizing": "border-box",
-                "overflow": "hidden",
-            },
+            styles={"box-sizing": "border-box", "overflow": "hidden"},
             css_classes=["al-modal-card", "al-dataset-modal-card"],
         )
 
 
-
 class HeaderDataSelection(DataSelection):
-    """DataSelection variant used inside the dataset header modal.
-
-    It keeps the original DataSelection UI/layout, but changes the load action
-    so the dataframe is registered with the platform DatasetManager instead of
-    only advancing the settings pipeline.
-    """
+    """DataSelection variant used inside the dataset-header modal."""
 
     def __init__(
         self,
-        src,
-        mode,
-        context,
-        close_settings_button,
-        on_dataset_loaded,
-    ):
+        src: Any,
+        mode: str,
+        context: Any,
+        close_settings_button: Any,
+        on_dataset_loaded: Any,
+    ) -> None:
         self._on_dataset_loaded_callback = on_dataset_loaded
         super().__init__(
             src=src,
@@ -696,30 +739,13 @@ class HeaderDataSelection(DataSelection):
             close_settings_button=close_settings_button,
         )
 
-    def _refresh_layout(self):
-        """Compact DataSelection layout for the dataset header modal.
-
-        Avoid pn.layout.Divider here. In the shared template modal it can become a
-        flex item that expands vertically, creating a large blank gap before the
-        information block.
-        """
-
+    def _refresh_layout(self) -> None:
         controls = self._build_controls()
         controls.margin = (0, 0, 0, 0)
-
         info = self._build_info()
         info.margin = (0, 20, 0, 20)
-
         divider = pn.pane.HTML(
-            """
-            <div style="
-                width: 100%;
-                height: 1px;
-                border-top: 2px solid #555;
-                margin: 10px 20px 12px 20px;
-                box-sizing: border-box;
-            "></div>
-            """,
+            '<div style="height:1px;background:#e5e7eb;margin:11px 0 12px;"></div>',
             sizing_mode="stretch_width",
             height=24,
             margin=(0, 0, 0, 0),
@@ -727,14 +753,9 @@ class HeaderDataSelection(DataSelection):
 
         self.view.sizing_mode = "stretch_width"
         self.view.margin = (0, 0, 0, 0)
+        self.view.objects = [controls, divider, info]
 
-        self.view.objects = [
-            controls,
-            divider,
-            info,
-        ]
-
-    def _build_controls(self):
+    def _build_controls(self) -> pn.Column:
         self._compact_widget_layout()
 
         memory_row = pn.Row(
@@ -744,7 +765,6 @@ class HeaderDataSelection(DataSelection):
             margin=(0, 0, 0, 0),
             height=24,
         )
-
         dataset_block = pn.Column(
             self._field_label("Data file"),
             self.dataset_widget,
@@ -752,11 +772,8 @@ class HeaderDataSelection(DataSelection):
             width=340,
             min_height=58,
             margin=(0, 0, 0, 0),
-            styles={
-                "overflow": "visible",
-            },
+            styles={"overflow": "visible"},
         )
-
         config_file_block = pn.Column(
             self._field_label("Configuration file"),
             self.config_file_widget,
@@ -764,11 +781,8 @@ class HeaderDataSelection(DataSelection):
             width=340,
             min_height=58,
             margin=(0, 0, 0, 0),
-            styles={
-                "overflow": "visible",
-            },
+            styles={"overflow": "visible"},
         )
-
         load_option_block = pn.Column(
             self._field_label("Load config options"),
             self.load_config_select_widget,
@@ -776,13 +790,14 @@ class HeaderDataSelection(DataSelection):
             width=340,
             min_height=58,
             margin=(0, 0, 0, 0),
-            styles={
-                "overflow": "visible",
-            },
+            styles={"overflow": "visible"},
         )
 
-        button = self.load_data_button if not self.load_layout_check else self.load_data_button_js
-
+        button = (
+            self.load_data_button_js
+            if self.load_layout_check
+            else self.load_data_button
+        )
         button_block = pn.Row(
             button,
             sizing_mode="fixed",
@@ -803,9 +818,7 @@ class HeaderDataSelection(DataSelection):
                 sizing_mode="fixed",
                 width=380,
                 margin=(0, 20, 0, 20),
-                styles={
-                    "overflow": "visible",
-                },
+                styles={"overflow": "visible"},
             )
 
         return pn.Column(
@@ -820,15 +833,10 @@ class HeaderDataSelection(DataSelection):
             width=380,
             margin=(12, 20, 0, 20),
             css_classes=["al-dataset-modal-controls"],
-            styles={
-                "overflow": "visible",
-                "color": "#172B4D",
-            },
+            styles={"overflow": "visible", "color": "#172B4D"},
         )
-    
-    def _compact_widget_layout(self) -> None:
-        """Remove margins inherited from the original settings screen widgets."""
 
+    def _compact_widget_layout(self) -> None:
         widgets = [
             getattr(self, "load_layout_widget", None),
             getattr(self, "memory_optimisation_check", None),
@@ -838,7 +846,6 @@ class HeaderDataSelection(DataSelection):
             getattr(self, "load_data_button", None),
             getattr(self, "load_data_button_js", None),
         ]
-
         for widget in widgets:
             if widget is None:
                 continue
@@ -897,47 +904,39 @@ class HeaderDataSelection(DataSelection):
             except Exception:
                 pass
 
-    def _field_label(self, text: str):
+    @staticmethod
+    def _field_label(text: str) -> pn.pane.HTML:
         return pn.pane.HTML(
-            f"""
-            <div style="
-                font-size: 13px;
-                font-weight: 700;
-                color: #44546A;
-                line-height: 18px;
-                height: 20px;
-                margin: 0;
-                padding: 0;
-                box-sizing: border-box;
-            ">
-                {text}
-            </div>
-            """,
+            f'<div style="font-weight:600;color:#172B4D;line-height:20px;">{text}</div>',
             height=20,
             margin=(0, 0, 4, 0),
             sizing_mode="fixed",
         )
 
-    def _load_data_cb(self, event):
+    def _load_data_cb(self, event: Any) -> Any:
+        del event
         self.load_data_button.disabled = True
         self.load_data_button.name = "Preparing dataset import..."
         print("[AstronomicAL loader] Load button clicked.", flush=True)
-        
+
         try:
             filename = self.dataset
             optimise_data = bool(self.memory_optimisation_check.value)
-
             if self.config is not None:
                 self.config.settings["dataset_filepath"] = filename
 
             dataset_id = self._unique_dataset_id(
                 self._normalise_dataset_id(Path(filename).stem)
             )
-            dataset_name = Path(filename).stem.replace("_", " ").replace("-", " ").title()
+            dataset_name = (
+                Path(filename).stem.replace("_", " ").replace("-", " ").title()
+            )
 
             self.load_data_button.name = "Importing and caching dataset..."
-            print("[AstronomicAL loader] Starting dataset import callback.", flush=True)
-
+            print(
+                "[AstronomicAL loader] Starting dataset import callback.",
+                flush=True,
+            )
             result = self._on_dataset_loaded_callback(
                 dataset_id=dataset_id,
                 dataset_name=dataset_name,
@@ -947,9 +946,11 @@ class HeaderDataSelection(DataSelection):
             )
 
             self.load_data_button.name = "Finalising dataset..."
-            print("[AstronomicAL loader] Dataset import callback complete.", flush=True)
+            print(
+                "[AstronomicAL loader] Dataset import callback complete.",
+                flush=True,
+            )
 
-            # Keep DataSelection internals alive with a one-row preview only.
             try:
                 self.df = self.context.datasets.head(dataset_id, n=1)
             except Exception:
@@ -963,7 +964,6 @@ class HeaderDataSelection(DataSelection):
                 self.config.main_df = self.df
 
             self._initialise_src()
-
             self.ready = True
             self.load_data_button.name = "File Loaded."
             print("[AstronomicAL loader] File loaded successfully.", flush=True)
@@ -984,22 +984,17 @@ class HeaderDataSelection(DataSelection):
                     modal_close_button.name = "Close Settings"
             except Exception:
                 pass
-
             return result
-
         except Exception as exc:
             self.error_message = f"Unable to load data file: `{exc}`"
             self.load_data_button.name = "Unable to load file"
             print(f"[AstronomicAL loader] ERROR: {exc}", flush=True)
             self._refresh_layout()
             raise
-
         finally:
             self.load_data_button.disabled = False
 
     def _unique_dataset_id(self, base: str) -> str:
-        existing = set()
-
         try:
             existing = set(self.context.datasets.list_ids())
         except Exception:
@@ -1008,13 +1003,13 @@ class HeaderDataSelection(DataSelection):
         if base not in existing:
             return base
 
-        i = 2
-        while f"{base}_{i}" in existing:
-            i += 1
+        index = 2
+        while f"{base}_{index}" in existing:
+            index += 1
+        return f"{base}_{index}"
 
-        return f"{base}_{i}"
-
-    def _normalise_dataset_id(self, value: str) -> str:
+    @staticmethod
+    def _normalise_dataset_id(value: str) -> str:
         value = (value or "dataset").strip().lower()
         value = re.sub(r"[^a-z0-9_]+", "_", value)
         value = re.sub(r"_+", "_", value).strip("_")
