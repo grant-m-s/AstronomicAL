@@ -54,6 +54,19 @@ BUILTIN_RECIPE_CLASSES = (
     *SKLEARN_RECIPE_CLASSES,
 )
 
+_BUILTIN_RECIPE_IDS = tuple(recipe_class.id for recipe_class in BUILTIN_RECIPE_CLASSES)
+
+if len(_BUILTIN_RECIPE_IDS) != len(set(_BUILTIN_RECIPE_IDS)):
+    duplicates = sorted(
+        recipe_id
+        for recipe_id in set(_BUILTIN_RECIPE_IDS)
+        if _BUILTIN_RECIPE_IDS.count(recipe_id) > 1
+    )
+    raise RuntimeError(
+        "Duplicate built-in ML recipe IDs: "
+        + ", ".join(repr(recipe_id) for recipe_id in duplicates)
+    )
+
 __all__ = [
     "BUILTIN_RECIPE_CLASSES",
     "IMAGE_RECIPE_CLASSES",

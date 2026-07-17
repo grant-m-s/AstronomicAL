@@ -42,6 +42,17 @@ _FEATURE_PROPERTIES = {
         "title": "Auto-select features when none are chosen",
         "default": False,
     },
+    "missing_value_policy": {
+        "type": "string",
+        "title": "Missing/non-finite feature policy",
+        "description": (
+            "Reject missing, NaN and infinite values, or explicitly "
+            "replace them with zero. Error is recommended because zero "
+            "may be a meaningful scientific value."
+        ),
+        "enum": ["error", "zero"],
+        "default": "error",
+    },
     "epochs": {"type": "integer", "default": 100, "minimum": 1},
     "batch_size": {"type": "integer", "default": 256, "minimum": 1},
     "num_workers": {"type": "integer", "default": 0, "minimum": 0},
@@ -61,13 +72,67 @@ def _feature_count(run) -> int:
         raise ValueError("The tabular recipe resolved zero input feature columns.")
     return count
 
+def _row_identifier(run, row):
+    record_id_column = getattr(
+        run.binding,
+        "record_id_column",
+        None,
+    )
+    if not record_id_column:
+        return "<unknown>"
+
+    try:
+        return row[record_id_column]
+    except Exception:
+        return "<unknown>"
+
+def _coerce_numeric_feature(run, row, column: str) -> float:
+    raw_value = row[column]
+
+    try:
+        value = float(raw_value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"Feature {column!r} for record "
+            f"{_row_identifier(run, row)!r} is not numeric: "
+            f"{raw_value!r}."
+        ) from exc
+
+    if math.isfinite(value):
+        return value
+
+    policy = str(
+        run.params.get("missing_value_policy", "error")
+    ).strip().lower()
+
+    if policy == "zero":
+        return 0.0
+
+    if policy != "error":
+        raise ValueError(
+            "missing_value_policy must be 'error' or 'zero', "
+            f"got {policy!r}."
+        )
+
+    raise ValueError(
+        f"Feature {column!r} for record "
+        f"{_row_identifier(run, row)!r} is non-finite: "
+        f"{raw_value!r}. Set missing_value_policy='zero' only "
+        "when zero replacement is scientifically appropriate."
+    )
+
 def _load_numeric_sample(run, row):
     import torch
 
-    values = []
-    for column in [column for column in (run.binding.input_columns or []) if column]:
-        value = float(row[column])
-        values.append(value if math.isfinite(value) else 0.0)
+    feature_columns = [
+        column
+        for column in (run.binding.input_columns or [])
+        if column
+    ]
+    values = [
+        _coerce_numeric_feature(run, row, column)
+        for column in feature_columns
+    ]
     return torch.tensor(values, dtype=torch.float32)
 
 def _make_optimizer_and_scheduler(run, model):
@@ -359,6 +424,16 @@ class TabularMLPRegressorRecipe(ManagedMLRecipe):
                 ),
                 "default": False,
             },
+            "missing_value_policy": {
+                "type": "string",
+                "title": "Missing/non-finite feature policy",
+                "description": (
+                    "Reject missing, NaN and infinite values, or explicitly "
+                    "replace them with zero."
+                ),
+                "enum": ["error", "zero"],
+                "default": "error",
+            },
             "hidden_layers": {
                 "type": "array",
                 "items": {"type": "integer"},
@@ -441,9 +516,7 @@ class TabularMLPRegressorRecipe(ManagedMLRecipe):
         return None
 
     def load_sample(self, run, row):
-        import torch
-        feats = [c for c in (run.binding.input_columns or []) if c]
-        return torch.tensor([float(row[c]) for c in feats], dtype=torch.float32)
+        return _load_numeric_sample(run, row)
 
     def fit(self, run, *, model, components: TrainingComponents, train_loader, harness: RunHarness):
         import torch
