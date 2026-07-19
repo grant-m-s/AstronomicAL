@@ -1,0 +1,16 @@
+asdf>=5.3
+asdf-astropy>=0.11
+astropy>=7.2
+astropy-healpix>=1.1
+astroquery>=0.4
+cdshealpix>=0.8
+gwcs>=1.0
+mocpy>=0.17
+ndcube>=2.4
+pyvo>=1.8
+reproject>=0.14
+sparclclient>=1.3
+spectres>=2.2
+specutils>=2.3
+xarray>=2025.6
+zarr>=3.1

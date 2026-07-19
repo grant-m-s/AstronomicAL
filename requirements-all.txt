@@ -1,0 +1,4 @@
+-r requirements-core.txt
+-r requirements-ml.txt
+-r requirements-huggingface.txt
+-r requirements-astro.txt
