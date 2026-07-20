@@ -1,9 +1,9 @@
 
 # astronomicAL specific
-data/cutouts
+./data/cutouts
 models
-data/
-data/*.fits
+./data/
+./data/*.fits
 
 .astronomical_cache/
 **.parquet
@@ -17,10 +17,10 @@ data/*.fits
 *extended.fits
 *.DS_Store
 *.login
-data/EDFN_DESI.fits
-data/EDFN-DESI.fits
-data/saved_sources
-data/notebook*
+./data/EDFN_DESI.fits
+./data/EDFN-DESI.fits
+./data/saved_sources
+./data/notebook*
 data_cutouts
 astronomicAL/extensions/data
 *.fits
