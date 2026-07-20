@@ -182,7 +182,7 @@ def _fit_torch_tabular(
     epochs = int(run.params.get("epochs", 100))
     clip_norm = float(run.params.get("gradient_clip_norm", 1.0))
 
-    for epoch in range(1, epochs + 1):
+    for epoch in run.epoch_range(epochs):
         run.check_cancelled()
         model.train()
         loss_sum = 0.0
@@ -214,6 +214,7 @@ def _fit_torch_tabular(
         harness.report_epoch(epoch, model, train_metrics=metrics)
         if components.scheduler is not None:
             components.scheduler.step()
+        harness.check_pause_boundary(epoch, model, components)
 
 def _build_ft_transformer(
     *,
@@ -343,6 +344,7 @@ def _build_tabular_mlp(*, d_in: int, hidden, dropout: float, d_out: int):
     return nn.Sequential(*layers)
 
 class _TorchTabularBase(ManagedMLRecipe):
+    required_imports = ["torch", "sklearn"]
     modality = "tabular"
     framework = "torch"
     complexity = "advanced"
@@ -360,12 +362,12 @@ class _TorchTabularBase(ManagedMLRecipe):
     def load_sample(self, run, row):
         return _load_numeric_sample(run, row)
 
-
 # =============================================================================
 # Baseline Torch tabular recipe.
 # =============================================================================
 
 class TabularMLPRegressorRecipe(ManagedMLRecipe):
+    required_imports = ["torch", "sklearn"]
     id = "core.ml.tabular_mlp_regressor"
     title = "Tabular MLP regressor (rtdl baseline)"
     version = "0.1.0"
@@ -522,7 +524,7 @@ class TabularMLPRegressorRecipe(ManagedMLRecipe):
         import torch
         device = harness.device
         model.to(device)
-        for epoch in range(1, int(run.params.get("epochs", 200)) + 1):
+        for epoch in run.epoch_range(int(run.params.get("epochs", 200))):
             run.check_cancelled()
             model.train()
             loss_sum = seen = 0
@@ -541,7 +543,7 @@ class TabularMLPRegressorRecipe(ManagedMLRecipe):
             harness.report_epoch(epoch, model, train_metrics={"loss": loss_sum / max(seen, 1)})
             if components.scheduler is not None:
                 components.scheduler.step()
-
+            harness.check_pause_boundary(epoch, model, components)
 
 # =============================================================================
 # Advanced Torch tabular architectures.

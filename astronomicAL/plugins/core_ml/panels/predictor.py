@@ -14,6 +14,8 @@ import panel as pn
 
 from astronomicAL.platform.plugins.specs import ActionRequest
 
+from ..resume import storage_locations
+
 # Platform parquet-cache helpers (same ones core.table_tools uses to add
 # columns to a dataset). Guarded so the panel still imports if they move.
 try:
@@ -389,6 +391,12 @@ class MLPredictPanel:
             sizing_mode="stretch_width")
         self.attach_columns = pn.widgets.Checkbox(
             name="Add the prediction columns to this dataset", value=True, sizing_mode="stretch_width")
+        locations = storage_locations(context)
+        self.save_predictions = pn.widgets.Checkbox(
+            name="Save the full prediction table to disk", value=True, sizing_mode="stretch_width")
+        self.prediction_output_dir = pn.widgets.TextInput(
+            name="Prediction output directory", value="",
+            placeholder=str(locations.get("predictions") or ""), sizing_mode="stretch_width")
 
         # --- actions / status ----------------------------------------------
         self.run_button = pn.widgets.Button(name="Run", button_type="primary", height=42,
@@ -406,6 +414,9 @@ class MLPredictPanel:
         self.distribution_pane = pn.pane.HTML("", sizing_mode="stretch_width", visible=False, margin=(0, 0, 6, 0))
         self.result_summary = pn.pane.Markdown("Run a prediction to see results here.",
                                                sizing_mode="stretch_width")
+        self.saved_prediction = pn.pane.Alert(
+            f"Prediction files will be saved under `{locations.get('predictions')}` unless you choose another directory.",
+            alert_type="info", sizing_mode="stretch_width")
         self.preview = pn.widgets.Tabulator(pd.DataFrame(), height=200, sizing_mode="stretch_width", disabled=True)
         self.technical = pn.pane.Markdown("Run a prediction first.", sizing_mode="stretch_width")
         self.result_json = pn.pane.JSON({}, depth=3, sizing_mode="stretch_width", height=240)
@@ -430,10 +441,11 @@ class MLPredictPanel:
     def panel(self):
         advanced = self._spaced(
             self.image_column, self.skip_bad_images, self.device, self.batch_size,
-            self.max_rows, self.decision_threshold, self.require_target_compatible, self.attach_columns)
+            self.max_rows, self.decision_threshold, self.require_target_compatible, self.attach_columns,
+            self.save_predictions, self.prediction_output_dir)
 
         results = self._spaced(
-            self.trust, self.metrics_pane, self.distribution_pane, self.result_summary,
+            self.trust, self.saved_prediction, self.metrics_pane, self.distribution_pane, self.result_summary,
             pn.pane.HTML("<div style='font-size:12px;font-weight:600;'>Preview</div>", height=18),
             self.preview,
             pn.Accordion(("Technical details (for ML / audit)",
@@ -509,6 +521,8 @@ class MLPredictPanel:
             "skip_bad_images": bool(self.skip_bad_images.value),
             "require_target_compatible": bool(self.require_target_compatible.value),
             "attach_columns": bool(self.attach_columns.value),
+            "save_predictions": bool(self.save_predictions.value),
+            "prediction_output_dir": str(self.prediction_output_dir.value or ""),
         }
 
     def restore_state(self, state: Dict[str, Any]) -> None:
@@ -537,8 +551,11 @@ class MLPredictPanel:
                 pass
         for key, widget in (("skip_bad_images", self.skip_bad_images),
                             ("require_target_compatible", self.require_target_compatible),
-                            ("attach_columns", self.attach_columns)):
+                            ("attach_columns", self.attach_columns),
+                            ("save_predictions", self.save_predictions)):
             widget.value = bool(state.get(key, widget.value))
+        if state.get("prediction_output_dir") is not None:
+            self.prediction_output_dir.value = str(state.get("prediction_output_dir") or "")
         self._on_accuracy_toggle()
         self.validate()
 
@@ -633,8 +650,12 @@ class MLPredictPanel:
             "device": str(self.device.value or "auto"),
             "image_batch_size": int(self.batch_size.value or 64), "batch_size": int(self.batch_size.value or 64),
             "skip_bad_images": bool(self.skip_bad_images.value), "max_rows": int(self.max_rows.value or 0),
+            "save_predictions": bool(self.save_predictions.value),
             "run_id": uuid.uuid4().hex,
         }
+        prediction_output_dir = str(self.prediction_output_dir.value or "").strip()
+        if prediction_output_dir:
+            params["prediction_output_dir"] = prediction_output_dir
         threshold = float(self.decision_threshold.value or 0.0)
         if threshold > 0.0:
             params["decision_threshold"] = threshold
@@ -715,6 +736,7 @@ class MLPredictPanel:
             self.trust.visible = False
 
         self.result_summary.object = self._render_summary_plain(result, failed_count, added, attach_error)
+        self._update_saved_prediction_status(result, artifact_id)
         self.technical.object = self._render_technical(result)
         self.result_json.object = result
 
@@ -725,16 +747,60 @@ class MLPredictPanel:
 
     def _on_predict_error(self, error: Any) -> None:
         self._set_running(False)
-        self._fail("Couldn't run", str(error), {"error": str(error)})
+        payload = getattr(error, "failure_payload", None)
+        if not isinstance(payload, Mapping):
+            payload = {"error": str(error), "error_type": type(error).__name__}
+        detail = str(payload.get("error") or error)
+        if payload.get("out_of_memory"):
+            detail += " The accelerator cache was cleared; reduce batch size before retrying."
+        self._fail("Couldn't run", detail, payload)
 
     def _fail(self, title: str, detail: str, result: Any) -> None:
         self._show_trust("danger", title, detail)
         self.metrics_pane.visible = False
         self.distribution_pane.visible = False
         self.result_summary.object = detail
+        self.saved_prediction.alert_type = "warning"
+        self.saved_prediction.object = "No new prediction file was completed for this failed run."
         self.result_json.object = result if isinstance(result, (dict, list)) else {"result": str(result)}
         self.status.alert_type = "danger"
         self.status.object = title + "."
+
+    def _update_saved_prediction_status(self, result: Mapping[str, Any], artifact_id: Any) -> None:
+        prediction_ref = result.get("prediction_ref") if isinstance(result, Mapping) else None
+        if not isinstance(prediction_ref, Mapping) and artifact_id:
+            try:
+                payload = self.context.artifacts.get(str(artifact_id))
+            except Exception:
+                payload = None
+            if isinstance(payload, Mapping):
+                prediction_ref = payload.get("prediction_ref")
+
+        if isinstance(prediction_ref, Mapping) and (prediction_ref.get("uri") or prediction_ref.get("path")):
+            path = str(prediction_ref.get("uri") or prediction_ref.get("path"))
+            details = []
+            if prediction_ref.get("row_count") is not None:
+                details.append(f"{prediction_ref.get('row_count')} rows")
+            if prediction_ref.get("sha256"):
+                details.append(f"SHA-256 `{str(prediction_ref.get('sha256'))[:16]}…`")
+            suffix = " — " + ", ".join(details) if details else ""
+            self.saved_prediction.alert_type = "success"
+            self.saved_prediction.object = f"**Saved prediction table:** `{path}`{suffix}"
+            return
+
+        if not bool(self.save_predictions.value):
+            self.saved_prediction.alert_type = "info"
+            self.saved_prediction.object = (
+                "The prediction artifact and registered prediction dataset were created, "
+                "but disk-file saving was disabled for this run."
+            )
+            return
+
+        self.saved_prediction.alert_type = "warning"
+        self.saved_prediction.object = (
+            "The prediction run completed, but no durable prediction file reference was returned. "
+            "Open Technical details and check the artifact record before closing the application."
+        )
 
     # ---- attach prediction columns to the dataset --------------------------
     def _attach_predictions(self, result: Mapping[str, Any], rows: List[Mapping[str, Any]]):
@@ -1239,6 +1305,12 @@ class MLPredictPanel:
         if result.get("checkpoint_sha256"):
             lines.append(f"**Model fingerprint:** `{str(result['checkpoint_sha256'])[:16]}…`")
 
+        prediction_ref = result.get("prediction_ref") or {}
+        if isinstance(prediction_ref, Mapping) and prediction_ref.get("uri"):
+            lines.append(f"**Saved predictions:** `{prediction_ref['uri']}`")
+            if prediction_ref.get("sha256"):
+                lines.append(f"**Prediction fingerprint:** `{str(prediction_ref['sha256'])[:16]}…`")
+
         return "  \n".join(lines)
 
     def _fmt(self, value) -> str:
@@ -1269,7 +1341,12 @@ class MLPredictPanel:
                 payload = None
 
             if isinstance(payload, Mapping):
-                rows = list((payload.get("prediction_table") or {}).get("rows") or [])
+                try:
+                    from ..artifacts import prediction_rows_from_payload
+
+                    rows = prediction_rows_from_payload(payload)
+                except Exception:
+                    rows = []
 
                 ib = payload.get("input_binding") or {}
                 transform = ib.get("transform") or {}
@@ -1416,7 +1493,7 @@ class MLPredictPanel:
         subscribe = getattr(getattr(self.context, "events", None), "subscribe", None)
         if not callable(subscribe):
             return
-        for topic in ["ml.run.finished", "ml.recipe_run.finished", "ml.model.saved",
+        for topic in ["ml.run.finished", "ml.recipe_run.finished", "ml.model.saved", "ml.model.selected",
                       "artifact.created", "artifact.updated", "workspace.restored",
                       "dataset.loaded", "dataset.active.changed", "dataset.mapping.updated"]:
             try:
@@ -1444,7 +1521,7 @@ class MLPredictPanel:
             if atype not in {"ml.model", "ml.model_definition", None}:
                 return
             select_model_id = payload.get("artifact_id") if atype == "ml.model" else None
-        elif topic == "ml.model.saved":
+        elif topic in {"ml.model.saved", "ml.model.selected"}:
             select_model_id = payload.get("artifact_id") or payload.get("model_artifact_id")
 
         def update():

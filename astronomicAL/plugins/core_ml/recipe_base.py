@@ -18,6 +18,8 @@ def make_run_context(
     recipe_spec: Any,
     params: Mapping[str, Any],
     cancel_token: Any = None,
+    training_control: Any = None,
+    resume_state: Optional[Mapping[str, Any]] = None,
     run_id: Optional[str] = None,
 ) -> MLRunContext:
     run_id = str(run_id or params.get("run_id") or uuid.uuid4().hex)
@@ -41,6 +43,10 @@ def make_run_context(
         recipe_spec=recipe_spec,
         params=params,
     )
+    if resume_state and logger is not None:
+        restore = getattr(logger, "restore_from_checkpoint", None)
+        if callable(restore):
+            restore(resume_state.get("logger_state") or {})
 
     return MLRunContext(
         context=context,
@@ -51,6 +57,9 @@ def make_run_context(
         run_id=run_id,
         work_dir=work_dir,
         cancel_token=cancel_token,
+        training_control=training_control,
+        resume_state=dict(resume_state or {}),
+        start_epoch=int((resume_state or {}).get("completed_epoch", 0) or 0) + 1,
         training_log_artifact_id=logger.training_log_artifact_id,
         logger=logger,
     )
@@ -71,6 +80,7 @@ class MLRecipe:
     optional_mappings: list = []
     produces: list = []
     params_schema: Dict[str, Any] = {"type": "object", "properties": {}}
+    required_imports: list = []
 
     @classmethod
     def spec(cls) -> "RecipeSpec":
@@ -116,7 +126,9 @@ class MLRecipe:
         call harness.report_epoch(epoch, model, train_metrics=...) at least
         once so the harness can evaluate the validation partition and select the
         best epoch. It receives no val/test loader and computes no selection
-        metric, by design."""
+        metric, by design. After the optimizer and scheduler have completed an
+        epoch, call ``harness.check_pause_boundary(epoch, model, components)``.
+        That is the cooperative boundary used by the launcher's Pause control."""
         raise NotImplementedError(
             "fit(run, *, model, components, train_loader, harness) must be "
             "implemented by a managed recipe."
@@ -132,6 +144,9 @@ class MLRunContext:
     run_id: str
     work_dir: Path
     cancel_token: Any = None
+    training_control: Any = None
+    resume_state: Dict[str, Any] = None
+    start_epoch: int = 1
     training_log_artifact_id: Optional[str] = None
     logger: Optional[MLRunLogger] = None
 
@@ -145,6 +160,21 @@ class MLRunContext:
     def check_cancelled(self) -> None:
         check_cancelled(self.cancel_token)
 
+    @property
+    def pause_requested(self) -> bool:
+        control = self.training_control
+        if control is None:
+            return False
+        value = getattr(control, "pause_requested", False)
+        try:
+            return bool(value() if callable(value) else value)
+        except Exception:
+            return False
+
+    def epoch_range(self, total_epochs: int):
+        """Return the remaining epoch range for a new or resumed run."""
+        return range(max(1, int(self.start_epoch or 1)), int(total_epochs) + 1)
+
     def publish(self, event_type: str, payload: Optional[Mapping[str, Any]] = None) -> None:
         publish(self.context, event_type, payload)
 
@@ -155,6 +185,7 @@ class MLRunContext:
         *,
         row_ids: Optional[Sequence[Any]] = None,
         params: Optional[Mapping[str, Any]] = None,
+        required: bool = False,
     ) -> Optional[str]:
         return put_artifact(
             self.context,
@@ -163,6 +194,7 @@ class MLRunContext:
             dataset_id=self.dataset_id,
             row_ids=row_ids,
             params=params or self.params,
+            required=required,
         )
 
     def log(

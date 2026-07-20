@@ -9,14 +9,14 @@ from astronomicAL.platform.plugins import PluginManifest
 manifest = PluginManifest(
     id="core.ml",
     name="ML Core",
-    version="0.5.0",
+    version="0.6.0",
     description=(
         "Machine-learning core: code-backed recipes, reusable recipe profiles, "
         "protocol-enforced training, durable model artifacts, compatibility-checked "
         "prediction, trained-model cataloguing, and training curves."
     ),
     requires=["scikit-learn>=1.2"],
-    optional_requires=["torch", "torchvision", "pillow", "matplotlib", "optuna", "joblib"],
+    optional_requires=["torch", "torchvision", "pillow", "matplotlib", "optuna", "joblib", "timm", "xgboost"],
     capabilities=["panel", "action", "machine-learning", "training", "inference", "artifacts", "recipe-profile",],
     tags=[
         "core",
@@ -37,6 +37,7 @@ def register(api) -> None:
     from . import trained_models
     from . import recipe_runner
     from . import profiles
+    from . import resume
 
     api.register_service(
         key="trained_model_catalog",
@@ -95,6 +96,7 @@ def register(api) -> None:
             {"type": "ml.predictions", "description": "Optional prediction artifact."},
             {"type": "ml.evaluation_report", "description": "Optional evaluation report."},
             {"type": "ml.run", "description": "Run summary and provenance."},
+            {"type": "ml.resume_checkpoint", "description": "Full epoch-boundary state for an exactly resumable paused run."},
         ],
         params_schema={
             "type": "object",
@@ -104,6 +106,48 @@ def register(api) -> None:
                 "recipe_profile_id": {"type": "string"},
                 "recipe_profile_artifact_id": {"type": "string"},
                 "run_id": {"type": "string"},
+                "resume_checkpoint_artifact_id": {"type": "string"},
+                "resume_manifest_path": {"type": "string"},
+                "trust_external_checkpoint": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "Allow resuming from a checkpoint outside the configured "
+                        "ML artifact root. Use only for trusted files."
+                    ),
+                },
+                "ml_artifact_dir": {
+                    "type": "string",
+                    "description": "Durable root directory for model, checkpoint, prediction, and log sidecars.",
+                },
+                "save_predictions": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": "Persist test predictions as a compressed sidecar file.",
+                },
+                "prediction_inline_limit": {
+                    "type": "integer",
+                    "default": 1000,
+                    "minimum": 0,
+                    "description": (
+                        "Maximum prediction rows retained inline when a "
+                        "durable sidecar is written."
+                    ),
+                },
+                "prediction_output_dir": {
+                    "type": "string",
+                    "description": "Optional directory for durable prediction sidecars.",
+                },
+                "keep_work_dir": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Retain the temporary run directory after a successful run.",
+                },
+                "keep_failed_work_dir": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Retain the temporary run directory after failure for debugging.",
+                },
                 "protocol_materialize_split_datasets": {
                     "type": "boolean",
                     "default": True,
@@ -153,6 +197,44 @@ def register(api) -> None:
     )
 
     api.register_action(
+        id="load_model_manifest",
+        title="Load Saved ML Model",
+        handler=resume.load_model_manifest_action,
+        description="Register a durable model_manifest.json from disk as an ml.model artifact.",
+        category="Machine Learning",
+        icon="upload_file",
+        tags=["ml", "model", "load", "import", "manifest"],
+        inputs={"dataset": False, "selection": "none", "columns": "none", "numeric_columns": "none"},
+        outputs=[{"type": "ml.model", "description": "Loaded durable model artifact."}],
+        params_schema={
+            "type": "object",
+            "required": ["manifest_path"],
+            "properties": {
+                "manifest_path": {
+                    "type": "string",
+                    "minLength": 1,
+                },
+                "ml_artifact_dir": {
+                    "type": "string",
+                    "description": (
+                        "Trusted ML artifact root used to validate the "
+                        "manifest and model paths."
+                    ),
+                },
+                "trust_external_files": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "Allow loading files outside the trusted ML artifact "
+                        "root. Use only for trusted files."
+                    ),
+                },
+            },
+        },
+        run_in_job=False,
+    )
+
+    api.register_action(
         id="predict",
         title="Predict with Trained Model",
         handler=prediction.predict_action,
@@ -193,6 +275,20 @@ def register(api) -> None:
                 "feature_column_mapping": {"type": "object"},
                 "require_target_compatible": {"type": "boolean", "default": False},
                 "register_prediction_dataset": {"type": "boolean", "default": True},
+                "save_predictions": {"type": "boolean", "default": True},
+                "prediction_inline_limit": {
+                    "type": "integer",
+                    "default": 1000,
+                    "minimum": 0,
+                    "description": (
+                        "Maximum prediction rows retained inline when a "
+                        "durable sidecar is written."
+                    ),
+                },
+                "prediction_output_dir": {
+                    "type": "string",
+                    "description": "Optional directory for the compressed prediction sidecar.",
+                },
                 "run_id": {"type": "string"},
             },
         },
@@ -224,6 +320,8 @@ def register(api) -> None:
             "ml.predictions",
             "ml.evaluation_report",
             "ml.run",
+            "ml.resume_checkpoint",
+            "ml.recipe_run.paused",
             "ml.recipe_run.started",
             "ml.recipe_run.progress",
             "ml.recipe_run.finished",
@@ -250,6 +348,22 @@ def register(api) -> None:
     )
 
     api.register_panel(
+        id="model_manager",
+        title="ML Models and Checkpoints",
+        factory=create_model_manager_panel,
+        description=(
+            "See exactly where models/checkpoints are stored, import saved model manifests, "
+            "select models for prediction, and send paused runs back to the Recipe Launcher."
+        ),
+        category="Machine Learning",
+        icon="inventory_2",
+        tags=["ml", "models", "checkpoints", "storage", "resume"],
+        uses_services=["core.ml.trained_model_catalog"],
+        produces=["ml.model.selected", "ml.resume_checkpoint.selected"],
+        default_layout={"x": 5, "y": 0, "w": 5, "h": 7},
+    )
+
+    api.register_panel(
         id="training_curves",
         title="ML Training Curves",
         factory=create_training_curves_panel,
@@ -260,6 +374,12 @@ def register(api) -> None:
         produces=[],
         default_layout={"x": 0, "y": 7, "w": 5, "h": 5},
     )
+
+def create_model_manager_panel(context, **kwargs):
+    from .panels import model_manager as model_manager_module
+
+    return model_manager_module.create_model_manager_panel(context=context, **kwargs)
+
 
 def create_training_curves_panel(context, **kwargs):
     from .panels import training_curves as curves_module
@@ -286,7 +406,6 @@ def create_ml_recipe_registry(context=None):
     registry = registry_module.MLRecipeRegistry()
     for recipe_class in BUILTIN_RECIPE_CLASSES:
         registry.register(recipe_class, replace=False)
-
 
     return registry
 

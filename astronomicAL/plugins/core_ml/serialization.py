@@ -4,7 +4,6 @@ import math
 from pathlib import Path
 from typing import Any, Mapping
 
-
 def json_safe(value: Any) -> Any:
     """Convert common scientific/runtime values into JSON-safe structures.
 
@@ -58,7 +57,6 @@ def json_safe(value: Any) -> Any:
             pass
 
     return str(value)
-
 
 def ensure_json_object(payload: Mapping[str, Any], *, schema_version: int | None = None) -> dict[str, Any]:
     safe = json_safe(dict(payload))

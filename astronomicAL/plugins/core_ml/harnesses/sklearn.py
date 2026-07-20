@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import importlib.util
+import json
+import os
+import shutil
 import sys
 import time
 from copy import deepcopy
@@ -11,6 +14,7 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 import pandas as pd
 
+from ..artifacts import file_sha256
 from ..recipe_base import ManagedMLRecipe
 from ..protocol import Partition, Partitions, TargetSpec, TrainingComponents
 from ..serialization import json_safe
@@ -268,7 +272,17 @@ class SklearnHarness(RunHarness):
 
         model_dir = ml_run_artifact_dir(self.run, kind="model")
         sidecar_path = model_dir / "model.joblib"
-        joblib.dump(pipeline, sidecar_path)
+        manifest_path = model_dir / "model_manifest.json"
+        tmp_sidecar_path = model_dir / "model.joblib.tmp"
+        try:
+            joblib.dump(pipeline, tmp_sidecar_path)
+            os.replace(tmp_sidecar_path, sidecar_path)
+        except Exception:
+            shutil.rmtree(model_dir, ignore_errors=True)
+            raise
+        checkpoint_sha256 = file_sha256(sidecar_path)
+        checkpoint_size = sidecar_path.stat().st_size
+        created_at = time.time()
 
         manifest_payload = {
             "schema_version": 2,
@@ -283,7 +297,8 @@ class SklearnHarness(RunHarness):
             "recipe_version": self.run.recipe_version,
             "protocol_id": parts.protocol_id,
             "split_spec_artifact_id": split_spec_artifact_id,
-            "created_at": time.time(),
+            "created_at": created_at,
+            "checkpoint_sha256": checkpoint_sha256,
             "class_names": list(parts.train.classes),
             "num_classes": int(target.num_classes) if target.kind == "classification" else 0,
             "feature_columns": self._feature_columns(),
@@ -293,13 +308,22 @@ class SklearnHarness(RunHarness):
             "validation_source": parts.validation_source,
             "test_source": parts.test_source,
             "prediction_capabilities": prediction_capabilities,
+            "files": {
+                "checkpoint": str(sidecar_path),
+                "manifest": str(manifest_path),
+            },
             "model_ref": {
                 "storage": "local_file",
                 "uri": str(sidecar_path),
                 "path": str(sidecar_path),
                 "format": "joblib",
                 "framework": "sklearn",
+                "created_at": created_at,
+                "sha256": checkpoint_sha256,
+                "size_bytes": checkpoint_size,
                 "metadata": {
+                    "sha256": checkpoint_sha256,
+                    "size_bytes": checkpoint_size,
                     "class_names": list(parts.train.classes),
                     "feature_columns": self._feature_columns(),
                     "recipe_id": self.run.recipe_id,
@@ -337,19 +361,36 @@ class SklearnHarness(RunHarness):
             },
         }
 
+        tmp_manifest_path = manifest_path.with_suffix(manifest_path.suffix + ".tmp")
+        try:
+            tmp_manifest_path.write_text(
+                json.dumps(json_safe(manifest_payload), indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+            os.replace(tmp_manifest_path, manifest_path)
+        except Exception:
+            shutil.rmtree(model_dir, ignore_errors=True)
+            raise
+
         self._eval_classes = list(parts.train.classes)
 
-        return self.run.put_artifact(
-            "ml.model",
-            json_safe(manifest_payload),
-            params=self.run.params,
-        )
+        try:
+            return self.run.put_artifact(
+                "ml.model",
+                json_safe(manifest_payload),
+                params=self.run.params,
+                required=True,
+            )
+        except Exception:
+            shutil.rmtree(model_dir, ignore_errors=True)
+            raise
 
 # =============================================================================
 # Base recipe + registration
 # =============================================================================
 
 class SklearnRecipe(ManagedMLRecipe):
+    required_imports = ["sklearn", "joblib"]
     """Base for sklearn recipes. Subclasses implement build_model; the default
     fit is one-shot (fit + one report_epoch). Warm-start estimators override
     fit via the helper below for a live validation curve."""
@@ -373,9 +414,12 @@ class SklearnRecipe(ManagedMLRecipe):
         return None
 
     def fit(self, run, *, model, components, train_loader, harness):
+        if int(getattr(run, "start_epoch", 1) or 1) > 1:
+            return
         Xt = harness._fitted_preprocessor.transform(train_loader.X)
         model.fit(Xt, train_loader.y)
         harness.report_epoch(1, model, train_metrics={})
+        harness.check_pause_boundary(1, model, components)
 
 def fit_warm_start(run, *, model, components, train_loader, harness, points=10):
     """Grow an n_estimators-based estimator in chunks, reporting val each chunk.
@@ -385,10 +429,32 @@ def fit_warm_start(run, *, model, components, train_loader, harness, points=10):
     Xt = harness._fitted_preprocessor.transform(train_loader.X)
 
     try:
-        final_n = int(model.get_params(deep=False).get("n_estimators") or 1)
+        current_n = int(
+            model.get_params(deep=False).get("n_estimators") or 1
+        )
     except Exception:
-        final_n = 1
+        current_n = 1
+
+    requested_n = run.params.get("n_estimators")
+
+    try:
+        final_n = (
+            int(requested_n)
+            if requested_n not in (None, "")
+            else current_n
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"Invalid n_estimators value {requested_n!r}."
+        ) from exc
+
     final_n = max(1, final_n)
+
+    if current_n > final_n:
+        raise ValueError(
+            f"Resume checkpoint already contains {current_n} estimators, "
+            f"which exceeds the requested final n_estimators={final_n}."
+        )
 
     try:
         model.set_params(warm_start=True)
@@ -402,6 +468,8 @@ def fit_warm_start(run, *, model, components, train_loader, harness, points=10):
         steps.append(final_n)
 
     for epoch, n in enumerate(steps, start=1):
+        if epoch < int(getattr(run, "start_epoch", 1) or 1):
+            continue
         run.check_cancelled()
         try:
             model.set_params(n_estimators=int(n))
@@ -409,6 +477,7 @@ def fit_warm_start(run, *, model, components, train_loader, harness, points=10):
             pass
         model.fit(Xt, train_loader.y)
         harness.report_epoch(epoch, model, train_metrics={"n_estimators": int(n)})
+        harness.check_pause_boundary(epoch, model, components)
 
 def register() -> None:
     """Register the sklearn harness with make_harness. Idempotent."""

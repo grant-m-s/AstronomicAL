@@ -10,10 +10,8 @@ import pandas as pd
 from .feature_columns import parse_column_list
 from .serialization import json_safe
 
-
 _TRUE_VALUES = {"1", "true", "yes", "y", "on"}
 _FALSE_VALUES = {"0", "false", "no", "n", "off"}
-
 
 def should_materialize_split_datasets(params: Mapping[str, Any]) -> bool:
     """Return whether managed recipe split partitions should become datasets.
@@ -35,7 +33,6 @@ def should_materialize_split_datasets(params: Mapping[str, Any]) -> bool:
         return True
 
     return True
-
 
 def materialize_split_datasets(
     *,
@@ -168,7 +165,6 @@ def materialize_split_datasets(
 
     return created
 
-
 def _split_dataset_prefix(
     *,
     source_dataset_id: str,
@@ -184,7 +180,6 @@ def _split_dataset_prefix(
     recipe = _safe_id(recipe_id)
     run = _safe_id(str(run_id)[:8] or "run")
     return f"{source}__ml_{recipe}_{run}"
-
 
 def _split_dataset_name(
     *,
@@ -208,7 +203,6 @@ def _split_dataset_name(
     }
 
     return f"{source_name} — ML {labels.get(role, role.title())} Split ({str(run_id)[:8]})"
-
 
 def _materialize_role_frame(
     *,
@@ -267,7 +261,6 @@ def _materialize_role_frame(
 
     return frame.reset_index(drop=True)
 
-
 def _restore_partition_order(
     frame: pd.DataFrame,
     *,
@@ -292,7 +285,6 @@ def _restore_partition_order(
 
     return ordered.drop(columns=["__astronomical_split_order__"]).reset_index(drop=True)
 
-
 def _register_dataset(
     *,
     datasets: Any,
@@ -316,7 +308,6 @@ def _register_dataset(
         return
 
     raise RuntimeError("DatasetManager does not expose register/ensure_registered.")
-
 
 def _copy_column_mappings(
     *,
@@ -369,7 +360,6 @@ def _copy_column_mappings(
         except Exception:
             pass
 
-
 def _mapping_is_valid(column_name: Any, frame_columns: set[str]) -> bool:
     if column_name is None:
         return False
@@ -381,7 +371,6 @@ def _mapping_is_valid(column_name: Any, frame_columns: set[str]) -> bool:
         "__index__",
         "index",
     }
-
 
 def _publish_dataset_events(
     *,
@@ -411,14 +400,12 @@ def _publish_dataset_events(
     ):
         _publish(context, topic, payload)
 
-
 def _publish(context: Any, topic: str, payload: Mapping[str, Any]) -> None:
     events = getattr(context, "events", None)
     publish = getattr(events, "publish", None)
 
     if callable(publish):
         publish(topic, json_safe(dict(payload)))
-
 
 def _safe_id(value: Any) -> str:
     text = str(value or "").strip()

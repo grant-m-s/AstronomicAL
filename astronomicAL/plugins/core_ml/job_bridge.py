@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import Any, Callable, Optional
 
-
 def submit_job(
     app_context: Any,
     fn: Callable[..., Any],

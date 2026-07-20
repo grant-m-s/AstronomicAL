@@ -8,7 +8,6 @@ import pandas as pd
 from .image_sidecar import load_image
 from .serialization import json_safe
 
-
 AUTO_KEYS = {
     "calculate_mean_std",
     "calculate_normalization",
@@ -35,7 +34,6 @@ STD_KEYS = {
     "normalization_stds",
 }
 
-
 def should_compute_train_split_normalization(params: Mapping[str, Any]) -> bool:
     params = dict(params or {})
 
@@ -44,7 +42,6 @@ def should_compute_train_split_normalization(params: Mapping[str, Any]) -> bool:
             return True
 
     return False
-
 
 def apply_train_split_image_normalization(
     *,
@@ -99,7 +96,7 @@ def apply_train_split_image_normalization(
         or 224
     )
 
-    mean, std, used = _compute_mean_std(
+    mean, std, image_count, pixel_count = _compute_mean_std(
         frame[image_column].dropna().tolist(),
         image_size=image_size,
         cancel_token=cancel_token,
@@ -108,29 +105,34 @@ def apply_train_split_image_normalization(
     for key in MEAN_KEYS:
         if key in params:
             params[key] = mean
+
     for key in STD_KEYS:
         if key in params:
             params[key] = std
 
-    # Always set canonical keys too, so new recipes have stable names.
     params["normalization_mean"] = mean
     params["normalization_std"] = std
     params["normalization_source"] = "train_split"
-    params["normalization_sample_count"] = used
+
+    # Keep sample_count as an image count for compatibility.
+    params["normalization_sample_count"] = image_count
+    params["normalization_image_count"] = image_count
+    params["normalization_pixel_count"] = pixel_count
 
     info = {
         "source": "train_split",
         "image_column": image_column,
         "train_dataset_id": train_dataset_id,
         "source_dataset_id": source_dataset_id,
-        "sample_count": used,
+        "sample_count": image_count,
+        "image_count": image_count,
+        "pixel_count": pixel_count,
         "mean": mean,
         "std": std,
     }
 
     params["computed_normalization"] = json_safe(info)
     return json_safe(info)
-
 
 def _load_train_frame(
     *,
@@ -168,21 +170,23 @@ def _load_train_frame(
         wanted = {str(row_id) for row_id in train_row_ids}
         return df[df[record_id_column].astype(str).isin(wanted)]
 
-
 def _compute_mean_std(
     image_values: Iterable[Any],
     *,
     image_size: int,
     cancel_token: Any = None,
-) -> Tuple[list[float], list[float], int]:
+) -> Tuple[list[float], list[float], int, int]:
     sums = np.zeros(3, dtype=np.float64)
     sq_sums = np.zeros(3, dtype=np.float64)
-    count = 0
+    image_count = 0
+    pixel_count = 0
 
     for value in image_values:
         _raise_if_cancelled(cancel_token)
 
-        image = load_image(value).resize((int(image_size), int(image_size)))
+        image = load_image(value).resize(
+            (int(image_size), int(image_size))
+        )
         arr = np.asarray(image, dtype=np.float32) / 255.0
 
         if arr.ndim != 3 or arr.shape[2] < 3:
@@ -193,21 +197,28 @@ def _compute_mean_std(
 
         sums += pixels.sum(axis=0)
         sq_sums += np.square(pixels).sum(axis=0)
-        count += pixels.shape[0]
+        image_count += 1
+        pixel_count += pixels.shape[0]
 
-    if count <= 0:
-        raise ValueError("Could not calculate mean/std because no valid images were loaded.")
+    if image_count <= 0 or pixel_count <= 0:
+        raise ValueError(
+            "Could not calculate mean/std because no valid "
+            "images were loaded."
+        )
 
-    mean = sums / count
-    variance = np.maximum((sq_sums / count) - np.square(mean), 0.0)
+    mean = sums / pixel_count
+    variance = np.maximum(
+        (sq_sums / pixel_count) - np.square(mean),
+        0.0,
+    )
     std = np.sqrt(variance)
 
     return (
         [float(v) for v in mean.tolist()],
         [float(v) for v in std.tolist()],
-        int(count),
+        int(image_count),
+        int(pixel_count),
     )
-
 
 def _as_bool(value: Any, *, default: bool) -> bool:
     if isinstance(value, bool):
@@ -223,7 +234,6 @@ def _as_bool(value: Any, *, default: bool) -> bool:
         return False
 
     return default
-
 
 def _raise_if_cancelled(cancel_token: Any) -> None:
     if cancel_token is None:

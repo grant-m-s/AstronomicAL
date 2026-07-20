@@ -159,4 +159,3 @@ def default_feature_columns(
         for column in columns
         if str(column) not in excluded
     ]
-

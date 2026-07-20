@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 import time
 import traceback
 from pathlib import Path
@@ -12,15 +13,23 @@ from .recipe_base import make_run_context
 from .registry import schema_defaults, validate_required_params
 from .protocol import ProtocolConfig
 from .serialization import json_safe
-from .runtime import MLRecipeCancelled, coerce_action_request, publish, put_artifact, request_dataset_id
+from .runtime import (
+    MLRecipeCancelled,
+    MLRecipePaused,
+    MLRecipeExecutionError,
+    cleanup_ml_runtime,
+    coerce_action_request,
+    is_out_of_memory_error,
+    publish,
+    put_artifact,
+    request_dataset_id,
+)
 
 def _coerce_request(request: Any) -> ActionRequest:
     return coerce_action_request(request)
 
-
 def _dataset_id(context: Any, request: ActionRequest, params: Mapping[str, Any]) -> Optional[str]:
     return request_dataset_id(context, request, params)
-
 
 def _collect_artifact_ids(
     result: Mapping[str, Any],
@@ -67,7 +76,6 @@ def _build_data_binding(
 ):
     return build_data_binding(context, dataset_id, spec, params)
 
-
 def _resolve_profile_params(context: Any, params: Dict[str, Any]) -> Dict[str, Any]:
     profile_key = (
         params.get("recipe_profile_id")
@@ -98,14 +106,67 @@ def _resolve_profile_params(context: Any, params: Dict[str, Any]) -> Dict[str, A
     merged.update(params)
     return merged
 
+def _bool_param(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+
+    return str(value or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "y",
+        "on",
+    }
+
+def _resolve_resume_state(context: Any, params: Dict[str, Any]) -> tuple[Dict[str, Any], Dict[str, Any]]:
+    artifact_id = params.get("resume_checkpoint_artifact_id")
+    manifest_path = params.get("resume_manifest_path")
+    sidecar_path = params.get("resume_checkpoint_path")
+    if not any((artifact_id, manifest_path, sidecar_path)):
+        return params, {}
+
+    from .resume import load_resume_checkpoint, merge_resume_params
+
+    state = load_resume_checkpoint(
+        context=context,
+        artifact_id=str(artifact_id) if artifact_id else None,
+        manifest_path=str(manifest_path) if manifest_path else None,
+        sidecar_path=str(sidecar_path) if sidecar_path else None,
+        trusted_root=(
+            params.get("ml_artifact_dir")
+            or params.get("artifact_dir")
+        ),
+        allow_external=_bool_param(
+            params.get("trust_external_checkpoint", False)
+        ),
+    )
+    saved_params = dict(state.get("params") or {})
+    merged = merge_resume_params(saved_params, params)
+    merged.update(
+        {
+            "recipe_id": state.get("recipe_id") or saved_params.get("recipe_id"),
+            "recipe_version": state.get("recipe_version") or saved_params.get("recipe_version"),
+            "dataset_id": state.get("dataset_id") or saved_params.get("dataset_id"),
+            "run_id": state.get("run_id") or saved_params.get("run_id"),
+            "training_log_artifact_id": state.get("training_log_artifact_id") or saved_params.get("training_log_artifact_id"),
+            "resume_checkpoint_artifact_id": artifact_id or state.get("_resume_artifact_id"),
+            "resume_manifest_path": manifest_path or state.get("_resume_manifest_path"),
+            "resume_checkpoint_path": sidecar_path or (state.get("_resume_ref") or {}).get("uri"),
+        }
+    )
+    return merged, state
+
+
 def run_ml_recipe_action(
     context: Any,
     request: Any,
     *,
     cancel_token: Any = None,
+    training_control: Any = None,
 ) -> Dict[str, Any]:
     request = _coerce_request(request)
     params = _resolve_profile_params(context, dict(request.params or {}))
+    params, resume_state = _resolve_resume_state(context, params)
 
     recipe_id = str(params.get("recipe_id") or "").strip()
     if not recipe_id:
@@ -116,7 +177,8 @@ def run_ml_recipe_action(
         raise ValueError("Missing required dataset_id.")
 
     registry = context.services.get("core.ml.recipe_registry")
-    spec = registry.get(recipe_id)
+    require_available = getattr(registry, "require_available", None)
+    spec = require_available(recipe_id) if callable(require_available) else registry.get(recipe_id)
 
     defaults = schema_defaults(
         spec.params_schema or {}
@@ -162,6 +224,8 @@ def run_ml_recipe_action(
         recipe_spec=spec,
         params=merged_params,
         cancel_token=cancel_token,
+        training_control=training_control,
+        resume_state=resume_state,
         run_id=merged_params.get("run_id"),
     )
 
@@ -183,6 +247,8 @@ def run_ml_recipe_action(
         "recipe_version": spec.version,
         "recipe_title": spec.title,
         "training_log_artifact_id": run.training_log_artifact_id,
+        "resumed": bool(resume_state),
+        "resume_checkpoint_artifact_id": merged_params.get("resume_checkpoint_artifact_id"),
     }
 
     if protocol is not None:
@@ -201,6 +267,9 @@ def run_ml_recipe_action(
         metrics={},
         extra={"phase": "started"},
     )
+
+    run_status = "running"
+    cleanup_error: Optional[BaseException] = None
 
     try:
         result = recipe.run(run)
@@ -415,6 +484,7 @@ def run_ml_recipe_action(
             finished_payload,
         )
 
+        run_status = "complete"
         return {
             "status": "complete",
             "run_id": run.run_id,
@@ -434,7 +504,61 @@ def run_ml_recipe_action(
             "final_training_log_artifact_id": final_training_log_artifact_id,
         }
 
+    except MLRecipePaused as exc:
+        run_status = "paused"
+        cleanup_error = exc
+        payload = dict(getattr(exc, "pause_payload", {}) or {})
+        payload.setdefault("status", "paused")
+        payload.setdefault("message", str(exc) or "Training paused.")
+        payload.setdefault("run_id", run.run_id)
+        payload.setdefault("dataset_id", dataset_id)
+        payload.setdefault("recipe_id", spec.id)
+        payload.setdefault("recipe_version", spec.version)
+        payload.setdefault("recipe_title", spec.title)
+        payload.setdefault("training_log_artifact_id", run.training_log_artifact_id)
+
+        final_training_log_artifact_id = None
+        if getattr(run, "logger", None) is not None:
+            run.logger.update_summary(**payload)
+            final_training_log_artifact_id = run.logger.persist_final(
+                status="paused",
+                message=str(payload.get("message") or "Training paused."),
+                extra_summary=payload,
+            )
+        payload["final_training_log_artifact_id"] = final_training_log_artifact_id
+
+        run_artifact_payload = {
+            "schema_version": 2,
+            "run_id": run.run_id,
+            "dataset_id": dataset_id,
+            "source_dataset_id": dataset_id,
+            "recipe_id": spec.id,
+            "recipe_version": spec.version,
+            "recipe_title": spec.title,
+            "status": "paused",
+            "resumable": True,
+            "params": json_safe(merged_params),
+            "result": json_safe(payload),
+            "artifact_ids": json_safe(payload.get("artifact_ids") or {}),
+            "training_log_artifact_id": run.training_log_artifact_id,
+            "final_training_log_artifact_id": final_training_log_artifact_id,
+        }
+        run_artifact_id = put_artifact(
+            context,
+            "ml.run",
+            run_artifact_payload,
+            dataset_id=dataset_id,
+            params=merged_params,
+        )
+        payload["run_artifact_id"] = run_artifact_id
+        payload.setdefault("artifact_ids", {})["run_artifact_id"] = run_artifact_id
+
+        publish(context, "ml.recipe_run.finished", payload)
+        return payload
+
     except MLRecipeCancelled as exc:
+        run_status = "cancelled"
+        cleanup_error = exc
         message = str(exc) or "Recipe run cancelled."
 
         if getattr(run, "logger", None) is not None:
@@ -486,7 +610,9 @@ def run_ml_recipe_action(
         return payload
 
     except Exception as exc:
-        
+        run_status = "failed"
+        cleanup_error = exc
+
         tb = traceback.format_exc()
         message = str(exc)
 
@@ -544,4 +670,36 @@ def run_ml_recipe_action(
             payload,
         )
 
-        raise
+        # Futures retain exception tracebacks. A CUDA OOM traceback can therefore
+        # keep model/batch tensors alive after the job has failed. Strip the
+        # original traceback and raise a small failure object whose detailed
+        # diagnostics remain in the durable training-log artifact.
+        try:
+            exc.__traceback__ = None
+            exc.__cause__ = None
+            exc.__context__ = None
+        except Exception:
+            pass
+        raise MLRecipeExecutionError(message, failure_payload=payload) from None
+
+    finally:
+        aggressive = bool(cleanup_error and is_out_of_memory_error(cleanup_error))
+
+        keep_work_dir = bool(merged_params.get("keep_work_dir", False))
+        if run_status == "failed":
+            keep_work_dir = keep_work_dir or bool(
+                merged_params.get("keep_failed_work_dir", False)
+            )
+
+        work_dir = getattr(run, "work_dir", None)
+        if work_dir and not keep_work_dir:
+            try:
+                shutil.rmtree(Path(work_dir), ignore_errors=True)
+            except Exception:
+                pass
+
+        recipe = None
+        cleanup_ml_runtime(
+            reason=f"recipe run {run_status}",
+            aggressive=aggressive or run_status == "failed",
+        )

@@ -408,8 +408,8 @@ def validate_model_for_dataset(
         resolved_image_column = _first_present(
             [
                 preferred_image_column,
-                _mapped_column(context, dataset_id, "image.path"),
                 _mapped_column(context, dataset_id, "image.uri"),
+                _mapped_column(context, dataset_id, "image.path"),
                 _mapped_column(context, dataset_id, "image.url"),
                 _guess_image_column(dataset_columns),
             ],
@@ -738,7 +738,15 @@ def _tabular_input_schema(
     metadata: Mapping[str, Any],
     training_dataset_id: str,
 ) -> Dict[str, Any]:
-    features = [str(c) for c in model_payload.get("feature_columns") or metadata.get("feature_columns") or []]
+    features = [
+        str(c)
+        for c in (
+            model_payload.get("feature_columns")
+            or metadata.get("feature_columns")
+            or metadata.get("input_columns")
+            or []
+        )
+    ]
     dtypes = {}
     if training_dataset_id and features:
         all_dtypes = dataset_dtypes(context, training_dataset_id)

@@ -6,11 +6,9 @@ from .torch_regression import TorchRegressionHarness
 
 _HARNESSES = []
 
-
 def register_harness(predicate, harness_cls):
     """Register a managed-run harness predicate. First match wins."""
     _HARNESSES.insert(0, (predicate, harness_cls))
-
 
 def make_harness(run, recipe) -> RunHarness:
     framework = str(run.params.get("framework") or getattr(recipe, "framework", "") or "").lower()

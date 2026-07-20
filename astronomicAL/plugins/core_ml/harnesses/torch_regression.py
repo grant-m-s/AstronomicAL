@@ -3,10 +3,12 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import time
 
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
+from ..artifacts import file_sha256
 from ..paths import ml_run_artifact_dir
 from ..protocol import Partition, Partitions, TargetSpec, _stable_protocol_id
 from ..runtime import put_artifact
@@ -87,7 +89,6 @@ class TorchRegressionHarness(RunHarness):
         if req == "cpu":
             return torch.device("cpu")
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
 
     def _ensure_train_split_normalization(self, partition: Partition) -> None:
         """Compute image mean/std once, after splitting, using train rows only."""
@@ -516,10 +517,12 @@ class TorchRegressionHarness(RunHarness):
             "test_dataset_id": parts.test_dataset_id,
             "validation_source": parts.validation_source,
             "test_source": parts.test_source,
+            "feature_columns": list(self.binding.input_columns or []),
             "input_contract": {
                 "record_id_column": parts.record_id_column,
                 "target_column": parts.target_column,
                 "image_column": self.binding.image_column,
+                "feature_columns": list(self.binding.input_columns or []),
                 "input_columns": list(self.binding.input_columns or []),
             },
             "architecture": architecture,
@@ -533,8 +536,15 @@ class TorchRegressionHarness(RunHarness):
         }
 
         # Atomic-ish write: temp then replace.
-        torch.save(checkpoint_payload, tmp_checkpoint_path)
-        os.replace(tmp_checkpoint_path, checkpoint_path)
+        try:
+            torch.save(checkpoint_payload, tmp_checkpoint_path)
+            os.replace(tmp_checkpoint_path, checkpoint_path)
+        except Exception:
+            shutil.rmtree(model_dir, ignore_errors=True)
+            raise
+        checkpoint_sha256 = file_sha256(checkpoint_path)
+        checkpoint_size = checkpoint_path.stat().st_size
+        created_at = time.time()
 
         manifest_payload = {
             "schema_version": 2,
@@ -550,7 +560,8 @@ class TorchRegressionHarness(RunHarness):
             "recipe_version": self.run.recipe_version,
             "protocol_id": parts.protocol_id,
             "split_spec_artifact_id": split_spec_artifact_id,
-            "created_at": time.time(),
+            "created_at": created_at,
+            "checkpoint_sha256": checkpoint_sha256,
             "class_names": [],
             "num_classes": int(n_outputs),
             "num_outputs": int(n_outputs),
@@ -570,7 +581,12 @@ class TorchRegressionHarness(RunHarness):
                 "path": str(checkpoint_path),
                 "format": "torch_checkpoint",
                 "framework": "torch",
+                "created_at": created_at,
+                "sha256": checkpoint_sha256,
+                "size_bytes": checkpoint_size,
                 "metadata": {
+                    "sha256": checkpoint_sha256,
+                    "size_bytes": checkpoint_size,
                     "class_names": [],
                     "num_classes": int(n_outputs),
                     "num_outputs": int(n_outputs),
@@ -583,10 +599,12 @@ class TorchRegressionHarness(RunHarness):
                     **transform_meta,
                 },
             },
+            "feature_columns": list(self.binding.input_columns or []),
             "input_contract": {
                 "record_id_column": parts.record_id_column,
                 "target_column": parts.target_column,
                 "image_column": self.binding.image_column,
+                "feature_columns": list(self.binding.input_columns or []),
                 "input_columns": list(self.binding.input_columns or []),
             },
             "protocol": {
@@ -612,16 +630,27 @@ class TorchRegressionHarness(RunHarness):
             },
         }
 
-        manifest_path.write_text(
-            json.dumps(json_safe(manifest_payload), indent=2, sort_keys=True),
-            encoding="utf-8",
-        )
+        tmp_manifest_path = manifest_path.with_suffix(manifest_path.suffix + ".tmp")
+        try:
+            tmp_manifest_path.write_text(
+                json.dumps(json_safe(manifest_payload), indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+            os.replace(tmp_manifest_path, manifest_path)
+        except Exception:
+            shutil.rmtree(model_dir, ignore_errors=True)
+            raise
 
-        return self.run.put_artifact(
-            "ml.model",
-            manifest_payload,
-            params=self.run.params,
-        )
+        try:
+            return self.run.put_artifact(
+                "ml.model",
+                manifest_payload,
+                params=self.run.params,
+                required=True,
+            )
+        except Exception:
+            shutil.rmtree(model_dir, ignore_errors=True)
+            raise
 
 def _is_torch_regression(
     framework="", task="", modality="", run=None, recipe=None, **_kwargs

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import os
 import urllib.request
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Sequence
@@ -88,7 +89,16 @@ def save_torch_image_sidecar_file(
     }
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(sidecar, path)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    try:
+        torch.save(sidecar, tmp_path)
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise
 
     return {
         "sidecar_type": TORCH_IMAGE_CLASSIFIER_FORMAT,
@@ -113,7 +123,10 @@ def load_torch_image_sidecar_file(
     import torch
 
     metadata = dict(metadata or {})
-    sidecar = torch.load(path, map_location=map_location)
+    try:
+        sidecar = torch.load(path, map_location=map_location, weights_only=False)
+    except TypeError:
+        sidecar = torch.load(path, map_location=map_location)
 
     if not isinstance(sidecar, Mapping):
         raise TypeError(f"Image sidecar {path} did not contain a mapping payload.")

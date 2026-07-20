@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import gzip
+import hashlib
+import json
+import os
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, Mapping, Optional
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
 import numpy as np
 import pandas as pd
@@ -13,6 +17,9 @@ import importlib.util
 import sys
 
 ML_ARTIFACT_SCHEMA_VERSION = 1
+
+DEFAULT_INLINE_PREDICTION_ROWS = 1000
+DEFAULT_PREDICTION_PREVIEW_ROWS = 25
 
 @dataclass(frozen=True)
 class StoredModelRef:
@@ -29,6 +36,23 @@ class StoredModelRef:
         return asdict(self)
 
 @dataclass(frozen=True)
+class StoredPredictionRef:
+    """JSON-safe pointer to a durable prediction table sidecar."""
+
+    storage: str
+    uri: str
+    format: str
+    created_at: float
+    row_count: int
+    columns: List[str]
+    sha256: str
+    size_bytes: int
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class MLArtifactContract:
     """Documented ML artifact types produced and consumed by core.ml."""
 
@@ -41,18 +65,46 @@ class MLArtifactContract:
     PREDICTIONS: str = "ml.predictions"
     TRAINING_LOG: str = "ml.training_log"
     RUN: str = "ml.run"
+    RESUME_CHECKPOINT: str = "ml.resume_checkpoint"
     ACTIVE_LEARNING_BATCH: str = "ml.active_learning_batch"
 
 ARTIFACTS = MLArtifactContract()
 
 from .serialization import ensure_json_object, json_safe
 
-
 def ensure_json_safe(payload: Mapping[str, Any]) -> Dict[str, Any]:
     """Return a JSON-safe shallow/deep copy of an artifact payload."""
 
     return ensure_json_object(payload, schema_version=ML_ARTIFACT_SCHEMA_VERSION)
 
+
+def file_sha256(path: Path | str) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _torch_load(path: Path, *, map_location: str = "cpu") -> Any:
+    import torch
+
+    try:
+        return torch.load(path, map_location=map_location, weights_only=False)
+    except TypeError:
+        return torch.load(path, map_location=map_location)
+
+
+def verify_file_ref(model_ref: Mapping[str, Any], path: Path) -> None:
+    metadata = dict(model_ref.get("metadata") or {})
+    expected = str(model_ref.get("sha256") or metadata.get("sha256") or "").strip()
+    if expected:
+        actual = file_sha256(path)
+        if actual.lower() != expected.lower():
+            raise ValueError(
+                f"Model sidecar checksum mismatch for {path}. "
+                f"Expected {expected}, got {actual}."
+            )
 
 def ml_storage_dir(context: Any, *, kind: str = "models") -> Path:
     """Return a writable storage directory for ML sidecar files.
@@ -114,6 +166,7 @@ def save_model_sidecar(
         )
         combined_metadata = dict(metadata)
         combined_metadata.update(image_metadata)
+        combined_metadata.update({"sha256": file_sha256(path), "size_bytes": path.stat().st_size})
         return StoredModelRef(
             storage="local_file",
             uri=str(path),
@@ -130,23 +183,33 @@ def save_model_sidecar(
     if framework == "sklearn":
         import joblib
 
-        joblib.dump(model, path)
+        tmp_path = path.with_suffix(path.suffix + ".tmp")
+        try:
+            joblib.dump(model, tmp_path)
+            os.replace(tmp_path, path)
+        except Exception:
+            tmp_path.unlink(missing_ok=True)
+            raise
         fmt = "joblib"
         extra = {"python_type": f"{type(model).__module__}.{type(model).__name__}"}
 
     elif framework == "torch":
         import torch
 
-        if hasattr(model, "state_dict") and callable(model.state_dict):
-            payload = {
-                "state_dict": model.state_dict(),
-                "python_type": f"{type(model).__module__}.{type(model).__name__}",
-            }
-        else:
-            payload = model
-
-        torch.save(payload, path)
-        fmt = "torch"
+        # Managed recipes use reconstructable state-dict checkpoints in their
+        # harnesses. This compatibility path handles older artifacts containing a
+        # live torch module. Persist the complete object because a bare state_dict
+        # is not reloadable without constructor arguments.
+        is_module = hasattr(model, "state_dict") and callable(model.state_dict)
+        payload = model
+        tmp_path = path.with_suffix(path.suffix + ".tmp")
+        try:
+            torch.save(payload, tmp_path)
+            os.replace(tmp_path, path)
+        except Exception:
+            tmp_path.unlink(missing_ok=True)
+            raise
+        fmt = "torch_module" if is_module else "torch_object"
         extra = {"python_type": f"{type(model).__module__}.{type(model).__name__}"}
 
     else:
@@ -154,6 +217,7 @@ def save_model_sidecar(
 
     combined_metadata = dict(metadata)
     combined_metadata.update(extra)
+    combined_metadata.update({"sha256": file_sha256(path), "size_bytes": path.stat().st_size})
 
     return StoredModelRef(
         storage="local_file",
@@ -177,15 +241,47 @@ def load_model_sidecar(model_ref: Mapping[str, Any]) -> Any:
     if not path.exists():
         raise FileNotFoundError(f"Model sidecar not found: {path}")
 
+    verify_file_ref(model_ref, path)
+
     if fmt == "joblib":
         import joblib
 
         return joblib.load(path)
 
-    if fmt == "torch":
-        import torch
+    if fmt == "sklearn_resume_checkpoint":
+        import joblib
 
-        return torch.load(path, map_location="cpu")
+        checkpoint = joblib.load(path)
+        if not isinstance(checkpoint, Mapping):
+            raise TypeError(f"Sklearn resume checkpoint {path} did not contain a mapping payload.")
+        prediction_model = checkpoint.get("prediction_model")
+        if prediction_model is None:
+            raise ValueError(f"Sklearn resume checkpoint {path} is missing prediction_model.")
+        return prediction_model
+
+    if fmt == "torch_resume_checkpoint":
+        checkpoint = _torch_load(path, map_location="cpu")
+        if not isinstance(checkpoint, Mapping):
+            raise TypeError(f"Torch resume checkpoint {path} did not contain a mapping payload.")
+        state_dict = checkpoint.get("model_state_dict") or checkpoint.get("state_dict")
+        if state_dict is None:
+            raise ValueError(f"Torch resume checkpoint {path} is missing model_state_dict.")
+        normalized = dict(checkpoint)
+        normalized.setdefault("state_dict", state_dict)
+        return {
+            "checkpoint_payload": normalized,
+            "state_dict": state_dict,
+            "checkpoint_path": str(path),
+            "checkpoint_sha256": file_sha256(path),
+            "metadata": json_safe(model_ref.get("metadata") or {}),
+        }
+
+    if fmt in {"torch", "torch_module", "torch_object"}:
+        loaded = _torch_load(path, map_location="cpu")
+        # Compatibility with the short-lived state-dict wrapper format.
+        if fmt == "torch" and isinstance(loaded, Mapping) and set(loaded) == {"state_dict", "python_type"}:
+            return dict(loaded)
+        return loaded
 
     if fmt == "torch_image_classifier":
         from . import image_sidecar
@@ -196,7 +292,21 @@ def load_model_sidecar(model_ref: Mapping[str, Any]) -> Any:
             map_location="cpu",
         )
 
-    if fmt in {"torch_checkpoint", "recipe_torch_checkpoint", "recipe_torch_image_checkpoint"}:
+    if fmt in {"torch_checkpoint", "recipe_torch_checkpoint"}:
+        checkpoint = _torch_load(path, map_location="cpu")
+        if not isinstance(checkpoint, Mapping):
+            raise TypeError(f"Torch checkpoint {path} did not contain a mapping payload.")
+        if checkpoint.get("state_dict") is None:
+            raise ValueError(f"Torch checkpoint {path} is missing state_dict.")
+        return {
+            "checkpoint_payload": dict(checkpoint),
+            "state_dict": checkpoint.get("state_dict"),
+            "checkpoint_path": str(path),
+            "checkpoint_sha256": file_sha256(path),
+            "metadata": json_safe(model_ref.get("metadata") or {}),
+        }
+
+    if fmt == "recipe_torch_image_checkpoint":
         return _load_recipe_torch_image_checkpoint(path=path, model_ref=model_ref)
 
     raise ValueError(f"Unsupported model sidecar format {fmt!r}.")
@@ -209,7 +319,7 @@ def _load_recipe_torch_image_checkpoint(*, path: Path, model_ref: Mapping[str, A
     """
     import torch
 
-    checkpoint = torch.load(path, map_location="cpu")
+    checkpoint = _torch_load(path, map_location="cpu")
     if not isinstance(checkpoint, Mapping):
         raise TypeError(f"Torch checkpoint {path} did not contain a mapping payload.")
 
@@ -343,6 +453,163 @@ def _build_recipe_image_model(
 
     raise ValueError(f"Unsupported recipe image architecture: {architecture!r}")
 
+def save_predictions_sidecar(
+    *,
+    context: Any,
+    run_id: str,
+    dataset_id: str,
+    model_artifact_id: str,
+    rows: Sequence[Mapping[str, Any]],
+    params: Optional[Mapping[str, Any]] = None,
+) -> StoredPredictionRef:
+    """Atomically persist row-keyed predictions as compressed JSON Lines."""
+    from .paths import ml_artifact_root
+
+    params = dict(params or {})
+    explicit = params.get("prediction_output_dir")
+    if explicit:
+        root = Path(str(explicit)).expanduser()
+    else:
+        root = ml_artifact_root(context, params) / "predictions"
+
+    path = (
+        root
+        / _safe_filename(dataset_id)
+        / _safe_filename(model_artifact_id)
+        / _safe_filename(run_id)
+        / "predictions.jsonl.gz"
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+
+    clean_rows = [json_safe(dict(row)) for row in rows]
+    columns = list(dict.fromkeys(key for row in clean_rows for key in row.keys()))
+
+    try:
+        with gzip.open(tmp_path, "wt", encoding="utf-8", newline="\n") as handle:
+            for row in clean_rows:
+                handle.write(json.dumps(row, sort_keys=True, separators=(",", ":")))
+                handle.write("\n")
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise
+
+    return StoredPredictionRef(
+        storage="local_file",
+        uri=str(path),
+        format="jsonl.gz",
+        created_at=time.time(),
+        row_count=len(clean_rows),
+        columns=columns,
+        sha256=file_sha256(path),
+        size_bytes=path.stat().st_size,
+    )
+
+
+def load_predictions_sidecar(prediction_ref: Mapping[str, Any]) -> List[Dict[str, Any]]:
+    uri = prediction_ref.get("uri") or prediction_ref.get("path")
+    if not uri:
+        raise ValueError("Prediction reference is missing `uri` or legacy `path`.")
+    path = Path(str(uri)).expanduser()
+    if not path.exists():
+        raise FileNotFoundError(f"Prediction sidecar not found: {path}")
+
+    expected = str(prediction_ref.get("sha256") or "").strip()
+    if expected:
+        actual = file_sha256(path)
+        if actual.lower() != expected.lower():
+            raise ValueError(
+                f"Prediction sidecar checksum mismatch for {path}. "
+                f"Expected {expected}, got {actual}."
+            )
+
+    fmt = str(prediction_ref.get("format") or "jsonl.gz").lower()
+    if fmt != "jsonl.gz":
+        raise ValueError(f"Unsupported prediction sidecar format {fmt!r}.")
+
+    rows: List[Dict[str, Any]] = []
+    with gzip.open(path, "rt", encoding="utf-8") as handle:
+        for line in handle:
+            if line.strip():
+                value = json.loads(line)
+                if isinstance(value, Mapping):
+                    rows.append(dict(value))
+    return rows
+
+def compact_predictions_payload(
+    payload: Mapping[str, Any],
+    *,
+    prediction_ref: Mapping[str, Any],
+    inline_limit: int = DEFAULT_INLINE_PREDICTION_ROWS,
+    preview_limit: int = DEFAULT_PREDICTION_PREVIEW_ROWS,
+) -> Dict[str, Any]:
+    """Replace large inline prediction rows with a durable sidecar."""
+    mutable = dict(payload)
+    table = dict(mutable.get("prediction_table") or {})
+
+    table_rows = [
+        dict(row)
+        for row in table.get("rows") or []
+    ]
+    records = [
+        dict(row)
+        for row in mutable.get("records") or []
+    ]
+
+    inline_limit = max(0, int(inline_limit))
+    preview_limit = max(0, int(preview_limit))
+
+    mutable["prediction_ref"] = dict(prediction_ref)
+    mutable["row_count"] = len(table_rows)
+    table["row_count"] = len(table_rows)
+
+    if len(table_rows) > inline_limit:
+        mutable["records_preview"] = records[:preview_limit]
+        mutable["records"] = []
+
+        table["preview"] = table_rows[:preview_limit]
+        table["rows"] = []
+        table["inline_complete"] = False
+        table["storage"] = "prediction_ref"
+    else:
+        table["inline_complete"] = True
+        table["storage"] = "inline_and_prediction_ref"
+
+    mutable["prediction_table"] = table
+    return ensure_json_safe(mutable)
+
+
+def prediction_rows_from_payload(
+    payload: Mapping[str, Any],
+) -> List[Dict[str, Any]]:
+    """Return complete prediction rows from inline storage or sidecar."""
+    table = dict(payload.get("prediction_table") or {})
+    table_rows = [
+        dict(row)
+        for row in table.get("rows") or []
+    ]
+
+    if table_rows and bool(table.get("inline_complete", True)):
+        return table_rows
+
+    records = [
+        dict(row)
+        for row in payload.get("records") or []
+    ]
+
+    if records and bool(payload.get("records_inline_complete", True)):
+        return records
+
+    prediction_ref = payload.get("prediction_ref")
+    if isinstance(prediction_ref, Mapping):
+        return load_predictions_sidecar(prediction_ref)
+
+    return table_rows or records
+
 def normalize_model_artifact_payload(
     *,
     context: Any,
@@ -413,7 +680,6 @@ def load_model_from_payload(payload: Mapping[str, Any]) -> Any:
         return load_model_sidecar(payload["model_ref"])
 
     raise ValueError("ml.model payload has neither `model` nor `model_ref`.")
-
 
 def _safe_filename(value: str) -> str:
     safe = []

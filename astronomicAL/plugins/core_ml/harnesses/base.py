@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from copy import deepcopy
+import hashlib
+import random
+import time
+from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from ..data.dataset_access import get_dataset_frame
 from ..protocol import DataBinding, Partition, Partitions, ProtocolConfig, TargetSpec
-from ..runtime import check_cancelled, put_artifact
+from ..runtime import MLRecipePaused, check_cancelled, cleanup_ml_runtime, publish, put_artifact
 from ..serialization import json_safe
 from ..split_datasets import materialize_split_datasets
 
@@ -34,6 +39,10 @@ class RunHarness:
         self._best_epoch = None
         self._best_state = None
         self._history: List[Dict[str, Any]] = []
+        self._parts: Optional[Partitions] = None
+        self._target: Optional[TargetSpec] = None
+        self._split_spec_artifact_id: Optional[str] = None
+        self._last_completed_epoch: int = 0
 
     # ---- the ONE primitive the recipe calls each epoch ---------------------
     def report_epoch(
@@ -100,6 +109,452 @@ class RunHarness:
 
         return val_metrics
 
+    def check_pause_boundary(self, epoch: int, model: Any, components: Any) -> None:
+        """Pause only after a complete epoch and scheduler update.
+
+        Built-in recipes call this immediately after their scheduler step. The
+        method persists both a full resumable checkpoint and an ml.model artifact
+        that can be selected by the Predictor while training is paused.
+        """
+        self._last_completed_epoch = int(epoch)
+        if not bool(getattr(self.run, "pause_requested", False)):
+            return
+        payload = self._persist_pause(model=model, components=components, completed_epoch=int(epoch))
+        raise MLRecipePaused(
+            f"Training paused after epoch {int(epoch)}.",
+            pause_payload=payload,
+        )
+
+    def _persist_pause(self, *, model: Any, components: Any, completed_epoch: int) -> Dict[str, Any]:
+        from ..resume import save_resume_checkpoint, write_paused_model_manifest
+
+        if self._parts is None or self._target is None:
+            raise RuntimeError("Cannot pause before partitions and target metadata are available.")
+
+        framework = str(self.run.params.get("framework") or getattr(self.recipe, "framework", "")).lower()
+        pause_reason = str(
+            getattr(getattr(self.run, "training_control", None), "pause_reason", "")
+            or "Training pause requested."
+        )
+        # Record the boundary before serialising logger state. The later paused
+        # event includes artifact ids, but this marker ensures a resumed training
+        # log still shows where and why execution stopped.
+        self.run.log(
+            message=f"{pause_reason} Saving epoch {completed_epoch} state.",
+            status="pausing",
+            step=completed_epoch,
+            metrics={},
+            extra={"phase": "pause_boundary", "completed_epoch": completed_epoch},
+        )
+        framework_state = self._capture_framework_resume_state(model, components, framework=framework)
+        state = {
+            "schema_version": 1,
+            "status": "paused",
+            "run_id": self.run.run_id,
+            "recipe_id": self.run.recipe_id,
+            "recipe_version": self.run.recipe_version,
+            "dataset_id": self.run.dataset_id,
+            "framework": framework,
+            "task": self._task_kind(),
+            "modality": str(getattr(self.recipe, "modality", "") or self.run.params.get("modality", "")),
+            "completed_epoch": int(completed_epoch),
+            "next_epoch": int(completed_epoch) + 1,
+            "params": dict(self.run.params),
+            "protocol": self._protocol_state(),
+            "binding": self._binding_state(),
+            "target": self._target_state(self._target),
+            "partition_signatures": self._partition_signatures(self._parts),
+            "split_spec_artifact_id": self._split_spec_artifact_id,
+            "history": list(self._history),
+            "best_epoch": self._best_epoch,
+            "best_score": self._best_score,
+            "best_state": self._best_state,
+            "framework_state": framework_state,
+            "logger_state": (
+                self.run.logger.checkpoint_state()
+                if getattr(self.run, "logger", None) is not None
+                and callable(getattr(self.run.logger, "checkpoint_state", None))
+                else {}
+            ),
+            "rng_state": self._capture_rng_state(framework=framework),
+            "training_log_artifact_id": self.run.training_log_artifact_id,
+            "created_at": time.time(),
+        }
+        # Torch prediction reconstruction already understands a top-level
+        # state_dict checkpoint. Keep the alias in addition to framework_state.
+        if framework == "torch":
+            state["state_dict"] = framework_state.get("model_state_dict")
+            state["model_state_dict"] = framework_state.get("model_state_dict")
+            state["class_names"] = list(self._target.classes)
+            state["num_classes"] = int(self._target.num_outputs)
+            state["num_outputs"] = int(self._target.num_outputs)
+            state["input_contract"] = self._binding_state()
+
+        resume_ref, resume_manifest_path = save_resume_checkpoint(
+            run=self.run,
+            state=state,
+            framework=framework,
+            completed_epoch=completed_epoch,
+        )
+        resume_payload = {
+            "artifact_type": "ml.resume_checkpoint",
+            "schema_version": 1,
+            "status": "paused",
+            "resumable": True,
+            "run_id": self.run.run_id,
+            "recipe_id": self.run.recipe_id,
+            "recipe_version": self.run.recipe_version,
+            "dataset_id": self.run.dataset_id,
+            "completed_epoch": int(completed_epoch),
+            "next_epoch": int(completed_epoch) + 1,
+            "resume_ref": resume_ref,
+            "manifest_path": str(resume_manifest_path),
+            "params": json_safe(self.run.params),
+            "protocol": json_safe(self._protocol_state()),
+            "binding": json_safe(self._binding_state()),
+            "split_spec_artifact_id": self._split_spec_artifact_id,
+            "training_log_artifact_id": self.run.training_log_artifact_id,
+            "created_at": time.time(),
+        }
+        resume_artifact_id = self.run.put_artifact(
+            "ml.resume_checkpoint",
+            resume_payload,
+            params=self.run.params,
+            required=True,
+        )
+
+        model_payload = self._paused_model_payload(
+            resume_ref=resume_ref,
+            resume_artifact_id=resume_artifact_id,
+            resume_manifest_path=resume_manifest_path,
+            completed_epoch=completed_epoch,
+        )
+        model_dir = Path(str(resume_manifest_path)).parent.parent / "model"
+        model_manifest_path = model_dir / f"paused-epoch-{completed_epoch:06d}.model_manifest.json"
+        model_payload.setdefault("files", {})["manifest"] = str(model_manifest_path)
+        write_paused_model_manifest(model_manifest_path, model_payload)
+        model_artifact_id = self.run.put_artifact(
+            "ml.model",
+            model_payload,
+            params=self.run.params,
+            required=True,
+        )
+
+        payload = {
+            "status": "paused",
+            "message": f"Training paused after epoch {completed_epoch}.",
+            "run_id": self.run.run_id,
+            "dataset_id": self.run.dataset_id,
+            "recipe_id": self.run.recipe_id,
+            "recipe_version": self.run.recipe_version,
+            "completed_epoch": int(completed_epoch),
+            "next_epoch": int(completed_epoch) + 1,
+            "resume_checkpoint_artifact_id": resume_artifact_id,
+            "resume_manifest_path": str(resume_manifest_path),
+            "resume_checkpoint_path": str(resume_ref.get("uri") or resume_ref.get("path")),
+            "model_artifact_id": model_artifact_id,
+            "model_manifest_path": str(model_manifest_path),
+            "model_path": str(resume_ref.get("uri") or resume_ref.get("path")),
+            "training_log_artifact_id": self.run.training_log_artifact_id,
+            "artifact_ids": {
+                "resume_checkpoint_artifact_id": resume_artifact_id,
+                "model_artifact_id": model_artifact_id,
+                "training_log_artifact_id": self.run.training_log_artifact_id,
+            },
+        }
+        if getattr(self.run, "logger", None) is not None:
+            self.run.logger.update_summary(**payload)
+        self.run.log(
+            message=payload["message"],
+            status="paused",
+            step=completed_epoch,
+            metrics={},
+            extra={"phase": "paused", **payload["artifact_ids"]},
+        )
+        publish(self.run.context, "ml.model.saved", {
+            "artifact_id": model_artifact_id,
+            "model_artifact_id": model_artifact_id,
+            "run_id": self.run.run_id,
+            "status": "paused",
+            "model_path": payload["model_path"],
+            "manifest_path": payload["model_manifest_path"],
+        })
+        publish(self.run.context, "ml.recipe_run.paused", payload)
+        return payload
+
+    def _capture_framework_resume_state(self, model: Any, components: Any, *, framework: str) -> Dict[str, Any]:
+        if framework == "torch":
+            module = model.module if hasattr(model, "module") else model
+            state = {
+                "model_state_dict": self._to_cpu(module.state_dict()),
+                "parameter_requires_grad": {
+                    str(name): bool(parameter.requires_grad)
+                    for name, parameter in module.named_parameters()
+                },
+                "optimizer_state_dict": self._to_cpu(
+                    components.optimizer.state_dict() if getattr(components, "optimizer", None) is not None else None
+                ),
+                "scheduler_state_dict": self._to_cpu(
+                    components.scheduler.state_dict() if getattr(components, "scheduler", None) is not None else None
+                ),
+                "extra_state_dicts": {},
+            }
+            for key, value in dict(getattr(components, "extra", {}) or {}).items():
+                state_dict = getattr(value, "state_dict", None)
+                if callable(state_dict):
+                    try:
+                        state["extra_state_dicts"][str(key)] = self._to_cpu(state_dict())
+                    except Exception:
+                        pass
+            return state
+        if framework == "sklearn":
+            from sklearn.pipeline import Pipeline
+
+            fitted_preprocessor = deepcopy(getattr(self, "_fitted_preprocessor", None))
+            fitted_model = deepcopy(model)
+            prediction_model = Pipeline([
+                ("preprocess", fitted_preprocessor),
+                ("model", deepcopy(fitted_model)),
+            ])
+            return {
+                "model": fitted_model,
+                "fitted_preprocessor": fitted_preprocessor,
+                "prediction_model": prediction_model,
+            }
+        raise ValueError(f"Pause/resume is not supported for framework {framework!r}.")
+
+    def _restore_resume_state(self, model: Any, components: Any, parts: Partitions, target: TargetSpec):
+        state = dict(getattr(self.run, "resume_state", {}) or {})
+        if not state:
+            return model, components
+        self._validate_resume_identity(state, parts, target)
+        self._history = [dict(row) for row in state.get("history") or [] if isinstance(row, Mapping)]
+        self._best_epoch = state.get("best_epoch")
+        self._best_score = state.get("best_score")
+        self._best_state = state.get("best_state")
+        self._last_completed_epoch = int(state.get("completed_epoch", 0) or 0)
+        self.run.start_epoch = self._last_completed_epoch + 1
+
+        framework = str(state.get("framework") or self.run.params.get("framework") or "").lower()
+        framework_state = dict(state.get("framework_state") or {})
+        if framework == "torch":
+            module = model.module if hasattr(model, "module") else model
+            model_state = framework_state.get("model_state_dict") or state.get("model_state_dict") or state.get("state_dict")
+            if model_state is None:
+                raise ValueError("Resume checkpoint is missing the torch model state.")
+            module.load_state_dict(model_state, strict=True)
+            requires_grad = dict(framework_state.get("parameter_requires_grad") or {})
+            if requires_grad:
+                for name, parameter in module.named_parameters():
+                    if name in requires_grad:
+                        parameter.requires_grad = bool(requires_grad[name])
+            optimizer = getattr(components, "optimizer", None)
+            optimizer_state = framework_state.get("optimizer_state_dict")
+            if optimizer is not None and optimizer_state is not None:
+                optimizer.load_state_dict(optimizer_state)
+                self._move_optimizer_state(optimizer, getattr(self, "device", "cpu"))
+            scheduler = getattr(components, "scheduler", None)
+            scheduler_state = framework_state.get("scheduler_state_dict")
+            if scheduler is not None and scheduler_state is not None:
+                scheduler.load_state_dict(scheduler_state)
+            for key, extra_state in dict(framework_state.get("extra_state_dicts") or {}).items():
+                value = dict(getattr(components, "extra", {}) or {}).get(key)
+                load_state_dict = getattr(value, "load_state_dict", None)
+                if callable(load_state_dict):
+                    load_state_dict(extra_state)
+        elif framework == "sklearn":
+            saved_model = framework_state.get("model")
+            if saved_model is None:
+                raise ValueError("Resume checkpoint is missing the fitted sklearn estimator.")
+            model = saved_model
+            self._fitted_preprocessor = framework_state.get("fitted_preprocessor")
+            self._preprocessor = self._fitted_preprocessor
+        else:
+            raise ValueError(f"Resume checkpoint uses unsupported framework {framework!r}.")
+
+        self._restore_rng_state(state.get("rng_state") or {}, framework=framework)
+        self.run.log(
+            message=f"Resuming after epoch {self._last_completed_epoch}.",
+            status="running",
+            step=self._last_completed_epoch,
+            metrics={},
+            extra={"phase": "resumed", "next_epoch": self.run.start_epoch},
+        )
+        return model, components
+
+    def _validate_resume_identity(self, state: Mapping[str, Any], parts: Partitions, target: TargetSpec) -> None:
+        checks = {
+            "recipe_id": self.run.recipe_id,
+            "recipe_version": self.run.recipe_version,
+            "dataset_id": self.run.dataset_id,
+        }
+        for key, expected in checks.items():
+            saved = state.get(key)
+            if saved not in (None, "", expected):
+                raise ValueError(f"Resume checkpoint {key}={saved!r} does not match current {expected!r}.")
+        saved_signatures = dict(state.get("partition_signatures") or {})
+        current_signatures = self._partition_signatures(parts)
+        if saved_signatures and saved_signatures != current_signatures:
+            raise ValueError(
+                "The dataset partitions no longer match the paused run. Resume was refused "
+                "to avoid training on a different train/validation/test split."
+            )
+        saved_target = dict(state.get("target") or {})
+        if saved_target and saved_target != self._target_state(target):
+            raise ValueError("The target/class schema no longer matches the paused run.")
+
+    def _paused_model_payload(
+        self,
+        *,
+        resume_ref: Mapping[str, Any],
+        resume_artifact_id: str,
+        resume_manifest_path: Path,
+        completed_epoch: int,
+    ) -> Dict[str, Any]:
+        parts, target = self._parts, self._target
+        assert parts is not None and target is not None
+        title = str(getattr(self.recipe, "title", None) or self.run.recipe_id)
+        return json_safe({
+            "artifact_type": "ml.model",
+            "schema_version": 3,
+            "kind": "paused_model",
+            "framework": str(self.run.params.get("framework") or getattr(self.recipe, "framework", "")),
+            "task": self._task_kind(),
+            "modality": str(getattr(self.recipe, "modality", "") or self.run.params.get("modality", "")),
+            "run_id": self.run.run_id,
+            "source_dataset_id": self.run.dataset_id,
+            "dataset_id": parts.train_dataset_id or self.run.dataset_id,
+            "train_dataset_id": parts.train_dataset_id,
+            "validation_dataset_id": parts.validation_dataset_id,
+            "test_dataset_id": parts.test_dataset_id,
+            "split_dataset_ids": dict(parts.materialized_split_dataset_ids or {}),
+            "split_spec_artifact_id": self._split_spec_artifact_id,
+            "recipe_id": self.run.recipe_id,
+            "recipe_version": self.run.recipe_version,
+            "protocol_id": parts.protocol_id,
+            "created_at": time.time(),
+            "training_status": "paused",
+            "resumable": True,
+            "paused_epoch": int(completed_epoch),
+            "resume_checkpoint_artifact_id": resume_artifact_id,
+            "resume_manifest_path": str(resume_manifest_path),
+            "training_log_artifact_id": self.run.training_log_artifact_id,
+            "model_title": f"{title} (paused at epoch {completed_epoch})",
+            "model_id": f"{self.run.recipe_id}.paused.{self.run.run_id}.{completed_epoch}",
+            "model_ref": dict(resume_ref),
+            "class_names": list(target.classes),
+            "num_classes": int(target.num_classes),
+            "num_outputs": int(target.num_outputs),
+            "feature_columns": list(self.binding.input_columns or []),
+            "input_contract": self._binding_state(),
+            "protocol": self._protocol_state(),
+            "params": dict(self.run.params),
+            "metrics": {
+                "best_score": self._best_score,
+                "selection_metric": self.protocol.selection_metric,
+                "best_epoch": self._best_epoch,
+                "paused_epoch": int(completed_epoch),
+            },
+            "files": {
+                "checkpoint": str(resume_ref.get("uri") or resume_ref.get("path")),
+                "resume_manifest": str(resume_manifest_path),
+            },
+        })
+
+    def _partition_signatures(self, parts: Partitions) -> Dict[str, Any]:
+        result: Dict[str, Any] = {}
+        for name, partition in (("train", parts.train), ("validation", parts.val), ("test", parts.test)):
+            if partition is None:
+                result[name] = None
+                continue
+            encoded = "\0".join(str(value) for value in partition.record_ids).encode("utf-8")
+            result[name] = {"count": len(partition.record_ids), "sha256": hashlib.sha256(encoded).hexdigest()}
+        return result
+
+    def _protocol_state(self) -> Dict[str, Any]:
+        p = self.protocol
+        return {
+            "protocol_id": p.protocol_id,
+            "split_strategy": p.split_strategy,
+            "validation_source": p.validation_source,
+            "test_source": p.test_source,
+            "validation_dataset_id": p.validation_dataset_id,
+            "test_dataset_id": p.test_dataset_id,
+            "group_column": p.group_column,
+            "split_column": p.split_column,
+            "validation_size": p.validation_size,
+            "test_size": p.test_size,
+            "selection_metric": p.selection_metric,
+            "selection_mode": p.selection_mode,
+            "random_state": p.random_state,
+        }
+
+    def _binding_state(self) -> Dict[str, Any]:
+        b = self.binding
+        return {
+            "record_id_column": b.record_id_column,
+            "target_column": b.target_column,
+            "image_column": b.image_column,
+            "feature_columns": list(b.input_columns or []),
+            "input_columns": list(b.input_columns or []),
+        }
+
+    @staticmethod
+    def _target_state(target: TargetSpec) -> Dict[str, Any]:
+        return {"kind": target.kind, "classes": list(target.classes), "n_outputs": int(target.n_outputs)}
+
+    def _capture_rng_state(self, *, framework: str) -> Dict[str, Any]:
+        import numpy as np
+        state: Dict[str, Any] = {"python": random.getstate(), "numpy": np.random.get_state()}
+        if framework == "torch":
+            import torch
+            state["torch_cpu"] = torch.get_rng_state()
+            if torch.cuda.is_available():
+                try:
+                    state["torch_cuda"] = torch.cuda.get_rng_state_all()
+                except Exception:
+                    pass
+        return state
+
+    def _restore_rng_state(self, state: Mapping[str, Any], *, framework: str) -> None:
+        import numpy as np
+        if state.get("python") is not None:
+            random.setstate(state["python"])
+        if state.get("numpy") is not None:
+            np.random.set_state(state["numpy"])
+        if framework == "torch":
+            import torch
+            if state.get("torch_cpu") is not None:
+                torch.set_rng_state(state["torch_cpu"])
+            if state.get("torch_cuda") is not None and torch.cuda.is_available():
+                torch.cuda.set_rng_state_all(state["torch_cuda"])
+
+    def _to_cpu(self, value: Any) -> Any:
+        if isinstance(value, Mapping):
+            return {key: self._to_cpu(item) for key, item in value.items()}
+        if isinstance(value, tuple):
+            return tuple(self._to_cpu(item) for item in value)
+        if isinstance(value, list):
+            return [self._to_cpu(item) for item in value]
+        detach = getattr(value, "detach", None)
+        cpu = getattr(value, "cpu", None)
+        if callable(detach) and callable(cpu):
+            try:
+                return value.detach().cpu()
+            except Exception:
+                return value
+        return value
+
+    def _move_optimizer_state(self, optimizer: Any, device: Any) -> None:
+        for state in getattr(optimizer, "state", {}).values():
+            for key, value in list(state.items()):
+                to = getattr(value, "to", None)
+                if callable(to):
+                    try:
+                        state[key] = value.to(device)
+                    except Exception:
+                        pass
+
 # ---- task abstraction (overridable; default classification) ------------
     def _task_kind(self) -> str:
         task = str(
@@ -145,83 +600,182 @@ class RunHarness:
 # ---- the protocol flow (NOT overridable by recipes) --------------------
     def execute(self) -> Dict[str, Any]:
         recipe, run = self.recipe, self.run
+        parts = None
+        model = None
+        components = None
+        train_loader = None
+        test_loader = None
+        completed = False
 
-        parts = self._partition()                               # PROTOCOL
-        split_spec_id = self._write_split_spec(parts)           # AUDIT: row-ids on disk
+        try:
+            parts = self._partition()                           # PROTOCOL
+            split_spec_id = self._write_split_spec(parts)       # AUDIT: row-ids on disk
+            self._parts = parts
+            self._split_spec_artifact_id = split_spec_id
 
-        target = self._target_spec(parts)                       # what 'output' means
-        model = self._build_model(parts, target)
-        components = recipe.configure_training(run, model)
+            target = self._target_spec(parts)                   # what 'output' means
+            self._target = target
+            model = self._build_model(parts, target)
+            components = recipe.configure_training(run, model)
 
-        train_loader = self._make_loader(parts.train, train=True)
-        self._val_loader = self._make_loader(parts.val, train=False)
+            train_loader = self._make_loader(parts.train, train=True)
+            self._val_loader = self._make_loader(parts.val, train=False)
 
-        self._assert_output_dim(model, target, train_loader)    # kuangliu-10 trap
+            model, components = self._restore_resume_state(model, components, parts, target)
+            self._assert_output_dim(model, target, train_loader)
+            # Output validation may iterate a shuffled loader or execute random
+            # evaluation transforms. Restore the checkpoint RNG again afterwards
+            # so the first resumed training batch is exactly the one that would
+            # have followed the paused epoch.
+            if getattr(self.run, "resume_state", None):
+                framework = str(
+                    self.run.resume_state.get("framework")
+                    or self.run.params.get("framework")
+                    or getattr(self.recipe, "framework", "")
+                ).lower()
+                self._restore_rng_state(
+                    self.run.resume_state.get("rng_state") or {},
+                    framework=framework,
+                )
 
-        # Expert's loop. It only sees train_loader + report_epoch(harness).
-        recipe.fit(run, model=model, components=components,
-                   train_loader=train_loader, harness=self)
-
-        if self._best_state is None:
-            raise RuntimeError(
-                "Recipe completed without calling harness.report_epoch(...). "
-                "A managed recipe must report at least one epoch so the harness "
-                "can select on the validation partition.")
-        self._restore(model, self._best_state)                  # best-epoch weights
-
-        test_metrics, test_records = {}, []
-        if parts.test is not None and len(parts.test) > 0:       # test LAST, ONCE
-            test_loader = self._make_loader(parts.test, train=False)
-            test_metrics, test_records = self._evaluate(
-                model, test_loader, return_records=True)
-
-        model_artifact_id = self._write_model_artifact(
-            model,
-            parts,
-            target,
-            split_spec_artifact_id=split_spec_id,
-        )
-
-        eval_id = self._write_evaluation_report(
-            parts=parts,
-            split_spec_id=split_spec_id,
-            test_metrics=test_metrics,
-            model_artifact_id=model_artifact_id,
-        )
-
-        predictions_id = None
-        if test_records:
-            predictions_id = self._write_predictions(
-                test_records,
-                parts,
-                model_artifact_id,
+            # Expert's loop. It only sees train_loader + report_epoch(harness).
+            recipe.fit(
+                run,
+                model=model,
+                components=components,
+                train_loader=train_loader,
+                harness=self,
             )
 
-        result = {
-            "status": "complete",
-            "model_artifact_id": model_artifact_id,
-            "evaluation_report_artifact_id": eval_id,
-            "predictions_artifact_id": predictions_id,
-            "split_spec_artifact_id": split_spec_id,
-            "source_dataset_id": self.run.dataset_id,
-            "train_dataset_id": parts.train_dataset_id,
-            "validation_dataset_id": parts.validation_dataset_id,
-            "test_dataset_id": parts.test_dataset_id,
-            "split_dataset_ids": dict(parts.materialized_split_dataset_ids or {}),
-            "best_epoch": self._best_epoch,
-            "best_score": self._best_score,
-            "selection_metric": self.protocol.selection_metric,
-            "selection_mode": self.protocol.resolved_mode(),
-            "protocol_id": self.protocol.protocol_id,
-            "task_kind": target.kind,
-            "test_metrics": test_metrics,
-            "history": self._history,
-        }
+            if self._best_state is None:
+                raise RuntimeError(
+                    "Recipe completed without calling harness.report_epoch(...). "
+                    "A managed recipe must report at least one epoch so the harness "
+                    "can select on the validation partition."
+                )
 
-        if getattr(self.run, "logger", None) is not None:
-            self.run.logger.update_summary(**result)
+            self._restore(model, self._best_state)
 
-        return result
+            test_metrics, test_records = {}, []
+            if parts.test is not None and len(parts.test) > 0:
+                test_loader = self._make_loader(parts.test, train=False)
+                test_metrics, test_records = self._evaluate(
+                    model,
+                    test_loader,
+                    return_records=True,
+                )
+
+            model_artifact_id = self._write_model_artifact(
+                model,
+                parts,
+                target,
+                split_spec_artifact_id=split_spec_id,
+            )
+            if not model_artifact_id:
+                raise RuntimeError("The trained model could not be persisted as an ml.model artifact.")
+
+            eval_id = self._write_evaluation_report(
+                parts=parts,
+                split_spec_id=split_spec_id,
+                test_metrics=test_metrics,
+                model_artifact_id=model_artifact_id,
+            )
+
+            predictions_id = None
+            if test_records:
+                predictions_id = self._write_predictions(
+                    test_records,
+                    parts,
+                    model_artifact_id,
+                )
+
+            result = {
+                "status": "complete",
+                "model_artifact_id": model_artifact_id,
+                "evaluation_report_artifact_id": eval_id,
+                "predictions_artifact_id": predictions_id,
+                "split_spec_artifact_id": split_spec_id,
+                "source_dataset_id": self.run.dataset_id,
+                "train_dataset_id": parts.train_dataset_id,
+                "validation_dataset_id": parts.validation_dataset_id,
+                "test_dataset_id": parts.test_dataset_id,
+                "split_dataset_ids": dict(parts.materialized_split_dataset_ids or {}),
+                "best_epoch": self._best_epoch,
+                "best_score": self._best_score,
+                "selection_metric": self.protocol.selection_metric,
+                "selection_mode": self.protocol.resolved_mode(),
+                "protocol_id": self.protocol.protocol_id,
+                "task_kind": target.kind,
+                "test_metrics": test_metrics,
+                "history": self._history,
+            }
+
+            if getattr(self.run, "logger", None) is not None:
+                self.run.logger.update_summary(**result)
+
+            completed = True
+            return result
+        finally:
+            cleanup = getattr(recipe, "cleanup", None)
+            if callable(cleanup):
+                try:
+                    cleanup(run)
+                except Exception:
+                    pass
+
+            # Move the live model and optimizer state off the accelerator before
+            # dropping references. This also updates references held by an exception
+            # traceback while the runner is still recording diagnostics.
+            if model is not None:
+                try:
+                    model.to("cpu")
+                except Exception:
+                    pass
+                try:
+                    for parameter in model.parameters():
+                        parameter.grad = None
+                except Exception:
+                    pass
+
+            optimizer = getattr(components, "optimizer", None)
+            if optimizer is not None:
+                try:
+                    optimizer.zero_grad(set_to_none=True)
+                except Exception:
+                    pass
+                try:
+                    optimizer.state.clear()
+                except Exception:
+                    pass
+
+            if components is not None:
+                for attribute in ("optimizer", "scheduler", "criterion"):
+                    try:
+                        setattr(components, attribute, None)
+                    except Exception:
+                        pass
+                try:
+                    components.extra.clear()
+                except Exception:
+                    pass
+
+            # Drop the largest references before collecting accelerator caches.
+            self._val_loader = None
+            self._best_state = None
+            self._frame = None
+            self._partition_frames.clear()
+            self._parts = None
+            self._target = None
+            test_loader = None
+            train_loader = None
+            optimizer = None
+            components = None
+            model = None
+            parts = None
+            cleanup_ml_runtime(
+                reason="managed recipe harness cleanup",
+                aggressive=not completed,
+            )
 
     def _load_partition_frame(
         self,
@@ -828,7 +1382,6 @@ class RunHarness:
             )
             self.run.params["split_dataset_ids"] = dict(split_dataset_ids)
 
-
         self._frame = train_df
         self._partition_frames = {
             "train": train_df,
@@ -1179,8 +1732,41 @@ class RunHarness:
         )
 
     def _write_predictions(self, records, parts, model_artifact_id) -> Optional[str]:
-        return self.run.put_artifact("ml.predictions", {
-            "schema_version": 2,
+        from pathlib import Path
+
+        from ..artifacts import save_predictions_sidecar
+
+        rows = [dict(record) for record in records]
+        prediction_ref = None
+        if bool(self.run.params.get("save_predictions", True)):
+            prediction_ref = save_predictions_sidecar(
+                context=self.run.context,
+                run_id=self.run.run_id,
+                dataset_id=self.run.dataset_id,
+                model_artifact_id=str(model_artifact_id or "model"),
+                rows=rows,
+                params=self.run.params,
+            )
+
+        inline_limit_value = self.run.params.get(
+            "prediction_inline_limit"
+        )
+        inline_limit = max(
+            0,
+            (
+                1000
+                if inline_limit_value in (None, "")
+                else int(inline_limit_value)
+            ),
+        )
+
+        compact = (
+            prediction_ref is not None
+            and len(rows) > inline_limit
+        )
+
+        payload = {
+            "schema_version": 3,
             "run_id": self.run.run_id,
             "dataset_id": self.run.dataset_id,
             "model_artifact_id": model_artifact_id,
@@ -1188,8 +1774,30 @@ class RunHarness:
             "prediction_scope": "test",
             "record_id_column": parts.record_id_column,
             "class_names": parts.train.classes,
-            "records": records,
-        }, row_ids=[r["record_id"] for r in records])
+            "row_count": len(rows),
+            "records": [] if compact else rows,
+            "records_preview": rows[:25] if compact else [],
+            "records_inline_complete": not compact,
+            "prediction_ref": (
+                prediction_ref.to_dict()
+                if prediction_ref is not None
+                else None
+            ),
+        }
+        try:
+            return self.run.put_artifact(
+                "ml.predictions",
+                payload,
+                row_ids=[record["record_id"] for record in rows],
+                required=True,
+            )
+        except Exception:
+            if prediction_ref is not None:
+                try:
+                    Path(prediction_ref.uri).unlink(missing_ok=True)
+                except Exception:
+                    pass
+            raise
 
 # ---- modality/framework specifics (subclasses implement) ---------------
     def _make_loader(self, partition: Partition, *, train: bool): raise NotImplementedError

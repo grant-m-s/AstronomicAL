@@ -41,6 +41,7 @@ class CIFARResNetRecipe(ManagedMLRecipe):
         "test evaluation are enforced by AstronomicAL's protocol, not this code."
     )
     tags = ["torch", "image", "classification", "cifar"]
+    required_imports = ["torch", "torchvision", "PIL"]
     required_mappings = ["record_id"]
     optional_mappings = ["target_label", "image.path", "image.uri"]
     produces = [
@@ -209,7 +210,7 @@ class CIFARResNetRecipe(ManagedMLRecipe):
         model.to(device)
         epochs = int(run.params.get("epochs", 200))
 
-        for epoch in range(1, epochs + 1):
+        for epoch in run.epoch_range(epochs):
             run.check_cancelled()
             model.train()
             loss_sum = 0.0
@@ -239,6 +240,7 @@ class CIFARResNetRecipe(ManagedMLRecipe):
 
             if components.scheduler is not None:
                 components.scheduler.step()
+            harness.check_pause_boundary(epoch, model, components)
         # No return — the harness restored best-epoch weights after fit.
 
 # =============================================================================
@@ -481,8 +483,9 @@ class TimmImageClassifierRecipe(ManagedMLRecipe):
         "evaluation are enforced by the protocol, not this code."
     )
     tags = ["torch", "timm", "image", "classification", "transfer-learning"]
+    required_imports = ["torch", "torchvision", "PIL", "timm"]
     required_mappings = ["record_id"]
-    optional_mappings = ["target_label", "image.path", "image.uri"]
+    optional_mappings = ["target_label", "image.uri"]
     produces = ["ml.split_spec", "ml.model", "ml.evaluation_report",
                 "ml.predictions", "ml.training_log", "ml.run"]
 
@@ -551,7 +554,7 @@ class TimmImageClassifierRecipe(ManagedMLRecipe):
         import torch
         device = harness.device
         model.to(device)
-        for epoch in range(1, int(run.params.get("epochs", 30)) + 1):
+        for epoch in run.epoch_range(int(run.params.get("epochs", 30))):
             run.check_cancelled()
             model.train()
             loss_sum = correct = seen = 0
@@ -572,6 +575,7 @@ class TimmImageClassifierRecipe(ManagedMLRecipe):
             })
             if components.scheduler is not None:
                 components.scheduler.step()
+            harness.check_pause_boundary(epoch, model, components)
 
 # =============================================================================
 # 2. WideResNet on CIFAR-size cutouts  (hysts/pytorch_image_classification)
@@ -594,6 +598,7 @@ class WideResNetCIFARRecipe(ManagedMLRecipe):
         "classification). Protocol handles validation/selection/test."
     )
     tags = ["torch", "image", "classification", "cifar", "wideresnet"]
+    required_imports = ["torch", "torchvision", "PIL"]
     required_mappings = ["record_id"]
     optional_mappings = ["target_label", "image.path", "image.uri"]
     produces = ["ml.split_spec", "ml.model", "ml.evaluation_report",
@@ -712,7 +717,7 @@ class WideResNetCIFARRecipe(ManagedMLRecipe):
         import torch
         device = harness.device
         model.to(device)
-        for epoch in range(1, int(run.params.get("epochs", 200)) + 1):
+        for epoch in run.epoch_range(int(run.params.get("epochs", 200))):
             run.check_cancelled()
             model.train()
             loss_sum = correct = seen = 0
@@ -733,6 +738,7 @@ class WideResNetCIFARRecipe(ManagedMLRecipe):
             })
             if components.scheduler is not None:
                 components.scheduler.step()
+            harness.check_pause_boundary(epoch, model, components)
 
 # =============================================================================
 # 3. timm image REGRESSOR  (timm backbone, Zoobot-style continuous targets)
@@ -756,6 +762,7 @@ class TimmImageRegressorRecipe(ManagedMLRecipe):
         "splitting/selection/test; selection defaults to val_loss (min)."
     )
     tags = ["torch", "timm", "image", "regression", "photoz", "transfer-learning"]
+    required_imports = ["torch", "torchvision", "PIL", "timm"]
     required_mappings = ["record_id"]
     optional_mappings = ["target_label", "image.path", "image.uri"]
     produces = ["ml.split_spec", "ml.model", "ml.evaluation_report",
@@ -826,7 +833,7 @@ class TimmImageRegressorRecipe(ManagedMLRecipe):
         import torch
         device = harness.device
         model.to(device)
-        for epoch in range(1, int(run.params.get("epochs", 30)) + 1):
+        for epoch in run.epoch_range(int(run.params.get("epochs", 30))):
             run.check_cancelled()
             model.train()
             loss_sum = seen = 0
@@ -845,7 +852,7 @@ class TimmImageRegressorRecipe(ManagedMLRecipe):
             harness.report_epoch(epoch, model, train_metrics={"loss": loss_sum / max(seen, 1)})
             if components.scheduler is not None:
                 components.scheduler.step()
-
+            harness.check_pause_boundary(epoch, model, components)
 
 # =============================================================================
 # Specialised image recipes built on the core image baselines.
@@ -1019,7 +1026,7 @@ class CutMixTimmClassifierRecipe(TimmImageClassifierRecipe):
         alpha = float(run.params.get("cutmix_alpha", 1.0))
         clip_norm = float(run.params.get("gradient_clip_norm", 0.0))
 
-        for epoch in range(1, epochs + 1):
+        for epoch in run.epoch_range(epochs):
             run.check_cancelled()
             model.train()
             loss_sum = 0.0
@@ -1062,6 +1069,7 @@ class CutMixTimmClassifierRecipe(TimmImageClassifierRecipe):
             )
             if components.scheduler is not None:
                 components.scheduler.step()
+            harness.check_pause_boundary(epoch, model, components)
 
 class SAMWideResNetCIFARRecipe(WideResNetCIFARRecipe):
     id = "core.ml.sam_wideresnet_cifar"
@@ -1113,7 +1121,7 @@ class SAMWideResNetCIFARRecipe(WideResNetCIFARRecipe):
         model.to(device)
         epochs = int(run.params.get("epochs", 200))
 
-        for epoch in range(1, epochs + 1):
+        for epoch in run.epoch_range(epochs):
             run.check_cancelled()
             model.train()
             loss_sum = 0.0
@@ -1151,6 +1159,7 @@ class SAMWideResNetCIFARRecipe(WideResNetCIFARRecipe):
             )
             if components.scheduler is not None:
                 components.scheduler.step()
+            harness.check_pause_boundary(epoch, model, components)
 
 class ZoobotFineTuneImageRegressorRecipe(TimmImageRegressorRecipe):
     id = "core.ml.zoobot_finetune_regressor"
@@ -1239,7 +1248,7 @@ class ZoobotFineTuneImageRegressorRecipe(TimmImageRegressorRecipe):
         epochs = int(run.params.get("epochs", 40))
         freeze_epochs = int(run.params.get("freeze_backbone_epochs", 3))
 
-        for epoch in range(1, epochs + 1):
+        for epoch in run.epoch_range(epochs):
             run.check_cancelled()
             if epoch == freeze_epochs + 1:
                 for parameter in model.parameters():
@@ -1268,3 +1277,4 @@ class ZoobotFineTuneImageRegressorRecipe(TimmImageRegressorRecipe):
             )
             if components.scheduler is not None:
                 components.scheduler.step()
+            harness.check_pause_boundary(epoch, model, components)

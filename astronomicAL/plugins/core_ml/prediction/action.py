@@ -34,6 +34,7 @@ import importlib.util
 import math
 import sys
 import time
+import traceback
 import uuid
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -45,7 +46,16 @@ import pandas as pd
 
 from astronomicAL.platform.plugins.specs import ActionRequest
 
-from ..runtime import check_cancelled, coerce_action_request, request_dataset_id, publish as publish_event
+from ..runtime import (
+    check_cancelled,
+    cleanup_ml_runtime,
+    coerce_action_request,
+    is_out_of_memory_error,
+    MLPredictionExecutionError,
+    put_artifact,
+    request_dataset_id,
+    publish as publish_event,
+)
 from ..serialization import json_safe
 
 PREDICTION_SCHEMA_VERSION = 3
@@ -584,33 +594,187 @@ def _reproducibility_manifest(*, model_payload, transform_desc, checkpoint_sha25
 # =============================================================================
 
 class _PredictRunShim:
-    def __init__(self, *, context, params, binding):
+    def __init__(self, *, context, params, binding, dataset_id=None, cancel_token=None):
         self.context = context
         self.params = dict(params or {})
         self.binding = binding
-        self.dataset_id = None
+        self.dataset_id = dataset_id
         self.run_id = None
+        self.cancel_token = cancel_token
 
     def check_cancelled(self):
-        return None
+        check_cancelled(self.cancel_token)
 
     def log(self, *args, **kwargs):
         return None
 
-def _resolve_recipe(context, recipe_id):
-    if not recipe_id:
-        return None
+
+def _recipe_registry(context):
     services = getattr(context, "services", None)
     get = getattr(services, "get", None)
     if not callable(get):
         return None
     for key in ("core.ml.recipe_registry", "recipe_registry"):
         try:
-            spec = get(key).get(recipe_id)
-            return spec.recipe_cls()
+            return get(key)
         except Exception:
             continue
     return None
+
+
+def _resolve_recipe(context, recipe_id, *, require_available=False):
+    if not recipe_id:
+        return None
+    registry = _recipe_registry(context)
+    if registry is None:
+        return None
+    try:
+        spec = (
+            registry.require_available(recipe_id)
+            if require_available and callable(getattr(registry, "require_available", None))
+            else registry.get(recipe_id)
+        )
+        return spec.recipe_cls()
+    except Exception:
+        if require_available:
+            raise
+        return None
+
+
+def _reconstruct_recipe_torch_bundle(
+    *,
+    context,
+    model_payload,
+    resolved_binding,
+    prediction_params,
+    cancel_token=None,
+):
+    """Rebuild any managed torch recipe from its durable checkpoint contract."""
+    import torch
+
+    from .. import artifacts as artifact_utils
+    from ..protocol import DataBinding, TargetSpec
+
+    saved = artifact_utils.load_model_from_payload(model_payload)
+    if not isinstance(saved, Mapping):
+        raise TypeError("Torch recipe sidecar did not load to a checkpoint mapping.")
+
+    # Legacy image-sidecar bundles already contain a reconstructed module.
+    if saved.get("torch_model") is not None:
+        return {
+            "model": saved.get("torch_model"),
+            "recipe": None,
+            "run": None,
+            "checkpoint": dict(saved.get("checkpoint") or {}),
+            "saved": saved,
+        }
+
+    checkpoint = dict(saved.get("checkpoint_payload") or {})
+    state_dict = saved.get("state_dict") or checkpoint.get("state_dict")
+    if not checkpoint or state_dict is None:
+        raise ValueError("Torch model checkpoint is missing its state_dict payload.")
+
+    recipe_id = str(
+        checkpoint.get("recipe_id")
+        or model_payload.get("recipe_id")
+        or (model_payload.get("model_ref", {}).get("metadata", {}) or {}).get("recipe_id")
+        or ""
+    ).strip()
+    if not recipe_id:
+        raise ValueError("Torch model artifact is missing recipe_id and cannot be rebuilt.")
+
+    recipe = _resolve_recipe(context, recipe_id, require_available=True)
+    if recipe is None:
+        raise ValueError(f"Registered recipe {recipe_id!r} could not be loaded.")
+
+    input_contract = dict(model_payload.get("input_contract") or checkpoint.get("input_contract") or {})
+    modality = str(model_payload.get("modality") or checkpoint.get("modality") or "tabular").lower()
+    task = str(model_payload.get("task") or checkpoint.get("task") or "classification").lower()
+
+    if modality == "image":
+        input_columns = [
+            str(resolved_binding.get("image_column") or input_contract.get("image_column") or "")
+        ]
+    else:
+        input_columns = [
+            str(value)
+            for value in (
+                resolved_binding.get("feature_columns")
+                or input_contract.get("feature_columns")
+                or input_contract.get("input_columns")
+                or []
+            )
+            if str(value)
+        ]
+
+    binding = DataBinding(
+        record_id_column=str(
+            resolved_binding.get("record_id_column")
+            or input_contract.get("record_id_column")
+            or ""
+        ),
+        target_column=None,
+        input_columns=input_columns,
+        image_column=(
+            str(resolved_binding.get("image_column") or input_contract.get("image_column") or "")
+            or None
+        ),
+    )
+
+    saved_params = dict(checkpoint.get("params") or {})
+    # Runtime inference controls may override saved execution settings, but the
+    # architecture/transform parameters remain those used for training unless
+    # the caller explicitly supplies the same named field.
+    merged_params = {**saved_params, **dict(prediction_params or {})}
+    run = _PredictRunShim(
+        context=context,
+        params=merged_params,
+        binding=binding,
+        dataset_id=resolved_binding.get("dataset_id"),
+        cancel_token=cancel_token,
+    )
+
+    classes = [
+        str(value)
+        for value in (
+            model_payload.get("class_names")
+            or checkpoint.get("class_names")
+            or (model_payload.get("prediction_contract", {}).get("output_schema", {}) or {}).get("classes")
+            or []
+        )
+    ]
+    n_outputs = int(
+        model_payload.get("num_outputs")
+        or checkpoint.get("num_outputs")
+        or model_payload.get("num_classes")
+        or checkpoint.get("num_classes")
+        or len(classes)
+        or 1
+    )
+    target = TargetSpec(kind=task, classes=classes, n_outputs=n_outputs)
+
+    try:
+        model = recipe.build_model(run, target=target)
+    except TypeError:
+        model = recipe.build_model(run, num_classes=target.num_outputs)
+
+    module = model.module if hasattr(model, "module") else model
+    try:
+        module.load_state_dict(state_dict, strict=True)
+    except RuntimeError as exc:
+        raise ValueError(
+            f"Checkpoint for recipe {recipe_id!r} does not match the installed recipe architecture: {exc}"
+        ) from exc
+    module.eval()
+
+    return {
+        "model": model,
+        "recipe": recipe,
+        "run": run,
+        "checkpoint": checkpoint,
+        "saved": saved,
+        "classes": classes,
+    }
 
 # =============================================================================
 # Predictor base — owns the audit flow; subclasses own the forward pass only
@@ -727,13 +891,55 @@ class Predictor:
             payload["evaluation"] = eval_block
             payload["evaluation_report_artifact_id"] = eval_report_id
 
-        artifact_id = self.context.artifacts.put(
-            artifact_utils.ARTIFACTS.PREDICTIONS,
-            payload,
-            dataset_id=self.dataset_id,
-            row_ids=row_ids,
-            params={"model_artifact_id": self.model_artifact_id, **self.params},
+        prediction_rows = list(
+            (payload.get("prediction_table") or {}).get("rows") or []
         )
+        prediction_preview = prediction_rows[:25]
+        prediction_ref = None
+
+        if bool(self.params.get("save_predictions", True)):
+            prediction_ref = artifact_utils.save_predictions_sidecar(
+                context=self.context,
+                run_id=self.run_id,
+                dataset_id=self.dataset_id,
+                model_artifact_id=self.model_artifact_id,
+                rows=prediction_rows,
+                params=self.params,
+            )
+
+            inline_limit_value = self.params.get(
+                "prediction_inline_limit"
+            )
+            inline_limit = (
+                1000
+                if inline_limit_value in (None, "")
+                else int(inline_limit_value)
+            )
+
+            payload = artifact_utils.compact_predictions_payload(
+                payload,
+                prediction_ref=prediction_ref.to_dict(),
+                inline_limit=inline_limit,
+            )
+
+        try:
+            artifact_id = put_artifact(
+                self.context,
+                artifact_utils.ARTIFACTS.PREDICTIONS,
+                payload,
+                dataset_id=self.dataset_id,
+                row_ids=row_ids,
+                params={"model_artifact_id": self.model_artifact_id, **self.params},
+                persist=True,
+                required=True,
+            )
+        except Exception:
+            if prediction_ref is not None:
+                try:
+                    Path(prediction_ref.uri).unlink(missing_ok=True)
+                except Exception:
+                    pass
+            raise
 
         derived_dataset_id = None
         if bool(self.params.get("register_prediction_dataset", True)):
@@ -741,6 +947,7 @@ class Predictor:
                 context=self.context,
                 predictions_payload=payload,
                 predictions_artifact_id=artifact_id,
+                rows=prediction_rows,
             )
 
         self._publish_events(artifact_id, derived_dataset_id, payload)
@@ -759,14 +966,13 @@ class Predictor:
                 "evaluation": eval_block,
                 "recipe_version_check": self.recipe_version_check,
                 "checkpoint_sha256": checkpoint_sha,
+                "prediction_ref": prediction_ref.to_dict() if prediction_ref is not None else None,
                 "audit_gaps": AUDIT_GAPS,
                 "recommended_color_columns": payload.get("visualisation", {}).get(
                     "recommended_color_columns",
                     [],
                 ),
-                "prediction_preview": list(
-                    (payload.get("prediction_table") or {}).get("rows") or []
-                )[:25],
+                "prediction_preview": prediction_preview,
                 "prediction_table_columns": list(
                     (payload.get("prediction_table") or {}).get("columns") or []
                 ),
@@ -1003,55 +1209,65 @@ class TorchImagePredictor(Predictor):
     modality = "image"
 
     def reconstruct(self) -> None:
-
-        from .. import artifacts as artifact_utils
         from .. import image_sidecar
 
-        saved = artifact_utils.load_model_from_payload(self.model_payload)
-        if not isinstance(saved, Mapping):
-            raise TypeError("Image artifact did not load to a sidecar mapping.")
-        self._model = saved.get("torch_model")
-        if self._model is None or not self.classes:
-            raise ValueError("Reconstructed image model missing torch_model/classes.")
+        bundle = _reconstruct_recipe_torch_bundle(
+            context=self.context,
+            model_payload=self.model_payload,
+            resolved_binding={**self.binding, "dataset_id": self.dataset_id},
+            prediction_params=self.params,
+            cancel_token=self.cancel_token,
+        )
+        self._model = bundle["model"]
+        self._recipe = bundle.get("recipe")
+        self._recipe_run = bundle.get("run")
+        saved = bundle.get("saved") or {}
+        checkpoint = bundle.get("checkpoint") or {}
+
+        if self._model is None:
+            raise ValueError("Reconstructed image model is missing its torch module.")
+        if not self.classes:
+            self.classes = [str(value) for value in bundle.get("classes") or []]
+        if not self.classes:
+            raise ValueError("Reconstructed image model is missing class names.")
         self._model.eval()
 
-        image_size = int(saved.get("image_size") or 224)
-        normalization = dict(saved.get("normalization") or image_sidecar.DEFAULT_NORMALIZATION)
         self._image_column = self.binding.get("image_column") or self.params.get("image_column")
         if not self._image_column:
             raise ValueError("Compatibility did not resolve an image column.")
 
-        recipe = _resolve_recipe(self.context, str(self.model_payload.get("recipe_id") or "").strip())
-        if recipe is not None:
-            try:
-                from .. import registry as registry_mod
+        if self._recipe is not None and self._recipe_run is not None:
+            self._transform = self._recipe.eval_transform(self._recipe_run)
+            self._read = lambda row: self._recipe.load_sample(self._recipe_run, row)
+            self._forward = lambda model, batch: self._recipe.eval_forward(model, batch)
+            self.transform_desc = {
+                "source": "recipe.eval_transform",
+                "recipe_id": self._recipe.id,
+                "recipe_version": self.model_payload.get("recipe_version"),
+                "checkpoint_transform": json_safe(checkpoint.get("transform") or {}),
+            }
+            return
 
-                binding = registry_mod.DataBinding(
-                    record_id_column=str(self.binding.get("record_id_column") or "id"),
-                    target_column=None,
-                    input_columns=[str(self._image_column)],
-                    image_column=str(self._image_column),
-                )
-                saved_params = dict(saved.get("checkpoint", {}).get("params") or {})
-                shim = _PredictRunShim(context=self.context, params={**saved_params, **self.params}, binding=binding)
-                self._transform = recipe.eval_transform(shim)
-                self._read = lambda row: recipe.load_sample(shim, row)
-                self._forward = lambda m, b: recipe.eval_forward(m, b)
-                self.transform_desc = {"source": "recipe.eval_transform", "recipe_id": recipe.id}
-                return
-            except Exception:
-                pass
-
-        self._transform = image_sidecar.image_transform(image_size=image_size, normalization=normalization)
+        image_size = int(saved.get("image_size") or 224)
+        normalization = dict(saved.get("normalization") or image_sidecar.DEFAULT_NORMALIZATION)
+        self._transform = image_sidecar.image_transform(
+            image_size=image_size,
+            normalization=normalization,
+        )
         self._read = lambda row: image_sidecar.load_image(row[self._image_column])
-        self._forward = lambda m, b: m(b)
-        self.transform_desc = {"source": "image_sidecar", "image_size": image_size, "normalization": normalization}
+        self._forward = lambda model, batch: model(batch)
+        self.transform_desc = {
+            "source": "image_sidecar",
+            "image_size": image_size,
+            "normalization": normalization,
+        }
 
     def read_columns(self) -> List[str]:
         return [self.binding.get("image_column"), self.binding.get("record_id_column")]
 
     def predict_records(self, df) -> List[Dict[str, Any]]:
         import torch
+
         rid_col = self.binding.get("record_id_column")
         device = _torch_device(self.params)
         self._model.to(device)
@@ -1066,28 +1282,45 @@ class TorchImagePredictor(Predictor):
             check_cancelled(self.cancel_token)
             batch = torch.stack(tensors).to(device)
             with torch.no_grad():
-                probs = torch.softmax(self._forward(self._model, batch), dim=1).cpu().numpy()
-            for rid, p in zip(pending, probs):
-                records.append(_classification_record(rid, p, self.classes))
-            tensors.clear(); pending.clear()
+                probabilities = torch.softmax(
+                    self._forward(self._model, batch),
+                    dim=1,
+                ).cpu().numpy()
+            for record_id, probability in zip(pending, probabilities):
+                records.append(_classification_record(record_id, probability, self.classes))
+            tensors.clear()
+            pending.clear()
+            del batch
 
-        for idx, row in df.iterrows():
-            check_cancelled(self.cancel_token)
-            rid = str(row[rid_col]) if (rid_col and rid_col in df.columns) else str(idx)
+        try:
+            for idx, row in df.iterrows():
+                check_cancelled(self.cancel_token)
+                record_id = str(row[rid_col]) if (rid_col and rid_col in df.columns) else str(idx)
+                try:
+                    tensors.append(self._transform(self._read(row)))
+                    pending.append(record_id)
+                except Exception as exc:
+                    failed.append({"record_id": record_id, "error": str(exc)})
+                    if not skip_bad:
+                        raise ValueError(
+                            f"Could not load image for row {record_id}: {exc}"
+                        ) from exc
+                if len(tensors) >= batch_size:
+                    flush()
+            flush()
+            self.failed_rows = failed
+            if failed:
+                self.transform_desc["failed_rows"] = len(failed)
+            return records
+        finally:
+            tensors.clear()
+            pending.clear()
             try:
-                tensors.append(self._transform(self._read(row)))
-                pending.append(rid)
-            except Exception as exc:
-                failed.append({"record_id": rid, "error": str(exc)})
-                if not skip_bad:
-                    raise ValueError(f"Could not load image for row {rid}: {exc}") from exc
-            if len(tensors) >= batch_size:
-                flush()
-        flush()
-        self.failed_rows = failed
-        if failed:
-            self.transform_desc["failed_rows"] = len(failed)
-        return records
+                self._model.to("cpu")
+            except Exception:
+                pass
+            cleanup_ml_runtime(reason="torch image prediction cleanup")
+
 
 def _normalise_probability_matrix(values: Any) -> Optional[np.ndarray]:
     """Validate and row-normalise a probability matrix."""
@@ -1273,38 +1506,119 @@ class TorchTabularPredictor(Predictor):
     modality = "tabular"
 
     def reconstruct(self) -> None:
+        bundle = _reconstruct_recipe_torch_bundle(
+            context=self.context,
+            model_payload=self.model_payload,
+            resolved_binding={**self.binding, "dataset_id": self.dataset_id},
+            prediction_params=self.params,
+            cancel_token=self.cancel_token,
+        )
+        self._model = bundle["model"]
+        self._recipe = bundle.get("recipe")
+        self._recipe_run = bundle.get("run")
+        saved = bundle.get("saved") or {}
 
-        from .. import artifacts as artifact_utils
+        self._features = [str(c) for c in self.binding.get("feature_columns") or []]
+        if not self._features:
+            raise ValueError("Compatibility did not resolve feature columns.")
 
-        saved = artifact_utils.load_model_from_payload(self.model_payload)
-        if not isinstance(saved, Mapping):
-            raise TypeError("Torch tabular sidecar must be a mapping.")
-        self._model = saved.get("torch_model") or saved.get("model")
+        # Compatibility with pre-recipe torch bundles that stored a fitted
+        # preprocessor next to the model.
         self._pre = saved.get("preprocessor")
         self._label_encoder = saved.get("label_encoder")
-        if self._model is None or self._pre is None:
-            raise ValueError("Torch tabular prediction needs torch_model + preprocessor.")
+        self._transform = (
+            self._recipe.eval_transform(self._recipe_run)
+            if self._recipe is not None and self._recipe_run is not None
+            else None
+        )
         self._model.eval()
-        self._features = [str(c) for c in self.binding.get("feature_columns") or []]
-        self.transform_desc = {"source": "torch_tabular_preprocessor", "feature_columns": self._features}
+        self.transform_desc = {
+            "source": (
+                "recipe.load_sample/eval_transform"
+                if self._recipe is not None
+                else "legacy_torch_tabular_preprocessor"
+            ),
+            "feature_columns": self._features,
+            "recipe_id": getattr(self._recipe, "id", None),
+        }
 
     def read_columns(self) -> List[str]:
         return [*self._features, self.binding.get("record_id_column")]
 
     def predict_records(self, df) -> List[Dict[str, Any]]:
         import torch
+
         rid_col = self.binding.get("record_id_column")
-        X = np.asarray(self._pre.transform(df[self._features]), dtype=np.float32)
-        with torch.no_grad():
-            out = self._model(torch.tensor(X)).cpu().numpy()
-        probs = _softmax(out)
-        classes = self.classes or (
-            [str(c) for c in getattr(self._label_encoder, "classes_", [])]
-            or [str(i) for i in range(probs.shape[1])]
-        )
-        ids = [str(df.iloc[i][rid_col]) if (rid_col and rid_col in df.columns) else str(df.index[i])
-               for i in range(len(df))]
-        return [_classification_record(rid, probs[i], classes) for i, rid in enumerate(ids)]
+        device = _torch_device(self.params)
+        batch_size = max(1, int(self.params.get("batch_size") or 256))
+        self._model.to(device)
+
+        ids = [
+            str(df.iloc[index][rid_col])
+            if rid_col and rid_col in df.columns
+            else str(df.index[index])
+            for index in range(len(df))
+        ]
+
+        try:
+            if self._pre is not None:
+                X = np.asarray(self._pre.transform(df[self._features]), dtype=np.float32)
+                outputs = []
+                with torch.no_grad():
+                    for offset in range(0, len(X), batch_size):
+                        check_cancelled(self.cancel_token)
+                        batch = torch.tensor(X[offset:offset + batch_size], device=device)
+                        outputs.append(self._model(batch).detach().cpu().numpy())
+                raw = np.concatenate(outputs, axis=0) if outputs else np.empty((0, 1))
+            else:
+                tensors = []
+                for _, row in df.iterrows():
+                    check_cancelled(self.cancel_token)
+                    tensor = self._recipe.load_sample(self._recipe_run, row)
+                    if self._transform is not None:
+                        tensor = self._transform(tensor)
+                    tensors.append(tensor)
+
+                outputs = []
+                with torch.no_grad():
+                    for offset in range(0, len(tensors), batch_size):
+                        check_cancelled(self.cancel_token)
+                        batch = torch.stack(tensors[offset:offset + batch_size]).to(device)
+                        output = self._recipe.eval_forward(self._model, batch)
+                        outputs.append(output.detach().cpu().numpy())
+                raw = np.concatenate(outputs, axis=0) if outputs else np.empty((0, 1))
+
+            if self.task == "regression":
+                values = np.asarray(raw, dtype=float)
+                if values.ndim == 1:
+                    values = values.reshape(-1, 1)
+                records = []
+                for index, record_id in enumerate(ids):
+                    row = values[index]
+                    prediction = float(row[0]) if row.size == 1 else [float(value) for value in row]
+                    records.append({
+                        "record_id": record_id,
+                        "row_id": record_id,
+                        "prediction": prediction,
+                        "predicted_value": prediction,
+                    })
+                return records
+
+            probs = _softmax(raw)
+            classes = self.classes or (
+                [str(c) for c in getattr(self._label_encoder, "classes_", [])]
+                or [str(i) for i in range(probs.shape[1])]
+            )
+            return [
+                _classification_record(record_id, probs[index], classes)
+                for index, record_id in enumerate(ids)
+            ]
+        finally:
+            try:
+                self._model.to("cpu")
+            except Exception:
+                pass
+            cleanup_ml_runtime(reason="torch tabular prediction cleanup")
 
 # Factory mirrors make_harness; extensible via register_predictor.
 _PREDICTORS: List = []
@@ -1334,7 +1648,6 @@ def make_predictor(*, framework, modality, **kwargs) -> Predictor:
 # =============================================================================
 
 def predict_action(context: Any, request: Any, cancel_token: Any = None) -> Dict[str, Any]:
-
     from .. import artifacts as artifact_utils
     from .. import contracts as contract_utils
 
@@ -1347,51 +1660,122 @@ def predict_action(context: Any, request: Any, cancel_token: Any = None) -> Dict
     if not model_artifact_id:
         raise ValueError("predict requires params.model_artifact_id or request.artifact_id.")
 
-    model_payload = context.artifacts.get(model_artifact_id)
-    if not isinstance(model_payload, Mapping):
-        raise TypeError(f"Artifact {model_artifact_id!r} is not an ml.model payload.")
-    if "model" in model_payload and "model_ref" not in model_payload:
-        model_payload = artifact_utils.persist_existing_model_artifact(
-            context=context, artifact_id=model_artifact_id)
+    predictor = None
+    failure = None
+    try:
+        model_payload = context.artifacts.get(model_artifact_id)
+        if not isinstance(model_payload, Mapping):
+            raise TypeError(f"Artifact {model_artifact_id!r} is not an ml.model payload.")
+        if "model" in model_payload and "model_ref" not in model_payload:
+            model_payload = artifact_utils.persist_existing_model_artifact(
+                context=context,
+                artifact_id=model_artifact_id,
+            )
 
-    compatibility = contract_utils.validate_model_for_dataset(
-        context=context,
-        model_artifact_id=model_artifact_id,
-        dataset_id=dataset_id,
-        target_column=params.get("target_column"),
-        image_column=params.get("image_column"),
-        feature_column_mapping=params.get("feature_column_mapping") or {},
-        require_target_compatible=bool(params.get("require_target_compatible", False)),
-    )
-    if not compatibility.can_predict:
-        return {
+        compatibility = contract_utils.validate_model_for_dataset(
+            context=context,
+            model_artifact_id=model_artifact_id,
+            dataset_id=dataset_id,
+            target_column=params.get("target_column"),
+            image_column=params.get("image_column"),
+            feature_column_mapping=params.get("feature_column_mapping") or {},
+            require_target_compatible=bool(params.get("require_target_compatible", False)),
+        )
+        if not compatibility.can_predict:
+            return {
+                "ok": False,
+                "status": compatibility.status,
+                "dataset_id": dataset_id,
+                "model_artifact_id": model_artifact_id,
+                "compatibility_report": compatibility.to_dict(),
+                "errors": list(compatibility.errors),
+                "warnings": list(compatibility.warnings),
+            }
+
+        contract = contract_utils.ensure_model_contract(
+            context=context,
+            model_artifact_id=model_artifact_id,
+            model_payload=model_payload,
+            persist=True,
+        )
+        framework = str(contract.get("framework") or model_payload.get("framework") or "").lower()
+        modality = str(contract.get("modality") or model_payload.get("modality") or "tabular").lower()
+
+        predictor = make_predictor(
+            framework=framework,
+            modality=modality,
+            context=context,
+            dataset_id=dataset_id,
+            model_artifact_id=model_artifact_id,
+            model_payload=model_payload,
+            compatibility=compatibility,
+            request=request,
+            scope=params.get("scope", SCOPE_AUTO),
+            cancel_token=cancel_token,
+        )
+        return predictor.run()
+    except Exception as exc:
+        failure = exc
+        oom = is_out_of_memory_error(exc)
+        failure_payload = {
             "ok": False,
-            "status": compatibility.status,
+            "status": "failed",
             "dataset_id": dataset_id,
             "model_artifact_id": model_artifact_id,
-            "compatibility_report": compatibility.to_dict(),
-            "errors": list(compatibility.errors),
-            "warnings": list(compatibility.warnings),
+            "error": str(exc),
+            "error_type": type(exc).__name__,
+            "out_of_memory": oom,
+            "traceback": traceback.format_exc(),
         }
 
-    contract = contract_utils.ensure_model_contract(
-        context=context, model_artifact_id=model_artifact_id,
-        model_payload=model_payload, persist=True)
-    framework = str(contract.get("framework") or model_payload.get("framework") or "").lower()
-    modality = str(contract.get("modality") or model_payload.get("modality") or "tabular").lower()
+        # Job futures retain exception tracebacks. Those frames can hold the model,
+        # optimizer, batches and CUDA tensors alive after a failed prediction.
+        exc.__traceback__ = None
+        exc.__cause__ = None
+        exc.__context__ = None
+        raise MLPredictionExecutionError(
+            str(exc),
+            failure_payload=failure_payload,
+        ) from None
+    finally:
+        if predictor is not None:
+            for attribute in (
+                "_model",
+                "model",
+                "_recipe",
+                "recipe",
+                "_recipe_run",
+                "_pre",
+                "_label_encoder",
+                "_transform",
+                "_bundle",
+                "_checkpoint",
+            ):
+                try:
+                    setattr(predictor, attribute, None)
+                except Exception:
+                    pass
+        predictor = None
+        cleanup_ml_runtime(
+            reason="prediction failed" if failure is not None else "prediction finished",
+            aggressive=failure is not None or is_out_of_memory_error(failure or ""),
+        )
 
-    predictor = make_predictor(
-        framework=framework, modality=modality,
-        context=context, dataset_id=dataset_id,
-        model_artifact_id=model_artifact_id, model_payload=model_payload,
-        compatibility=compatibility, request=request,
-        scope=params.get("scope", SCOPE_AUTO), cancel_token=cancel_token,
-    )
-    return predictor.run()
+def register_prediction_table_dataset(
+    *,
+    context,
+    predictions_payload,
+    predictions_artifact_id,
+    rows=None,
+) -> Optional[str]:
 
+    if rows is None:
+        from ..artifacts import prediction_rows_from_payload
 
-def register_prediction_table_dataset(*, context, predictions_payload, predictions_artifact_id) -> Optional[str]:
-    rows = list((predictions_payload.get("prediction_table") or {}).get("rows") or [])
+        rows = prediction_rows_from_payload(predictions_payload)
+
+    rows = [dict(row) for row in rows or []]
+
     if not rows:
         return None
     df = pd.DataFrame(rows)
@@ -1526,10 +1910,6 @@ def _torch_device(params):
         return torch.device("cpu")
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-
-
-
-
 def _filter_rows(df, request, record_id_column):
     params = dict(getattr(request, "params", {}) or {})
     row_ids = list(getattr(request, "row_ids", None) or [])
@@ -1549,23 +1929,17 @@ def _filter_rows(df, request, record_id_column):
         limit = 0
     return df.head(limit) if limit > 0 else df
 
-
 def _softmax(values):
     values = np.asarray(values, dtype=float)
     exp = np.exp(values - np.max(values, axis=1, keepdims=True))
     return exp / np.sum(exp, axis=1, keepdims=True)
 
-
 def _entropy(probs):
     clean = np.asarray([p for p in probs if p > 0.0], dtype=float)
     return 0.0 if clean.size == 0 else float(-np.sum(clean * np.log(clean)))
 
-
 def _json_scalar(value):
     return json_safe(value)
-
-
-
 
 def _get_trained_model_catalog(context):
     get = getattr(getattr(context, "services", None), "get", None)

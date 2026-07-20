@@ -399,7 +399,6 @@ class SklearnTabularRegressorRecipe(SklearnRecipe):
             harness=harness,
         )
 
-
 # =============================================================================
 # XGBoost recipes use the sklearn-compatible harness and preprocessing path.
 # =============================================================================
@@ -473,7 +472,6 @@ class StringLabelXGBClassifier:
             raise RuntimeError("XGBoost classifier has not been fitted.")
         return self.model.predict_proba(X)
 
-
 class XGBoostTabularClassifierRecipe(SklearnRecipe):
     id = "core.ml.xgboost_tabular_classifier"
     title = "XGBoost tabular classifier"
@@ -489,6 +487,7 @@ class XGBoostTabularClassifierRecipe(SklearnRecipe):
         "validation/test evaluation and artifact generation."
     )
     tags = ["xgboost", "gbdt", "tabular", "classification"]
+    required_imports = ["sklearn", "joblib", "xgboost"]
     source_urls = ["https://github.com/dmlc/xgboost"]
     source_reference = "Uses XGBoost's histogram tree method and regularized subsampled boosting defaults."
     required_mappings = ["record_id"]
@@ -516,7 +515,6 @@ class XGBoostTabularClassifierRecipe(SklearnRecipe):
             random_state=int(p.get("random_state", 42)),
         )
 
-
 class XGBoostTabularRegressorRecipe(SklearnRecipe):
     id = "core.ml.xgboost_tabular_regressor"
     title = "XGBoost tabular regressor"
@@ -531,6 +529,7 @@ class XGBoostTabularRegressorRecipe(SklearnRecipe):
         "performance under AstronomicAL's managed split and evaluation protocol."
     )
     tags = ["xgboost", "gbdt", "tabular", "regression"]
+    required_imports = ["sklearn", "joblib", "xgboost"]
     source_urls = ["https://github.com/dmlc/xgboost"]
     source_reference = "Uses the official XGBoost sklearn regressor with conservative high-performing defaults."
     required_mappings = ["record_id"]

@@ -46,6 +46,37 @@ class MLRunLogger:
 
         self._ensure_training_log_artifact()
 
+    def checkpoint_state(self) -> Dict[str, Any]:
+        """Return the in-memory log state required to continue one run."""
+        return json_safe(
+            {
+                "started_at": self.started_at,
+                "events": list(self.events),
+                "epochs": self._epoch_rows(),
+                "summary": dict(self.summary),
+                "training_log_artifact_id": self.training_log_artifact_id,
+            }
+        )
+
+    def restore_from_checkpoint(self, state: Mapping[str, Any]) -> None:
+        """Restore chronological events and curve rows before a resumed epoch."""
+        if not isinstance(state, Mapping) or not state:
+            return
+        try:
+            self.started_at = float(state.get("started_at") or self.started_at)
+        except Exception:
+            pass
+        self.events = [dict(row) for row in state.get("events") or [] if isinstance(row, Mapping)]
+        self.epochs_by_epoch = {}
+        for row in state.get("epochs") or []:
+            if not isinstance(row, Mapping):
+                continue
+            epoch = self._coerce_epoch(row)
+            if epoch is not None:
+                self.epochs_by_epoch[int(epoch)] = dict(row)
+        self.summary.update(dict(state.get("summary") or {}))
+        self.summary.update({"status": "resuming", "message": "Recipe run resumed from checkpoint."})
+
     def persist_final(
         self,
         *,

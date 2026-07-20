@@ -3,6 +3,7 @@ from __future__ import annotations
 import html
 import json
 import traceback
+from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional
 
 import panel as pn
@@ -15,6 +16,8 @@ from ..data import dataset_access as _dataset_access
 from ..feature_columns import parse_column_list
 from ..job_bridge import submit_job
 from ..profiles import PROTOCOL_KEYS as _PROTOCOL_KEYS
+from ..resume import discover_resume_manifests, storage_locations
+from ..runtime import TrainingControl
 
 _RUN_ONLY_LABEL_KEYS = {
     "target_column",
@@ -78,7 +81,6 @@ _PROTOCOL_LABELS = {
     "protocol_random_state": "Random seed",
 }
 
-
 class MLRecipeLauncherPanel:
     def __init__(
         self,
@@ -96,6 +98,7 @@ class MLRecipeLauncherPanel:
         self.normalization_fields: Dict[str, Any] = {}
         self._subscriptions: List[Any] = []
         self._active_handle: Any = None
+        self._training_control: Any = None
 
         self.recipe = pn.widgets.Select(name="", options={}, sizing_mode="stretch_width")
         self.dataset = pn.widgets.Select(name="", options=[], sizing_mode="stretch_width")
@@ -140,10 +143,51 @@ class MLRecipeLauncherPanel:
             button_type="success",
             sizing_mode="stretch_width",
         )
+        self.pause_button = pn.widgets.Button(
+            name="Pause after epoch",
+            button_type="warning",
+            disabled=True,
+            sizing_mode="stretch_width",
+        )
         self.cancel_button = pn.widgets.Button(
             name="Cancel run",
             button_type="danger",
             disabled=True,
+            sizing_mode="stretch_width",
+        )
+        locations = storage_locations(context)
+        self.artifact_root = pn.widgets.TextInput(
+            name="",
+            value=locations["artifact_root"],
+            sizing_mode="stretch_width",
+        )
+        self.save_predictions = pn.widgets.Checkbox(
+            name="",
+            value=True,
+            sizing_mode="stretch_width",
+        )
+        self.prediction_output_dir = pn.widgets.TextInput(
+            name="",
+            value="",
+            placeholder=locations["predictions"],
+            sizing_mode="stretch_width",
+        )
+        self.storage_preview = pn.pane.Markdown("", sizing_mode="stretch_width")
+        self.resume_checkpoint = pn.widgets.Select(
+            name="",
+            options={},
+            sizing_mode="stretch_width",
+        )
+        self.resume_button = pn.widgets.Button(
+            name="Resume selected run",
+            button_type="primary",
+            disabled=True,
+            sizing_mode="stretch_width",
+        )
+        self.saved_output = pn.pane.Alert(
+            "No model or checkpoint has been saved from this panel yet.",
+            alert_type="info",
+            visible=True,
             sizing_mode="stretch_width",
         )
 
@@ -168,6 +212,12 @@ class MLRecipeLauncherPanel:
             "Choose a recipe.",
             sizing_mode="stretch_width",
         )
+        self.recipe_availability_notice = pn.pane.Alert(
+            "",
+            alert_type="warning",
+            visible=False,
+            sizing_mode="stretch_width",
+        )
         self.params_area = pn.Column(sizing_mode="stretch_width")
         self.status = pn.pane.Alert(
             "Choose a recipe and dataset.",
@@ -185,7 +235,12 @@ class MLRecipeLauncherPanel:
         self.compute_train_split_stats.param.watch(self._sync_normalization_controls, "value")
         self.refresh_button.on_click(lambda *_: self.refresh())
         self.run_button.on_click(self._run_clicked)
+        self.pause_button.on_click(self._pause_clicked)
         self.cancel_button.on_click(self._cancel_clicked)
+        self.resume_button.on_click(self._resume_clicked)
+        self.resume_checkpoint.param.watch(lambda *_: self._on_resume_selection(), "value")
+        self.artifact_root.param.watch(lambda *_: self._update_storage_preview(), "value")
+        self.prediction_output_dir.param.watch(lambda *_: self._update_storage_preview(), "value")
         self.save_profile_button.on_click(self._save_profile_clicked)
         self.load_profile_button.on_click(self._load_profile_clicked)
         self._subscribe_to_profile_events()
@@ -201,6 +256,7 @@ class MLRecipeLauncherPanel:
 
             self._section_heading("Recipe"),
             self._field("Recipe", self.recipe),
+            self.recipe_availability_notice,
             self.recipe_card,
 
             self._section_heading("Dataset"),
@@ -220,9 +276,19 @@ class MLRecipeLauncherPanel:
             self.label_column_field,
             pn.Row(
                 self.run_button,
+                self.pause_button,
                 self.cancel_button,
                 sizing_mode="stretch_width",
             ),
+
+            self._section_heading("Saving and recovery"),
+            self._field("ML artifact root", self.artifact_root),
+            self._field("Save test predictions", self.save_predictions),
+            self._field("Prediction output directory (blank = default)", self.prediction_output_dir),
+            self.storage_preview,
+            self._field("Paused checkpoint", self.resume_checkpoint),
+            self.resume_button,
+            self.saved_output,
 
             self.status,
             sizing_mode="stretch_both",
@@ -321,6 +387,10 @@ class MLRecipeLauncherPanel:
             "recipe": self.recipe.value,
             "dataset": self.dataset.value,
             "label_column": self.label_column.value,
+            "artifact_root": self.artifact_root.value,
+            "save_predictions": self.save_predictions.value,
+            "prediction_output_dir": self.prediction_output_dir.value,
+            "resume_checkpoint": self.resume_checkpoint.value,
             "params": self._params(include_run_only=False),
         }
 
@@ -341,6 +411,16 @@ class MLRecipeLauncherPanel:
             if label_column in self.label_column.options:
                 self.label_column.value = label_column
 
+        if state.get("artifact_root"):
+            self.artifact_root.value = str(state.get("artifact_root"))
+        if "save_predictions" in state:
+            self.save_predictions.value = bool(state.get("save_predictions"))
+        if state.get("prediction_output_dir"):
+            self.prediction_output_dir.value = str(state.get("prediction_output_dir"))
+        self._refresh_resume_checkpoints()
+        if state.get("resume_checkpoint") in self._option_values(self.resume_checkpoint.options):
+            self.resume_checkpoint.value = state.get("resume_checkpoint")
+
         params = state.get("params") or {}
         if isinstance(params, dict):
             self._apply_param_values(params)
@@ -355,6 +435,7 @@ class MLRecipeLauncherPanel:
             except Exception:
                 pass
             self._active_handle = None
+        self._training_control = None
 
         events = getattr(self.context, "events", None)
         unsubscribe = getattr(events, "unsubscribe", None)
@@ -367,11 +448,47 @@ class MLRecipeLauncherPanel:
         self._subscriptions.clear()
 
     def refresh(self) -> None:
-        recipes = self.registry.list()
+        refresh_availability = getattr(self.registry, "refresh_availability", None)
+        if callable(refresh_availability):
+            refresh_availability()
+
+        list_available = getattr(self.registry, "list_available", None)
+        recipes = list_available() if callable(list_available) else self.registry.list()
+        previous_recipe = self.recipe.value
         self.recipe.options = {recipe.title: recipe.id for recipe in recipes}
 
-        if recipes and not self.recipe.value:
+        available_ids = {recipe.id for recipe in recipes}
+        if previous_recipe in available_ids:
+            self.recipe.value = previous_recipe
+        elif recipes:
             self.recipe.value = recipes[0].id
+        else:
+            self.recipe.value = None
+
+        consume_notice = getattr(self.registry, "consume_unavailable_notice", None)
+        unavailable = consume_notice() if callable(consume_notice) else []
+        if unavailable:
+            grouped: Dict[str, List[str]] = {}
+            for recipe_spec, availability in unavailable:
+                missing = ", ".join(availability.missing_imports) or "unknown dependency"
+                grouped.setdefault(missing, []).append(recipe_spec.title)
+            lines = [
+                "Some optional recipes are hidden because their Python dependencies are not installed:",
+                *[
+                    f"- **{', '.join(titles)}** — install `{missing}`"
+                    for missing, titles in grouped.items()
+                ],
+                "Refresh this panel after installing the missing packages.",
+            ]
+            self.recipe_availability_notice.object = "\n".join(lines)
+            self.recipe_availability_notice.visible = True
+
+        if not recipes:
+            self.status.alert_type = "danger"
+            self.status.object = (
+                "No ML recipes are available in this environment. Install at least "
+                "the scikit-learn recipe dependencies and refresh."
+            )
 
         dataset_ids = _dataset_access.list_dataset_ids(self.context)
         self.dataset.options = dataset_ids
@@ -383,6 +500,8 @@ class MLRecipeLauncherPanel:
             self.dataset.value = dataset_ids[0] if dataset_ids else None
 
         self._refresh_profiles()
+        self._refresh_resume_checkpoints()
+        self._update_storage_preview()
         self._on_recipe_change()
         self._apply_inferred_defaults()
 
@@ -1145,6 +1264,11 @@ class MLRecipeLauncherPanel:
 
         params["recipe_id"] = self.recipe.value
         params["dataset_id"] = self.dataset.value
+        params["ml_artifact_dir"] = str(self.artifact_root.value or "").strip()
+        params["save_predictions"] = bool(self.save_predictions.value)
+        prediction_output_dir = str(self.prediction_output_dir.value or "").strip()
+        if prediction_output_dir:
+            params["prediction_output_dir"] = prediction_output_dir
         return params
 
     def _apply_param_values(self, params: Mapping[str, Any]) -> None:
@@ -1256,6 +1380,19 @@ class MLRecipeLauncherPanel:
         if recipe_id in self.recipe.options.values():
             self.recipe.value = recipe_id
             self._on_recipe_change()
+        elif recipe_id:
+            availability = getattr(self.registry, "availability", None)
+            try:
+                report = availability(recipe_id) if callable(availability) else None
+            except Exception:
+                report = None
+            reason = getattr(report, "reason", "") or "the recipe is not available"
+            self.status.alert_type = "danger"
+            self.status.object = (
+                f"Profile `{profile.get('name') or profile_id}` uses hidden recipe "
+                f"`{recipe_id}`: {reason}."
+            )
+            return
 
         dataset_id = profile.get("default_dataset_id")
         if dataset_id in self.dataset.options:
@@ -1290,7 +1427,18 @@ class MLRecipeLauncherPanel:
             self.status.object = "Choose a dataset."
             return
 
-        spec = self.registry.get(params["recipe_id"])
+        require_available = getattr(self.registry, "require_available", None)
+        try:
+            spec = (
+                require_available(params["recipe_id"])
+                if callable(require_available)
+                else self.registry.get(params["recipe_id"])
+            )
+        except Exception as exc:
+            self.status.alert_type = "danger"
+            self.status.object = str(exc)
+            return
+
         if self._recipe_uses_label_column(spec) and not params.get("target_column"):
             self.status.alert_type = "danger"
             self.status.object = (
@@ -1299,15 +1447,56 @@ class MLRecipeLauncherPanel:
             )
             return
 
-        self._set_running_state(True)
-        self.status.alert_type = "info"
-        self.status.object = (
-            "Recipe running. Use Cancel run to request a clean stop. "
-            "Cancellation will happen at the next run.check_cancelled() point."
+        self._submit_run(
+            params,
+            title=f"Run ML recipe: {params['recipe_id']}",
+            key=f"core.ml.recipe:{params['dataset_id']}:{params['recipe_id']}",
+            message=(
+                "Recipe running. Pause waits for the current epoch, validation, and scheduler update, "
+                "then saves a resumable checkpoint. Cancel requests a clean stop without a resumable model."
+            ),
         )
 
+    def _resume_clicked(self, *_: Any) -> None:
+        if self._active_handle is not None:
+            self.status.alert_type = "warning"
+            self.status.object = "A recipe is already running from this panel."
+            return
+        value = str(self.resume_checkpoint.value or "").strip()
+        if not value:
+            self.status.alert_type = "warning"
+            self.status.object = "Choose a paused checkpoint to resume."
+            return
+        params: Dict[str, Any] = {
+            "ml_artifact_dir": str(self.artifact_root.value or "").strip(),
+            "save_predictions": bool(self.save_predictions.value),
+        }
+        prediction_dir = str(self.prediction_output_dir.value or "").strip()
+        if prediction_dir:
+            params["prediction_output_dir"] = prediction_dir
+        if value.startswith("artifact:"):
+            params["resume_checkpoint_artifact_id"] = value.split(":", 1)[1]
+        elif value.startswith("manifest:"):
+            params["resume_manifest_path"] = value.split(":", 1)[1]
+        else:
+            self.status.alert_type = "danger"
+            self.status.object = "The selected resume entry is not valid. Refresh the checkpoint list."
+            return
+        self._submit_run(
+            params,
+            title="Resume paused ML recipe",
+            key=f"core.ml.resume:{value}",
+            message="Restoring model, optimizer, scheduler, RNG, split, parameters, best epoch, and training history.",
+        )
+
+    def _submit_run(self, params: Dict[str, Any], *, title: str, key: str, message: str) -> None:
+        self._training_control = TrainingControl()
+        self._set_running_state(True)
+        self.status.alert_type = "info"
+        self.status.object = message
+
         request = ActionRequest(
-            dataset_id=params["dataset_id"],
+            dataset_id=params.get("dataset_id"),
             row_ids=None,
             columns=[],
             params=params,
@@ -1318,24 +1507,56 @@ class MLRecipeLauncherPanel:
         def on_done(result: Dict[str, Any]) -> None:
             status = str(result.get("status") or "").lower()
             self._active_handle = None
+            self._training_control = None
             self._set_running_state(False)
-            self._update_result(result, success=status != "cancelled", cancelled=status == "cancelled")
+            self._refresh_resume_checkpoints()
+            self._update_result(
+                result,
+                success=status == "complete",
+                cancelled=status == "cancelled",
+                paused=status == "paused",
+            )
 
         def on_error(exc: BaseException) -> None:
             self._active_handle = None
+            self._training_control = None
             self._set_running_state(False)
-            tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
-            self._update_result({"error": str(exc), "traceback": tb}, success=False, cancelled=False)
+            failure_payload = getattr(exc, "failure_payload", None)
+            if isinstance(failure_payload, Mapping) and failure_payload:
+                payload = dict(failure_payload)
+            else:
+                tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+                payload = {"error": str(exc), "traceback": tb}
+            self._update_result(payload, success=False, cancelled=False, paused=False)
 
         self._active_handle = submit_job(
             self.context,
             _runner.run_ml_recipe_action,
-            title=f"Run ML recipe: {self.recipe.value}",
-            key=f"core.ml.recipe:{params['dataset_id']}:{params['recipe_id']}",
+            title=title,
+            key=key,
             on_done=on_done,
             on_error=on_error,
             context=self.context,
             request=request,
+            training_control=self._training_control,
+        )
+
+    def _pause_clicked(self, *_: Any) -> None:
+        if self._active_handle is None or self._training_control is None:
+            self.status.alert_type = "warning"
+            self.status.object = "No recipe run is currently active from this panel."
+            return
+        try:
+            self._training_control.request_pause("Pause requested from the ML Recipe Launcher.")
+        except Exception as exc:
+            self.status.alert_type = "danger"
+            self.status.object = f"Could not request a pause: {exc}"
+            return
+        self.pause_button.disabled = True
+        self.status.alert_type = "warning"
+        self.status.object = (
+            "Pause requested. The current epoch will finish, validation and the scheduler will run, "
+            "then a prediction-ready model and full resumable checkpoint will be saved."
         )
 
     def _cancel_clicked(self, *_: Any) -> None:
@@ -1364,7 +1585,9 @@ class MLRecipeLauncherPanel:
         def apply() -> None:
             self.run_button.disabled = running
             self.refresh_button.disabled = running
+            self.pause_button.disabled = not running
             self.cancel_button.disabled = not running
+            self.resume_button.disabled = running or not bool(self.resume_checkpoint.value)
 
         try:
             pn.state.curdoc.add_next_tick_callback(apply)
@@ -1377,6 +1600,7 @@ class MLRecipeLauncherPanel:
         *,
         success: bool,
         cancelled: bool = False,
+        paused: bool = False,
     ) -> None:
         def apply() -> None:
             self.result.object = payload
@@ -1384,17 +1608,135 @@ class MLRecipeLauncherPanel:
             if cancelled:
                 self.status.alert_type = "warning"
                 self.status.object = payload.get("message") or "Recipe run cancelled."
+            elif paused:
+                self.status.alert_type = "warning"
+                self.status.object = payload.get("message") or "Training paused and saved."
             elif success:
                 self.status.alert_type = "success"
-                self.status.object = "Recipe finished."
+                self.status.object = "Recipe finished and durable outputs were saved."
             else:
                 self.status.alert_type = "danger"
                 self.status.object = f"Recipe failed: {payload.get('error', 'unknown error')}"
+            self._show_saved_outputs(payload)
 
         try:
             pn.state.curdoc.add_next_tick_callback(apply)
         except Exception:
             apply()
+
+    def _refresh_resume_checkpoints(self) -> None:
+        previous = self.resume_checkpoint.value
+        options: Dict[str, str] = {}
+        artifacts = getattr(self.context, "artifacts", None)
+        find = getattr(artifacts, "find", None)
+        get = getattr(artifacts, "get", None)
+        if callable(find) and callable(get):
+            try:
+                refs = find(type="ml.resume_checkpoint")
+            except Exception:
+                refs = []
+            for ref in refs:
+                artifact_id = getattr(ref, "artifact_id", None)
+                if not artifact_id:
+                    continue
+                try:
+                    payload = get(artifact_id)
+                except Exception:
+                    payload = {}
+                if not isinstance(payload, Mapping):
+                    payload = {}
+                label = (
+                    f"{payload.get('recipe_id') or 'recipe'} — epoch "
+                    f"{payload.get('completed_epoch', '?')} — run {str(payload.get('run_id') or '')[:8]}"
+                )
+                options[label] = f"artifact:{artifact_id}"
+        try:
+            manifests = discover_resume_manifests(
+                self.context,
+                {"ml_artifact_dir": str(self.artifact_root.value or "").strip()},
+            )
+        except Exception:
+            manifests = []
+        for path in manifests:
+            label = f"disk — {Path(path).parent.parent.name}/{Path(path).name}"
+            options.setdefault(label, f"manifest:{path}")
+        self.resume_checkpoint.options = options
+        if previous in set(options.values()):
+            self.resume_checkpoint.value = previous
+        elif options and not self.resume_checkpoint.value:
+            self.resume_checkpoint.value = next(iter(options.values()))
+        elif not options:
+            self.resume_checkpoint.value = None
+        self._on_resume_selection()
+
+    def _on_resume_selection(self) -> None:
+        self.resume_button.disabled = self._active_handle is not None or not bool(self.resume_checkpoint.value)
+
+    def _update_storage_preview(self) -> None:
+        locations = storage_locations(
+            self.context,
+            {
+                "ml_artifact_dir": str(self.artifact_root.value or "").strip(),
+                "prediction_output_dir": str(self.prediction_output_dir.value or "").strip(),
+            },
+        )
+        self.storage_preview.object = (
+            f"Models/checkpoints: `{locations['artifact_root']}`  \n"
+            f"Predictions: `{locations['predictions']}`  \n"
+            f"Training logs: `{locations['training_logs']}`"
+        )
+
+    def _show_saved_outputs(self, payload: Mapping[str, Any]) -> None:
+        result = dict(payload.get("result") or {}) if isinstance(payload.get("result"), Mapping) else {}
+        merged = {**result, **dict(payload)}
+        artifact_ids = dict(payload.get("artifact_ids") or {})
+        artifact_ids.update(dict(result.get("artifact_ids") or {}))
+        model_id = merged.get("model_artifact_id") or artifact_ids.get("model_artifact_id")
+        predictions_id = merged.get("predictions_artifact_id") or artifact_ids.get("predictions_artifact_id")
+        lines = []
+        if model_id:
+            lines.append(f"**Model artifact:** `{model_id}`")
+            try:
+                model_payload = self.context.artifacts.get(str(model_id))
+            except Exception:
+                model_payload = {}
+            if isinstance(model_payload, Mapping):
+                model_ref = dict(model_payload.get("model_ref") or {})
+                files = dict(model_payload.get("files") or {})
+                if model_ref.get("uri") or model_ref.get("path"):
+                    lines.append(f"**Model/checkpoint file:** `{model_ref.get('uri') or model_ref.get('path')}`")
+                if files.get("manifest"):
+                    lines.append(f"**Loadable model manifest:** `{files.get('manifest')}`")
+        if merged.get("resume_checkpoint_artifact_id"):
+            lines.append(f"**Resume artifact:** `{merged.get('resume_checkpoint_artifact_id')}`")
+        if merged.get("resume_checkpoint_path"):
+            lines.append(f"**Resume checkpoint file:** `{merged.get('resume_checkpoint_path')}`")
+        if merged.get("resume_manifest_path"):
+            lines.append(f"**Resume manifest:** `{merged.get('resume_manifest_path')}`")
+        if predictions_id:
+            lines.append(f"**Predictions artifact:** `{predictions_id}`")
+            try:
+                prediction_payload = self.context.artifacts.get(str(predictions_id))
+            except Exception:
+                prediction_payload = {}
+            if isinstance(prediction_payload, Mapping):
+                prediction_ref = dict(prediction_payload.get("prediction_ref") or {})
+                if prediction_ref.get("uri") or prediction_ref.get("path"):
+                    lines.append(f"**Prediction file:** `{prediction_ref.get('uri') or prediction_ref.get('path')}`")
+        if merged.get("final_training_log_artifact_id"):
+            lines.append(f"**Final training log:** `{merged.get('final_training_log_artifact_id')}`")
+        if lines:
+            self.saved_output.object = "\n\n".join(lines)
+            self.saved_output.alert_type = "success" if str(merged.get("status") or "") == "complete" else "warning"
+        else:
+            self.saved_output.object = "No durable model or checkpoint was produced by this operation."
+            self.saved_output.alert_type = "info"
+
+    @staticmethod
+    def _option_values(options: Any) -> set[Any]:
+        if isinstance(options, Mapping):
+            return set(options.values())
+        return set(options or [])
 
     def _subscribe_to_profile_events(self) -> None:
         events = getattr(self.context, "events", None)
@@ -1402,7 +1744,13 @@ class MLRecipeLauncherPanel:
         if not callable(subscribe):
             return
 
-        for topic in ("ml.recipe_profile.saved", "ml.recipe_profiles.changed"):
+        for topic in (
+            "ml.recipe_profile.saved",
+            "ml.recipe_profiles.changed",
+            "ml.recipe_run.paused",
+            "ml.resume_checkpoint.selected",
+            "artifact.created",
+        ):
             try:
                 self._subscriptions.append(
                     subscribe(
@@ -1418,6 +1766,15 @@ class MLRecipeLauncherPanel:
     def _on_profile_event(self, topic: str, payload: Any) -> None:
         def update() -> None:
             self._refresh_profiles()
+            self._refresh_resume_checkpoints()
+            if topic == "ml.resume_checkpoint.selected" and isinstance(payload, Mapping):
+                value = None
+                if payload.get("resume_checkpoint_artifact_id"):
+                    value = f"artifact:{payload.get('resume_checkpoint_artifact_id')}"
+                elif payload.get("resume_manifest_path"):
+                    value = f"manifest:{payload.get('resume_manifest_path')}"
+                if value in self._option_values(self.resume_checkpoint.options):
+                    self.resume_checkpoint.value = value
 
         try:
             doc = pn.state.curdoc
@@ -1427,7 +1784,6 @@ class MLRecipeLauncherPanel:
         except Exception:
             pass
         update()
-
 
 def create_recipe_launcher_panel(context: Any, **kwargs: Any):
     registry = context.services.get("core.ml.recipe_registry")
