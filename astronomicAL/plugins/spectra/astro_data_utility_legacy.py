@@ -1225,6 +1225,7 @@ class EuclidSpectraClass(BaseSpectraClass):
         return_object=False,
         smooth_kernel="Box1dkernel",
         smooth_window=5,
+        environment = "PDR",
     ):
         """
         Method which calls sequentially all the other methods to get the spectra.
@@ -1258,7 +1259,7 @@ class EuclidSpectraClass(BaseSpectraClass):
             self.max_separation = max_separation / 3600
 
         if self.sourceId is not None:
-            result = self.query_spectra_sourceId(verbose=True)
+            result = self.query_spectra_sourceId(verbose=True, environment=environment)
 
             if self._is_terminal_result(result):
                 return self._finish_get_spectra(
@@ -1289,7 +1290,7 @@ class EuclidSpectraClass(BaseSpectraClass):
                 spectrum.set_attribute("spectype", "")
 
         else:
-            result = self.query_table(verbose=True)
+            result = self.query_table(verbose=True, environment=environment)
 
             if self._is_terminal_result(result):
                 return self._finish_get_spectra(
@@ -1314,7 +1315,7 @@ class EuclidSpectraClass(BaseSpectraClass):
                     result=result,
                 )
 
-            result = self.query_spectra_sourceId(verbose=True)
+            result = self.query_spectra_sourceId(verbose=True, environment=environment)
 
             if self._is_terminal_result(result):
                 return self._finish_get_spectra(
@@ -1359,11 +1360,12 @@ class EuclidSpectraClass(BaseSpectraClass):
             result=result,
         )
         
-    def query_table(self, verbose=False):
+    def query_table(self, environment = "PDR", verbose=False):
+        table_name = "dr1.spectra_source" if environment == "IDR" else "q1.spectra_source"
         query = f"""SELECT TOP 400
                     spec.file_name, spec.file_path, spec.source_id, spec.spectra_source_oid, spec.ra_obj, spec.dec_obj,
                     DISTANCE(spec.ra_obj, spec.dec_obj, {self.ra}, {self.dec})*3600 AS separation
-                    FROM q1.spectra_source AS spec
+                    FROM {table_name} AS spec
                     WHERE DISTANCE(ra_obj, dec_obj, {self.ra}, {self.dec}) < {self.max_separation}
                     ORDER BY separation
                 """
@@ -1436,13 +1438,19 @@ class EuclidSpectraClass(BaseSpectraClass):
         
   
     @staticmethod
-    def _get_euclid_url(source_id, retrieval_type = "SPECTRA_RGS" ):
+    def _get_euclid_url(source_id, retrieval_type = "SPECTRA_RGS", environment = "PDR"):
         """retrieval_type : str either  'SPECTRA_RGS', 'SPECTRA_BGS' or 'ALL'
         Type of spectrum to be retrieved, Red, or Blue grism, ALL returns a .zip file.
         In Q1 only Red Grism Spectra are available"""
+        
         if not isinstance(source_id, list):
             source_id =[source_id]
-        url = "https://eas.esac.esa.int/sas-dd/data?ID="
+        
+        if environment == "IDR":
+            url = "https://easidr.esac.esa.int/sas-dd/data?ID="
+        else:
+            url = "https://eas.esac.esa.int/sas-dd/data?ID="
+        
         id_list = ",".join(f"sedm+{s_id}" for s_id in source_id)
         url =  url + id_list + f"&RETRIEVAL_TYPE={retrieval_type}"
         return url
@@ -1474,14 +1482,33 @@ class EuclidSpectraClass(BaseSpectraClass):
                     spectrum.set_attribute("dec", dec)
                     spectrum.set_attribute("redshift", np.nan) 
                     spectrum.set_attribute("spectype", "") 
-        
 
-    def query_spectra_sourceId(self, verbose = False):
+    def _login(self, username, password):
+        login_url = "https://easidr.esac.esa.int/sas-dd/login"
+        response = self.session.post(
+            login_url,
+            data={"username": username,
+                  "password": password,
+            },
+            timeout=60,
+            verify=True
+        )
+        response.raise_for_status()
+
+    def _create_session(self, environment = "PDR"):
+        self.session = requests.Session()
+        if environment == "IDR":
+            raise NotImplementedError
+            ###Need to get user and password here
+            self._login(username, password)
+    
+    def query_spectra_sourceId(self, verbose = False, environment = "PDR"):
         source_id = list(self.table_results["source_id"])
-        url = self._get_euclid_url(source_id=source_id, retrieval_type= "SPECTRA_RGS")
+        url = self._get_euclid_url(source_id=source_id, retrieval_type= "SPECTRA_RGS", environment = environment)
         tic = time.perf_counter()
         try:
-            r = requests.get(url, timeout=60)
+            self._create_session(environment=environment)
+            r = self.session.get(url, timeout=60)
             r.raise_for_status()
         except requests.exceptions.RequestException as e:
             self.error_tracker.log_error(e, "Failed to retrieve spectra from ESA URL")

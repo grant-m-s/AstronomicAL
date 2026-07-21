@@ -89,7 +89,7 @@ class EuclidCutoutsClass:
             except Exception:
                 pass
 
-        client = EuclidClass(environment=self.environment)
+        client = EuclidClass(environment="PDR")
         print("Initialized EuclidClass")
 
         if services is not None:
