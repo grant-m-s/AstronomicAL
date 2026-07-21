@@ -1,139 +1,108 @@
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Mapping, Optional
+
 
 def resolve_selection_mode(metric: str, mode: str = "auto") -> str:
     if mode in ("max", "min"):
         return mode
-    m = str(metric or "").lower()
-    return "min" if any(t in m for t in ("loss", "error", "mae", "mse", "rmse")) else "max"
+    metric_name = str(metric or "").lower()
+    return (
+        "min"
+        if any(token in metric_name for token in ("loss", "error", "mae", "mse", "rmse"))
+        else "max"
+    )
+
 
 @dataclass
 class ProtocolConfig:
     """Experiment protocol enforced by the harness.
 
-    split_strategy controls only how the selected/main dataset is split when
-    validation_source or test_source is "split".
+    ``split_strategy`` controls only how the selected/main dataset is split when
+    ``validation_source`` or ``test_source`` is ``"split"``.
 
-    validation_source:
-        split   -> create validation from selected dataset
-        dataset -> use protocol_validation_dataset_id
+    ``validation_source``:
+      - ``split``: create validation from the selected dataset
+      - ``dataset``: use ``protocol_validation_dataset_id``
 
-    test_source:
-        split   -> create test from selected dataset
-        dataset -> use protocol_test_dataset_id
-        none    -> no test set
+    ``test_source``:
+      - ``split``: create test from the selected dataset
+      - ``dataset``: use ``protocol_test_dataset_id``
+      - ``none``: no test set
     """
 
     split_strategy: str = "random"  # random | by_group | temporal | predefined
-
     validation_source: str = "split"  # split | dataset
-    test_source: str = "split"        # split | dataset | none
-
+    test_source: str = "split"  # split | dataset | none
     validation_dataset_id: Optional[str] = None
     test_dataset_id: Optional[str] = None
-
     group_column: Optional[str] = None
     split_column: Optional[str] = None
-
     validation_size: float = 0.1
     test_size: float = 0.2
-
     materialize_split_datasets: bool = True
     split_dataset_prefix: Optional[str] = None
-
     selection_metric: str = "val_accuracy"
     selection_mode: str = "auto"
     random_state: int = 42
     protocol_id: str = ""
 
     def resolved_mode(self) -> str:
-        return resolve_selection_mode(
-            self.selection_metric,
-            self.selection_mode,
-        )
+        return resolve_selection_mode(self.selection_metric, self.selection_mode)
 
     @classmethod
     def from_params(cls, params: Dict[str, Any]) -> "ProtocolConfig":
-        def num(key, default):
+        def num(key: str, default: float) -> float:
             try:
                 return float(params.get(key, default))
             except Exception:
                 return default
 
         cfg = cls(
-            split_strategy=str(
-                params.get("protocol_split_strategy", "random")
-            ),
-            validation_source=str(
-                params.get("protocol_validation_source", "split")
-            ),
-            test_source=str(
-                params.get("protocol_test_source", "split")
-            ),
-            validation_dataset_id=(
-                params.get("protocol_validation_dataset_id") or None
-            ),
-            test_dataset_id=(
-                params.get("protocol_test_dataset_id") or None
-            ),
-            group_column=(
-                params.get("protocol_group_column") or None
-            ),
-            split_column=(
-                params.get("protocol_split_column") or None
-            ),
+            split_strategy=str(params.get("protocol_split_strategy", "random")),
+            validation_source=str(params.get("protocol_validation_source", "split")),
+            test_source=str(params.get("protocol_test_source", "split")),
+            validation_dataset_id=params.get("protocol_validation_dataset_id") or None,
+            test_dataset_id=params.get("protocol_test_dataset_id") or None,
+            group_column=params.get("protocol_group_column") or None,
+            split_column=params.get("protocol_split_column") or None,
             validation_size=num("protocol_validation_size", 0.1),
             test_size=num("protocol_test_size", 0.2),
             materialize_split_datasets=_bool_param(
-                params.get("protocol_materialize_split_datasets"),
-                True,
+                params.get("protocol_materialize_split_datasets"), True
             ),
-            split_dataset_prefix=(
-                params.get("protocol_split_dataset_prefix") or None
-            ),
+            split_dataset_prefix=params.get("protocol_split_dataset_prefix") or None,
             selection_metric=str(
                 params.get("protocol_selection_metric", "val_accuracy")
             ),
-            selection_mode=str(
-                params.get("protocol_selection_mode", "auto")
-            ),
+            selection_mode=str(params.get("protocol_selection_mode", "auto")),
             random_state=int(params.get("protocol_random_state", 42)),
         )
 
-        allowed_split_strategies = {
-            "random",
-            "by_group",
-            "temporal",
-            "predefined",
-        }
+        allowed_split_strategies = {"random", "by_group", "temporal", "predefined"}
         if cfg.split_strategy not in allowed_split_strategies:
             raise ValueError(
                 f"Unknown protocol_split_strategy {cfg.split_strategy!r}. "
                 f"Expected one of {sorted(allowed_split_strategies)}."
             )
-
         if cfg.validation_source not in {"split", "dataset"}:
             raise ValueError(
                 "protocol_validation_source must be 'split' or 'dataset'."
             )
-
         if cfg.test_source not in {"split", "dataset", "none"}:
             raise ValueError(
                 "protocol_test_source must be 'split', 'dataset', or 'none'."
             )
 
         train_dataset_id = params.get("dataset_id")
-
         if cfg.validation_source == "dataset":
             if not cfg.validation_dataset_id:
                 raise ValueError(
                     "Validation source is 'dataset', but no validation dataset "
                     "was selected."
                 )
-
             if cfg.validation_dataset_id == train_dataset_id:
                 raise ValueError(
                     "Validation dataset must be different from the selected "
@@ -145,7 +114,6 @@ class ProtocolConfig:
                 raise ValueError(
                     "Test source is 'dataset', but no test dataset was selected."
                 )
-
             if cfg.test_dataset_id == train_dataset_id:
                 raise ValueError(
                     "Test dataset must be different from the selected training dataset."
@@ -158,20 +126,16 @@ class ProtocolConfig:
             and cfg.test_dataset_id
             and cfg.validation_dataset_id == cfg.test_dataset_id
         ):
-            raise ValueError(
-                "Validation and test datasets must be different."
-            )
+            raise ValueError("Validation and test datasets must be different.")
 
         val_from_split = cfg.validation_source == "split"
         test_from_split = cfg.test_source == "split"
-
         if val_from_split and cfg.split_strategy != "predefined":
             if cfg.validation_size <= 0:
                 raise ValueError(
                     "protocol_validation_size must be > 0 when validation "
                     "is split from the selected dataset."
                 )
-
         if test_from_split and cfg.split_strategy != "predefined":
             if cfg.test_size <= 0:
                 raise ValueError(
@@ -185,7 +149,6 @@ class ProtocolConfig:
                 split_total += cfg.validation_size
             if test_from_split:
                 split_total += cfg.test_size
-
             if split_total >= 1.0:
                 raise ValueError(
                     "Fractions split from the selected dataset must sum to < 1.0."
@@ -203,34 +166,29 @@ class ProtocolConfig:
             val_from_split or test_from_split
         ):
             if not cfg.split_column:
-                raise ValueError(
-                    "predefined split requires protocol_split_column."
-                )
+                raise ValueError("predefined split requires protocol_split_column.")
 
         cfg.protocol_id = _stable_protocol_id(cfg)
         return cfg
 
+
 def _bool_param(value: Any, default: bool) -> bool:
     if isinstance(value, bool):
         return value
-
     if value is None:
         return default
-
     text = str(value).strip().lower()
     if text in {"1", "true", "yes", "y", "on"}:
         return True
     if text in {"0", "false", "no", "n", "off"}:
         return False
-
     return default
 
-def _stable_protocol_id(cfg: ProtocolConfig) -> str:
-    import hashlib
 
+def _stable_protocol_id(cfg: ProtocolConfig) -> str:
     raw = "|".join(
-        str(x)
-        for x in (
+        str(value)
+        for value in (
             cfg.split_strategy,
             cfg.validation_source,
             cfg.test_source,
@@ -245,21 +203,123 @@ def _stable_protocol_id(cfg: ProtocolConfig) -> str:
             cfg.random_state,
         )
     )
-
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
+
 
 @dataclass
 class DataBinding:
-    """Resolved column binding. The harness resolves this (mappings/inference);
-    the recipe only READS it inside load_sample. Data binding is not a recipe
-    internal."""
+    """Resolved column binding owned by the harness, not the recipe."""
+
     record_id_column: str
     target_column: Optional[str]
     input_columns: List[str] = field(default_factory=list)
     image_column: Optional[str] = None
 
+
+@dataclass(frozen=True)
+class SplitManifestRef:
+    """JSON-safe reference to a durable split-membership table."""
+
+    schema_version: int
+    storage: str
+    uri: str
+    format: str
+    created_at: float
+    source_dataset_id: str
+    protocol_id: str
+    record_id_column: str
+    target_column: Optional[str]
+    row_count: int
+    role_counts: Dict[str, int]
+    columns: List[str]
+    sha256: str
+    size_bytes: int
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "SplitManifestRef":
+        payload = dict(value or {})
+        return cls(
+            schema_version=int(payload.get("schema_version", 1)),
+            storage=str(payload.get("storage", "local_file")),
+            uri=str(payload["uri"]),
+            format=str(payload.get("format", "jsonl.gz")),
+            created_at=float(payload.get("created_at", 0.0)),
+            source_dataset_id=str(payload.get("source_dataset_id", "")),
+            protocol_id=str(payload.get("protocol_id", "")),
+            record_id_column=str(payload.get("record_id_column", "record_id")),
+            target_column=(
+                str(payload["target_column"])
+                if payload.get("target_column") is not None
+                else None
+            ),
+            row_count=int(payload.get("row_count", 0)),
+            role_counts={
+                str(role): int(count)
+                for role, count in dict(payload.get("role_counts") or {}).items()
+            },
+            columns=[str(column) for column in payload.get("columns") or []],
+            sha256=str(payload.get("sha256", "")),
+            size_bytes=int(payload.get("size_bytes", 0)),
+        )
+
+
+@dataclass(frozen=True)
+class PartitionRef:
+    """A partition represented by a role in a durable split manifest.
+
+    It intentionally contains counts and metadata rather than every record ID.
+    """
+
+    name: str
+    role: str
+    row_count: int
+    manifest: SplitManifestRef
+    classes: List[str] = field(default_factory=list)
+    dataset_id: Optional[str] = None
+    source: str = "split"  # split | dataset | none
+    fingerprint: str = ""
+
+    def __len__(self) -> int:
+        return int(self.row_count)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "name": self.name,
+            "role": self.role,
+            "row_count": int(self.row_count),
+            "manifest": self.manifest.to_dict(),
+            "classes": list(self.classes),
+            "dataset_id": self.dataset_id,
+            "source": self.source,
+            "fingerprint": self.fingerprint,
+        }
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "PartitionRef":
+        payload = dict(value or {})
+        return cls(
+            name=str(payload.get("name", payload.get("role", "partition"))),
+            role=str(payload.get("role", payload.get("name", "partition"))),
+            row_count=int(payload.get("row_count", 0)),
+            manifest=SplitManifestRef.from_dict(payload["manifest"]),
+            classes=[str(item) for item in payload.get("classes") or []],
+            dataset_id=(
+                str(payload["dataset_id"])
+                if payload.get("dataset_id") is not None
+                else None
+            ),
+            source=str(payload.get("source", "split")),
+            fingerprint=str(payload.get("fingerprint", "")),
+        )
+
+
 @dataclass
 class Partition:
+    """Legacy materialised partition retained during the streaming migration."""
+
     name: str
     record_ids: List[str]
     labels: List[str]
@@ -270,11 +330,15 @@ class Partition:
     def __len__(self) -> int:
         return len(self.record_ids)
 
+
+PartitionLike = Partition | PartitionRef
+
+
 @dataclass
 class Partitions:
-    train: Partition
-    val: Partition
-    test: Optional[Partition]
+    train: PartitionLike
+    val: PartitionLike
+    test: Optional[PartitionLike]
     strategy: str
     validation_source: str
     test_source: str
@@ -287,26 +351,80 @@ class Partitions:
     validation_dataset_id: Optional[str] = None
     test_dataset_id: Optional[str] = None
     materialized_split_dataset_ids: Dict[str, str] = field(default_factory=dict)
+    split_manifest: Optional[SplitManifestRef] = None
+    partition_refs: Dict[str, PartitionRef] = field(default_factory=dict)
+    split_generation: Dict[str, Any] = field(default_factory=dict)
+
+    def partition_ref(self, role: str) -> Optional[PartitionRef]:
+        """Return the durable reference for a canonical partition role."""
+
+        canonical = _canonical_partition_role(role)
+        ref = self.partition_refs.get(canonical)
+        if ref is not None:
+            return ref
+
+        value = {
+            "train": self.train,
+            "validation": self.val,
+            "test": self.test,
+        }[canonical]
+        return value if isinstance(value, PartitionRef) else None
+
+    def partition(self, role: str) -> Optional[Partition]:
+        """Return the legacy materialised partition when it is still present."""
+
+        canonical = _canonical_partition_role(role)
+        value = {
+            "train": self.train,
+            "validation": self.val,
+            "test": self.test,
+        }[canonical]
+        return value if isinstance(value, Partition) else None
+
+    def attach_manifest(
+        self,
+        manifest: SplitManifestRef,
+        refs: Mapping[str, PartitionRef],
+    ) -> None:
+        """Attach durable memberships while legacy partitions remain usable."""
+
+        self.split_manifest = manifest
+        self.partition_refs = {
+            _canonical_partition_role(role): ref for role, ref in refs.items()
+        }
+
+
+def _canonical_partition_role(role: str) -> str:
+    value = str(role or "").strip().lower()
+    aliases = {
+        "train": "train",
+        "training": "train",
+        "val": "validation",
+        "valid": "validation",
+        "validation": "validation",
+        "test": "test",
+    }
+    try:
+        return aliases[value]
+    except KeyError as exc:
+        raise KeyError(f"Unknown partition role {role!r}.") from exc
+
 
 @dataclass
 class TrainingComponents:
-    """What configure_training returns — all the expert's, none of it protocol."""
+    """What ``configure_training`` returns: recipe policy, not protocol policy."""
+
     optimizer: Any
     scheduler: Any = None
     criterion: Any = None
     extra: Dict[str, Any] = field(default_factory=dict)
 
+
 @dataclass
 class TargetSpec:
-    """What 'the model output' means for a run.
+    """Meaning and width of the model output for a run."""
 
-    The harness derives this once (via _target_spec) and threads it everywhere
-    that used to assume a class count. Classification carries the class list;
-    regression carries the number of continuous outputs. New task kinds add a
-    new `kind` plus a matching harness, without touching the protocol flow.
-    """
-
-    kind: str = "classification"        # classification | regression
+    kind: str = "classification"  # classification | regression
     classes: List[str] = field(default_factory=list)
     n_outputs: int = 1
 
@@ -316,7 +434,6 @@ class TargetSpec:
 
     @property
     def num_outputs(self) -> int:
-        """Width of the model's output layer."""
         if self.kind == "classification":
             return len(self.classes)
         return int(self.n_outputs)

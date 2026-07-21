@@ -2288,45 +2288,154 @@ class ActiveLearningPanel:
         )
         return left, right
 
-    def _pool_remaining_summary(self, session_payload: Mapping[str, Any]) -> str:
+    def _pool_remaining_summary(
+        self,
+        session_payload: Mapping[str, Any],
+    ) -> str:
         remaining, total, source = self._pool_remaining_counts(session_payload)
         if remaining is None:
             return "—"
         if total is None:
             return f"{remaining}"
-        label = "prediction pool" if source == "predictions" else "dataset pool"
-        return f"{remaining} of {total} ({label})"
 
-    def _pool_remaining_counts(self, session_payload: Mapping[str, Any]) -> Tuple[Optional[int], Optional[int], str]:
+        labels = {
+            "session_dataset": "session pool",
+            "session_metadata": "session pool",
+            "prediction_metadata": "prediction metadata",
+        }
+        return f"{remaining} of {total} ({labels.get(source, 'session pool')})"
+
+    def _pool_remaining_counts(
+        self,
+        session_payload: Mapping[str, Any],
+    ) -> Tuple[Optional[int], Optional[int], str]:
         session = al_state.coerce_session(session_payload)
         excluded = acquisition.session_query_exclude_row_ids(session, {})
-        predictions_artifact_id = str(
+
+        pool_dataset_id = acquisition.session_pool_dataset_id(session)
+        total = (
+            self._dataset_row_count(pool_dataset_id)
+            if pool_dataset_id
+            else None
+        )
+        source = "session_dataset"
+
+        if total is None:
+            total = self._session_pool_row_count(session)
+            source = "session_metadata"
+
+        if total is None:
+            total = self._prediction_pool_row_count(
+                session,
+                pool_dataset_id=pool_dataset_id,
+            )
+            source = "prediction_metadata"
+
+        if total is None:
+            return None, None, "unknown"
+
+        total = max(0, int(total))
+        excluded_count = min(total, len(excluded))
+        return total - excluded_count, total, source
+
+    def _session_pool_row_count(
+        self,
+        session: Mapping[str, Any],
+    ) -> Optional[int]:
+        """Return the persisted pool count without reading dataset rows."""
+
+        candidates: List[Any] = []
+
+        partition_counts = session.get("partition_counts")
+        if isinstance(partition_counts, Mapping):
+            candidates.append(partition_counts.get("pool"))
+
+        session_split = session.get("session_split")
+        if isinstance(session_split, Mapping):
+            counts = session_split.get("counts")
+            if isinstance(counts, Mapping):
+                candidates.append(counts.get("pool"))
+
+        contract = session.get("contract")
+        if isinstance(contract, Mapping):
+            contract_split = contract.get("session_split")
+            if isinstance(contract_split, Mapping):
+                counts = contract_split.get("counts")
+                if isinstance(counts, Mapping):
+                    candidates.append(counts.get("pool"))
+
+        for value in candidates:
+            if value in (None, ""):
+                continue
+            try:
+                return max(0, int(value))
+            except (TypeError, ValueError):
+                continue
+
+        return None
+
+    def _prediction_pool_row_count(
+        self,
+        session: Mapping[str, Any],
+        *,
+        pool_dataset_id: str,
+    ) -> Optional[int]:
+        """Use complete prediction metadata only as a restoration fallback.
+
+        Inline prediction records may be a bounded preview and must never be used
+        as the pool denominator.
+        """
+
+        artifact_id = str(
             al_state.latest_reference(session, "predictions_artifact_id")
             or self._widget_value("predictions_id", "")
             or ""
         ).strip()
-        if predictions_artifact_id:
-            try:
-                payload = self.context.artifacts.get(predictions_artifact_id)
-            except Exception:
-                payload = None
-            if isinstance(payload, Mapping):
-                records = acquisition.extract_prediction_records(payload)
-                row_ids = []
-                seen = set()
-                for record in records:
-                    row_id = str(record.get("row_id") or record.get("id") or "").strip()
-                    if row_id and row_id not in seen:
-                        seen.add(row_id)
-                        row_ids.append(row_id)
-                if row_ids:
-                    return sum(1 for row_id in row_ids if row_id not in excluded), len(row_ids), "predictions"
+        if not artifact_id:
+            return None
 
-        dataset_id = acquisition.session_pool_dataset_id(session) or str(self._widget_value("dataset_id", "") or "").strip()
-        total = self._dataset_row_count(dataset_id) if dataset_id else None
-        if total is None:
-            return None, None, "unknown"
-        return max(0, int(total) - len(excluded)), int(total), "dataset"
+        try:
+            payload = self.context.artifacts.get(artifact_id)
+        except Exception:
+            return None
+        if not isinstance(payload, Mapping):
+            return None
+
+        matches_dataset = getattr(
+            acquisition,
+            "prediction_payload_matches_dataset",
+            None,
+        )
+        if (
+            pool_dataset_id
+            and callable(matches_dataset)
+            and not matches_dataset(payload, pool_dataset_id)
+        ):
+            return None
+
+        candidates: List[Any] = [payload.get("row_count")]
+
+        prediction_ref = payload.get("prediction_ref")
+        if isinstance(prediction_ref, Mapping):
+            candidates.append(prediction_ref.get("row_count"))
+
+        prediction_table = payload.get("prediction_table")
+        if isinstance(prediction_table, Mapping):
+            candidates.append(prediction_table.get("row_count"))
+
+            storage = prediction_table.get("storage")
+            if isinstance(storage, Mapping):
+                candidates.append(storage.get("row_count"))
+
+        for value in candidates:
+            if value in (None, ""):
+                continue
+            try:
+                return max(0, int(value))
+            except (TypeError, ValueError):
+                continue
+
+        return None
 
     def _dataset_row_count(self, dataset_id: str) -> Optional[int]:
         datasets = getattr(self.context, "datasets", None)

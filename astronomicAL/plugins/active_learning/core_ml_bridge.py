@@ -371,32 +371,18 @@ def clean_feature_columns(value: Any, *, available_columns: Optional[Sequence[st
     return out
 
 IMAGE_COLUMN_PARAM_KEYS = (
-    "image_column",
-    "image_path_column",
-    "image_uri_column",
-    "image_url_column",
-    "image.path",
     "image.uri",
+    "image.path",
 )
 
 IMAGE_MAPPING_KEYS = (
-    "image.path",
     "image.uri",
-    "image.url",
-    "image",
-    "image_path",
-    "image_uri",
-    "image_url",
+    "image.path",
 )
 
 IMAGE_COLUMN_EXACT_NAMES = (
-    "image_path",
     "image_uri",
-    "image_url",
-    "image",
-    "cutout_path",
-    "cutout_uri",
-    "cutout_url",
+    "image_path",
     "file_path",
     "filepath",
 )
@@ -523,152 +509,25 @@ def sanitize_recipe_params_for_al_training(params: Mapping[str, Any], *, availab
 
     return cleaned
 
-def materialize_training_set_action(context: Any, request: Any, cancel_token: Any = None) -> Dict[str, Any]:
-    request = al_actions.coerce_request(request)
-    params = dict(request.params or {})
-    session_artifact_id = str(params.get("session_artifact_id") or "").strip()
-    if not session_artifact_id:
-        raise ValueError("materialize_training_set requires session_artifact_id.")
-    session = al_state.coerce_session(context.artifacts.get(session_artifact_id))
-    session_without_queue = al_state.clear_queued_rows(session, reason="training_started")
-    if session_without_queue != session:
-        session_artifact_id = al_actions.put_session(context, session_without_queue, previous_artifact_id=session_artifact_id)
-        session = session_without_queue
-        al_actions.publish(
-            context,
-            "al.query_batch.invalidated",
-            {
-                "session_artifact_id": session_artifact_id,
-                "session_id": session.get("session_id"),
-                "reason": "training_started",
-            },
-        )
-    dataset_id = acquisition.session_pool_dataset_id(session)
-    if not dataset_id:
-        raise ValueError("Could not determine source/pool dataset_id.")
-    labelled_items = al_state.labelled_training_items(session)
-    if not labelled_items:
-        raise ValueError("No verified labels are available for training.")
+def materialize_training_set_action(
+    context: Any,
+    request: Any,
+    cancel_token: Any = None,
+) -> Dict[str, Any]:
+    """Compatibility entry point for the authoritative streaming action."""
 
-    round_index = int(session.get("round", 0)) + 1
-    target_column = str(params.get("target_column") or session.get("target_column") or "al_label")
-    task_type = al_state.parse_task_type(params.get("task_type") or session.get("task_type") or session.get("problem_type"))
-    train_dataset_id = str(params.get("train_dataset_id") or "").strip()
-    if not train_dataset_id:
-        train_dataset_id = al_actions.unique_dataset_id(f"{dataset_id}__al_train_r{round_index}")
-
-    required_columns = [column for column in parse_string_list(params.get("required_columns") or []) if not is_prediction_column(column)]
-    profile_info = resolve_recipe_profile_info(context, params)
-    recipe_params = sanitize_recipe_params_for_al_training(
-        merged_profile_recipe_params(dict(profile_info.get("profile") or {}), params)
+    from .streaming_actions import (
+        materialize_training_set_action as streaming_materialize,
     )
-    source_columns = list_dataset_columns(context, dataset_id)
-    image_column = resolve_image_column_for_al_training(context, dataset_id, params, recipe_params, available_columns=source_columns)
-    ensure_image_params(recipe_params, image_column)
-    required_columns.extend(column for column in column_like_recipe_params(recipe_params).values() if not is_prediction_column(column))
-    required_columns.extend(clean_feature_columns(recipe_params.get("feature_columns") or recipe_params.get("input_columns") or []))
-    if image_column and image_column not in required_columns:
-        required_columns.append(image_column)
-    train_df, id_column = training_dataframe(
+
+    return streaming_materialize(
         context,
-        dataset_id=dataset_id,
-        labelled_items=labelled_items,
-        target_column=target_column,
-        required_columns=required_columns,
+        request,
+        cancel_token=cancel_token,
     )
-    mappings = al_actions.filter_mappings_to_columns(al_actions.dataset_mappings(context, dataset_id), train_df.columns)
-    if id_column:
-        mappings["record_id"] = id_column
-    mappings["target_label"] = target_column
-
-    context.datasets.register(
-        train_dataset_id,
-        train_df,
-        name=f"AL training round {round_index}",
-        column_mappings=mappings,
-        al_session_id=session["session_id"],
-        al_session_artifact_id=session_artifact_id,
-        al_round=round_index,
-        source_dataset_id=dataset_id,
-        pool_dataset_id=dataset_id,
-        label_column=target_column,
-        target_column=target_column,
-        task_type=task_type,
-        problem_type=task_type,
-    )
-    al_actions.publish(
-        context,
-        "dataset.registered",
-        {
-            "dataset_id": train_dataset_id,
-            "source_dataset_id": dataset_id,
-            "origin": f"{ORIGIN}.materialize_training_set",
-            "kind": "active_learning_training_dataset",
-            "session_id": session["session_id"],
-            "session_artifact_id": session_artifact_id,
-            "round": round_index,
-        },
-    )
-
-    class_labels = [] if task_type == al_state.TASK_REGRESSION else resolve_class_labels(params=params, session=session, labelled_items=labelled_items)
-    payload = {
-        "schema_version": 3,
-        "session_id": session["session_id"],
-        "session_artifact_id": session_artifact_id,
-        "source_dataset_id": dataset_id,
-        "pool_dataset_id": dataset_id,
-        "training_dataset_id": train_dataset_id,
-        "validation_dataset_id": str(params.get("validation_dataset_id") or session.get("validation_dataset_id") or ""),
-        "test_dataset_id": str(params.get("test_dataset_id") or session.get("test_dataset_id") or ""),
-        "recipe_id": str(profile_info.get("recipe_id") or session.get("recipe_id") or ""),
-        "recipe_profile_id": str(profile_info.get("recipe_profile_id") or session.get("recipe_profile_id") or ""),
-        "recipe_profile_name": str(profile_info.get("recipe_profile_name") or session.get("recipe_profile_name") or ""),
-        "target_column": target_column,
-        "task_type": task_type,
-        "problem_type": task_type,
-        "label_profile": dict(session.get("label_profile") or {}),
-        "record_id_column": id_column,
-        "image_column": image_column,
-        "class_labels": class_labels,
-        "classes": class_labels,
-        "round": round_index,
-        "seed": int(params.get("seed", session.get("seed", 42))),
-        "row_ids": [str(item["row_id"]) for item in labelled_items],
-        "labels": labelled_items,
-        "label_counts": al_state.label_counts(session),
-        "counts": al_state.counts(session),
-        "session_contract": dict(params.get("session_contract") or session.get("contract") or {}),
-    }
-    training_artifact_id = context.artifacts.put(
-        al_state.ARTIFACT_TRAINING_SET,
-        payload,
-        dataset_id=train_dataset_id,
-        row_ids=payload["row_ids"],
-        params={"session_id": session["session_id"], "round": round_index, "target_column": target_column},
-    )
-    return {
-        "ok": True,
-        "session": session,
-        "session_artifact_id": session_artifact_id,
-        "source_dataset_id": dataset_id,
-        "training_dataset_id": train_dataset_id,
-        "training_artifact_id": training_artifact_id,
-        "target_column": target_column,
-        "task_type": task_type,
-        "problem_type": task_type,
-        "label_profile": dict(session.get("label_profile") or {}),
-        "record_id_column": id_column,
-        "image_column": image_column,
-        "class_labels": class_labels,
-        "labelled_count": len(labelled_items),
-        "recipe_id": str(profile_info.get("recipe_id") or session.get("recipe_id") or ""),
-        "recipe_profile_id": str(profile_info.get("recipe_profile_id") or session.get("recipe_profile_id") or ""),
-        "recipe_profile_name": str(profile_info.get("recipe_profile_name") or session.get("recipe_profile_name") or ""),
-        "round": round_index,
-    }
 
 def train_from_session_action(context: Any, request: Any, cancel_token: Any = None) -> Dict[str, Any]:
-    """Optional core.ml bridge: materialise labels, train, optionally predict/query."""
+    """Optional core.ml bridge: attach labels, train, optionally predict/query."""
 
     request = al_actions.coerce_request(request)
     params = dict(request.params or {})
@@ -712,6 +571,16 @@ def train_from_session_action(context: Any, request: Any, cancel_token: Any = No
         session_artifact_id = str(materialized.get("session_artifact_id") or session_artifact_id)
         train_dataset_id = str(materialized["training_dataset_id"])
         training_artifact_id = str(materialized["training_artifact_id"])
+        training_row_ids = [
+            str(row_id)
+            for row_id in materialized.get("training_row_ids") or []
+            if str(row_id).strip()
+        ]
+        if not training_row_ids:
+            raise ValueError(
+                "The prepared Active Learning training set did not provide "
+                "training_row_ids."
+            )
         target_column = str(materialized["target_column"])
         task_type = al_state.parse_task_type(materialized.get("task_type") or session.get("task_type") or session.get("problem_type"))
         train_columns = list_dataset_columns(context, train_dataset_id)
@@ -733,6 +602,8 @@ def train_from_session_action(context: Any, request: Any, cancel_token: Any = No
                 "al_session_artifact_id": session_artifact_id,
                 "al_training_artifact_id": training_artifact_id,
                 "al_round": materialized["round"],
+                "training_row_ids": training_row_ids,
+                "training_row_count": len(training_row_ids),
                 "task_type": task_type,
                 "problem_type": task_type,
                 "warm_start": False,
@@ -757,7 +628,7 @@ def train_from_session_action(context: Any, request: Any, cancel_token: Any = No
 
         ml_request = ActionRequest(
             dataset_id=train_dataset_id,
-            row_ids=None,
+            row_ids=training_row_ids,
             columns=[],
             params=recipe_params,
             artifact_id=None,
@@ -871,6 +742,10 @@ def train_from_session_action(context: Any, request: Any, cancel_token: Any = No
         "workflow_status": "complete" if not workflow_errors else "partial",
         "workflow_errors": workflow_errors,
         "labelled_count": materialized["labelled_count"],
+        "training_row_count": len(training_row_ids),
+        "training_dataset_reused": bool(
+            materialized.get("training_dataset_reused", False)
+        ),
         "origin": f"{ORIGIN}.train_from_session",
     }
     finish_payload = ml_event_payload(finish_base, ml_result)
@@ -904,6 +779,10 @@ def train_from_session_action(context: Any, request: Any, cancel_token: Any = No
         "recipe_profile_id": recipe_profile_id,
         "recipe_profile_name": recipe_profile_name,
         "labelled_count": materialized["labelled_count"],
+        "training_row_count": len(training_row_ids),
+        "training_dataset_reused": bool(
+            materialized.get("training_dataset_reused", False)
+        ),
         "ml_result": al_state.json_safe_summary(ml_result),
         "prediction_result": al_state.json_safe_summary(prediction_result),
         "query_result": al_state.json_safe_summary(query_result),
@@ -952,7 +831,6 @@ def training_dataframe(
         raise ValueError("Derived AL training dataset is missing required columns: " + ", ".join(missing))
     return df, id_column
 
-
 def _lookup_training_rows_by_id(
     context: Any,
     *,
@@ -994,7 +872,6 @@ def _lookup_training_rows_by_id(
                     return df
     return None
 
-
 def _coerce_rows_dataframe(rows: Any) -> Optional[pd.DataFrame]:
     if rows is None:
         return None
@@ -1008,13 +885,11 @@ def _coerce_rows_dataframe(rows: Any) -> Optional[pd.DataFrame]:
             return pd.DataFrame.from_records(records)
     return None
 
-
 def _materialise_training_columns(context: Any, *, dataset_id: str, columns: Sequence[str]) -> pd.DataFrame:
     try:
         return context.datasets.get_df(dataset_id, columns=list(columns)) if columns else context.datasets.get_df(dataset_id)
     except TypeError:
         return context.datasets.get_df(dataset_id)
-
 
 def _normalise_training_rows(source_df: pd.DataFrame, *, id_column: Optional[str], row_ids: Sequence[str]) -> Tuple[pd.DataFrame, Optional[str]]:
     row_id_set = set(row_ids)

@@ -21,10 +21,13 @@ models
 ./data/EDFN-DESI.fits
 ./data/saved_sources
 ./data/notebook*
+data/*
+
 data_cutouts
 astronomicAL/extensions/data
 *.fits
 
+.astronomical/*
 
 
 # Byte-compiled / optimized / DLL files

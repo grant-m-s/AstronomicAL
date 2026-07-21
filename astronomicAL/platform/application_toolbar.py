@@ -51,6 +51,10 @@ BUILT_IN_TEMPLATES: tuple[QuickWorkspaceTemplate, ...] = (
                 titles=("Scatter", "Scatter Plot"),
             ),
             PanelSelector(
+                registration_ids=("core.visualisation.scatter",),
+                titles=("Scatter", "Scatter Plot"),
+            ),
+            PanelSelector(
                 registration_ids=("core.table_tools.table",),
                 titles=("Table", "Dataset Table"),
             ),
@@ -108,12 +112,24 @@ BUILT_IN_TEMPLATES: tuple[QuickWorkspaceTemplate, ...] = (
                 titles=("Active Learning",),
             ),
             PanelSelector(
-                registration_ids=("core.image.selection_gallery",),
-                titles=("Selection Gallery",),
+                registration_ids=("core.ml.recipe_launcher",),
+                titles=("Recipe Launcher",),
             ),
             PanelSelector(
                 registration_ids=("core.ml.training_curves",),
                 titles=("Training Curves",),
+            ),
+            PanelSelector(
+                registration_ids=("core.ml.predictor",),
+                titles=("Predictor",),
+            ),
+            PanelSelector(
+                registration_ids=("core.resources.monitor",),
+                titles=("Resource Monitor",),
+            ),
+            PanelSelector(
+                registration_ids=("core.visualisation.scatter",),
+                titles=("Scatter", "Scatter Plot"),
             ),
         ),
     ),
