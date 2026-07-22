@@ -596,6 +596,23 @@ class MappingAlertController:
         self.modal_body[:] = body
         self.modal_footer[:] = [self._build_action_row()]
 
+    @staticmethod
+    def _partition_pending_items(
+        items: List[Tuple[PendingKey, dict]],
+    ) -> List[Tuple[PendingKey, dict]]:
+        """Keep required and optional groups stable in request order."""
+        required = [
+            keyed_item
+            for keyed_item in items
+            if bool(keyed_item[1].get("required", True))
+        ]
+        optional = [
+            keyed_item
+            for keyed_item in items
+            if not bool(keyed_item[1].get("required", True))
+        ]
+        return required + optional
+
     def _section_header(self, dataset_id: str) -> list[Any]:
         return [
             pn.pane.HTML(
@@ -636,10 +653,7 @@ class MappingAlertController:
         blocks = []
 
         for dataset_id, unsorted_items in ordered_groups:
-            items = sorted(
-                unsorted_items,
-                key=self._pending_item_sort_key,
-            )
+            items = self._partition_pending_items(unsorted_items)
             section = self._section_header(dataset_id)
 
             for key, item in items:
