@@ -5,6 +5,9 @@ import html
 import json
 from typing import Any, Optional
 
+import math
+import time
+
 import panel as pn
 
 try:
@@ -34,7 +37,7 @@ class ImageViewerPanel:
         self,
         context: Any,
         *,
-        max_size: int = 2048,
+        max_size: int = 1024,
         image_height: int = 360,
     ) -> None:
         self.context = context
@@ -47,6 +50,11 @@ class ImageViewerPanel:
         self._current_row_id: Optional[str] = None
         self._last_preview: Optional[ImagePreview] = None
         self._request_seq = 0
+
+        self._load_delay_ms = 360
+        self._load_scheduled = False
+        self._load_due_at = 0.0
+        self._pending_load: Optional[tuple[str, str, int]] = None
 
         self._title = pn.pane.Markdown("### Image Viewer", sizing_mode="stretch_width")
         self._status = pn.pane.Alert(
@@ -124,6 +132,10 @@ class ImageViewerPanel:
         return self._view
 
     def dispose(self) -> None:
+        self._request_seq += 1
+        self._pending_load = None
+        self._cancel_image_jobs()
+
         events = getattr(self.context, "events", None)
         if events is not None:
             for sub in self._subscriptions:
@@ -132,13 +144,6 @@ class ImageViewerPanel:
                 except Exception:
                     pass
         self._subscriptions.clear()
-
-        for handle in self._job_handles:
-            try:
-                handle.cancel()
-            except Exception:
-                pass
-        self._job_handles.clear()
 
     def get_state(self) -> dict[str, Any]:
         return {
@@ -175,15 +180,106 @@ class ImageViewerPanel:
         ):
             self._subscriptions.append(events.subscribe(topic, callback))
 
+    def _start_pending_load(self) -> None:
+        remaining = self._load_due_at - time.monotonic()
+        if remaining > 0:
+            self._schedule(
+                self._start_pending_load,
+                delay_ms=max(1, math.ceil(remaining * 1000)),
+            )
+            return
+
+        self._load_scheduled = False
+        request = self._pending_load
+        self._pending_load = None
+        if request is None:
+            return
+
+        dataset_id, row_id, request_seq = request
+        self._cancel_image_jobs()
+        self._submit_image_load(dataset_id, row_id, request_seq)
+
+    def _submit_image_load(
+        self,
+        dataset_id: str,
+        row_id: str,
+        request_seq: int,
+    ) -> None:
+        jobs = getattr(self.context, "jobs", None)
+        if jobs is None:
+            self._set_error("The platform job service is unavailable.")
+            return
+
+        resolver = get_image_resolver(self.context)
+        self._set_loading(f"Loading image for `{html.escape(row_id)}`…")
+
+        handle = None
+
+        def done(preview: ImagePreview) -> None:
+            self._discard_job_handle(handle)
+            self._render_preview_if_current(preview, request_seq)
+
+        def failed(exc: BaseException) -> None:
+            self._discard_job_handle(handle)
+            if request_seq == self._request_seq:
+                self._set_error(str(exc))
+
+        handle = jobs.submit(
+            resolver.load_preview_for_row,
+            title="Load image preview",
+            key=f"core.image.viewer:{id(self)}:{request_seq}",
+            on_done=done,
+            on_error=failed,
+            dataset_id=dataset_id,
+            row_id=row_id,
+            max_size=self.max_size,
+            prefer_thumbnail=False,
+        )
+        self._job_handles.append(handle)
+
+    def _cancel_image_jobs(self) -> None:
+        for handle in list(self._job_handles):
+            try:
+                handle.cancel()
+            except Exception:
+                pass
+        self._job_handles.clear()
+
+    def _discard_job_handle(self, handle: Any) -> None:
+        if handle is None:
+            return
+        try:
+            self._job_handles.remove(handle)
+        except ValueError:
+            pass
+
     def on_selection_focus_changed(self, topic: str, payload: dict[str, Any]) -> None:
         dataset_id = payload.get("dataset_id")
         row_id = payload.get("row_id")
         if not dataset_id or row_id is None:
-            self._set_info("Focus event did not include dataset_id and row_id.")
             return
-        self._load_row(str(dataset_id), str(row_id))
+
+        self._current_dataset_id = str(dataset_id)
+        self._current_row_id = str(row_id)
+        self._last_preview = None
+        self._request_seq += 1
+        self._cancel_image_jobs()
+
+        self._pending_load = (
+            self._current_dataset_id,
+            self._current_row_id,
+            self._request_seq,
+        )
+        self._load_due_at = time.monotonic() + self._load_delay_ms / 1000
+
+        if not self._load_scheduled:
+            self._load_scheduled = True
+            self._schedule(self._start_pending_load, delay_ms=self._load_delay_ms)
 
     def on_selection_focus_cleared(self, topic: str, payload: dict[str, Any]) -> None:
+        self._request_seq += 1
+        self._pending_load = None
+        self._cancel_image_jobs()
         self._current_dataset_id = None
         self._current_row_id = None
         self._last_preview = None
@@ -210,43 +306,6 @@ class ImageViewerPanel:
 
         self._set_loading("Image mapping updated. Reloading focused image…")
         self.on_selection_focus_changed("selection.focus.changed", focus)
-
-    def _load_row(self, dataset_id: str, row_id: str) -> None:
-        self._current_dataset_id = str(dataset_id)
-        self._current_row_id = str(row_id)
-        self._last_preview = None
-        self._request_seq += 1
-        request_seq = self._request_seq
-        self._set_loading(f"Loading image for `{html.escape(str(row_id))}`…")
-
-        jobs = getattr(self.context, "jobs", None)
-        resolver = get_image_resolver(self.context)
-
-        if jobs is None:
-            try:
-                preview = resolver.load_preview_for_row(
-                    dataset_id,
-                    row_id,
-                    max_size=self.max_size,
-                    prefer_thumbnail=False,
-                )
-                self._render_preview_if_current(preview, request_seq)
-            except Exception as exc:
-                self._set_error(str(exc))
-            return
-
-        handle = jobs.submit(
-            resolver.load_preview_for_row,
-            title="Load image preview",
-            key=f"core.image.preview:{dataset_id}:{row_id}:{self.max_size}",
-            on_done=lambda preview: self._render_preview_if_current(preview, request_seq),
-            on_error=lambda exc: self._set_error(str(exc)) if request_seq == self._request_seq else None,
-            dataset_id=dataset_id,
-            row_id=row_id,
-            max_size=self.max_size,
-            prefer_thumbnail=False,
-        )
-        self._job_handles.append(handle)
 
     def _render_preview_if_current(self, preview: ImagePreview, request_seq: int) -> None:
         if request_seq != self._request_seq:
@@ -436,17 +495,31 @@ class ImageViewerPanel:
         """
 
     @staticmethod
-    def _schedule(fn: Any) -> None:
+    def _schedule(fn: Any, *, delay_ms: int = 0) -> None:
         try:
             doc = pn.state.curdoc
         except Exception:
             doc = None
+
         if doc is None:
+            if delay_ms <= 0:
+                try:
+                    fn()
+                except Exception:
+                    pass
             return
+
         try:
-            doc.add_next_tick_callback(fn)
+            if delay_ms > 0:
+                doc.add_timeout_callback(fn, int(delay_ms))
+            else:
+                doc.add_next_tick_callback(fn)
         except Exception:
-            pass
+            if delay_ms <= 0:
+                try:
+                    fn()
+                except Exception:
+                    pass
 
     def _set_info(self, message: str) -> None:
         self._status.alert_type = "info"
