@@ -17,6 +17,8 @@ except Exception:
 from .image_visualization import ImageVisualizationClass
 from .service import DEFAULT_EUCLID_FILTERS, DEFAULT_SAVE_DIR, EuclidCutoutRuntime
 
+from concurrent.futures import CancelledError
+
 
 PLUGIN_ID = "astro.euclid_cutout"
 RUNTIME_SERVICE_KEY = f"{PLUGIN_ID}.runtime"
@@ -43,6 +45,9 @@ SETTINGS_CONTENT_HEIGHT = (
 )
 
 HEADER_HEIGHT = 52
+
+AUTO_LOAD_DELAY_MS = 750
+FILTER_LOAD_DELAY_MS = 125
 
 def _settings_overlay_styles(open_settings: bool) -> Dict[str, str]:
     styles = {
@@ -308,27 +313,42 @@ class EuclidCutoutPanel:
         self.context = context
         self.data = data
         self.panel_id = f"{PLUGIN_ID}.{uuid.uuid4().hex}"
+
         self._subscriptions: List[Any] = []
         self._job_handle: Any = None
+        self._job_generation: Optional[int] = None
+        self._request_generation = 0
         self._disposed = False
         self._initial_load_started = False
         self._settings_built = False
         self.settings_visible = False
+
+        self._runtime_service: Optional[EuclidCutoutRuntime] = None
+        self._owns_runtime_service = False
+        self._panel_storage: Any = None
+        self._suppress_filter_reload = False
+
         self._current_target: Optional[_ResolvedTarget] = None
         self._cutout_result: Any = None
-        self.euclid_object: Any = None  # retrieval object only, not visualisation
+        self.euclid_object: Any = None
         self.image_container: Optional[ImageVisualizationClass] = None
+
         self.overplotted_coordinates: List[Any] = []
-        self.stored_spectrum_coordinates: Dict[str, Dict[str, Iterable[float]]] = {}
+        self.stored_spectrum_coordinates: Dict[
+            str,
+            Dict[str, Iterable[float]],
+        ] = {}
+
         self.image_width = 1
         self.image_height = 1
         self.bar_length_pixels = 1
         self.euclid_fig: List[Any] = []
 
         self._auto_load_generation = 0
-        self._auto_load_scheduled = False
-        self._pending_auto_load_reason: Optional[str] = None
         self._target_status_scheduled = False
+
+        runtime = self._runtime()
+        self._panel_storage = runtime.acquire_panel_storage(self.panel_id)
 
         self._build_widgets()
         if state:
@@ -347,15 +367,40 @@ class EuclidCutoutPanel:
         return self.view()
 
     def dispose(self) -> None:
+        if self._disposed:
+            return
+
         self._disposed = True
-        self._cancel_job()
+        self._request_generation += 1
+        self._auto_load_generation += 1
+        self._cancel_job(reason="panel.disposed", publish=False)
+
+        result = self._cutout_result
+        self._cutout_result = None
+        self.euclid_object = None
+        self.image_container = None
+        self._cleanup_result(result)
+
+        runtime = self._runtime_service
+        lease = self._panel_storage
+        self._panel_storage = None
+
+        if runtime is not None:
+            runtime.release_panel_storage(lease)
+        elif lease is not None:
+            lease.release()
+
+        if self._owns_runtime_service and runtime is not None:
+            runtime.dispose()
+
         events = getattr(self.context, "events", None)
         if events is not None:
-            for sub in list(self._subscriptions):
+            for subscription in list(self._subscriptions):
                 try:
-                    events.unsubscribe(sub)
+                    events.unsubscribe(subscription)
                 except Exception:
                     pass
+
         self._subscriptions.clear()
 
     def snapshot_state(self) -> Dict[str, Any]:
@@ -380,6 +425,7 @@ class EuclidCutoutPanel:
     def restore_state(self, state: Dict[str, Any]) -> None:
         if not isinstance(state, dict):
             return
+
         self.settings_visible = bool(state.get("settings_visible", False))
         mapping = {
             "environment": self.environment,
@@ -397,12 +443,19 @@ class EuclidCutoutPanel:
             "save_dir": self.save_dir_input,
             "credentials_filepath": self.credentials_file_input,
         }
-        for key, widget in mapping.items():
-            if key in state:
+
+        self._suppress_filter_reload = True
+        try:
+            for key, widget in mapping.items():
+                if key not in state:
+                    continue
                 try:
                     widget.value = state[key]
                 except Exception:
                     pass
+        finally:
+            self._suppress_filter_reload = False
+
         try:
             self._apply_settings_visibility()
         except Exception:
@@ -543,7 +596,7 @@ class EuclidCutoutPanel:
 
         self.save_dir_input = _wide_input(
             pn.widgets.TextInput(
-                name="FITS cache directory",
+                name="FITS storage directory",
                 value=DEFAULT_SAVE_DIR,
             )
         )
@@ -669,9 +722,9 @@ class EuclidCutoutPanel:
         self.refresh_button.on_click(lambda _event: self._refresh_display())
         self.clean_jobs_button.on_click(lambda _event: self._clean_async_jobs())
         self.environment.param.watch(self._environment_changed, "value")
+        self.filter_input.param.watch(self._filter_changed, "value")
 
         for widget in [
-            self.filter_input,
             self.clip_slider,
             self.rgb_clip_r,
             self.rgb_clip_g,
@@ -967,38 +1020,72 @@ class EuclidCutoutPanel:
 
         self._schedule_panel_callback(_run, delay_ms=delay_ms)
 
-    def _schedule_auto_load(self, *, reason: str, delay_ms: int = 175) -> None:
-        """Debounce auto-loads so rapid focus changes only load the latest row."""
+    def _schedule_auto_load(
+        self,
+        *,
+        reason: str,
+        delay_ms: int = AUTO_LOAD_DELAY_MS,
+    ) -> None:
+        """Run one trailing load after focus changes have gone quiet."""
+
         self._auto_load_generation += 1
-        generation = int(self._auto_load_generation)
-        self._pending_auto_load_reason = str(reason or "auto")
-
-        if getattr(self, "_auto_load_scheduled", False):
-            return
-
-        self._auto_load_scheduled = True
+        generation = self._auto_load_generation
 
         def _run() -> None:
-            self._auto_load_scheduled = False
-            if getattr(self, "_disposed", False):
+            if self._disposed:
                 return
-            if generation != int(getattr(self, "_auto_load_generation", 0)):
-                # A newer focus/dataset event superseded this one.
-                if self._pending_auto_load_reason:
-                    self._schedule_auto_load(
-                        reason=self._pending_auto_load_reason,
-                        delay_ms=delay_ms,
-                    )
+            if generation != self._auto_load_generation:
                 return
 
-            reason_to_use = self._pending_auto_load_reason or reason
-            self._pending_auto_load_reason = None
             try:
-                self.load_cutout(reason=reason_to_use)
+                self.load_cutout(reason=str(reason or "auto"))
             except Exception:
                 traceback.print_exc()
 
         self._schedule_panel_callback(_run, delay_ms=delay_ms)
+
+
+    def _invalidate_request(
+        self,
+        *,
+        reason: str,
+        target: Optional[_ResolvedTarget] = None,
+        publish: bool = False,
+    ) -> None:
+        self._request_generation += 1
+        self._auto_load_generation += 1
+        self._cancel_job(
+            target=target,
+            reason=reason,
+            publish=publish,
+        )
+
+
+    def _filter_changed(self, _event: Any) -> None:
+        if self._disposed or self._suppress_filter_reload:
+            return
+
+        selected = str(self.filter_input.value)
+        available = set(
+            getattr(self.image_container, "available_bands", []) or []
+        )
+
+        if self.image_container is not None and selected in available:
+            self._schedule_panel_callback(self._refresh_display)
+            return
+
+        old_target = self._current_target
+        self._invalidate_request(
+            reason="filter.changed",
+            target=old_target,
+            publish=True,
+        )
+
+        self.status.object = f"Loading Euclid {selected} cutout…"
+        self._schedule_auto_load(
+            reason="filter.changed",
+            delay_ms=FILTER_LOAD_DELAY_MS,
+        )
 
     def _event_identity(
         self,
@@ -1097,62 +1184,112 @@ class EuclidCutoutPanel:
         )
         self._publish("plugin.error", payload)
 
-    def _reset_loaded_cutout(self) -> None:
+    def _reset_loaded_cutout(self, *, clear_figure: bool = True) -> None:
+        result = self._cutout_result
         self._cutout_result = None
         self.euclid_object = None
         self.image_container = None
-        self.figure.object = self._empty_image()
+        self._cleanup_result(result)
+
+        if clear_figure:
+            self.figure.object = self._empty_image()
 
     def _selection_changed(self, topic: str, payload: Any) -> None:
-        # Keep EventBus subscriber work cheap.
-        self._auto_load_generation += 1
+        del payload
 
-        self._cancel_job(reason=str(topic or "selection.focus.changed"))
+        reason = str(topic or "selection.focus.changed")
+        old_target = self._current_target
+
+        self._invalidate_request(
+            reason=reason,
+            target=old_target,
+            publish=False,
+        )
+
         self._current_target = None
         self.stored_spectrum_coordinates.clear()
         self.overplotted_coordinates = []
 
-        self._reset_loaded_cutout()
-        self.target_status.object = "New focused row queued…"
-
-        if self.auto_reload.value:
-            self._schedule_auto_load(
-                reason=str(topic or "selection.focus.changed"),
-                delay_ms=175,
+        def _update() -> None:
+            self._publish_cutout_running(
+                False,
+                target=old_target,
+                reason=reason,
             )
-        else:
-            self._schedule_target_status_refresh(delay_ms=75)
+            self.target_status.object = (
+                "New focused row queued; showing the previous cutout until "
+                "the replacement is ready…"
+            )
+
+            if self.auto_reload.value:
+                self._schedule_auto_load(reason=reason)
+            else:
+                self._schedule_target_status_refresh(delay_ms=75)
+
+        self._schedule_panel_callback(_update)
+
 
     def _selection_cleared(self, topic: str, payload: Any) -> None:
-        self._auto_load_generation += 1
+        del payload
 
-        self._cancel_job(reason=str(topic or "selection.focus.cleared"))
+        reason = str(topic or "selection.focus.cleared")
+        old_target = self._current_target
+
+        self._invalidate_request(
+            reason=reason,
+            target=old_target,
+            publish=False,
+        )
+
         self._current_target = None
         self.stored_spectrum_coordinates.clear()
         self.overplotted_coordinates = []
 
-        self.status.object = "No focused row selected."
-        self.target_status.object = ""
-        self._reset_loaded_cutout()
+        def _clear() -> None:
+            self._publish_cutout_running(
+                False,
+                target=old_target,
+                reason=reason,
+            )
+            self.status.object = "No focused row selected."
+            self.target_status.object = ""
+            self._reset_loaded_cutout()
+
+        self._schedule_panel_callback(_clear)
+
 
     def _dataset_changed(self, topic: str, payload: Any) -> None:
-        self._auto_load_generation += 1
+        del payload
 
-        self._cancel_job(reason=str(topic or "dataset.changed"))
+        reason = str(topic or "dataset.changed")
+        old_target = self._current_target
+
+        self._invalidate_request(
+            reason=reason,
+            target=old_target,
+            publish=False,
+        )
+
         self._current_target = None
         self.stored_spectrum_coordinates.clear()
         self.overplotted_coordinates = []
 
-        self._reset_loaded_cutout()
-        self.target_status.object = "Dataset changed; resolving target…"
-
-        if self.auto_reload.value:
-            self._schedule_auto_load(
-                reason=str(topic or "dataset.changed"),
-                delay_ms=225,
+        def _update() -> None:
+            self._publish_cutout_running(
+                False,
+                target=old_target,
+                reason=reason,
             )
-        else:
-            self._schedule_target_status_refresh(delay_ms=100)
+            self.target_status.object = (
+                "Dataset changed; resolving the latest focused row…"
+            )
+
+            if self.auto_reload.value:
+                self._schedule_auto_load(reason=reason)
+            else:
+                self._schedule_target_status_refresh(delay_ms=100)
+
+        self._schedule_panel_callback(_update)
 
     def _coords_updated(self, topic: str, payload: Any) -> None:
         if not isinstance(payload, dict):
@@ -1193,7 +1330,7 @@ class EuclidCutoutPanel:
             if key == str(source) or key.startswith(f"{source}:"):
                 del self.stored_spectrum_coordinates[key]
         self.stored_spectrum_coordinates[storage_key] = normalised
-        self._refresh_display()
+        self._schedule_panel_callback(self._refresh_display)
 
     # ------------------------------------------------------------------
     # Data/mapping helpers
@@ -1593,14 +1730,35 @@ class EuclidCutoutPanel:
     # Loading / rendering
     # ------------------------------------------------------------------
     def _runtime(self) -> EuclidCutoutRuntime:
+        if self._runtime_service is not None:
+            return self._runtime_service
+
         services = getattr(self.context, "services", None)
         if services is not None:
             try:
                 if services.has(RUNTIME_SERVICE_KEY):
-                    return services.get(RUNTIME_SERVICE_KEY)
+                    self._runtime_service = services.get(RUNTIME_SERVICE_KEY)
+                    return self._runtime_service
             except Exception:
                 pass
-        return EuclidCutoutRuntime(context=self.context)
+
+        self._runtime_service = EuclidCutoutRuntime(context=self.context)
+        self._owns_runtime_service = True
+        return self._runtime_service
+
+
+    def _cleanup_result(self, result: Any) -> None:
+        if result is None:
+            return
+
+        runtime = self._runtime_service
+        if runtime is not None:
+            runtime.cleanup_result(result)
+            return
+
+        cleanup = getattr(result, "cleanup", None)
+        if callable(cleanup):
+            cleanup()
 
     def _schedule_initial_load(self) -> None:
         if self._initial_load_started:
@@ -1644,47 +1802,81 @@ class EuclidCutoutPanel:
 
         try:
             target = self._resolve_target()
-            self._current_target = target
         except Exception as exc:
             self.status.object = f"**Euclid cutout unavailable:** {exc}"
-            self.figure.object = self._empty_image()
             return
 
-        self._cancel_job(reason="superseded")
-        self._reset_loaded_cutout()
+        previous_target = self._current_target
+
+        # Invalidate both pending debounce callbacks and older result callbacks.
+        self._auto_load_generation += 1
+        self._request_generation += 1
+        generation = self._request_generation
+
+        self._cancel_job(
+            target=previous_target,
+            reason="superseded",
+        )
+
         self.status.object = "Loading Euclid cutout…"
         self.target_status.object = self._target_html(target)
-
-        self._publish_cutout_running(True, target=target, reason=reason)
+        self._publish_cutout_running(
+            True,
+            target=target,
+            reason=reason,
+        )
 
         runtime = self._runtime()
+        lease = self._panel_storage
+        if lease is None or lease.released:
+            lease = runtime.acquire_panel_storage(self.panel_id)
+            self._panel_storage = lease
+
+        # Read all widget state on the UI thread. The worker receives plain values.
         credentials = self.credentials_file_input.value.strip() or None
         user = self.user_input.value.strip() or None
         password = self.password_input.value or None
         environment = self.environment.value or "PDR"
+        radius_arcsec = float(self.radius_input.value)
+        filter_name = str(self.filter_input.value)
+        stretch = str(self.stretch_input.value)
+        stretch_scale = self._stretch_scale_value()
+        save_dir = self.save_dir_input.value or DEFAULT_SAVE_DIR
 
         def _worker(cancel_token: Any = None) -> Any:
             return runtime.fetch_cutout(
                 ra=target.ra,
                 dec=target.dec,
-                radius_arcsec=float(self.radius_input.value),
-                filter_name=self.filter_input.value,
-                stretch=self.stretch_input.value,
-                stretch_scale=self._stretch_scale_value(),
+                radius_arcsec=radius_arcsec,
+                filter_name=filter_name,
+                stretch=stretch,
+                stretch_scale=stretch_scale,
                 environment=environment,
                 user=user,
                 password=password,
                 credentials_filepath=credentials,
-                save_dir=self.save_dir_input.value or DEFAULT_SAVE_DIR,
+                save_dir=save_dir,
+                panel_storage=lease,
+                request_id=generation,
                 cancel_token=cancel_token,
                 verbose=True,
             )
 
         def _done(result: Any) -> None:
-            self._on_cutout_loaded(result, target=target, reason=reason)
+            self._on_cutout_loaded(
+                result,
+                target=target,
+                reason=reason,
+                generation=generation,
+            )
 
         def _error(exc: BaseException) -> None:
-            self._on_cutout_error(exc, target=target, reason=reason)
+            self._on_cutout_error(
+                exc,
+                target=target,
+                reason=reason,
+                generation=generation,
+            )
 
         jobs = getattr(self.context, "jobs", None)
         if jobs is None:
@@ -1698,7 +1890,7 @@ class EuclidCutoutPanel:
             self._job_handle = jobs.submit(
                 _worker,
                 title="Fetch Euclid cutout",
-                key=f"{self.panel_id}:{target.dataset_id}:{target.row_id}:{target.ra}:{target.dec}",
+                key=f"{self.panel_id}:request:{generation}",
                 on_done=_done,
                 on_error=_error,
             )
@@ -1710,18 +1902,21 @@ class EuclidCutoutPanel:
                 on_error=_error,
             )
 
+        self._job_generation = generation
+
     def _cancel_job(
         self,
         *,
         target: Optional[_ResolvedTarget] = None,
         reason: str = "cancelled",
         publish: bool = True,
-    ) -> None:
+    ) -> bool:
         handle = self._job_handle
         self._job_handle = None
+        self._job_generation = None
 
         if handle is None:
-            return
+            return False
 
         try:
             handle.cancel()
@@ -1735,24 +1930,58 @@ class EuclidCutoutPanel:
                 reason=reason,
             )
 
-    def _on_cutout_loaded(self, result: Any, *, target: _ResolvedTarget, reason: str) -> None:
-        if self._disposed:
-            self._publish_cutout_running(False, target=target, reason="panel.disposed")
+        return True
+
+    def _on_cutout_loaded(
+        self,
+        result: Any,
+        *,
+        target: _ResolvedTarget,
+        reason: str,
+        generation: int,
+    ) -> None:
+        stale = (
+            self._disposed
+            or generation != self._request_generation
+            or not self._target_matches_current_focus(target)
+        )
+
+        if stale:
+            self._cleanup_result(result)
+            self._publish_cutout_running(
+                False,
+                target=target,
+                reason="stale_result",
+            )
             return
 
-        if not self._target_matches_current_focus(target):
-            self._publish_cutout_running(False, target=target, reason="stale_result")
-            return
+        if self._job_generation == generation:
+            self._job_handle = None
+            self._job_generation = None
 
-        self._job_handle = None
+        previous_result = self._cutout_result
+        previous_object = self.euclid_object
+        previous_container = self.image_container
+        previous_target = self._current_target
+
         self._cutout_result = result
         self.euclid_object = result.cutout
 
         try:
             self._create_image_container(result)
+            self._current_target = target
+            self.status.object = ""
+            self._refresh_display()
         except Exception as exc:
-            self.status.object = f"**Could not initialise Euclid image visualisation:** {exc}"
-            self.figure.object = self._empty_image()
+            self._cutout_result = previous_result
+            self.euclid_object = previous_object
+            self.image_container = previous_container
+            self._current_target = previous_target
+            self._cleanup_result(result)
+
+            self.status.object = (
+                f"**Could not initialise Euclid image visualisation:** {exc}"
+            )
             self._publish_cutout_running(
                 False,
                 target=target,
@@ -1766,13 +1995,54 @@ class EuclidCutoutPanel:
             )
             return
 
-        self.status.object = ""
-        self._refresh_display()
+        self._cleanup_result(previous_result)
 
-        artifact_id = self._put_cutout_artifact(result, target=target)
-        self._publish_cutout_artifact_created(artifact_id=artifact_id, target=target)
+        artifact_id: Optional[str] = None
+        retained_paths = False
 
-        updated_payload = self._event_identity(target=target, artifact_id=artifact_id)
+        # Navbar/selection-driven loads are transient. Only explicit Load actions
+        # create retained FITS files and platform artifacts.
+        retain_result = reason in {"button.load", "manual"}
+
+        if retain_result:
+            try:
+                self._runtime().promote_result(result)
+                retained_paths = bool(result.fits_paths)
+                artifact_id = self._put_cutout_artifact(
+                    result,
+                    target=target,
+                )
+            except Exception as exc:
+                self.status.object = (
+                    "Cutout loaded, but its retained FITS artifact could not "
+                    f"be written: {exc}"
+                )
+                self._publish_plugin_error(
+                    stage="retain_cutout",
+                    error=exc,
+                    target=target,
+                )
+
+        # The visualisation owns detached NumPy arrays, so scratch files can now
+        # be removed even though the displayed image remains available.
+        self._cleanup_result(result)
+
+        if not retained_paths:
+            result.fits_paths = {}
+            try:
+                result.cutout.cutouts_paths = {}
+            except Exception:
+                pass
+
+        self._publish_cutout_artifact_created(
+            artifact_id=artifact_id,
+            target=target,
+        )
+
+        updated_payload = self._event_identity(
+            target=target,
+            artifact_id=artifact_id,
+        )
         updated_payload.update(
             {
                 "ra": target.ra,
@@ -1801,62 +2071,78 @@ class EuclidCutoutPanel:
         target_wcs = result.wcs.get(reference_band)
 
         preferred_color_band_sets = [
-            ["NIR_H", "NIR_Y", "VIS"], 
+            ["NIR_H", "NIR_Y", "VIS"],
             ["NIR_H", "NIR_J", "VIS"],
             ["NIR_J", "NIR_Y", "VIS"],
         ]
-
-        color_bands = None
-
-        for candidate in preferred_color_band_sets:
-            if all(band in bands for band in candidate):
-                color_bands = candidate
-                break
-
-        has_color = color_bands is not None
+        color_bands = next(
+            (
+                candidate
+                for candidate in preferred_color_band_sets
+                if all(band in bands for band in candidate)
+            ),
+            None,
+        )
 
         self.image_container = ImageVisualizationClass(
             images=images,
             wcs=wcs_list,
             band_names=bands,
-            color_image=has_color,
-            color_bands=color_bands if has_color else None,
+            color_image=color_bands is not None,
+            color_bands=color_bands,
             color_name="Color",
             target_wcs=target_wcs,
         )
 
-        options = self.image_container.available_bands
-        previous = self.filter_input.value
-        self.filter_input.options = options
-        if previous in options:
-            self.filter_input.value = previous
-        elif "Color" in options:
-            self.filter_input.value = "Color"
-        else:
-            self.filter_input.value = options[0]
+        available = list(self.image_container.available_bands)
+        if not available:
+            raise RuntimeError("Euclid visualisation contains no available bands.")
 
-    def _on_cutout_error(self, exc: BaseException, *, target: _ResolvedTarget, reason: str) -> None:
-        if self._disposed:
+        # Keep every archive filter selectable. Choosing a filter not present in
+        # the current result starts a new selected-band request.
+        self.filter_input.options = ["Color", *DEFAULT_EUCLID_FILTERS]
+
+        selected = str(self.filter_input.value)
+        if selected not in available:
+            fallback = "Color" if "Color" in available else available[0]
+            self._suppress_filter_reload = True
+            try:
+                self.filter_input.value = fallback
+            finally:
+                self._suppress_filter_reload = False
+
+    def _on_cutout_error(
+        self,
+        exc: BaseException,
+        *,
+        target: _ResolvedTarget,
+        reason: str,
+        generation: int,
+    ) -> None:
+        if self._job_generation == generation:
+            self._job_handle = None
+            self._job_generation = None
+
+        stale = (
+            self._disposed
+            or generation != self._request_generation
+            or not self._target_matches_current_focus(target)
+        )
+
+        if stale or isinstance(exc, CancelledError):
             self._publish_cutout_running(
                 False,
                 target=target,
-                reason="panel.disposed",
-                error=exc,
+                reason=(
+                    "cancelled"
+                    if isinstance(exc, CancelledError)
+                    else "stale_result"
+                ),
             )
             return
 
-        if not self._target_matches_current_focus(target):
-            self._publish_cutout_running(
-                False,
-                target=target,
-                reason="stale_result",
-                error=exc,
-            )
-            return
-
-        self._job_handle = None
+        # Keep the previous successful image visible.
         self.status.object = f"**Euclid cutout unavailable:** {exc}"
-        self.figure.object = self._empty_image()
 
         self._publish_cutout_running(
             False,
@@ -2299,7 +2585,9 @@ class EuclidCutoutArtifactViewer:
         return {}
 
     @staticmethod
-    def _load_images_from_fits(fits_paths: Dict[str, str]) -> Tuple[Dict[str, np.ndarray], Dict[str, Any]]:
+    def _load_images_from_fits(
+        fits_paths: Dict[str, str],
+    ) -> Tuple[Dict[str, np.ndarray], Dict[str, Any]]:
         images: Dict[str, np.ndarray] = {}
         wcs: Dict[str, Any] = {}
 
@@ -2317,32 +2605,32 @@ class EuclidCutoutArtifactViewer:
                 continue
 
             try:
-                with fits.open(str(path)) as hdul:
-                    selected_hdu = None
-
-                    for hdu in hdul:
-                        data = getattr(hdu, "data", None)
-                        if data is None:
-                            continue
-
-                        array = np.asarray(data)
-                        if array.size and array.ndim >= 2:
-                            selected_hdu = hdu
-                            break
-
+                with fits.open(str(path), memmap=False) as hdul:
+                    selected_hdu = next(
+                        (
+                            hdu
+                            for hdu in hdul
+                            if getattr(hdu, "data", None) is not None
+                        ),
+                        None,
+                    )
                     if selected_hdu is None:
                         continue
 
-                    array = np.asarray(selected_hdu.data)
-                    while array.ndim > 2:
-                        array = array[0]
+                    array = np.array(selected_hdu.data, copy=True)
+                    header = selected_hdu.header.copy()
 
-                    images[str(band)] = array
+                while array.ndim > 2:
+                    array = array[0]
 
-                    try:
-                        wcs[str(band)] = WCS(selected_hdu.header)
-                    except Exception:
-                        pass
+                if array.ndim != 2 or array.size == 0:
+                    continue
+
+                images[str(band)] = array
+                try:
+                    wcs[str(band)] = WCS(header)
+                except Exception:
+                    pass
             except Exception:
                 continue
 
