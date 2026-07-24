@@ -3,8 +3,6 @@ from __future__ import annotations
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 import html
 
-from astronomicAL.platform.plugins.specs import ActionRequest
-
 from . import actions
 from . import acquisition
 from . import analytics
@@ -14,6 +12,13 @@ try:  # pragma: no cover - UI import is environment-specific.
     import panel as pn
 except Exception:  # pragma: no cover
     pn = None
+
+
+def _new_action_request(**kwargs: Any) -> Any:
+    from astronomicAL.platform.plugins.specs import ActionRequest
+
+    return ActionRequest(**kwargs)
+
 
 MAX_AUTO_LABEL_SCAN_ROWS = 50000
 XY_DEFAULT_MAX_POINTS = 5000
@@ -61,6 +66,8 @@ class ActiveLearningPanel:
         "al.strategy_scores.calculated",
         "al.round.training_started",
         "al.round.training_finished",
+        "al.round.training_paused",
+        "al.round.training_cancelled",
         "al.round.training_failed",
         "al.round.prediction_or_query_failed",
         "ml.recipe_run.started",
@@ -109,6 +116,14 @@ class ActiveLearningPanel:
             self._view = self._build_view()
             self.refresh_choices(status=False)
         return self._view
+
+    def _session_protocol_controls_view(self) -> Any:
+        """Optional session-protocol controls supplied by the job-backed panel."""
+        return None
+
+    def _training_controls_view(self, train_button: Any) -> Any:
+        """Optional pause/resume/cancel controls supplied by the job-backed panel."""
+        return train_button
 
     def get_state(self) -> Dict[str, Any]:
         return {
@@ -181,7 +196,7 @@ class ActiveLearningPanel:
         recipe_value = self._valid_or_default(self.recipe_profile_id, recipe_options, allow_blank=True)
 
         self._widgets = {
-            "dataset_id": pn.widgets.Select(name="Dataset", options=dataset_options, value=dataset_value),
+            "dataset_id": pn.widgets.Select(name="Training pool dataset", options=dataset_options, value=dataset_value),
             "label_column": pn.widgets.Select(name="Label column", options=column_options, value=column_value),
             "labels": pn.widgets.MultiChoice(name="Labels to use", options=labels, value=labels, disabled=not bool(column_value) or self.task_type == al_state.TASK_REGRESSION),
             "label_profile": pn.pane.Markdown(self._label_profile_text(), sizing_mode="stretch_width"),
@@ -275,16 +290,26 @@ class ActiveLearningPanel:
         refresh_xy_btn.on_click(lambda event: self._refresh_xy_plot())
         score_all_btn.on_click(lambda event: self._run_score_pool())
 
-        start_tab = self._scrollable_tab(
+        start_objects: List[Any] = [
             "### Start",
             self._widgets["dataset_id"],
             self._widgets["label_column"],
             self._widgets["label_profile"],
             self._widgets["labels"],
             "For classification, the class set is inferred from the label column and can be limited here. For regression, labels are numeric target values and no class list is used.",
-            self._compact_row(self._widgets["initial_k"], self._widgets["seed"]),
-            self._compact_row(start_btn, refresh_data_btn),
+        ]
+        protocol_controls = self._session_protocol_controls_view()
+        if isinstance(protocol_controls, (list, tuple)):
+            start_objects.extend(protocol_controls)
+        elif protocol_controls is not None:
+            start_objects.append(protocol_controls)
+        start_objects.extend(
+            [
+                self._compact_row(self._widgets["initial_k"], self._widgets["seed"]),
+                self._compact_row(start_btn, refresh_data_btn),
+            ]
         )
+        start_tab = self._scrollable_tab(*start_objects)
         query_tab = self._scrollable_tab(
             "### Query",
             pn.Accordion(
@@ -316,14 +341,24 @@ class ActiveLearningPanel:
             "`Next N labels from column` uses each row's pre-assigned value in the selected label column; it does not repeat the dropdown value.",
             "Use label `Unsure` to remove a row from the query pool without adding it to training.",
         )
-        train_tab = self._scrollable_tab(
+        train_objects: List[Any] = [
             "### Train",
             self._widgets["session_id"],
             self._compact_row(self._widgets["recipe_profile_id"], refresh_recipe_btn),
             self._widgets["seed"],
-            train_btn,
-            "Training materialises the currently labelled rows and updates model/prediction artifacts. Create the next query batch from the Query tab after choosing the strategy and batch size.",
+        ]
+        training_controls = self._training_controls_view(train_btn)
+        if isinstance(training_controls, (list, tuple)):
+            train_objects.extend(training_controls)
+        elif training_controls is not None:
+            train_objects.append(training_controls)
+        train_objects.extend(
+            [
+                "Pause is cooperative: the current epoch, validation pass, scheduler update, and checkpoint save complete before the job enters the paused state. Cancel requests a clean stop through the platform JobManager.",
+                "Training materialises the currently labelled rows and updates model/prediction artifacts. Create the next query batch from the Query tab after choosing the strategy and batch size.",
+            ]
         )
+        train_tab = self._scrollable_tab(*train_objects)
         performance_tab = self._scrollable_tab(
             "### AL Performance",
             "Each point is one completed active-learning training round. The x-axis is the number of labelled training rows used in that round.",
@@ -823,7 +858,7 @@ class ActiveLearningPanel:
                 raise ValueError("Select at least one class label for the active-learning session.")
             result = actions.start_session_action(
                 self.context,
-                ActionRequest(
+                _new_action_request(
                     dataset_id=dataset_id,
                     row_ids=None,
                     columns=[],
@@ -875,7 +910,7 @@ class ActiveLearningPanel:
     def _run_plugin_action(
         self,
         action_id: str,
-        request: ActionRequest,
+        request: Any,
         *,
         on_done: Any,
         on_error: Any,
@@ -912,7 +947,7 @@ class ActiveLearningPanel:
             if not predictions_id:
                 raise ValueError("Train/predict first, or enter an ml.predictions artifact id.")
 
-            request = ActionRequest(
+            request = _new_action_request(
                 dataset_id=None,
                 row_ids=None,
                 columns=[],
@@ -993,7 +1028,7 @@ class ActiveLearningPanel:
         try:
             result = actions.record_label_action(
                 self.context,
-                ActionRequest(
+                _new_action_request(
                     dataset_id=None,
                     row_ids=None,
                     columns=[],
@@ -1029,7 +1064,7 @@ class ActiveLearningPanel:
         try:
             result = actions.bulk_label_next_action(
                 self.context,
-                ActionRequest(
+                _new_action_request(
                     dataset_id=None,
                     row_ids=None,
                     columns=[],
@@ -1084,7 +1119,7 @@ class ActiveLearningPanel:
         )
         self._set_button_busy("score_all_btn", True)
 
-        request = ActionRequest(
+        request = _new_action_request(
             dataset_id=None,
             row_ids=None,
             columns=[],
@@ -1333,7 +1368,7 @@ class ActiveLearningPanel:
             self.recipe_profile_id = recipe_profile_id
             self.recipe_id = ""
 
-            request = ActionRequest(
+            request = _new_action_request(
                 dataset_id=None,
                 row_ids=None,
                 columns=[],

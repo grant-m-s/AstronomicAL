@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from typing import Any
+
 from astronomicAL.platform.plugins import PluginManifest
 
 manifest = PluginManifest(
     id="core.active_learning",
     name="Active Learning",
-    version="0.6.0",
+    version="0.7.0",
     description=(
         "Active-learning sessions with durable labels and memberships, streaming "
         "or embedding-indexed acquisition, selection handoff, and an optional "
@@ -23,9 +25,8 @@ def register(api) -> None:
     from . import session_partitions
     from . import strategies
     from . import streaming_actions
+    from .training_control import ActiveLearningTrainingControls
 
-    session_partitions.install_legacy_bridge()
-    streaming_actions.install_legacy_bridge()
 
     api.register_service(
         key="query_strategy_registry",
@@ -34,14 +35,24 @@ def register(api) -> None:
         replace=True,
         description="Registry for active-learning query strategies.",
     )
+    api.register_service(
+        key="training_controls",
+        factory=lambda context: ActiveLearningTrainingControls(),
+        lazy=True,
+        replace=True,
+        description=(
+            "Context-owned cooperative pause controls for Active Learning "
+            "training jobs."
+        ),
+    )
     api.register_action(
         id="start_session",
         title="Start Active-Learning Session",
         handler=session_partitions.start_session_action,
         description=(
-            "Create pool, validation, and test partitions in a cancellable background "
-            "job, retain the selected source as the active dataset, and draw the "
-            "initial review batch from the session pool."
+            "Create a fixed Active Learning data protocol. Validation and test "
+            "may independently use a split from the selected pool source or an "
+            "already registered dataset."
         ),
         category="Active Learning",
         icon="playlist_add",
@@ -67,12 +78,30 @@ def register(api) -> None:
                 "membership_storage_format": {"type": "string", "enum": ["auto", "parquet", "jsonl.gz"], "default": "auto"},
                 "label_output_dir": {"type": "string"},
                 "membership_output_dir": {"type": "string"},
-                "partition_whole_dataset": {"type": "boolean", "default": True},
-                "session_validation_size": {"type": "number", "minimum": 0.0, "exclusiveMaximum": 1.0, "default": 0.1},
-                "session_test_size": {"type": "number", "minimum": 0.0, "exclusiveMaximum": 1.0, "default": 0.2},
-                "session_pool_dataset_id": {"type": "string"},
-                "session_validation_dataset_id": {"type": "string"},
-                "session_test_dataset_id": {"type": "string"},
+                "validation_source": {
+                    "type": "string",
+                    "enum": ["split", "dataset"],
+                    "default": "split",
+                },
+                "validation_dataset_id": {"type": "string"},
+                "test_source": {
+                    "type": "string",
+                    "enum": ["split", "dataset"],
+                    "default": "split",
+                },
+                "test_dataset_id": {"type": "string"},
+                "session_validation_size": {
+                    "type": "number",
+                    "minimum": 0.0,
+                    "exclusiveMaximum": 1.0,
+                    "default": 0.1,
+                },
+                "session_test_size": {
+                    "type": "number",
+                    "minimum": 0.0,
+                    "exclusiveMaximum": 1.0,
+                    "default": 0.2,
+                },
                 "session_split_output_dir": {"type": "string"},
                 "session_split_scan_batch_size": {"type": "integer", "minimum": 1, "default": 65536},
                 "session_split_output_batch_size": {"type": "integer", "minimum": 1, "default": 8192},
@@ -256,10 +285,18 @@ def register(api) -> None:
             "required": ["session_artifact_id"],
             "properties": {
                 "session_artifact_id": {"type": "string"},
+                "training_control_id": {"type": "string"},
                 "recipe_profile_id": {"type": "string"},
                 "recipe_profile_artifact_id": {"type": "string"},
                 "recipe_id": {"type": "string"},
                 "recipe_params": {"type": "object"},
+                "resume_checkpoint_artifact_id": {"type": "string"},
+                "resume_manifest_path": {"type": "string"},
+                "resume_checkpoint_path": {"type": "string"},
+                "trust_external_checkpoint": {
+                    "type": "boolean",
+                    "default": False,
+                },
                 "prediction_params": {"type": "object"},
                 "target_column": {"type": "string", "default": "al_label"},
                 "task_type": {"type": "string", "enum": ["classification", "regression", "auto"]},
@@ -285,7 +322,7 @@ def register(api) -> None:
         tags=["active-learning", "ml", "selection", "annotation", "query-strategy"],
         required_mappings=["record_id"],
         optional_mappings=[],
-        uses_services=["core.active_learning.query_strategy_registry", "core.ml.recipe_profile_store"],
+        uses_services=["core.active_learning.query_strategy_registry", "core.active_learning.training_controls", "core.ml.recipe_profile_store"],
         produces=[
             "al.session",
             "al.training_set",
@@ -302,6 +339,8 @@ def register(api) -> None:
             "al.labels.bulk_recorded",
             "al.round.training_started",
             "al.round.training_finished",
+            "al.round.training_paused",
+            "al.round.training_cancelled",
             "al.round.training_failed",
             "ml.recipe_run.started",
             "ml.recipe_run.finished",
@@ -309,7 +348,7 @@ def register(api) -> None:
             "ml.training.finished",
         ],
         default_layout={"x": 0, "y": 0, "w": 6, "h": 8},
-        state_version=9,
+        state_version=10,
         persist_layout=True,
         persist_state=True,
         restore_policy="best_effort",

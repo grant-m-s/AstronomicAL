@@ -4,9 +4,8 @@ import uuid
 from collections import defaultdict
 from typing import Any, Dict, Mapping, Optional, Sequence
 
-
 from . import acquisition
-from . import actions as legacy_actions
+from . import actions
 from . import state as al_state
 from .score_storage import ScoreTableRef, ScoreTableWriter, delete_score_ref, score_output_root
 from .streaming_acquisition import acquire_query_batch_streaming, iter_pool_score_rows
@@ -20,56 +19,46 @@ from .selection_handoff import (
 
 ORIGIN = "core.active_learning"
 
-def install_legacy_bridge() -> None:
-    """Route the existing train action through the streaming materialiser."""
-
-    from . import core_ml_bridge
-
-    core_ml_bridge.materialize_training_set_action = materialize_training_set_action
-    legacy_actions.query_batch_action = query_batch_action
-    legacy_actions.score_pool_action = score_pool_action
-    legacy_actions.materialize_training_set_action = materialize_training_set_action
-    legacy_actions.train_from_session_action = train_from_session_action
 
 def train_from_session_action(
     context: Any,
     request: Any,
     cancel_token: Any = None,
 ) -> Dict[str, Any]:
-    """Train labelled pool rows against the session's fixed holdout datasets.
-
-    The initial Active Learning split owns validation and test membership. The
-    recipe therefore receives the currently labelled rows as its training
-    dataset and the session validation/test datasets as external protocol
-    datasets; it must not split the labelled subset again.
-    """
+    """Train labelled pool rows against the session's fixed data protocol."""
 
     from . import core_ml_bridge
 
-    action_request = legacy_actions.coerce_request(request)
+    action_request = actions.coerce_request(request)
     params = dict(action_request.params or {})
     session_artifact_id = str(params.get("session_artifact_id") or "").strip()
     if not session_artifact_id:
         raise ValueError("train_from_session requires session_artifact_id.")
+
     session = al_state.coerce_session(context.artifacts.get(session_artifact_id))
     validation_dataset_id = str(
-        params.get("validation_dataset_id")
-        or session.get("validation_dataset_id")
-        or ""
+        session.get("validation_dataset_id") or ""
     ).strip()
-    test_dataset_id = str(
-        params.get("test_dataset_id") or session.get("test_dataset_id") or ""
-    ).strip()
+    test_dataset_id = str(session.get("test_dataset_id") or "").strip()
     if not validation_dataset_id:
         raise ValueError(
-            "The Active Learning session has no fixed validation dataset. "
-            "Create a new partitioned session before training."
+            "The Active Learning session has no fixed validation dataset."
         )
     if not test_dataset_id:
         raise ValueError(
-            "The Active Learning session has no fixed test dataset. "
-            "Create a new partitioned session before training."
+            "The Active Learning session has no fixed test dataset."
         )
+
+    for role, fixed_id in (
+        ("validation", validation_dataset_id),
+        ("test", test_dataset_id),
+    ):
+        requested = str(params.get(f"{role}_dataset_id") or "").strip()
+        if requested and requested != fixed_id:
+            raise ValueError(
+                f"The {role} dataset is fixed by the Active Learning session "
+                f"protocol as {fixed_id!r}; received {requested!r}."
+            )
 
     registered = set(context.datasets.list_ids())
     missing = [
@@ -100,7 +89,7 @@ def train_from_session_action(
             "test_dataset_id": test_dataset_id,
         }
     )
-    rewritten = legacy_actions.coerce_request(
+    rewritten = actions.coerce_request(
         {
             "dataset_id": action_request.dataset_id,
             "row_ids": action_request.row_ids,
@@ -110,14 +99,14 @@ def train_from_session_action(
             "origin": action_request.origin,
         }
     )
-    return core_ml_bridge.train_from_session_action(
+    return core_ml_bridge.run_training_round(
         context,
         rewritten,
         cancel_token=cancel_token,
     )
 
 def query_batch_action(context: Any, request: Any, cancel_token: Any = None) -> Dict[str, Any]:
-    request = legacy_actions.coerce_request(request)
+    request = actions.coerce_request(request)
     params = dict(request.params or {})
     session_artifact_id = str(params.get("session_artifact_id") or "").strip()
     if not session_artifact_id:
@@ -145,7 +134,7 @@ def query_batch_action(context: Any, request: Any, cancel_token: Any = None) -> 
     strategy_id = str(params.get("strategy_id") or params.get("strategy") or "least_confidence")
     k = max(1, int(params.get("k", 200)))
     seed = int(params.get("seed", session.get("seed", 42)))
-    registry = legacy_actions.get_strategy_registry(context)
+    registry = actions.get_strategy_registry(context)
     result, ranked_records = acquire_query_batch_streaming(
         context=context,
         registry=registry,
@@ -191,7 +180,7 @@ def query_batch_action(context: Any, request: Any, cancel_token: Any = None) -> 
         predictions_artifact_id=predictions_artifact_id,
         kind="query",
     )
-    new_session_artifact_id = legacy_actions.put_session(
+    new_session_artifact_id = actions.put_session(
         context,
         updated,
         previous_artifact_id=session_artifact_id,
@@ -225,7 +214,7 @@ def query_batch_action(context: Any, request: Any, cancel_token: Any = None) -> 
         "focused_row_id": selection_result.focused_row_id,
         "selection_reason": selection_result.reason,
     }
-    legacy_actions.publish(context, "al.query_batch.created", payload)
+    actions.publish(context, "al.query_batch.created", payload)
     return {
         "ok": True,
         **payload,
@@ -234,7 +223,7 @@ def query_batch_action(context: Any, request: Any, cancel_token: Any = None) -> 
     }
 
 def score_pool_action(context: Any, request: Any, cancel_token: Any = None) -> Dict[str, Any]:
-    request = legacy_actions.coerce_request(request)
+    request = actions.coerce_request(request)
     params = dict(request.params or {})
     session_artifact_id = str(params.get("session_artifact_id") or "").strip()
     if not session_artifact_id:
@@ -258,7 +247,7 @@ def score_pool_action(context: Any, request: Any, cancel_token: Any = None) -> D
     if not isinstance(predictions_payload, Mapping):
         raise TypeError(f"{predictions_artifact_id!r} is not an ml.predictions payload.")
 
-    registry = legacy_actions.get_strategy_registry(context)
+    registry = actions.get_strategy_registry(context)
     strategy_ids = _strategy_ids(registry, params)
     seed = int(params.get("seed", session.get("seed", 42)))
     rows_iter, score_state = iter_pool_score_rows(
@@ -368,7 +357,7 @@ def score_pool_action(context: Any, request: Any, cancel_token: Any = None) -> D
                 "timestamp": al_state.now(),
             }
         )
-        new_session_artifact_id = legacy_actions.put_session(
+        new_session_artifact_id = actions.put_session(
             context,
             updated,
             previous_artifact_id=session_artifact_id,
@@ -387,7 +376,7 @@ def score_pool_action(context: Any, request: Any, cancel_token: Any = None) -> D
             "stats_by_strategy": stats_by_strategy,
             "score_ref": score_ref.to_dict(),
         }
-        legacy_actions.publish(context, "al.strategy_scores.calculated", payload)
+        actions.publish(context, "al.strategy_scores.calculated", payload)
         return {"ok": True, **payload}
     except Exception:
         if writer is not None:
@@ -404,7 +393,7 @@ def materialize_training_set_action(
 
     from . import core_ml_bridge as bridge
 
-    request = legacy_actions.coerce_request(request)
+    request = actions.coerce_request(request)
     params = dict(request.params or {})
     session_artifact_id = str(params.get("session_artifact_id") or "").strip()
     if not session_artifact_id:
@@ -420,13 +409,13 @@ def materialize_training_set_action(
             reason="training_started",
         )
         if session_without_queue != session:
-            session_artifact_id = legacy_actions.put_session(
+            session_artifact_id = actions.put_session(
                 context,
                 session_without_queue,
                 previous_artifact_id=session_artifact_id,
             )
             session = session_without_queue
-            legacy_actions.publish(
+            actions.publish(
                 context,
                 "al.query_batch.invalidated",
                 {
@@ -482,7 +471,7 @@ def materialize_training_set_action(
     )
 
     mappings = dict(
-        legacy_actions.dataset_mappings(context, dataset_id) or {}
+        actions.dataset_mappings(context, dataset_id) or {}
     )
     id_column = str(
         params.get("record_id_column")
@@ -702,7 +691,7 @@ def materialize_training_set_action(
         "label_overlay": overlay,
         "origin": f"{ORIGIN}.materialize_training_set",
     }
-    legacy_actions.publish(
+    actions.publish(
         context,
         "al.training_set.prepared",
         event_payload,
@@ -743,7 +732,6 @@ def materialize_training_set_action(
         "label_overlay": overlay,
     }
 
-
 def _register_score_dataset(
     context: Any,
     *,
@@ -762,7 +750,7 @@ def _register_score_dataset(
     if requested:
         score_dataset_id = requested
     else:
-        unique_id = getattr(legacy_actions, "unique_dataset_id", None)
+        unique_id = getattr(actions, "unique_dataset_id", None)
         base = f"{dataset_id}__al_scores"
         score_dataset_id = unique_id(base) if callable(unique_id) else f"{base}_{uuid.uuid4().hex[:8]}"
     register(
