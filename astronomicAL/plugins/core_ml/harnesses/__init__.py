@@ -12,9 +12,16 @@ _HARNESSES = []
 def register_harness(predicate, harness_cls):
     """Register a managed-run harness predicate.
 
-    First match wins.
+    First match wins. Re-registering the same harness class replaces its previous
+    predicate so repeated service construction does not accumulate duplicates.
     """
 
+    global _HARNESSES
+    _HARNESSES = [
+        (existing_predicate, existing_cls)
+        for existing_predicate, existing_cls in _HARNESSES
+        if existing_cls is not harness_cls
+    ]
     _HARNESSES.insert(0, (predicate, harness_cls))
 
 

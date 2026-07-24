@@ -89,7 +89,6 @@ def _accepts_keyword(
         for parameter in parameters
     )
 
-
 def _call_frame_method(
     method: Any,
     dataset_id: str,
@@ -117,7 +116,6 @@ def _call_frame_method(
 
     return df
 
-
 def _call_bound_frame_method(
     method: Any,
     columns: Optional[Sequence[str]],
@@ -140,7 +138,6 @@ def _call_bound_frame_method(
         return df.loc[:, requested_columns]
 
     return df
-
 
 def get_dataset_frame(
     context: Any,
@@ -273,7 +270,7 @@ def list_dataset_columns(
     context: Any,
     dataset_id: Optional[str],
 ) -> List[str]:
-    """Return available columns for a dataset."""
+    """Return available columns without materialising the dataset."""
 
     if not dataset_id:
         return []
@@ -297,15 +294,182 @@ def list_dataset_columns(
             except Exception:
                 pass
 
-    try:
-        df = get_dataset_frame(context, dataset_id)
-    except Exception:
-        return []
+    get_source = getattr(datasets, "get_source", None)
+    if callable(get_source):
+        try:
+            source = get_source(dataset_id)
+            columns = getattr(source, "columns", None)
+            if callable(columns):
+                return [str(c) for c in columns()]
+        except Exception:
+            pass
 
-    try:
-        return [str(c) for c in list(df.columns)]
-    except Exception:
-        return []
+    get_df = getattr(datasets, "get_df", None)
+    if callable(get_df):
+        try:
+            if _accepts_keyword(get_df, "limit"):
+                frame = get_df(dataset_id, limit=0)
+                return [str(c) for c in frame.columns]
+        except Exception:
+            pass
+
+    return []
+
+
+def dataset_row_count(context: Any, dataset_id: Optional[str]) -> Optional[int]:
+    """Return a source row count without falling back to full materialisation."""
+
+    if not dataset_id:
+        return None
+    datasets = getattr(context, "datasets", None)
+    if datasets is None:
+        return None
+    dataset_id = str(dataset_id)
+
+    for method_name in ("row_count", "count_rows", "get_row_count"):
+        method = getattr(datasets, method_name, None)
+        if callable(method):
+            try:
+                value = method(dataset_id)
+                if value is not None:
+                    return int(value)
+            except Exception:
+                pass
+
+    get_source = getattr(datasets, "get_source", None)
+    if callable(get_source):
+        try:
+            source = get_source(dataset_id)
+            method = getattr(source, "row_count", None)
+            if callable(method):
+                value = method()
+                if value is not None:
+                    return int(value)
+        except Exception:
+            pass
+
+    get_meta = getattr(datasets, "get_meta", None)
+    if callable(get_meta):
+        try:
+            meta = get_meta(dataset_id) or {}
+            if isinstance(meta, Mapping):
+                for key in ("row_count", "rows", "n_rows"):
+                    if meta.get(key) is not None:
+                        return int(meta[key])
+        except Exception:
+            pass
+    return None
+
+
+def dataset_dtypes(context: Any, dataset_id: Optional[str]) -> Dict[str, str]:
+    """Return a bounded dtype/schema description for resource preflight."""
+
+    if not dataset_id:
+        return {}
+    datasets = getattr(context, "datasets", None)
+    if datasets is None:
+        return {}
+    dataset_id = str(dataset_id)
+
+    method = getattr(datasets, "dtypes", None)
+    if callable(method):
+        try:
+            return {str(key): str(value) for key, value in dict(method(dataset_id)).items()}
+        except Exception:
+            pass
+
+    get_source = getattr(datasets, "get_source", None)
+    if callable(get_source):
+        try:
+            source = get_source(dataset_id)
+            schema_method = getattr(source, "schema", None)
+            schema = schema_method() if callable(schema_method) else schema_method
+            values = _schema_dtypes(schema)
+            if values:
+                return values
+        except Exception:
+            pass
+
+    get_df = getattr(datasets, "get_df", None)
+    if callable(get_df):
+        try:
+            kwargs = {"limit": 64} if _accepts_keyword(get_df, "limit") else {}
+            if not kwargs:
+                return {}
+            frame = get_df(dataset_id, **kwargs)
+            return {str(key): str(value) for key, value in frame.dtypes.items()}
+        except Exception:
+            pass
+    return {}
+
+
+def dataset_capabilities(context: Any, dataset_id: Optional[str]) -> Any:
+    """Return source capabilities where the platform exposes them."""
+
+    if not dataset_id:
+        return None
+    datasets = getattr(context, "datasets", None)
+    if datasets is None:
+        return None
+    dataset_id = str(dataset_id)
+
+    method = getattr(datasets, "capabilities", None)
+    if callable(method):
+        try:
+            return method(dataset_id)
+        except Exception:
+            pass
+
+    get_source = getattr(datasets, "get_source", None)
+    if callable(get_source):
+        try:
+            source = get_source(dataset_id)
+            value = getattr(source, "capabilities", None)
+            return value() if callable(value) else value
+        except Exception:
+            pass
+    return None
+
+
+def _schema_dtypes(schema: Any) -> Dict[str, str]:
+    if isinstance(schema, Mapping):
+        return {str(key): str(value) for key, value in schema.items()}
+
+    if isinstance(schema, Sequence) and not isinstance(schema, (str, bytes)):
+        result: Dict[str, str] = {}
+        for field in schema:
+            if isinstance(field, Mapping):
+                name = field.get("name") or field.get("column")
+                dtype = field.get("dtype") or field.get("type")
+            else:
+                name = getattr(field, "name", None)
+                dtype = getattr(field, "dtype", None) or getattr(field, "type", None)
+            if name is not None and dtype is not None:
+                result[str(name)] = str(dtype)
+        if result:
+            return result
+
+    fields = getattr(schema, "fields", None)
+    if fields is not None:
+        result: Dict[str, str] = {}
+        for field in fields:
+            name = getattr(field, "name", None)
+            dtype = getattr(field, "type", None)
+            if name is not None:
+                result[str(name)] = str(dtype)
+        return result
+
+    names = getattr(schema, "names", None)
+    field_method = getattr(schema, "field", None)
+    if names is not None and callable(field_method):
+        result = {}
+        for name in names:
+            try:
+                result[str(name)] = str(field_method(name).type)
+            except Exception:
+                pass
+        return result
+    return {}
 
 def mapped_column(
     context: Any,
@@ -355,6 +519,32 @@ def mapped_column(
                     return str(value)
 
     return None
+
+def set_dataset_mapping(
+    context: Any,
+    dataset_id: str,
+    semantic_name: str,
+    column_name: str,
+) -> None:
+    """Persist a semantic mapping through the platform DatasetManager.
+
+    Mapping ownership remains with the platform. Plugins may request a mapping
+    change, but must not maintain a second mapping store or write legacy config
+    state directly.
+    """
+
+    datasets = getattr(context, "datasets", None)
+    if datasets is None:
+        raise RuntimeError("No dataset manager is available on context.")
+
+    method = getattr(datasets, "set_mapping", None)
+    if not callable(method):
+        raise RuntimeError(
+            "The platform DatasetManager does not expose set_mapping()."
+        )
+
+    method(str(dataset_id), str(semantic_name), str(column_name))
+
 
 def infer_column_bindings(
     context: Any,
@@ -415,7 +605,7 @@ def infer_column_bindings(
 
     image_column = (
         from_params("image_column", "image_path_column", "image_uri_column")
-        or from_mapping("image.uri", "image", "cutout.path")
+        or from_mapping("image.path", "image.uri", "image", "cutout.path")
         or from_aliases(
             "image_uri",
             "image_path",

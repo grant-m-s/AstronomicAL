@@ -3,6 +3,9 @@ from __future__ import annotations
 import html
 import json
 import traceback
+import time
+from concurrent.futures import CancelledError
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional
 
@@ -15,9 +18,11 @@ from .. import registry as _registry_mod
 from ..data import dataset_access as _dataset_access
 from ..feature_columns import parse_column_list
 from ..job_bridge import submit_job
+from ..progress import PROGRESS_EVENT, progress_alert_type, progress_markdown, progress_percent
 from ..profiles import PROTOCOL_KEYS as _PROTOCOL_KEYS
 from ..resume import discover_resume_manifests, storage_locations
-from ..runtime import TrainingControl
+from ..runtime import TrainingControl, publish
+from ..resource_estimates import estimate_recipe_resources
 
 _RUN_ONLY_LABEL_KEYS = {
     "target_column",
@@ -26,6 +31,12 @@ _RUN_ONLY_LABEL_KEYS = {
     "target",
     "label",
     "labels",
+}
+
+_RUN_ONLY_IMAGE_KEYS = {
+    "image_column",
+    "image_path_column",
+    "image_uri_column",
 }
 
 _NORMALIZATION_AUTO_KEYS = {
@@ -99,9 +110,27 @@ class MLRecipeLauncherPanel:
         self._subscriptions: List[Any] = []
         self._active_handle: Any = None
         self._training_control: Any = None
+        self._preflight_blocked = False
+        self._required_inputs_blocked = False
+        self._suspend_image_mapping = False
+        self._active_run_id: Optional[str] = None
+        self._active_training_log_artifact_id: Optional[str] = None
+        self._active_launcher_session_id: Optional[str] = None
+        self._latest_progress: Dict[str, Any] = {}
 
         self.recipe = pn.widgets.Select(name="", options={}, sizing_mode="stretch_width")
         self.dataset = pn.widgets.Select(name="", options=[], sizing_mode="stretch_width")
+
+        self.image_column = pn.widgets.Select(
+            name="",
+            options=[""],
+            value="",
+            sizing_mode="stretch_width",
+        )
+        self.image_column_field = self._field(
+            "Image column (updates image.path and image.uri mappings)",
+            self.image_column,
+        )
 
         self.label_column = pn.widgets.Select(
             name="",
@@ -218,11 +247,53 @@ class MLRecipeLauncherPanel:
             visible=False,
             sizing_mode="stretch_width",
         )
+        self.resource_preflight = pn.pane.Alert(
+            "Choose a recipe and dataset to estimate resource requirements.",
+            alert_type="info",
+            visible=True,
+            sizing_mode="stretch_width",
+        )
+        self.allow_unsafe_materialization = pn.widgets.Checkbox(
+            name="",
+            value=False,
+            sizing_mode="stretch_width",
+        )
         self.params_area = pn.Column(sizing_mode="stretch_width")
+        # Keep the live-status region at a stable height. Progress messages vary
+        # from two to several lines; allowing the Alert to auto-size makes the run
+        # buttons jump on every update. A fixed viewport preserves the surrounding
+        # layout while still allowing unusually detailed messages to scroll.
         self.status = pn.pane.Alert(
             "Choose a recipe and dataset.",
             alert_type="info",
             sizing_mode="stretch_width",
+            height=184,
+            min_height=184,
+            max_height=184,
+            styles={
+                "box-sizing": "border-box",
+                "overflow-y": "auto",
+                "overflow-x": "hidden",
+            },
+        )
+        self.live_progress = pn.indicators.Progress(
+            name="",
+            value=0,
+            max=100,
+            visible=True,
+            sizing_mode="stretch_width",
+            height=16,
+            margin=(0, 0, 0, 0),
+            styles={"visibility": "hidden"},
+        )
+        self.live_progress_slot = pn.Column(
+            self.live_progress,
+            sizing_mode="stretch_width",
+            height=24,
+            min_height=24,
+            max_height=24,
+            margin=(0, 0, 6, 0),
+            styles={"box-sizing": "border-box", "overflow": "hidden"},
         )
         self.result = pn.pane.JSON(
             {},
@@ -233,6 +304,12 @@ class MLRecipeLauncherPanel:
         self.recipe.param.watch(lambda *_: self._on_recipe_change(), "value")
         self.dataset.param.watch(lambda *_: self._on_dataset_change(), "value")
         self.compute_train_split_stats.param.watch(self._sync_normalization_controls, "value")
+        self.image_column.param.watch(self._on_image_column_change, "value")
+        self.label_column.param.watch(self._on_label_column_change, "value")
+        self.allow_unsafe_materialization.param.watch(
+            lambda *_: self._update_resource_preflight(),
+            "value",
+        )
         self.refresh_button.on_click(lambda *_: self.refresh())
         self.run_button.on_click(self._run_clicked)
         self.pause_button.on_click(self._pause_clicked)
@@ -244,6 +321,7 @@ class MLRecipeLauncherPanel:
         self.save_profile_button.on_click(self._save_profile_clicked)
         self.load_profile_button.on_click(self._load_profile_clicked)
         self._subscribe_to_profile_events()
+        self._subscribe_to_run_events()
 
         self.refresh()
 
@@ -262,6 +340,11 @@ class MLRecipeLauncherPanel:
             self._section_heading("Dataset"),
             self._field("Dataset", self.dataset),
             self.refresh_button,
+            self.resource_preflight,
+            self._field(
+                "Override materialised-memory safety block",
+                self.allow_unsafe_materialization,
+            ),
 
             self._section_heading("Profile"),
             self._field("Saved profile", self.profile),
@@ -273,7 +356,10 @@ class MLRecipeLauncherPanel:
             ),
 
             self._section_heading("Run"),
+            self.image_column_field,
             self.label_column_field,
+            self.status,
+            self.live_progress_slot,
             pn.Row(
                 self.run_button,
                 self.pause_button,
@@ -290,7 +376,6 @@ class MLRecipeLauncherPanel:
             self.resume_button,
             self.saved_output,
 
-            self.status,
             sizing_mode="stretch_both",
             scroll=True,
             styles={
@@ -386,11 +471,13 @@ class MLRecipeLauncherPanel:
         return {
             "recipe": self.recipe.value,
             "dataset": self.dataset.value,
+            "image_column": self.image_column.value,
             "label_column": self.label_column.value,
             "artifact_root": self.artifact_root.value,
             "save_predictions": self.save_predictions.value,
             "prediction_output_dir": self.prediction_output_dir.value,
             "resume_checkpoint": self.resume_checkpoint.value,
+            "allow_unsafe_materialization": self.allow_unsafe_materialization.value,
             "params": self._params(include_run_only=False),
         }
 
@@ -405,6 +492,12 @@ class MLRecipeLauncherPanel:
         if state.get("dataset") in self.dataset.options:
             self.dataset.value = state["dataset"]
 
+        image_column = state.get("image_column")
+        if image_column:
+            self._refresh_image_column_widget()
+            if image_column in self.image_column.options:
+                self._set_image_column_value(str(image_column))
+
         label_column = state.get("label_column")
         if label_column:
             self._refresh_label_column_widget()
@@ -417,6 +510,10 @@ class MLRecipeLauncherPanel:
             self.save_predictions.value = bool(state.get("save_predictions"))
         if state.get("prediction_output_dir"):
             self.prediction_output_dir.value = str(state.get("prediction_output_dir"))
+        if "allow_unsafe_materialization" in state:
+            self.allow_unsafe_materialization.value = bool(
+                state.get("allow_unsafe_materialization")
+            )
         self._refresh_resume_checkpoints()
         if state.get("resume_checkpoint") in self._option_values(self.resume_checkpoint.options):
             self.resume_checkpoint.value = state.get("resume_checkpoint")
@@ -504,6 +601,7 @@ class MLRecipeLauncherPanel:
         self._update_storage_preview()
         self._on_recipe_change()
         self._apply_inferred_defaults()
+        self._update_resource_preflight()
 
     def _section_heading(self, title: str):
         return pn.pane.HTML(
@@ -588,7 +686,10 @@ class MLRecipeLauncherPanel:
         recipe_id = self.recipe.value
         if not recipe_id:
             self.recipe_card.object = "No recipe selected."
+            self.image_column_field.visible = False
             self.label_column_field.visible = False
+            self._update_required_input_status()
+            self._update_resource_preflight()
             return
 
         spec = self.registry.get(recipe_id)
@@ -600,6 +701,7 @@ class MLRecipeLauncherPanel:
             f"- Task: `{spec.task}`\n"
             f"- Modality: `{spec.modality}`\n"
             f"- Complexity: `{spec.complexity}`\n"
+            f"- Data access: `{spec.data_access.label}` — {spec.data_access.description}\n"
             "- Protocol: AstronomicAL manages splitting, validation, model selection, and test evaluation\n"
             f"- Required mappings: `{', '.join(spec.required_mappings) or 'none'}`\n"
             f"- Produces: `{', '.join(spec.produces) or 'none'}`"
@@ -613,7 +715,7 @@ class MLRecipeLauncherPanel:
 
         for name, param_schema in properties.items():
             name = str(name)
-            if self._is_run_only_label_key(name):
+            if self._is_run_only_label_key(name) or self._is_run_only_image_key(name):
                 continue
 
             widget = self._widget_for_schema(name, param_schema)
@@ -622,6 +724,13 @@ class MLRecipeLauncherPanel:
 
             self.param_widgets[name] = widget
             self.param_fields[name] = field
+            try:
+                widget.param.watch(
+                    lambda *_: self._update_resource_preflight(),
+                    "value",
+                )
+            except Exception:
+                pass
 
             if self._is_normalization_param(name):
                 self.normalization_fields[name] = field
@@ -635,9 +744,13 @@ class MLRecipeLauncherPanel:
 
         self._append_normalization_section(spec)
         self._build_protocol_section(spec)
+        self._sync_image_column_visibility(spec)
         self._sync_label_column_visibility(spec)
+        self._refresh_image_column_widget()
         self._refresh_label_column_widget()
         self._apply_inferred_defaults()
+        self._update_required_input_status()
+        self._update_resource_preflight()
 
     def _build_protocol_section(self, spec: Any) -> None:
         self.protocol_widgets = {}
@@ -776,6 +889,15 @@ class MLRecipeLauncherPanel:
                 continue
             try:
                 widget.param.watch(lambda *_: self._sync_protocol_visibility(), "value")
+            except Exception:
+                pass
+
+        for widget in self.protocol_widgets.values():
+            try:
+                widget.param.watch(
+                    lambda *_: self._update_resource_preflight(),
+                    "value",
+                )
             except Exception:
                 pass
 
@@ -937,11 +1059,17 @@ class MLRecipeLauncherPanel:
     def _on_dataset_change(self, *_: Any) -> None:
         self._refresh_recipe_column_widgets()
         self._refresh_protocol_columns()
+        self._refresh_image_column_widget()
         self._refresh_label_column_widget()
         self._apply_inferred_defaults()
+        self._update_required_input_status()
+        self._update_resource_preflight()
 
     def _is_run_only_label_key(self, name: Any) -> bool:
         return str(name or "").strip() in _RUN_ONLY_LABEL_KEYS
+
+    def _is_run_only_image_key(self, name: Any) -> bool:
+        return str(name or "").strip() in _RUN_ONLY_IMAGE_KEYS
 
     def _is_normalization_param(self, name: Any) -> bool:
         return str(name or "").strip() in _NORMALIZATION_PARAM_KEYS
@@ -956,6 +1084,199 @@ class MLRecipeLauncherPanel:
 
     def _recipe_is_image(self, spec: Any) -> bool:
         return str(getattr(spec, "modality", "") or "").lower() == "image"
+
+    def _recipe_uses_image_column(self, spec: Any) -> bool:
+        if self._recipe_is_image(spec):
+            return True
+
+        required = {
+            str(value or "").strip().lower()
+            for value in list(getattr(spec, "required_mappings", []) or [])
+        }
+        return bool(required & {"image.path", "image.uri", "image"})
+
+    def _sync_image_column_visibility(self, spec: Any) -> None:
+        self.image_column_field.visible = self._recipe_uses_image_column(spec)
+
+    def _set_image_column_value(self, value: str) -> None:
+        self._suspend_image_mapping = True
+        try:
+            self.image_column.value = value
+        finally:
+            self._suspend_image_mapping = False
+
+    def _refresh_image_column_widget(self) -> None:
+        columns = list(
+            _dataset_access.list_dataset_columns(
+                self.context,
+                self.dataset.value,
+            )
+        )
+        options = [""] + columns
+        current = str(self.image_column.value or "")
+        self.image_column.options = options
+
+        inferred = self._infer_image_column(columns)
+        if inferred in options:
+            self._set_image_column_value(inferred)
+        elif current in options:
+            self._set_image_column_value(current)
+        else:
+            self._set_image_column_value("")
+
+    def _infer_image_column(self, columns: List[str]) -> str:
+        dataset_id = self.dataset.value
+        if not dataset_id:
+            return ""
+
+        for semantic_name in ("image.path", "image.uri", "image"):
+            mapped = _dataset_access.mapped_column(
+                self.context,
+                str(dataset_id),
+                semantic_name,
+            )
+            if mapped and mapped in columns:
+                return mapped
+
+        lowered = {str(column).lower(): str(column) for column in columns}
+        for candidate in (
+            "image_path",
+            "image_uri",
+            "image_url",
+            "image",
+            "filepath",
+            "file_path",
+            "path",
+            "filename",
+            "cutout_path",
+            "cutout",
+        ):
+            if candidate in lowered:
+                return lowered[candidate]
+
+        return ""
+
+    def _persist_image_mapping(
+        self,
+        *,
+        dataset_id: str,
+        column_name: str,
+    ) -> None:
+        for semantic_name in ("image.path", "image.uri"):
+            current = _dataset_access.mapped_column(
+                self.context,
+                dataset_id,
+                semantic_name,
+            )
+            if current == column_name:
+                continue
+            _dataset_access.set_dataset_mapping(
+                self.context,
+                dataset_id,
+                semantic_name,
+                column_name,
+            )
+
+    def _on_image_column_change(self, *_: Any) -> None:
+        if self._suspend_image_mapping:
+            return
+
+        recipe_id = self.recipe.value
+        dataset_id = self.dataset.value
+        column_name = str(self.image_column.value or "").strip()
+
+        if not recipe_id or not dataset_id or not column_name:
+            self._update_required_input_status()
+            self._update_resource_preflight()
+            return
+
+        try:
+            spec = self.registry.get(recipe_id)
+        except Exception:
+            self._update_resource_preflight()
+            return
+
+        if not self._recipe_uses_image_column(spec):
+            self._update_resource_preflight()
+            return
+
+        try:
+            self._persist_image_mapping(
+                dataset_id=str(dataset_id),
+                column_name=column_name,
+            )
+        except Exception as exc:
+            self._required_inputs_blocked = True
+            self.run_button.disabled = True
+            self.status.alert_type = "danger"
+            self.status.object = (
+                f"Could not save the image mapping for `{dataset_id}`: `{exc}`"
+            )
+            self._update_resource_preflight()
+            return
+
+        self._update_required_input_status()
+        if not self._required_inputs_blocked:
+            self.status.alert_type = "success"
+            self.status.object = (
+                f"Mapped `{column_name}` as `image.path` and `image.uri` for "
+                f"dataset `{dataset_id}`."
+            )
+        self._update_resource_preflight()
+
+    def _on_label_column_change(self, *_: Any) -> None:
+        self._update_required_input_status()
+        self._update_resource_preflight()
+
+    def _update_required_input_status(self) -> None:
+        if self._active_handle is not None:
+            self._required_inputs_blocked = False
+            return
+
+        recipe_id = self.recipe.value
+        dataset_id = self.dataset.value
+        if not recipe_id or not dataset_id:
+            self._required_inputs_blocked = True
+            self.status.alert_type = "info"
+            self.status.object = "Choose a recipe and dataset."
+            self.run_button.disabled = True
+            return
+
+        try:
+            spec = self.registry.get(recipe_id)
+        except Exception as exc:
+            self._required_inputs_blocked = True
+            self.status.alert_type = "danger"
+            self.status.object = f"The selected recipe is unavailable: `{exc}`"
+            self.run_button.disabled = True
+            return
+
+        missing: List[str] = []
+        if self._recipe_uses_image_column(spec) and not str(
+            self.image_column.value or ""
+        ).strip():
+            missing.append(
+                "choose the dataset column containing image paths or URIs"
+            )
+        if self._recipe_uses_label_column(spec) and not str(
+            self.label_column.value or ""
+        ).strip():
+            missing.append("choose the label / target column")
+
+        self._required_inputs_blocked = bool(missing)
+        self.run_button.disabled = (
+            self._required_inputs_blocked or self._preflight_blocked
+        )
+
+        if missing:
+            self.status.alert_type = "warning"
+            self.status.object = "Before running, " + " and ".join(missing) + "."
+        elif self.status.alert_type in {"info", "warning"}:
+            self.status.alert_type = "success"
+            self.status.object = (
+                "Required inputs are configured. Review the resource preflight, "
+                "then run the recipe."
+            )
 
     def _recipe_uses_label_column(self, spec: Any) -> bool:
         task = str(getattr(spec, "task", "") or "").lower()
@@ -1096,6 +1417,17 @@ class MLRecipeLauncherPanel:
             inferred = {}
 
         applied = []
+
+        image_value = (
+            inferred.get("image_column")
+            or inferred.get("image_path_column")
+            or inferred.get("image_uri_column")
+            or self._infer_image_column(
+                list(_dataset_access.list_dataset_columns(self.context, dataset_id))
+            )
+        )
+        if image_value and image_value in self.image_column.options:
+            self._set_image_column_value(str(image_value))
 
         if inferred:
             for name, value in inferred.items():
@@ -1249,6 +1581,15 @@ class MLRecipeLauncherPanel:
             params[name] = widget.value
 
         if include_run_only:
+            image_column = str(self.image_column.value or "").strip()
+            if image_column and self._recipe_uses_image_column(spec):
+                params["image_column"] = image_column
+
+                if "image_path_column" in properties:
+                    params["image_path_column"] = image_column
+                if "image_uri_column" in properties:
+                    params["image_uri_column"] = image_column
+
             label_column = str(self.label_column.value or "").strip()
             if label_column:
                 params["target_column"] = label_column
@@ -1266,14 +1607,29 @@ class MLRecipeLauncherPanel:
         params["dataset_id"] = self.dataset.value
         params["ml_artifact_dir"] = str(self.artifact_root.value or "").strip()
         params["save_predictions"] = bool(self.save_predictions.value)
+        if include_run_only:
+            params["allow_unsafe_materialization"] = bool(
+                self.allow_unsafe_materialization.value
+            )
         prediction_output_dir = str(self.prediction_output_dir.value or "").strip()
         if prediction_output_dir:
             params["prediction_output_dir"] = prediction_output_dir
         return params
 
     def _apply_param_values(self, params: Mapping[str, Any]) -> None:
-        for name, value in dict(params or {}).items():
-            if self._is_run_only_label_key(name):
+        values = dict(params or {})
+        image_column = (
+            values.get("image_column")
+            or values.get("image_path_column")
+            or values.get("image_uri_column")
+        )
+        if image_column:
+            self._refresh_image_column_widget()
+            if image_column in self.image_column.options:
+                self._set_image_column_value(str(image_column))
+
+        for name, value in values.items():
+            if self._is_run_only_label_key(name) or self._is_run_only_image_key(name):
                 continue
 
             widget = self.param_widgets.get(name) or self.protocol_widgets.get(name)
@@ -1291,6 +1647,72 @@ class MLRecipeLauncherPanel:
 
         self._sync_protocol_visibility()
         self._sync_normalization_controls()
+        self._update_required_input_status()
+        self._update_resource_preflight()
+
+    def _update_resource_preflight(
+        self,
+        *,
+        params: Optional[Mapping[str, Any]] = None,
+        spec: Any = None,
+    ):
+        recipe_id = self.recipe.value
+        dataset_id = self.dataset.value
+        if not recipe_id or not dataset_id:
+            self._preflight_blocked = False
+            self.resource_preflight.alert_type = "info"
+            self.resource_preflight.object = (
+                "Choose a recipe and dataset to estimate resource requirements."
+            )
+            if self._active_handle is None:
+                self.run_button.disabled = self._required_inputs_blocked
+            return None
+
+        try:
+            spec = spec or self.registry.get(recipe_id)
+            values = dict(params or self._params(include_run_only=True))
+            report = estimate_recipe_resources(
+                context=self.context,
+                dataset_id=str(dataset_id),
+                recipe_spec=spec,
+                params=values,
+            )
+        except Exception as exc:
+            self._preflight_blocked = False
+            self.resource_preflight.alert_type = "warning"
+            self.resource_preflight.object = (
+                "Resource requirements could not be estimated without running "
+                f"the recipe: `{exc}`"
+            )
+            if self._active_handle is None:
+                self.run_button.disabled = self._required_inputs_blocked
+            return None
+
+        self.allow_unsafe_materialization.disabled = (
+            report.access_mode != "materialized"
+        )
+        lines = [report.summary()]
+        if report.errors:
+            lines.extend(f"- **Blocked:** {message}" for message in report.errors)
+        if report.warnings:
+            lines.extend(f"- **Warning:** {message}" for message in report.warnings)
+        if not report.errors and not report.warnings:
+            lines.append("- The selected recipe/data combination passed preflight.")
+
+        self.resource_preflight.object = "\n".join(lines)
+        self.resource_preflight.alert_type = (
+            "danger"
+            if report.blocked
+            else "warning"
+            if report.warnings
+            else "success"
+        )
+        self._preflight_blocked = bool(report.blocked)
+        if self._active_handle is None:
+            self.run_button.disabled = (
+                self._preflight_blocked or self._required_inputs_blocked
+            )
+        return report
 
     def _save_profile_clicked(self, *_: Any) -> None:
         if not self.recipe.value:
@@ -1410,6 +1832,7 @@ class MLRecipeLauncherPanel:
 
         self.status.alert_type = "success"
         self.status.object = f"Loaded recipe profile `{profile.get('name') or profile_id}`."
+        self._update_required_input_status()
 
     def _run_clicked(self, *_: Any) -> None:
         if self._active_handle is not None:
@@ -1439,11 +1862,43 @@ class MLRecipeLauncherPanel:
             self.status.object = str(exc)
             return
 
+        if self._recipe_uses_image_column(spec) and not params.get("image_column"):
+            self.status.alert_type = "danger"
+            self.status.object = (
+                "Choose an image column before running this recipe. The selected "
+                "column will be stored in the dataset mappings as `image.path` "
+                "and `image.uri`."
+            )
+            return
+
+        if self._recipe_uses_image_column(spec):
+            try:
+                self._persist_image_mapping(
+                    dataset_id=str(params["dataset_id"]),
+                    column_name=str(params["image_column"]),
+                )
+            except Exception as exc:
+                self.status.alert_type = "danger"
+                self.status.object = (
+                    "The image column was selected, but its dataset mapping could "
+                    f"not be saved: `{exc}`"
+                )
+                return
+
         if self._recipe_uses_label_column(spec) and not params.get("target_column"):
             self.status.alert_type = "danger"
             self.status.object = (
                 "Choose a label / target column before running this recipe. "
                 "This is a run-only choice and is not saved into recipe profiles."
+            )
+            return
+
+        preflight = self._update_resource_preflight(params=params, spec=spec)
+        if preflight is not None and preflight.blocked:
+            self.status.alert_type = "danger"
+            self.status.object = (
+                "Recipe resource preflight blocked this run. Resolve the issues "
+                "shown above before launching it."
             )
             return
 
@@ -1491,9 +1946,18 @@ class MLRecipeLauncherPanel:
 
     def _submit_run(self, params: Dict[str, Any], *, title: str, key: str, message: str) -> None:
         self._training_control = TrainingControl()
+        self._active_launcher_session_id = uuid.uuid4().hex
+        params = dict(params)
+        params["launcher_session_id"] = self._active_launcher_session_id
+        self._active_run_id = None
+        self._active_training_log_artifact_id = None
+        self._latest_progress = {}
+        self._set_live_progress_bar(None)
         self._set_running_state(True)
         self.status.alert_type = "info"
-        self.status.object = message
+        self.status.object = (
+            "**Job submitted**  \nWaiting for an ML worker to start the run.  \n" + str(message)
+        )
 
         request = ActionRequest(
             dataset_id=params.get("dataset_id"),
@@ -1521,6 +1985,22 @@ class MLRecipeLauncherPanel:
             self._active_handle = None
             self._training_control = None
             self._set_running_state(False)
+            if isinstance(exc, CancelledError) or type(exc).__name__ in {
+                "CancelledError",
+                "MLRecipeCancelled",
+            }:
+                self._update_result(
+                    {
+                        "status": "cancelled",
+                        "message": str(exc) or "Recipe run cancelled.",
+                        "run_id": self._active_run_id,
+                        "training_log_artifact_id": self._active_training_log_artifact_id,
+                    },
+                    success=False,
+                    cancelled=True,
+                    paused=False,
+                )
+                return
             failure_payload = getattr(exc, "failure_payload", None)
             if isinstance(failure_payload, Mapping) and failure_payload:
                 payload = dict(failure_payload)
@@ -1560,33 +2040,94 @@ class MLRecipeLauncherPanel:
         )
 
     def _cancel_clicked(self, *_: Any) -> None:
-        if self._active_handle is None:
+        handle = self._active_handle
+        if handle is None:
             self.status.alert_type = "warning"
             self.status.object = "No recipe run is currently active from this panel."
             return
 
-        try:
-            self._active_handle.cancel()
-        except Exception:
-            token = getattr(self._active_handle, "token", None)
-            if token is not None:
-                try:
-                    token.cancel()
-                except Exception:
-                    pass
+        requested = False
+        errors: List[str] = []
 
+        cancel = getattr(handle, "cancel", None)
+        if callable(cancel):
+            try:
+                result = cancel()
+                requested = bool(result) if result is not None else True
+            except Exception as exc:
+                errors.append(str(exc))
+
+        # Always signal the cooperative token as well. Some JobHandle.cancel()
+        # implementations only cancel a not-yet-started Future and return False
+        # once work is running. Token cancellation is idempotent and is what the
+        # ML harness observes at its safe batch boundaries.
+        seen_tokens = set()
+        for attribute in ("token", "cancel_token"):
+            token = getattr(handle, attribute, None)
+            if token is None or id(token) in seen_tokens:
+                continue
+            seen_tokens.add(id(token))
+            token_cancel = getattr(token, "cancel", None)
+            if callable(token_cancel):
+                try:
+                    token_cancel()
+                    requested = True
+                except Exception as exc:
+                    errors.append(str(exc))
+
+        self.pause_button.disabled = True
         self.cancel_button.disabled = True
-        self.status.alert_type = "warning"
-        self.status.object = (
-            "Cancellation requested. The recipe will stop at the next safe cancellation point."
-        )
+        self.cancel_button.name = "Stopping…"
+
+        if not requested:
+            self.status.alert_type = "danger"
+            self.status.object = (
+                "Could not signal cancellation to the active job."
+                + (f"  \nDetails: `{'; '.join(errors)}`" if errors else "")
+            )
+            return
+
+        latest = dict(self._latest_progress or {})
+        payload = {
+            **latest,
+            "status": "cancelling",
+            "stage": "cancelling",
+            "message": (
+                "Cancellation requested. Waiting for the current batch operation "
+                "to reach a safe stop point."
+            ),
+            "detail": (
+                "No additional batch will be handed to the recipe after the "
+                "current DataLoader fetch or GPU batch returns control to the "
+                "main process."
+            ),
+            "run_id": self._active_run_id or latest.get("run_id"),
+            "training_log_artifact_id": (
+                self._active_training_log_artifact_id
+                or latest.get("training_log_artifact_id")
+            ),
+            "launcher_session_id": self._active_launcher_session_id,
+            "dataset_id": latest.get("dataset_id") or self.dataset.value,
+            "updated_at": time.time(),
+        }
+        self._render_live_progress(payload)
+        try:
+            publish(self.context, PROGRESS_EVENT, payload)
+        except Exception:
+            pass
 
     def _set_running_state(self, running: bool) -> None:
         def apply() -> None:
-            self.run_button.disabled = running
+            self.run_button.disabled = (
+                running
+                or self._preflight_blocked
+                or self._required_inputs_blocked
+            )
             self.refresh_button.disabled = running
             self.pause_button.disabled = not running
             self.cancel_button.disabled = not running
+            if not running:
+                self.cancel_button.name = "Cancel run"
             self.resume_button.disabled = running or not bool(self.resume_checkpoint.value)
 
         try:
@@ -1737,6 +2278,115 @@ class MLRecipeLauncherPanel:
         if isinstance(options, Mapping):
             return set(options.values())
         return set(options or [])
+
+    def _subscribe_to_run_events(self) -> None:
+        events = getattr(self.context, "events", None)
+        subscribe = getattr(events, "subscribe", None)
+        if not callable(subscribe):
+            return
+
+        for topic in (
+            "ml.recipe_run.started",
+            PROGRESS_EVENT,
+            "ml.recipe_run.paused",
+            "ml.recipe_run.finished",
+        ):
+            try:
+                sub = subscribe(
+                    topic,
+                    self._on_run_event,
+                    owner_label="ML Recipe Launcher",
+                    owner_kind="panel",
+                )
+            except TypeError:
+                try:
+                    sub = subscribe(topic, self._on_run_event)
+                except Exception:
+                    continue
+            except Exception:
+                continue
+            self._subscriptions.append(sub)
+
+    def _on_run_event(self, topic: str, payload: Any) -> None:
+        if not isinstance(payload, Mapping):
+            return
+        data = dict(payload)
+        session_id = str(data.get("launcher_session_id") or "")
+        active_session = str(self._active_launcher_session_id or "")
+        run_id = str(data.get("run_id") or "")
+
+        if active_session and session_id and session_id != active_session:
+            return
+        if self._active_run_id and run_id and run_id != self._active_run_id:
+            return
+        if not self._active_handle and not self._active_run_id:
+            return
+
+        def update() -> None:
+            if run_id:
+                self._active_run_id = run_id
+            log_id = data.get("training_log_artifact_id") or data.get("artifact_id")
+            if log_id:
+                self._active_training_log_artifact_id = str(log_id)
+
+            topic_text = str(topic or "")
+            if topic_text == PROGRESS_EVENT:
+                self._render_live_progress(data)
+                return
+
+            if topic_text.endswith(".started"):
+                self.status.alert_type = "info"
+                self.status.object = (
+                    f"**Run started**  \nRun `{run_id}` is initialising. Live stage and batch/row progress will appear here."
+                )
+                return
+
+            if topic_text.endswith(".paused"):
+                self._render_live_progress({
+                    **data,
+                    "status": "paused",
+                    "stage": "paused",
+                    "message": data.get("message") or "Training paused and resumable state was saved.",
+                })
+                return
+
+            if topic_text.endswith(".finished") and data.get("status"):
+                self._render_live_progress({
+                    **data,
+                    "stage": str(data.get("status") or "complete"),
+                    "message": data.get("message") or (
+                        "Recipe run completed." if str(data.get("status")).lower() == "complete"
+                        else f"Recipe run {data.get('status')}."
+                    ),
+                    "current": 1,
+                    "total": 1,
+                    "unit": "run",
+                })
+
+        try:
+            doc = pn.state.curdoc
+            if doc is not None:
+                doc.add_next_tick_callback(update)
+                return
+        except Exception:
+            pass
+        update()
+
+    def _render_live_progress(self, payload: Mapping[str, Any]) -> None:
+        data = dict(payload or {})
+        self._latest_progress = data
+        self.status.alert_type = progress_alert_type(data)
+        self.status.object = progress_markdown(data)
+        self._set_live_progress_bar(progress_percent(data))
+
+    def _set_live_progress_bar(self, percent: Optional[float]) -> None:
+        """Update the bar without adding/removing it from the document layout."""
+        if percent is None:
+            self.live_progress.value = 0
+            self.live_progress.styles = {"visibility": "hidden"}
+            return
+        self.live_progress.value = max(0, min(100, int(round(float(percent)))))
+        self.live_progress.styles = {"visibility": "visible"}
 
     def _subscribe_to_profile_events(self) -> None:
         events = getattr(self.context, "events", None)

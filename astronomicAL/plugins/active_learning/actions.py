@@ -8,6 +8,8 @@ from astronomicAL.platform.plugins.specs import ActionRequest
 from . import acquisition
 from . import state as al_state
 from . import strategies as strategy_module
+from . import label_storage
+from . import membership_storage
 
 ORIGIN = "core.active_learning"
 
@@ -64,6 +66,19 @@ def start_session_action(context: Any, request: Any, cancel_token: Any = None) -
         label_profile=label_profile,
         contract=params.get("session_contract") or params.get("contract") or {},
     )
+    session["storage"] = {
+        key: params[key]
+        for key in (
+            "artifact_root",
+            "label_output_dir",
+            "membership_output_dir",
+            "label_storage_format",
+            "membership_storage_format",
+            "label_storage_batch_size",
+            "membership_storage_batch_size",
+        )
+        if params.get(key) not in (None, "")
+    }
 
     records = acquisition.build_initial_records(selected_row_ids)
     batch_payload = acquisition.create_batch_payload(
@@ -720,17 +735,32 @@ def get_strategy_registry(context: Any):
     return strategy_module.create_default_strategy_registry()
 
 def put_session(context: Any, session: Mapping[str, Any], *, previous_artifact_id: Optional[str] = None) -> str:
-    session_payload = al_state.with_revision(session, previous_session_artifact_id=previous_artifact_id)
+    session_payload = al_state.with_revision(
+        session,
+        previous_session_artifact_id=previous_artifact_id,
+    )
+    session_payload = _persist_session_tables(context, session_payload)
+    membership_ref = membership_storage.MembershipTableRef.from_value(
+        session_payload["membership_table_ref"]
+    )
+    row_ids_preview = membership_storage.excluded_row_ids_preview(
+        session_payload,
+        limit=1000,
+    )
     artifact_id = context.artifacts.put(
         al_state.ARTIFACT_SESSION,
         session_payload,
         dataset_id=str(session_payload.get("dataset_id") or "default"),
-        row_ids=list(session_payload.get("ignored_row_ids") or []),
+        row_ids=row_ids_preview,
+        row_count=int(membership_ref.row_count),
+        row_ids_ref=membership_storage.artifact_row_ids_ref(membership_ref),
         params={
             "session_id": session_payload.get("session_id"),
             "round": session_payload.get("round"),
             "revision": session_payload.get("revision"),
             "previous_session_artifact_id": previous_artifact_id,
+            "label_table_artifact_id": (session_payload.get("latest") or {}).get("label_table_artifact_id"),
+            "membership_table_artifact_id": (session_payload.get("latest") or {}).get("membership_table_artifact_id"),
         },
     )
     publish(
@@ -743,10 +773,78 @@ def put_session(context: Any, session: Mapping[str, Any], *, previous_artifact_i
             "dataset_id": session_payload.get("dataset_id"),
             "round": session_payload.get("round"),
             "revision": session_payload.get("revision"),
+            "label_table_artifact_id": (session_payload.get("latest") or {}).get("label_table_artifact_id"),
+            "membership_table_artifact_id": (session_payload.get("latest") or {}).get("membership_table_artifact_id"),
             "counts": al_state.counts(session_payload),
         },
     )
     return str(artifact_id)
+
+
+def _persist_session_tables(context: Any, session: Mapping[str, Any]) -> Dict[str, Any]:
+    payload = al_state.coerce_session(session)
+    storage_params = dict(payload.get("storage") or {})
+    label_ref, label_changed = label_storage.ensure_label_table(
+        context,
+        payload,
+        params=storage_params,
+    )
+    membership_ref, membership_changed = membership_storage.ensure_membership_table(
+        context,
+        payload,
+        params=storage_params,
+    )
+    payload["label_table_ref"] = label_ref.to_dict()
+    payload["membership_table_ref"] = membership_ref.to_dict()
+    payload["labels_inline_complete"] = True
+    payload["memberships_inline_complete"] = True
+
+    latest = dict(payload.get("latest") or {})
+    if label_changed or not latest.get("label_table_artifact_id"):
+        label_artifact_id = context.artifacts.put(
+            al_state.ARTIFACT_LABEL_TABLE,
+            {
+                "schema_version": label_ref.schema_version,
+                "session_id": label_ref.session_id,
+                "dataset_id": label_ref.dataset_id,
+                "target_column": label_ref.target_column,
+                "task_type": label_ref.task_type,
+                "label_ref": label_ref.to_dict(),
+            },
+            dataset_id=label_ref.dataset_id or str(payload.get("dataset_id") or "default"),
+            row_count=label_ref.row_count,
+            row_ids_ref=label_storage.artifact_row_ids_ref(label_ref),
+            params={
+                "session_id": label_ref.session_id,
+                "content_sha256": label_ref.content_sha256,
+                "schema_version": label_ref.schema_version,
+            },
+        )
+        latest["label_table_artifact_id"] = str(label_artifact_id)
+
+    if membership_changed or not latest.get("membership_table_artifact_id"):
+        membership_artifact_id = context.artifacts.put(
+            al_state.ARTIFACT_MEMBERSHIP_TABLE,
+            {
+                "schema_version": membership_ref.schema_version,
+                "session_id": membership_ref.session_id,
+                "dataset_id": membership_ref.dataset_id,
+                "membership_ref": membership_ref.to_dict(),
+            },
+            dataset_id=membership_ref.dataset_id or str(payload.get("dataset_id") or "default"),
+            row_count=membership_ref.row_count,
+            row_ids_ref=membership_storage.artifact_row_ids_ref(membership_ref),
+            params={
+                "session_id": membership_ref.session_id,
+                "content_sha256": membership_ref.content_sha256,
+                "excluded_count": membership_ref.excluded_count,
+                "schema_version": membership_ref.schema_version,
+            },
+        )
+        latest["membership_table_artifact_id"] = str(membership_artifact_id)
+
+    payload["latest"] = latest
+    return payload
 
 def resolve_dataset_id(context: Any, request: ActionRequest, params: Mapping[str, Any]) -> str:
     dataset_id = str(params.get("dataset_id") or request.dataset_id or "").strip()

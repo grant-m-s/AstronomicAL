@@ -11,6 +11,10 @@ from astronomicAL.platform.plugins.specs import ActionRequest
 from .data.binding import build_data_binding
 from .recipe_base import make_run_context
 from .registry import schema_defaults, validate_required_params
+from .resource_estimates import (
+    ensure_recipe_resources_allowed,
+    estimate_recipe_resources,
+)
 from .protocol import ProtocolConfig
 from .serialization import json_safe
 from .runtime import (
@@ -156,7 +160,6 @@ def _resolve_resume_state(context: Any, params: Dict[str, Any]) -> tuple[Dict[st
     )
     return merged, state
 
-
 def run_ml_recipe_action(
     context: Any,
     request: Any,
@@ -218,6 +221,17 @@ def run_ml_recipe_action(
         merged_params,
     )
 
+    resource_preflight = estimate_recipe_resources(
+        context=context,
+        dataset_id=dataset_id,
+        recipe_spec=spec,
+        params=merged_params,
+        feature_columns=list(binding.input_columns or []),
+    )
+    merged_params["recipe_data_access"] = spec.data_access.to_dict()
+    merged_params["resource_preflight"] = resource_preflight.to_dict()
+    ensure_recipe_resources_allowed(resource_preflight)
+
     run = make_run_context(
         context=context,
         dataset_id=dataset_id,
@@ -247,8 +261,11 @@ def run_ml_recipe_action(
         "recipe_version": spec.version,
         "recipe_title": spec.title,
         "training_log_artifact_id": run.training_log_artifact_id,
+        "launcher_session_id": merged_params.get("launcher_session_id"),
         "resumed": bool(resume_state),
         "resume_checkpoint_artifact_id": merged_params.get("resume_checkpoint_artifact_id"),
+        "recipe_data_access": spec.data_access.to_dict(),
+        "resource_preflight": resource_preflight.to_dict(),
     }
 
     if protocol is not None:
@@ -260,18 +277,43 @@ def run_ml_recipe_action(
         start_payload,
     )
 
-    run.log(
-        message=f"Recipe `{spec.title}` started.",
-        status="running",
-        step=None,
-        metrics={},
-        extra={"phase": "started"},
-    )
+    if getattr(run, "progress", None) is not None:
+        run.progress.report(
+            stage="initializing",
+            message=f"Recipe `{spec.title}` has started. Preparing the managed training harness.",
+            detail=(
+                f"Dataset `{dataset_id}` passed resource preflight using "
+                f"`{spec.data_access.mode.value}` data access."
+            ),
+            force=True,
+        )
+    else:
+        run.log(
+            message=f"Recipe `{spec.title}` started.",
+            status="running",
+            step=None,
+            metrics={},
+            extra={"phase": "started"},
+        )
 
     run_status = "running"
     cleanup_error: Optional[BaseException] = None
 
     try:
+        if getattr(run, "progress", None) is not None:
+            run.progress.report(
+                stage="preflight",
+                message="Recipe, dataset bindings, protocol, and resource limits are valid. Dispatching the recipe harness.",
+                detail=(
+                    f"Framework `{merged_params.get('framework') or 'unknown'}`, "
+                    f"task `{merged_params.get('task') or 'unknown'}`, "
+                    f"modality `{merged_params.get('modality') or 'unknown'}`."
+                ),
+                current=1,
+                total=1,
+                unit="checks",
+                force=True,
+            )
         result = recipe.run(run)
 
         if result is None:
@@ -281,6 +323,8 @@ def run_ml_recipe_action(
             result = {"result": result}
 
         result = json_safe(dict(result))
+        result.setdefault("recipe_data_access", spec.data_access.to_dict())
+        result.setdefault("resource_preflight", resource_preflight.to_dict())
 
         split_dataset_ids = dict(result.get("split_dataset_ids") or {})
 
@@ -367,6 +411,13 @@ def run_ml_recipe_action(
                 "image_column": binding.image_column,
             }
 
+        if getattr(run, "progress", None) is not None:
+            run.progress.report(
+                stage="finalizing",
+                message="Training outputs are complete. Saving the durable run summary and final training log.",
+                force=True,
+            )
+
         run_artifact_id = put_artifact(
             context,
             "ml.run",
@@ -406,19 +457,25 @@ def run_ml_recipe_action(
                 test_metrics=result.get("test_metrics"),
             )
 
-        run.log(
-            message=f"Recipe `{spec.title}` complete.",
-            status="complete",
-            metrics={},
-            extra={
-                "phase": "complete",
-                "artifact_ids": artifact_ids,
-                "split_dataset_ids": split_dataset_ids,
-                "train_dataset_id": train_dataset_id,
-                "validation_dataset_id": validation_dataset_id,
-                "test_dataset_id": test_dataset_id,
-            },
-        )
+        if getattr(run, "progress", None) is not None:
+            run.progress.terminal(
+                status="complete",
+                message=f"Recipe `{spec.title}` completed and all durable outputs were saved.",
+            )
+        else:
+            run.log(
+                message=f"Recipe `{spec.title}` complete.",
+                status="complete",
+                metrics={},
+                extra={
+                    "phase": "complete",
+                    "artifact_ids": artifact_ids,
+                    "split_dataset_ids": split_dataset_ids,
+                    "train_dataset_id": train_dataset_id,
+                    "validation_dataset_id": validation_dataset_id,
+                    "test_dataset_id": test_dataset_id,
+                },
+            )
 
         final_training_log_artifact_id = None
 
@@ -476,6 +533,7 @@ def run_ml_recipe_action(
             "run_artifact_id": run_artifact_id,
             "training_log_artifact_id": run.training_log_artifact_id,
             "final_training_log_artifact_id": final_training_log_artifact_id,
+            "launcher_session_id": merged_params.get("launcher_session_id"),
         }
 
         publish(
@@ -497,6 +555,8 @@ def run_ml_recipe_action(
             "recipe_id": spec.id,
             "recipe_version": spec.version,
             "recipe_title": spec.title,
+            "recipe_data_access": spec.data_access.to_dict(),
+            "resource_preflight": resource_preflight.to_dict(),
             "result": result,
             "artifact_ids": artifact_ids,
             "run_artifact_id": run_artifact_id,
@@ -516,6 +576,13 @@ def run_ml_recipe_action(
         payload.setdefault("recipe_version", spec.version)
         payload.setdefault("recipe_title", spec.title)
         payload.setdefault("training_log_artifact_id", run.training_log_artifact_id)
+        payload.setdefault("launcher_session_id", merged_params.get("launcher_session_id"))
+
+        if getattr(run, "progress", None) is not None:
+            run.progress.terminal(
+                status="paused",
+                message=str(payload.get("message") or "Training paused and resumable state was saved."),
+            )
 
         final_training_log_artifact_id = None
         if getattr(run, "logger", None) is not None:
@@ -568,15 +635,18 @@ def run_ml_recipe_action(
                 cancelled=True,
             )
 
-        run.log(
-            message=message,
-            status="cancelled",
-            metrics={},
-            extra={
-                "phase": "cancelled",
-                "cancelled": True,
-            },
-        )
+        if getattr(run, "progress", None) is not None:
+            run.progress.terminal(status="cancelled", message=message)
+        else:
+            run.log(
+                message=message,
+                status="cancelled",
+                metrics={},
+                extra={
+                    "phase": "cancelled",
+                    "cancelled": True,
+                },
+            )
 
         final_training_log_artifact_id = None
 
@@ -599,6 +669,7 @@ def run_ml_recipe_action(
             "message": message,
             "training_log_artifact_id": run.training_log_artifact_id,
             "final_training_log_artifact_id": final_training_log_artifact_id,
+            "launcher_session_id": merged_params.get("launcher_session_id"),
         }
 
         publish(
@@ -626,17 +697,21 @@ def run_ml_recipe_action(
 
         final_training_log_artifact_id = None
 
+        if getattr(run, "progress", None) is not None:
+            run.progress.terminal(status="failed", message=message)
+
         try:
-            run.log(
-                message=message,
-                status="failed",
-                metrics={},
-                extra={
-                    "phase": "failed",
-                    "error": message,
-                    "traceback": tb,
-                },
-            )
+            if getattr(run, "progress", None) is None:
+                run.log(
+                    message=message,
+                    status="failed",
+                    metrics={},
+                    extra={
+                        "phase": "failed",
+                        "error": message,
+                        "traceback": tb,
+                    },
+                )
 
             if getattr(run, "logger", None) is not None:
                 final_training_log_artifact_id = run.logger.persist_final(
@@ -662,6 +737,7 @@ def run_ml_recipe_action(
             "traceback": tb,
             "training_log_artifact_id": run.training_log_artifact_id,
             "final_training_log_artifact_id": final_training_log_artifact_id,
+            "launcher_session_id": merged_params.get("launcher_session_id"),
         }
 
         publish(

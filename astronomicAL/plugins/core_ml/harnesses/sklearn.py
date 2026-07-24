@@ -16,6 +16,7 @@ import pandas as pd
 
 from ..artifacts import file_sha256
 from ..recipe_base import ManagedMLRecipe
+from ..resource_estimates import RecipeDataAccess, RecipeDataAccessMode
 from ..protocol import Partition, Partitions, TargetSpec, TrainingComponents
 from ..serialization import json_safe
 from ..paths import ml_run_artifact_dir
@@ -36,7 +37,12 @@ class SklearnBatch:
 # =============================================================================
 
 class SklearnHarness(RunHarness):
-    """Protocol harness for sklearn estimators (classification + regression).
+    """Protocol harness for materialised sklearn estimators.
+
+    This compatibility harness deliberately materialises complete partitions.
+    Incremental and external-memory recipes are routed to separate harnesses.
+
+    Protocol harness for sklearn estimators (classification + regression).
 
     The recipe owns build_model / configure_training / fit. The harness owns the
     train-only preprocessor, validation selection, test-once evaluation, and the
@@ -92,9 +98,41 @@ class SklearnHarness(RunHarness):
 
         # Fit the preprocessor on the TRAIN partition only, once.
         if train and self._fitted_preprocessor is None:
+            self._progress_report(
+                stage="preprocessing",
+                message="Materialised sklearn recipe: fitting train-only imputation, scaling, and categorical encoding.",
+                detail=f"Training matrix shape: `{len(X):,}` rows × `{len(X.columns):,}` source features.",
+                current=0,
+                total=len(X),
+                unit="rows",
+                force=True,
+            )
             self._preprocessor = self._make_preprocessor(X)
-            self._fitted_preprocessor = self._preprocessor.fit(X)
+            with self._progress_activity(
+                stage="preprocessing",
+                message="Fitting the complete sklearn preprocessing pipeline in memory.",
+                detail="This recipe is explicitly materialised-only and was allowed by resource preflight.",
+            ):
+                self._fitted_preprocessor = self._preprocessor.fit(X)
+            self._progress_report(
+                stage="preprocessing",
+                message="Sklearn preprocessing is fitted and ready for estimator training.",
+                current=len(X),
+                total=len(X),
+                unit="rows",
+                force=True,
+            )
 
+        role = str(getattr(partition, "name", "train" if train else "validation"))
+        self._progress_report(
+            stage="loading_data",
+            message=f"Prepared materialised `{role}` matrix.",
+            detail=f"Rows `{len(X):,}`, source features `{len(X.columns):,}`.",
+            current=len(X),
+            total=len(X),
+            unit="rows",
+            force=True,
+        )
         return SklearnBatch(X=X, y=y, ids=ids, classes=list(partition.classes))
 
     def _make_preprocessor(self, X: pd.DataFrame):
@@ -283,11 +321,20 @@ class SklearnHarness(RunHarness):
         checkpoint_sha256 = file_sha256(sidecar_path)
         checkpoint_size = sidecar_path.stat().st_size
         created_at = time.time()
+        data_access = RecipeDataAccess.coerce(
+            getattr(self.recipe, "data_access", None),
+            framework="sklearn",
+        )
 
         manifest_payload = {
             "schema_version": 2,
-            "kind": "sklearn_estimator",
+            "kind": (
+                "sklearn_materialized_estimator"
+                if data_access.mode == RecipeDataAccessMode.MATERIALIZED
+                else "sklearn_estimator"
+            ),
             "framework": "sklearn",
+            "training_data_access": data_access.to_dict(),
             "task": self.recipe.task,
             "modality": self.recipe.modality,
             "run_id": self.run.run_id,
@@ -330,6 +377,7 @@ class SklearnHarness(RunHarness):
                     "run_id": self.run.run_id,
                     "python_type": f"{type(best).__module__}.{type(best).__name__}",
                     "prediction_capabilities": prediction_capabilities,
+                    "training_data_access": data_access.to_dict(),
                 },
             },
             "input_contract": {
@@ -397,6 +445,17 @@ class SklearnRecipe(ManagedMLRecipe):
 
     framework = "sklearn"
     modality = "tabular"
+    data_access = RecipeDataAccess(
+        mode=RecipeDataAccessMode.MATERIALIZED,
+        description=(
+            "Materialises raw partitions and the encoded sklearn feature matrix "
+            "in process memory."
+        ),
+        materializes_training_partition=True,
+        memory_multiplier=5.0,
+        warning_bytes=2 * 1024**3,
+        blocking_bytes=8 * 1024**3,
+    )
 
     def configure_training(self, run, model) -> TrainingComponents:
         # sklearn folds optimizer/loss into the estimator; nothing to configure.
@@ -482,9 +541,14 @@ def fit_warm_start(run, *, model, components, train_loader, harness, points=10):
 def register() -> None:
     """Register the sklearn harness with make_harness. Idempotent."""
     register_harness(
-        lambda framework, task, modality, **_: (
+        lambda framework, task, modality, recipe, **_: (
             str(framework).lower() == "sklearn"
             and str(task).lower() in {"classification", "regression"}
+            and RecipeDataAccess.coerce(
+                getattr(recipe, "data_access", None),
+                framework=framework,
+            ).mode
+            == RecipeDataAccessMode.MATERIALIZED
         ),
         SklearnHarness,
     )

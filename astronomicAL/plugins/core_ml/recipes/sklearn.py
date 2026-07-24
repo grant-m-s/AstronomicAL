@@ -2,9 +2,13 @@ from __future__ import annotations
 
 from typing import Any
 
-import numpy as np
-
 from ..harnesses.sklearn import SklearnRecipe, fit_warm_start
+from ..harnesses.sklearn_incremental import IncrementalSklearnRecipe
+from ..harnesses.xgboost_external import (
+    ExternalMemoryXGBoostModel,
+    ExternalMemoryXGBoostRecipe,
+)
+
 
 _FEATURE_COLUMNS_SCHEMA = {
     "type": "array",
@@ -44,41 +48,53 @@ _AUTO_FEATURE_COLUMNS_SCHEMA = {
     "default": False,
 }
 
+_COMMON_BINDING_PROPERTIES = {
+    "record_id_column": _RECORD_ID_COLUMN_SCHEMA,
+    "target_column": _TARGET_COLUMN_SCHEMA,
+    "feature_columns": _FEATURE_COLUMNS_SCHEMA,
+    "auto_feature_columns": _AUTO_FEATURE_COLUMNS_SCHEMA,
+}
+
+_COMMON_OUTPUTS = [
+    "ml.split_spec",
+    "ml.model",
+    "ml.evaluation_report",
+    "ml.predictions",
+    "ml.training_log",
+    "ml.run",
+]
+
+
 class SklearnTabularClassifierRecipe(SklearnRecipe):
     id = "core.ml.sklearn_tabular_classifier"
     title = "Sklearn tabular classifier"
-    version = "0.1.0"
+    version = "0.2.0"
     task = "classification"
     modality = "tabular"
     framework = "sklearn"
     complexity = "baseline"
     author = "AstronomicAL"
     description = (
-        "Protocol-managed sklearn baseline for tabular classification. "
-        "Supports Random Forest, Extra Trees, HistGradientBoosting, and "
-        "Logistic Regression. The harness owns train/validation/test protocol, "
-        "preprocessing, metrics, artifacts, and prediction contracts."
+        "Materialised sklearn baseline for tabular classification. Supports "
+        "Random Forest, Extra Trees, HistGradientBoosting, and Logistic "
+        "Regression. The launcher estimates peak memory and blocks unsafe runs."
     )
-    tags = ["sklearn", "tabular", "classification", "baseline"]
+    tags = [
+        "sklearn",
+        "tabular",
+        "classification",
+        "baseline",
+        "materialized",
+    ]
     required_mappings = ["record_id"]
     optional_mappings = ["target_label"]
-    produces = [
-        "ml.split_spec",
-        "ml.model",
-        "ml.evaluation_report",
-        "ml.predictions",
-        "ml.training_log",
-        "ml.run",
-    ]
+    produces = list(_COMMON_OUTPUTS)
 
     params_schema = {
         "type": "object",
         "required": ["feature_columns"],
         "properties": {
-            "record_id_column": _RECORD_ID_COLUMN_SCHEMA,
-            "target_column": _TARGET_COLUMN_SCHEMA,
-            "feature_columns": _FEATURE_COLUMNS_SCHEMA,
-            "auto_feature_columns": _AUTO_FEATURE_COLUMNS_SCHEMA,
+            **_COMMON_BINDING_PROPERTIES,
             "model_type": {
                 "type": "string",
                 "title": "Sklearn model",
@@ -229,41 +245,38 @@ class SklearnTabularClassifierRecipe(SklearnRecipe):
             harness=harness,
         )
 
+
 class SklearnTabularRegressorRecipe(SklearnRecipe):
     id = "core.ml.sklearn_tabular_regressor"
     title = "Sklearn tabular regressor"
-    version = "0.1.0"
+    version = "0.2.0"
     task = "regression"
     modality = "tabular"
     framework = "sklearn"
     complexity = "baseline"
     author = "AstronomicAL"
     description = (
-        "Protocol-managed sklearn baseline for tabular regression. Supports "
-        "Random Forest, Extra Trees, HistGradientBoosting, and Ridge regression. "
-        "The harness owns train/validation/test protocol, preprocessing, metrics, "
-        "artifacts, and prediction contracts."
+        "Materialised sklearn baseline for tabular regression. Supports Random "
+        "Forest, Extra Trees, HistGradientBoosting, and Ridge regression. The "
+        "launcher estimates peak memory and blocks unsafe runs."
     )
-    tags = ["sklearn", "tabular", "regression", "baseline", "photoz"]
+    tags = [
+        "sklearn",
+        "tabular",
+        "regression",
+        "baseline",
+        "photoz",
+        "materialized",
+    ]
     required_mappings = ["record_id"]
     optional_mappings = ["target_label"]
-    produces = [
-        "ml.split_spec",
-        "ml.model",
-        "ml.evaluation_report",
-        "ml.predictions",
-        "ml.training_log",
-        "ml.run",
-    ]
+    produces = list(_COMMON_OUTPUTS)
 
     params_schema = {
         "type": "object",
         "required": ["feature_columns"],
         "properties": {
-            "record_id_column": _RECORD_ID_COLUMN_SCHEMA,
-            "target_column": _TARGET_COLUMN_SCHEMA,
-            "feature_columns": _FEATURE_COLUMNS_SCHEMA,
-            "auto_feature_columns": _AUTO_FEATURE_COLUMNS_SCHEMA,
+            **_COMMON_BINDING_PROPERTIES,
             "model_type": {
                 "type": "string",
                 "title": "Sklearn model",
@@ -399,19 +412,194 @@ class SklearnTabularRegressorRecipe(SklearnRecipe):
             harness=harness,
         )
 
-# =============================================================================
-# XGBoost recipes use the sklearn-compatible harness and preprocessing path.
-# =============================================================================
+
+_INCREMENTAL_COMMON_PROPERTIES = {
+    **_COMMON_BINDING_PROPERTIES,
+    "epochs": {
+        "type": "integer",
+        "title": "Passes over the training partition",
+        "default": 5,
+        "minimum": 1,
+    },
+    "alpha": {
+        "type": "number",
+        "title": "Regularisation strength",
+        "default": 0.0001,
+        "minimum": 0.0,
+    },
+    "penalty": {
+        "type": "string",
+        "enum": ["l2", "l1", "elasticnet"],
+        "default": "l2",
+    },
+    "l1_ratio": {
+        "type": "number",
+        "default": 0.15,
+        "minimum": 0.0,
+        "maximum": 1.0,
+    },
+    "learning_rate": {
+        "type": "string",
+        "enum": ["optimal", "constant", "invscaling", "adaptive"],
+        "default": "optimal",
+    },
+    "eta0": {
+        "type": "number",
+        "default": 0.01,
+        "minimum": 0.0,
+    },
+    "average": {
+        "type": "boolean",
+        "default": False,
+    },
+    "random_state": {
+        "type": "integer",
+        "default": 42,
+    },
+    "stream_source_batch_size": {
+        "type": "integer",
+        "title": "Source batch rows",
+        "default": 8192,
+        "minimum": 1,
+    },
+}
+
+
+class IncrementalSGDClassifierRecipe(IncrementalSklearnRecipe):
+    id = "core.ml.sklearn_incremental_sgd_classifier"
+    title = "Incremental SGD classifier"
+    version = "0.1.0"
+    task = "classification"
+    modality = "tabular"
+    framework = "sklearn"
+    complexity = "baseline"
+    author = "AstronomicAL"
+    description = (
+        "Numeric tabular classifier trained with StandardScaler.partial_fit and "
+        "SGDClassifier.partial_fit over bounded DatasetSource batches."
+    )
+    tags = [
+        "sklearn",
+        "incremental",
+        "partial-fit",
+        "tabular",
+        "classification",
+    ]
+    required_mappings = ["record_id"]
+    optional_mappings = ["target_label"]
+    produces = list(_COMMON_OUTPUTS)
+    params_schema = {
+        "type": "object",
+        "required": ["feature_columns"],
+        "properties": {
+            **_INCREMENTAL_COMMON_PROPERTIES,
+            "loss": {
+                "type": "string",
+                "enum": ["log_loss", "modified_huber"],
+                "default": "log_loss",
+            },
+        },
+    }
+
+    def build_model(self, run, *, num_classes: int):
+        from sklearn.linear_model import SGDClassifier
+
+        return SGDClassifier(
+            loss=str(run.params.get("loss") or "log_loss"),
+            penalty=str(run.params.get("penalty") or "l2"),
+            alpha=float(run.params.get("alpha") or 0.0001),
+            l1_ratio=float(run.params.get("l1_ratio") or 0.15),
+            learning_rate=str(run.params.get("learning_rate") or "optimal"),
+            eta0=float(run.params.get("eta0") or 0.01),
+            average=bool(run.params.get("average", False)),
+            random_state=int(run.params.get("random_state") or 42),
+        )
+
+
+class IncrementalSGDRegressorRecipe(IncrementalSklearnRecipe):
+    id = "core.ml.sklearn_incremental_sgd_regressor"
+    title = "Incremental SGD regressor"
+    version = "0.1.0"
+    task = "regression"
+    modality = "tabular"
+    framework = "sklearn"
+    complexity = "baseline"
+    author = "AstronomicAL"
+    description = (
+        "Numeric tabular regressor trained with StandardScaler.partial_fit and "
+        "SGDRegressor.partial_fit over bounded DatasetSource batches."
+    )
+    tags = [
+        "sklearn",
+        "incremental",
+        "partial-fit",
+        "tabular",
+        "regression",
+    ]
+    required_mappings = ["record_id"]
+    optional_mappings = ["target_label"]
+    produces = list(_COMMON_OUTPUTS)
+    params_schema = {
+        "type": "object",
+        "required": ["feature_columns"],
+        "properties": {
+            **_INCREMENTAL_COMMON_PROPERTIES,
+            "loss": {
+                "type": "string",
+                "enum": ["squared_error", "huber", "epsilon_insensitive"],
+                "default": "squared_error",
+            },
+            "epsilon": {
+                "type": "number",
+                "default": 0.1,
+                "minimum": 0.0,
+            },
+        },
+    }
+
+    def build_model(self, run, *, num_classes: int):
+        from sklearn.linear_model import SGDRegressor
+
+        return SGDRegressor(
+            loss=str(run.params.get("loss") or "squared_error"),
+            penalty=str(run.params.get("penalty") or "l2"),
+            alpha=float(run.params.get("alpha") or 0.0001),
+            l1_ratio=float(run.params.get("l1_ratio") or 0.15),
+            learning_rate=str(run.params.get("learning_rate") or "optimal"),
+            eta0=float(run.params.get("eta0") or 0.01),
+            epsilon=float(run.params.get("epsilon") or 0.1),
+            average=bool(run.params.get("average", False)),
+            random_state=int(run.params.get("random_state") or 42),
+        )
+
 
 _XGBOOST_COMMON_PROPERTIES = {
-    "record_id_column": _RECORD_ID_COLUMN_SCHEMA,
-    "target_column": _TARGET_COLUMN_SCHEMA,
-    "feature_columns": _FEATURE_COLUMNS_SCHEMA,
-    "auto_feature_columns": _AUTO_FEATURE_COLUMNS_SCHEMA,
-    "n_estimators": {"type": "integer", "default": 800, "minimum": 1},
+    **_COMMON_BINDING_PROPERTIES,
+    "n_estimators": {
+        "type": "integer",
+        "title": "Boosting rounds",
+        "default": 800,
+        "minimum": 1,
+    },
+    "curve_points": {
+        "type": "integer",
+        "title": "Validation curve points",
+        "default": 10,
+        "minimum": 1,
+        "maximum": 50,
+    },
     "max_depth": {"type": "integer", "default": 6, "minimum": 1},
-    "learning_rate": {"type": "number", "default": 0.05, "minimum": 1e-6},
-    "subsample": {"type": "number", "default": 0.8, "minimum": 0.05, "maximum": 1.0},
+    "learning_rate": {
+        "type": "number",
+        "default": 0.05,
+        "minimum": 1e-6,
+    },
+    "subsample": {
+        "type": "number",
+        "default": 0.8,
+        "minimum": 0.05,
+        "maximum": 1.0,
+    },
     "colsample_bytree": {
         "type": "number",
         "default": 0.8,
@@ -423,118 +611,90 @@ _XGBOOST_COMMON_PROPERTIES = {
     "reg_lambda": {"type": "number", "default": 1.0, "minimum": 0.0},
     "tree_method": {
         "type": "string",
-        "enum": ["hist", "approx", "exact"],
+        "enum": ["hist", "approx"],
         "default": "hist",
     },
     "n_jobs": {"type": "integer", "default": -1},
     "random_state": {"type": "integer", "default": 42},
+    "stream_source_batch_size": {
+        "type": "integer",
+        "title": "Source-to-cache batch rows",
+        "default": 8192,
+        "minimum": 1,
+    },
 }
 
-class StringLabelXGBClassifier:
-    """Small sklearn-compatible wrapper that preserves string class labels."""
 
-    def __init__(self, **params):
-        self.params = dict(params)
-        self.model = None
-        self.classes_ = np.asarray([], dtype=object)
-
-    def get_params(self, deep: bool = True):
-        return dict(self.params)
-
-    def set_params(self, **params):
-        self.params.update(params)
-        return self
-
-    def fit(self, X, y):
-        from xgboost import XGBClassifier
-
-        labels = np.asarray(y).astype(str)
-        self.classes_ = np.asarray(sorted(set(labels.tolist())), dtype=object)
-        mapping = {label: index for index, label in enumerate(self.classes_)}
-        encoded = np.asarray([mapping[label] for label in labels], dtype=np.int64)
-        params = dict(self.params)
-        params["objective"] = "binary:logistic" if len(self.classes_) == 2 else "multi:softprob"
-        params["eval_metric"] = "logloss" if len(self.classes_) == 2 else "mlogloss"
-        if len(self.classes_) > 2:
-            params["num_class"] = len(self.classes_)
-        self.model = XGBClassifier(**params)
-        self.model.fit(X, encoded)
-        return self
-
-    def predict(self, X):
-        if self.model is None:
-            raise RuntimeError("XGBoost classifier has not been fitted.")
-        encoded = np.asarray(self.model.predict(X), dtype=np.int64)
-        return self.classes_[encoded]
-
-    def predict_proba(self, X):
-        if self.model is None:
-            raise RuntimeError("XGBoost classifier has not been fitted.")
-        return self.model.predict_proba(X)
-
-class XGBoostTabularClassifierRecipe(SklearnRecipe):
+class XGBoostTabularClassifierRecipe(ExternalMemoryXGBoostRecipe):
     id = "core.ml.xgboost_tabular_classifier"
-    title = "XGBoost tabular classifier"
-    version = "0.1.0"
+    title = "XGBoost external-memory classifier"
+    version = "0.2.0"
     task = "classification"
     modality = "tabular"
     framework = "sklearn"
     complexity = "advanced"
     author = "AstronomicAL"
     description = (
-        "Strong gradient-boosted-tree classifier using XGBoost's sklearn API. "
-        "AstronomicAL fits preprocessing on the training split only and owns all "
-        "validation/test evaluation and artifact generation."
+        "Numeric gradient-boosted-tree classifier trained from disk-backed "
+        "XGBoost DMatrix caches rather than a fully materialised pandas matrix."
     )
-    tags = ["xgboost", "gbdt", "tabular", "classification"]
+    tags = [
+        "xgboost",
+        "external-memory",
+        "gbdt",
+        "tabular",
+        "classification",
+    ]
     required_imports = ["sklearn", "joblib", "xgboost"]
     source_urls = ["https://github.com/dmlc/xgboost"]
-    source_reference = "Uses XGBoost's histogram tree method and regularized subsampled boosting defaults."
+    source_reference = (
+        "Uses XGBoost's official external-memory DMatrix cache format."
+    )
     required_mappings = ["record_id"]
     optional_mappings = ["target_label"]
-    produces = ["ml.split_spec", "ml.model", "ml.evaluation_report", "ml.predictions", "ml.training_log", "ml.run"]
+    produces = list(_COMMON_OUTPUTS)
     params_schema = {
         "type": "object",
         "required": ["feature_columns"],
         "properties": dict(_XGBOOST_COMMON_PROPERTIES),
     }
 
-    def build_model(self, run, *, num_classes: int):
-        p = run.params
-        return StringLabelXGBClassifier(
-            n_estimators=int(p.get("n_estimators", 800)),
-            max_depth=int(p.get("max_depth", 6)),
-            learning_rate=float(p.get("learning_rate", 0.05)),
-            subsample=float(p.get("subsample", 0.8)),
-            colsample_bytree=float(p.get("colsample_bytree", 0.8)),
-            min_child_weight=float(p.get("min_child_weight", 1.0)),
-            reg_alpha=float(p.get("reg_alpha", 0.0)),
-            reg_lambda=float(p.get("reg_lambda", 1.0)),
-            tree_method=str(p.get("tree_method", "hist")),
-            n_jobs=int(p.get("n_jobs", -1)),
-            random_state=int(p.get("random_state", 42)),
+    def build_model(self, run, *, target=None, num_classes: int = 0):
+        classes = list(getattr(target, "classes", []) or [])
+        return ExternalMemoryXGBoostModel(
+            task="classification",
+            classes=classes,
         )
 
-class XGBoostTabularRegressorRecipe(SklearnRecipe):
+
+class XGBoostTabularRegressorRecipe(ExternalMemoryXGBoostRecipe):
     id = "core.ml.xgboost_tabular_regressor"
-    title = "XGBoost tabular regressor"
-    version = "0.1.0"
+    title = "XGBoost external-memory regressor"
+    version = "0.2.0"
     task = "regression"
     modality = "tabular"
     framework = "sklearn"
     complexity = "advanced"
     author = "AstronomicAL"
     description = (
-        "Regularized histogram-based XGBoost regressor for strong tabular "
-        "performance under AstronomicAL's managed split and evaluation protocol."
+        "Numeric XGBoost regressor trained from disk-backed DMatrix caches "
+        "under AstronomicAL's managed split and evaluation protocol."
     )
-    tags = ["xgboost", "gbdt", "tabular", "regression"]
+    tags = [
+        "xgboost",
+        "external-memory",
+        "gbdt",
+        "tabular",
+        "regression",
+    ]
     required_imports = ["sklearn", "joblib", "xgboost"]
     source_urls = ["https://github.com/dmlc/xgboost"]
-    source_reference = "Uses the official XGBoost sklearn regressor with conservative high-performing defaults."
+    source_reference = (
+        "Uses XGBoost's official external-memory DMatrix cache format."
+    )
     required_mappings = ["record_id"]
     optional_mappings = ["target_label"]
-    produces = ["ml.split_spec", "ml.model", "ml.evaluation_report", "ml.predictions", "ml.training_log", "ml.run"]
+    produces = list(_COMMON_OUTPUTS)
     params_schema = {
         "type": "object",
         "required": ["feature_columns"],
@@ -542,27 +702,18 @@ class XGBoostTabularRegressorRecipe(SklearnRecipe):
             **_XGBOOST_COMMON_PROPERTIES,
             "objective": {
                 "type": "string",
-                "enum": ["reg:squarederror", "reg:pseudohubererror", "reg:absoluteerror"],
+                "enum": [
+                    "reg:squarederror",
+                    "reg:pseudohubererror",
+                    "reg:absoluteerror",
+                ],
                 "default": "reg:squarederror",
             },
         },
     }
 
-    def build_model(self, run, *, num_classes: int):
-        from xgboost import XGBRegressor
-
-        p = run.params
-        return XGBRegressor(
-            n_estimators=int(p.get("n_estimators", 800)),
-            max_depth=int(p.get("max_depth", 6)),
-            learning_rate=float(p.get("learning_rate", 0.05)),
-            subsample=float(p.get("subsample", 0.8)),
-            colsample_bytree=float(p.get("colsample_bytree", 0.8)),
-            min_child_weight=float(p.get("min_child_weight", 1.0)),
-            reg_alpha=float(p.get("reg_alpha", 0.0)),
-            reg_lambda=float(p.get("reg_lambda", 1.0)),
-            tree_method=str(p.get("tree_method", "hist")),
-            objective=str(p.get("objective", "reg:squarederror")),
-            n_jobs=int(p.get("n_jobs", -1)),
-            random_state=int(p.get("random_state", 42)),
+    def build_model(self, run, *, target=None, num_classes: int = 0):
+        return ExternalMemoryXGBoostModel(
+            task="regression",
+            classes=[],
         )

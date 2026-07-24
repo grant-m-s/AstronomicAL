@@ -5,16 +5,17 @@ from astronomicAL.platform.plugins import PluginManifest
 manifest = PluginManifest(
     id="core.active_learning",
     name="Active Learning",
-    version="0.5.4",
+    version="0.6.0",
     description=(
-        "Active-learning sessions, labels, streaming query strategies, selection "
-        "handoff, and an optional core.ml train/predict bridge."
+        "Active-learning sessions with durable labels and memberships, streaming "
+        "or embedding-indexed acquisition, selection handoff, and an optional "
+        "core.ml train/predict bridge."
     ),
     requires_plugins=[],
     requires=[],
     optional_requires=[],
-    capabilities=["panel", "action", "active-learning", "selection", "machine-learning"],
-    tags=["core", "active-learning", "ml", "selection", "query-strategy"],
+    capabilities=["panel", "action", "active-learning", "selection", "machine-learning", "embedding-acquisition"],
+    tags=["core", "active-learning", "ml", "selection", "query-strategy", "embeddings"],
 )
 
 def register(api) -> None:
@@ -46,7 +47,7 @@ def register(api) -> None:
         icon="playlist_add",
         tags=["active-learning", "random", "selection", "session"],
         inputs={"dataset": True, "selection": "none", "columns": "none", "numeric_columns": "none", "required_mappings": ["record_id"]},
-        outputs=[{"type": "al.session"}, {"type": "ml.active_learning_batch"}, {"type": "selection.ids", "optional": True}],
+        outputs=[{"type": "al.session"}, {"type": "al.labels"}, {"type": "al.memberships"}, {"type": "ml.active_learning_batch"}, {"type": "selection.ids", "optional": True}],
         params_schema={
             "type": "object",
             "properties": {
@@ -62,6 +63,10 @@ def register(api) -> None:
                 "initial_k": {"type": "integer", "minimum": 0, "default": 20},
                 "seed": {"type": "integer", "default": 42},
                 "make_selection": {"type": "boolean", "default": True},
+                "label_storage_format": {"type": "string", "enum": ["auto", "parquet", "jsonl.gz"], "default": "auto"},
+                "membership_storage_format": {"type": "string", "enum": ["auto", "parquet", "jsonl.gz"], "default": "auto"},
+                "label_output_dir": {"type": "string"},
+                "membership_output_dir": {"type": "string"},
                 "partition_whole_dataset": {"type": "boolean", "default": True},
                 "session_validation_size": {"type": "number", "minimum": 0.0, "exclusiveMaximum": 1.0, "default": 0.1},
                 "session_test_size": {"type": "number", "minimum": 0.0, "exclusiveMaximum": 1.0, "default": 0.2},
@@ -120,7 +125,7 @@ def register(api) -> None:
         icon="rule",
         tags=["active-learning", "query", "selection", "uncertainty", "streaming"],
         inputs={"dataset": False, "selection": "none", "columns": "none", "numeric_columns": "none", "accepts_artifact_types": ["ml.predictions"]},
-        outputs=[{"type": "al.session"}, {"type": "ml.active_learning_batch"}, {"type": "selection.ids", "optional": True}],
+        outputs=[{"type": "al.session"}, {"type": "al.memberships"}, {"type": "ml.active_learning_batch"}, {"type": "selection.ids", "optional": True}],
         params_schema={
             "type": "object",
             "required": ["session_artifact_id"],
@@ -135,6 +140,13 @@ def register(api) -> None:
                 "exclude_row_ids": {"type": "array", "items": {"type": "string"}},
                 "prediction_scan_batch_size": {"type": "integer", "minimum": 1, "default": 8192},
                 "batch_strategy_max_rows": {"type": "integer", "minimum": 1, "default": 100000},
+                "embedding_artifact_id": {"type": "string"},
+                "embeddings_artifact_id": {"type": "string"},
+                "embedding_ref": {"type": "object"},
+                "use_embedding_acquisition": {"type": "boolean", "default": False},
+                "embedding_metric": {"type": "string", "enum": ["euclidean", "cosine"], "default": "euclidean"},
+                "embedding_scan_batch_size": {"type": "integer", "minimum": 1, "default": 8192},
+                "embedding_initial_centres_max": {"type": "integer", "minimum": 0, "default": 2048},
             },
         },
         run_in_job=True,
@@ -175,7 +187,7 @@ def register(api) -> None:
         icon="label",
         tags=["active-learning", "label", "annotation"],
         inputs={"dataset": False, "selection": "optional", "columns": "none", "numeric_columns": "none"},
-        outputs=[{"type": "al.session"}],
+        outputs=[{"type": "al.session"}, {"type": "al.labels"}, {"type": "al.memberships"}],
         params_schema={"type": "object", "required": ["session_artifact_id", "label"], "properties": {"session_artifact_id": {"type": "string"}, "row_id": {"type": "string"}, "label": {}, "source": {"type": "string", "default": "manual"}}},
         run_in_job=False,
     )
@@ -188,7 +200,7 @@ def register(api) -> None:
         icon="playlist_add_check",
         tags=["active-learning", "label", "bulk"],
         inputs={"dataset": False, "selection": "optional", "columns": "none", "numeric_columns": "none"},
-        outputs=[{"type": "al.session"}],
+        outputs=[{"type": "al.session"}, {"type": "al.labels"}, {"type": "al.memberships"}],
         params_schema={"type": "object", "required": ["session_artifact_id"], "properties": {"session_artifact_id": {"type": "string"}, "row_id": {"type": "string"}, "label_column": {"type": "string"}, "n": {"type": "integer", "minimum": 1, "default": 5}, "source": {"type": "string", "default": "bulk_column"}}},
         run_in_job=False,
     )
@@ -238,7 +250,7 @@ def register(api) -> None:
         icon="model_training",
         tags=["active-learning", "training", "ml", "streaming"],
         inputs={"dataset": False, "selection": "none", "columns": "none", "numeric_columns": "none"},
-        outputs=[{"type": "al.session"}, {"type": "al.training_set"}, {"type": "ml.run", "optional": True}, {"type": "ml.model", "optional": True}, {"type": "ml.predictions", "optional": True}],
+        outputs=[{"type": "al.session"}, {"type": "al.labels"}, {"type": "al.memberships"}, {"type": "al.training_set"}, {"type": "ml.run", "optional": True}, {"type": "ml.model", "optional": True}, {"type": "ml.predictions", "optional": True}],
         params_schema={
             "type": "object",
             "required": ["session_artifact_id"],
@@ -277,6 +289,9 @@ def register(api) -> None:
         produces=[
             "al.session",
             "al.training_set",
+            "al.labels",
+            "al.memberships",
+            "ml.embeddings",
             "ml.active_learning_batch",
             "ml.active_learning_scores",
             "selection.ids",
@@ -294,7 +309,7 @@ def register(api) -> None:
             "ml.training.finished",
         ],
         default_layout={"x": 0, "y": 0, "w": 6, "h": 8},
-        state_version=8,
+        state_version=9,
         persist_layout=True,
         persist_state=True,
         restore_policy="best_effort",

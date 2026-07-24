@@ -6,7 +6,7 @@ from dataclasses import asdict, dataclass
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from .data.dataset_access import infer_column_bindings
-
+from .resource_estimates import RecipeDataAccess
 
 def schema_defaults(schema: Mapping[str, Any]) -> Dict[str, Any]:
     """Extract default values from a JSON-schema-like parameter schema."""
@@ -17,7 +17,6 @@ def schema_defaults(schema: Mapping[str, Any]) -> Dict[str, Any]:
             defaults[str(name)] = spec["default"]
     return defaults
 
-
 def validate_required_params(schema: Mapping[str, Any], params: Mapping[str, Any]) -> None:
     required = list(schema.get("required", []) or []) if isinstance(schema, Mapping) else []
     missing = []
@@ -27,7 +26,6 @@ def validate_required_params(schema: Mapping[str, Any], params: Mapping[str, Any
             missing.append(str(key))
     if missing:
         raise ValueError(f"Missing required recipe parameter(s): {', '.join(missing)}")
-
 
 def infer_recipe_params(context: Any, dataset_id: str, recipe_spec: Any) -> Dict[str, Any]:
     """Return inferred values only for parameters exposed by the recipe schema."""
@@ -59,14 +57,11 @@ def infer_recipe_params(context: Any, dataset_id: str, recipe_spec: Any) -> Dict
 
     return inferred
 
-
 def is_empty_param_value(value: Any) -> bool:
     return value is None or value == "" or value == [] or value == {}
 
-
 class RecipeUnavailableError(RuntimeError):
     """Raised when a registered recipe cannot run in the current environment."""
-
 
 @dataclass(frozen=True)
 class RecipeAvailability:
@@ -84,7 +79,6 @@ class RecipeAvailability:
         if self.available:
             return ""
         return "Missing Python import(s): " + ", ".join(self.missing_imports)
-
 
 @dataclass(frozen=True)
 class RecipeSpec:
@@ -104,6 +98,7 @@ class RecipeSpec:
     produces: List[str]
     params_schema: Dict[str, Any]
     required_imports: List[str]
+    data_access: RecipeDataAccess
 
     @classmethod
     def from_recipe_cls(cls, recipe_cls: type) -> "RecipeSpec":
@@ -134,8 +129,11 @@ class RecipeSpec:
             produces=list(g("produces", []) or []),
             params_schema=dict(g("params_schema", {"type": "object", "properties": {}}) or {}),
             required_imports=[str(value).strip() for value in (g("required_imports", []) or []) if str(value).strip()],
+            data_access=RecipeDataAccess.coerce(
+                g("data_access", None),
+                framework=str(g("framework", "") or ""),
+            ),
         )
-
 
 class MLRecipeRegistry:
     """In-memory registry of recipe specs, keyed by recipe id.
@@ -249,7 +247,6 @@ class MLRecipeRegistry:
             missing_imports=missing,
             checked_at=time.time(),
         )
-
 
 def _import_available(import_name: str) -> bool:
     """Check import presence without importing heavy ML frameworks."""

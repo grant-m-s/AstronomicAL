@@ -382,11 +382,14 @@ class TorchRegressionHarness(RunHarness):
         device = self._device()
         model.to(device)
         model.eval()
+        self.run.check_cancelled()
         x, _y, _ids = next(iter(train_loader))
+        self.run.check_cancelled()
         if hasattr(x, "to"):
             x = x.to(device)
         with torch.no_grad():
             out = self.recipe.eval_forward(model, x)
+        self.run.check_cancelled()
         out_dim = 1 if out.dim() == 1 else int(out.shape[1])
         if out_dim != expected:
             raise ValueError(
@@ -407,9 +410,11 @@ class TorchRegressionHarness(RunHarness):
         preds_all, true_all, ids_all = [], [], []
         with torch.no_grad():
             for x, y, ids in loader:
+                self.run.check_cancelled()
                 if hasattr(x, "to"):
                     x = x.to(device)
                 out = self.recipe.eval_forward(model, x)
+                self.run.check_cancelled()
                 out = out.detach().cpu().float().numpy()
                 if out.ndim == 1:
                     out = out.reshape(-1, 1)

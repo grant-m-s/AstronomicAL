@@ -186,6 +186,19 @@ def start_session_action(
         label_profile=label_profile,
         contract=session_contract,
     )
+    session["storage"] = {
+        key: params[key]
+        for key in (
+            "artifact_root",
+            "label_output_dir",
+            "membership_output_dir",
+            "label_storage_format",
+            "membership_storage_format",
+            "label_storage_batch_size",
+            "membership_storage_batch_size",
+        )
+        if params.get(key) not in (None, "")
+    }
     records = acquisition.build_initial_records(selected_row_ids)
     batch_payload = acquisition.create_batch_payload(
         dataset_id=pool_dataset_id,
@@ -419,7 +432,6 @@ def create_session_partitions(
         "root": str(root),
     }
 
-
 def _register_partition_dataset(
     *,
     context: Any,
@@ -475,7 +487,6 @@ def _register_partition_dataset(
     }
     legacy_actions.publish(context, "dataset.registered", event)
     legacy_actions.publish(context, "dataset.loaded", event)
-
 
 def _session_split_root(context: Any, params: Mapping[str, Any]) -> Path:
     explicit = (

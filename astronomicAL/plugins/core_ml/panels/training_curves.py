@@ -8,6 +8,8 @@ from typing import Any, Dict, List, Optional, Sequence
 import pandas as pd
 import panel as pn
 
+from ..progress import PROGRESS_EVENT, progress_alert_type, progress_markdown, progress_percent
+
 class MLTrainingCurvesPanel:
     """Panel for viewing training curves and Optuna trial history."""
 
@@ -19,6 +21,42 @@ class MLTrainingCurvesPanel:
         self.reset_curve_controls = pn.widgets.Button(name="Reset metric selections", button_type="light")
 
         self.summary = pn.pane.Markdown("")
+        # Reserve a fixed live-status viewport. The progress text can gain or
+        # lose context, timing, ETA and row/batch lines between updates. Without a
+        # fixed viewport those changes resize the selector block and make the tabs
+        # below visibly jump.
+        self.live_status = pn.pane.Alert(
+            "No active training run is selected.",
+            alert_type="info",
+            sizing_mode="stretch_width",
+            height=184,
+            min_height=184,
+            max_height=184,
+            styles={
+                "box-sizing": "border-box",
+                "overflow-y": "auto",
+                "overflow-x": "hidden",
+            },
+        )
+        self.live_progress = pn.indicators.Progress(
+            name="",
+            value=0,
+            max=100,
+            visible=True,
+            sizing_mode="stretch_width",
+            height=16,
+            margin=(0, 0, 0, 0),
+            styles={"visibility": "hidden"},
+        )
+        self.live_progress_slot = pn.Column(
+            self.live_progress,
+            sizing_mode="stretch_width",
+            height=24,
+            min_height=24,
+            max_height=24,
+            margin=(0, 0, 6, 0),
+            styles={"box-sizing": "border-box", "overflow": "hidden"},
+        )
         self.curve_help = pn.pane.Alert(
             "Select a training log to configure visible curves.",
             alert_type="info",
@@ -145,6 +183,8 @@ class MLTrainingCurvesPanel:
         self._last_log_refresh_at = 0.0
         self._last_rendered_epoch_count_by_artifact: Dict[str, int] = {}
         self._last_rendered_status_by_artifact: Dict[str, str] = {}
+        self._latest_live_progress_by_artifact: Dict[str, Dict[str, Any]] = {}
+        self._latest_live_progress_by_run: Dict[str, Dict[str, Any]] = {}
 
         # Event-driven curve redraw cadence. Manual widget changes and finished
         # events still render immediately.
@@ -171,6 +211,8 @@ class MLTrainingCurvesPanel:
             "ml.training_log.created",
             "ml.training_log.updated",
             "ml.recipe_run.started",
+            PROGRESS_EVENT,
+            "ml.recipe_run.paused",
             "ml.recipe_run.finished",
             "ml.training.started",
             "ml.training.finished",
@@ -198,7 +240,46 @@ class MLTrainingCurvesPanel:
             )
 
         topic_text = str(topic or "")
-        force = topic_text.endswith(".finished") or topic_text.endswith(".created")
+        if topic_text == PROGRESS_EVENT and isinstance(payload, dict):
+            progress_payload = dict(payload)
+
+            def update_progress() -> None:
+                artifact_key = str(artifact_id or "")
+                run_key = str(progress_payload.get("run_id") or "")
+                if artifact_key:
+                    self._latest_live_progress_by_artifact[artifact_key] = dict(progress_payload)
+                if run_key:
+                    self._latest_live_progress_by_run[run_key] = dict(progress_payload)
+
+                if (
+                    artifact_key
+                    and artifact_key in self.log_select.options.values()
+                    and self.log_select.value != artifact_key
+                ):
+                    try:
+                        self.log_select.value = artifact_key
+                    except Exception:
+                        pass
+
+                # Refresh the durable summary first, but do not let a slightly
+                # older artifact snapshot overwrite the event that just arrived.
+                self._refresh_summary_only(
+                    select_artifact_id=artifact_key or None,
+                    render_progress=False,
+                )
+                self._render_live_progress(progress_payload)
+
+            try:
+                doc = pn.state.curdoc
+                if doc is not None:
+                    doc.add_next_tick_callback(update_progress)
+                    return
+            except Exception:
+                pass
+            update_progress()
+            return
+
+        force = topic_text.endswith(".finished") or topic_text.endswith(".created") or topic_text.endswith(".paused")
 
         if artifact_id:
             self._pending_log_event_artifact_id = str(artifact_id)
@@ -270,7 +351,12 @@ class MLTrainingCurvesPanel:
 
         return epoch_count - previous_epoch_count >= int(self._event_refresh_epoch_step)
 
-    def _refresh_summary_only(self, select_artifact_id: Optional[str] = None) -> None:
+    def _refresh_summary_only(
+        self,
+        select_artifact_id: Optional[str] = None,
+        *,
+        render_progress: bool = True,
+    ) -> None:
         artifact_id = str(select_artifact_id or self.log_select.value or "")
         if not artifact_id:
             return
@@ -290,6 +376,8 @@ class MLTrainingCurvesPanel:
         tuning_trials = payload.get("tuning_trials") or []
         try:
             self.summary.object = self._summary_markdown(payload, tuning, tuning_trials)
+            if render_progress:
+                self._render_progress_from_log_payload(payload, artifact_id=artifact_id)
         except Exception:
             pass
 
@@ -316,6 +404,8 @@ class MLTrainingCurvesPanel:
             header,
             self._field("Training log", self.log_select),
             pn.Row(self.refresh, self.reset_curve_controls, sizing_mode="stretch_width"),
+            self.live_status,
+            self.live_progress_slot,
             sizing_mode="stretch_width",
             margin=(0, 0, 10, 0),
             styles={"box-sizing": "border-box", "overflow": "visible"},
@@ -587,6 +677,9 @@ class MLTrainingCurvesPanel:
 
         if not artifact_id:
             self.summary.object = "No training logs yet.\nTrain a model first."
+            self.live_status.alert_type = "info"
+            self.live_status.object = "No active training run is selected."
+            self._set_live_progress_bar(None)
             if not self._has_loss_plot:
                 self.loss_plot_html.object = self._plot_message_html("Loss curves will appear after training starts.")
             if not self._has_metric_plot:
@@ -619,6 +712,7 @@ class MLTrainingCurvesPanel:
         tuning_df = pd.DataFrame(tuning_trials)
         self.tuning_table.object = tuning_df
         self.summary.object = self._summary_markdown(payload, tuning, tuning_trials)
+        self._render_progress_from_log_payload(payload, artifact_id=str(artifact_id))
 
         status = str(payload.get("status", "unknown") or "unknown")
         self._last_rendered_status_by_artifact[str(artifact_id)] = status
@@ -683,6 +777,87 @@ class MLTrainingCurvesPanel:
         self._last_rendered_epoch_count_by_artifact[str(artifact_id)] = latest_epoch_count
 
         self._render_tuning(payload, tuning, tuning_df)
+
+    def _render_progress_from_log_payload(
+        self,
+        payload: Dict[str, Any],
+        *,
+        artifact_id: Optional[str] = None,
+    ) -> None:
+        durable_progress = payload.get("progress")
+        candidate = dict(durable_progress) if isinstance(durable_progress, dict) else None
+
+        artifact_key = str(artifact_id or "")
+        run_key = str(payload.get("run_id") or "")
+        status = str(payload.get("status") or "unknown")
+        terminal = status.lower() in {
+            "complete",
+            "completed",
+            "finished",
+            "paused",
+            "cancelled",
+            "failed",
+            "error",
+        }
+
+        if terminal:
+            # A terminal durable state must never be replaced by the last cached
+            # running event merely because the artifact omitted a progress block.
+            if candidate is None:
+                candidate = {
+                    "status": status,
+                    "stage": payload.get("stage") or status,
+                    "message": payload.get("message") or f"Run {status}.",
+                    "run_id": run_key,
+                    "dataset_id": payload.get("dataset_id"),
+                    "recipe_id": payload.get("recipe_id"),
+                    "elapsed_seconds": payload.get("elapsed_seconds"),
+                    "updated_at": payload.get("updated_at") or time.time(),
+                }
+            if artifact_key:
+                self._latest_live_progress_by_artifact.pop(artifact_key, None)
+            if run_key:
+                self._latest_live_progress_by_run.pop(run_key, None)
+        else:
+            live_candidate = None
+            if artifact_key:
+                live_candidate = self._latest_live_progress_by_artifact.get(artifact_key)
+            if live_candidate is None and run_key:
+                live_candidate = self._latest_live_progress_by_run.get(run_key)
+
+            if isinstance(live_candidate, dict):
+                live_updated = float(live_candidate.get("updated_at") or 0.0)
+                durable_updated = float((candidate or {}).get("updated_at") or 0.0)
+                if candidate is None or live_updated >= durable_updated:
+                    candidate = dict(live_candidate)
+
+        if candidate is not None:
+            self._render_live_progress(candidate)
+            return
+
+        message = str(payload.get("message") or "Waiting for progress updates.")
+        self._render_live_progress({
+            "status": status,
+            "stage": payload.get("stage") or status,
+            "message": message,
+            "epoch": payload.get("best_epoch"),
+            "elapsed_seconds": payload.get("elapsed_seconds"),
+        })
+
+    def _render_live_progress(self, payload: Dict[str, Any]) -> None:
+        data = dict(payload or {})
+        self.live_status.alert_type = progress_alert_type(data)
+        self.live_status.object = progress_markdown(data)
+        self._set_live_progress_bar(progress_percent(data))
+
+    def _set_live_progress_bar(self, percent: Optional[float]) -> None:
+        """Keep the progress slot mounted so status updates cannot move the UI."""
+        if percent is None:
+            self.live_progress.value = 0
+            self.live_progress.styles = {"visibility": "hidden"}
+            return
+        self.live_progress.value = max(0, min(100, int(round(float(percent)))))
+        self.live_progress.styles = {"visibility": "visible"}
 
     def _normalise_epoch_df(self, df: pd.DataFrame) -> pd.DataFrame:
         """Flatten nested metric dictionaries and coerce plottable columns.
@@ -870,12 +1045,14 @@ class MLTrainingCurvesPanel:
         tuning_trials: List[Dict[str, Any]],
     ) -> str:
         tuning_enabled = bool(tuning.get("enabled") or tuning_trials)
+        progress = payload.get("progress") if isinstance(payload.get("progress"), dict) else {}
         lines = [
             f"**Model:** {payload.get('model_title', 'unknown')}",
             f"**Run:** `{payload.get('run_id', '')}`",
             f"**Framework:** `{payload.get('framework', '')}`",
             f"**Status:** `{payload.get('status', 'unknown')}`",
-            f"**Message:** {payload.get('message', '')}",
+            f"**Stage:** `{progress.get('stage_label') or progress.get('stage') or payload.get('stage', '')}`",
+            f"**Message:** {progress.get('message') or payload.get('message', '')}",
             f"**Optimised to:** `{payload.get('optimize_metric', tuning.get('metric', ''))}`",
             f"**Best epoch:** `{payload.get('best_epoch', '')}`",
             f"**Optuna:** {'enabled' if tuning_enabled else 'disabled'}",

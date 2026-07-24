@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from contextlib import nullcontext
 from copy import deepcopy
 import hashlib
 import random
@@ -9,6 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from ..data.dataset_access import get_dataset_frame
+from ..progress import ProgressIterable
 from ..protocol import DataBinding, Partition, Partitions, ProtocolConfig, TargetSpec
 from ..runtime import MLRecipePaused, check_cancelled, cleanup_ml_runtime, publish, put_artifact
 from ..serialization import json_safe
@@ -43,6 +45,38 @@ class RunHarness:
         self._target: Optional[TargetSpec] = None
         self._split_spec_artifact_id: Optional[str] = None
         self._last_completed_epoch: int = 0
+        self.progress = getattr(run, "progress", None)
+
+    def _progress_report(self, **kwargs: Any) -> None:
+        if self.progress is None:
+            return
+        try:
+            self.progress.report(**kwargs)
+        except Exception:
+            pass
+
+    def _progress_activity(self, **kwargs: Any):
+        if self.progress is None:
+            return nullcontext()
+        try:
+            return self.progress.activity(**kwargs)
+        except Exception:
+            return nullcontext()
+
+    def _instrument_training_loader(self, loader: Any) -> Any:
+        framework = str(
+            self.run.params.get("framework")
+            or getattr(self.recipe, "framework", "")
+            or ""
+        ).lower()
+        if framework == "torch" and hasattr(loader, "__iter__"):
+            # Cancellation must not depend on progress UI availability. The
+            # wrapper checks the main-process token between every DataLoader batch.
+            return ProgressIterable(loader, reporter=self.progress, run=self.run)
+        return loader
+
+    def _training_step_label(self) -> str:
+        return "epoch"
 
     # ---- the ONE primitive the recipe calls each epoch ---------------------
     def report_epoch(
@@ -52,46 +86,66 @@ class RunHarness:
         *,
         train_metrics: Dict[str, Any],
     ):
-        """Called by managed recipes once per epoch.
-
-        The recipe reports training metrics only. The harness evaluates validation,
-        chooses the best epoch, snapshots best weights, and logs a merged curve row.
-        """
+        """Evaluate validation data, select the best epoch, and publish progress."""
 
         self.run.check_cancelled()
-
-        val_metrics = self._evaluate(model, self._val_loader)[0]
+        total_epochs = _configured_total_epochs(self.run)
+        step_label = self._training_step_label()
+        step_title = step_label.capitalize()
+        self._progress_report(
+            stage="validation",
+            message=f"{step_title} {int(epoch)} training is complete. Evaluating the validation partition.",
+            epoch=int(epoch),
+            total_epochs=total_epochs,
+            force=True,
+        )
+        with self._progress_activity(
+            stage="validation",
+            message=f"Evaluating validation data for {step_label} {int(epoch)}.",
+            detail="Computing validation predictions and selection metrics without exposing the validation loader to the recipe.",
+        ):
+            val_metrics = self._evaluate(model, self._val_loader)[0]
 
         row: Dict[str, Any] = {"epoch": int(epoch)}
-
         row.update(
-            {
-                f"train_{key}": value
-                for key, value in dict(train_metrics or {}).items()
-            }
+            {f"train_{key}": value for key, value in dict(train_metrics or {}).items()}
         )
-
         row.update(
-            {
-                f"val_{key}": value
-                for key, value in dict(val_metrics or {}).items()
-            }
+            {f"val_{key}": value for key, value in dict(val_metrics or {}).items()}
         )
-
         self._history.append(row)
 
         score = row.get(self.protocol.selection_metric)
-
+        improved = False
         if score is not None:
             try:
                 score_float = float(score)
             except Exception:
                 score_float = None
-
             if score_float is not None and self._is_better(score_float):
                 self._best_score = score_float
                 self._best_epoch = int(epoch)
                 self._best_state = self._snapshot(model)
+                improved = True
+
+        selection_detail = (
+            f"Selection metric `{self.protocol.selection_metric}` = `{score}`. "
+            f"Best epoch is now `{self._best_epoch}` with score `{self._best_score}`."
+        )
+        if not improved and self._best_epoch is not None:
+            selection_detail = (
+                f"Selection metric `{self.protocol.selection_metric}` = `{score}`. "
+                f"The existing best remains epoch `{self._best_epoch}` with score `{self._best_score}`."
+            )
+        self._progress_report(
+            stage="selecting_checkpoint",
+            message=f"Validation for {step_label} {int(epoch)} is complete. Comparing it with the best checkpoint.",
+            detail=selection_detail,
+            epoch=int(epoch),
+            total_epochs=total_epochs,
+            metrics=row,
+            force=True,
+        )
 
         self.run.log(
             message=f"epoch {epoch}",
@@ -107,6 +161,23 @@ class RunHarness:
             },
         )
 
+        self._progress_report(
+            stage="training",
+            message=(
+                f"{step_title} {int(epoch)} is complete. "
+                + (
+                    f"Preparing {step_label} {int(epoch) + 1}."
+                    if total_epochs is None or int(epoch) < total_epochs
+                    else "All configured epochs are complete."
+                )
+            ),
+            epoch=int(epoch),
+            total_epochs=total_epochs,
+            current=int(epoch),
+            total=total_epochs,
+            unit="epochs",
+            force=True,
+        )
         return val_metrics
 
     def check_pause_boundary(self, epoch: int, model: Any, components: Any) -> None:
@@ -139,13 +210,22 @@ class RunHarness:
         # Record the boundary before serialising logger state. The later paused
         # event includes artifact ids, but this marker ensures a resumed training
         # log still shows where and why execution stopped.
-        self.run.log(
-            message=f"{pause_reason} Saving epoch {completed_epoch} state.",
-            status="pausing",
-            step=completed_epoch,
-            metrics={},
-            extra={"phase": "pause_boundary", "completed_epoch": completed_epoch},
+        self._progress_report(
+            stage="saving_checkpoint",
+            message=f"{pause_reason} Capturing complete state after epoch {completed_epoch}.",
+            detail="Saving model, optimiser, scheduler, RNG, split identity, history, and best-checkpoint state.",
+            epoch=completed_epoch,
+            total_epochs=_configured_total_epochs(self.run),
+            force=True,
         )
+        if self.progress is None:
+            self.run.log(
+                message=f"{pause_reason} Saving epoch {completed_epoch} state.",
+                status="pausing",
+                step=completed_epoch,
+                metrics={},
+                extra={"phase": "pause_boundary", "completed_epoch": completed_epoch},
+            )
         framework_state = self._capture_framework_resume_state(model, components, framework=framework)
         state = {
             "schema_version": 1,
@@ -190,12 +270,16 @@ class RunHarness:
             state["num_outputs"] = int(self._target.num_outputs)
             state["input_contract"] = self._binding_state()
 
-        resume_ref, resume_manifest_path = save_resume_checkpoint(
-            run=self.run,
-            state=state,
-            framework=framework,
-            completed_epoch=completed_epoch,
-        )
+        with self._progress_activity(
+            stage="saving_checkpoint",
+            message=f"Writing the epoch {completed_epoch} resumable checkpoint and manifest.",
+        ):
+            resume_ref, resume_manifest_path = save_resume_checkpoint(
+                run=self.run,
+                state=state,
+                framework=framework,
+                completed_epoch=completed_epoch,
+            )
         resume_payload = {
             "artifact_type": "ml.resume_checkpoint",
             "schema_version": 1,
@@ -223,6 +307,16 @@ class RunHarness:
             required=True,
         )
 
+        self._progress_report(
+            stage="saving_checkpoint",
+            message="The resumable checkpoint is saved. Writing a prediction-ready paused model artifact.",
+            current=1,
+            total=2,
+            unit="pause artifacts",
+            epoch=completed_epoch,
+            total_epochs=_configured_total_epochs(self.run),
+            force=True,
+        )
         model_payload = self._paused_model_payload(
             resume_ref=resume_ref,
             resume_artifact_id=resume_artifact_id,
@@ -232,14 +326,28 @@ class RunHarness:
         model_dir = Path(str(resume_manifest_path)).parent.parent / "model"
         model_manifest_path = model_dir / f"paused-epoch-{completed_epoch:06d}.model_manifest.json"
         model_payload.setdefault("files", {})["manifest"] = str(model_manifest_path)
-        write_paused_model_manifest(model_manifest_path, model_payload)
-        model_artifact_id = self.run.put_artifact(
-            "ml.model",
-            model_payload,
-            params=self.run.params,
-            required=True,
-        )
+        with self._progress_activity(
+            stage="saving_checkpoint",
+            message="Writing the paused model manifest and registering the model artifact.",
+        ):
+            write_paused_model_manifest(model_manifest_path, model_payload)
+            model_artifact_id = self.run.put_artifact(
+                "ml.model",
+                model_payload,
+                params=self.run.params,
+                required=True,
+            )
 
+        self._progress_report(
+            stage="saving_checkpoint",
+            message="Pause checkpoint and prediction-ready model are both saved.",
+            current=2,
+            total=2,
+            unit="pause artifacts",
+            epoch=completed_epoch,
+            total_epochs=_configured_total_epochs(self.run),
+            force=True,
+        )
         payload = {
             "status": "paused",
             "message": f"Training paused after epoch {completed_epoch}.",
@@ -608,25 +716,98 @@ class RunHarness:
         completed = False
 
         try:
-            parts = self._partition()                           # PROTOCOL
-            split_spec_id = self._write_split_spec(parts)       # AUDIT: row-ids on disk
+            run.check_cancelled()
+            with self._progress_activity(
+                stage="partitioning",
+                message="Scanning the dataset and creating train, validation, and test membership.",
+                detail="Only protocol-required columns are scanned by streaming harnesses; materialised recipes follow their declared compatibility path.",
+            ):
+                parts = self._partition()
+            run.check_cancelled()
+
+            partition_counts = {
+                "train": _partition_length(parts.train),
+                "validation": _partition_length(parts.val),
+                "test": _partition_length(parts.test),
+            }
+            self._progress_report(
+                stage="partitioning",
+                message="Dataset partitioning is complete.",
+                detail=(
+                    f"Train `{partition_counts['train']:,}`, validation `{partition_counts['validation']:,}`, "
+                    f"test `{partition_counts['test']:,}` rows."
+                ),
+                current=sum(partition_counts.values()),
+                total=sum(partition_counts.values()),
+                unit="rows",
+                force=True,
+            )
+
+            self._progress_report(
+                stage="split_manifest",
+                message="Saving split membership, checksums, and protocol provenance.",
+                force=True,
+            )
+            split_spec_id = self._write_split_spec(parts)
+            run.check_cancelled()
             self._parts = parts
             self._split_spec_artifact_id = split_spec_id
 
-            target = self._target_spec(parts)                   # what 'output' means
+            target = self._target_spec(parts)
             self._target = target
-            model = self._build_model(parts, target)
+            self._progress_report(
+                stage="building_model",
+                message="Building the model with the resolved target/output shape.",
+                detail=(
+                    f"Task `{target.kind}`, output width `{target.num_outputs}`, "
+                    f"recipe `{self.run.recipe_id}`."
+                ),
+                force=True,
+            )
+            with self._progress_activity(
+                stage="building_model",
+                message="Constructing model architecture and initial parameters.",
+            ):
+                model = self._build_model(parts, target)
+            run.check_cancelled()
+
+            self._progress_report(
+                stage="configuring_training",
+                message="Creating loss, optimiser, scheduler, and recipe-specific training components.",
+                force=True,
+            )
             components = recipe.configure_training(run, model)
+            run.check_cancelled()
 
-            train_loader = self._make_loader(parts.train, train=True)
-            self._val_loader = self._make_loader(parts.val, train=False)
+            self._progress_report(
+                stage="loading_data",
+                message="Preparing bounded train and validation data access.",
+                force=True,
+            )
+            with self._progress_activity(
+                stage="loading_data",
+                message="Preparing train and validation loaders/readers.",
+            ):
+                train_loader = self._make_loader(parts.train, train=True)
+                self._val_loader = self._make_loader(parts.val, train=False)
+            run.check_cancelled()
 
+            if getattr(self.run, "resume_state", None):
+                self._progress_report(
+                    stage="restoring",
+                    message="Restoring model, optimiser, scheduler, RNG, history, and best-checkpoint state.",
+                    force=True,
+                )
             model, components = self._restore_resume_state(model, components, parts, target)
+            run.check_cancelled()
+
+            self._progress_report(
+                stage="output_validation",
+                message="Checking that model outputs match the resolved task and target schema.",
+                force=True,
+            )
             self._assert_output_dim(model, target, train_loader)
-            # Output validation may iterate a shuffled loader or execute random
-            # evaluation transforms. Restore the checkpoint RNG again afterwards
-            # so the first resumed training batch is exactly the one that would
-            # have followed the paused epoch.
+            run.check_cancelled()
             if getattr(self.run, "resume_state", None):
                 framework = str(
                     self.run.resume_state.get("framework")
@@ -638,14 +819,37 @@ class RunHarness:
                     framework=framework,
                 )
 
-            # Expert's loop. It only sees train_loader + report_epoch(harness).
-            recipe.fit(
-                run,
-                model=model,
-                components=components,
-                train_loader=train_loader,
-                harness=self,
+            train_loader = self._instrument_training_loader(train_loader)
+            total_epochs = _configured_total_epochs(run)
+            self._progress_report(
+                stage="training",
+                message="Starting the recipe training loop.",
+                detail=(
+                    f"Training will run for `{total_epochs}` epoch(s)."
+                    if total_epochs
+                    else "The recipe controls the number of training passes and reports each completed epoch."
+                ),
+                current=max(0, int(getattr(run, "start_epoch", 1) or 1) - 1),
+                total=total_epochs,
+                unit="epochs",
+                epoch=max(1, int(getattr(run, "start_epoch", 1) or 1)),
+                total_epochs=total_epochs,
+                force=True,
             )
+            with self._progress_activity(
+                stage="training",
+                message="Training is active. Reading batches and updating model parameters.",
+                detail="Batch/row counters appear when the selected harness exposes them.",
+            ):
+                run.check_cancelled()
+                recipe.fit(
+                    run,
+                    model=model,
+                    components=components,
+                    train_loader=train_loader,
+                    harness=self,
+                )
+            run.check_cancelled()
 
             if self._best_state is None:
                 raise RuntimeError(
@@ -654,26 +858,68 @@ class RunHarness:
                     "can select on the validation partition."
                 )
 
+            self._progress_report(
+                stage="selecting_checkpoint",
+                message=f"Restoring the best model state from epoch {self._best_epoch}.",
+                detail=f"Best `{self.protocol.selection_metric}` score: `{self._best_score}`.",
+                force=True,
+            )
             self._restore(model, self._best_state)
 
             test_metrics, test_records = {}, []
             if parts.test is not None and len(parts.test) > 0:
+                self._progress_report(
+                    stage="test_evaluation",
+                    message="Preparing the held-out test partition for its one-time evaluation.",
+                    current=0,
+                    total=_partition_length(parts.test),
+                    unit="rows",
+                    force=True,
+                )
                 test_loader = self._make_loader(parts.test, train=False)
-                test_metrics, test_records = self._evaluate(
-                    model,
-                    test_loader,
-                    return_records=True,
+                with self._progress_activity(
+                    stage="test_evaluation",
+                    message="Running one-time test prediction and metric calculation.",
+                ):
+                    test_metrics, test_records = self._evaluate(
+                        model,
+                        test_loader,
+                        return_records=True,
+                    )
+                self._progress_report(
+                    stage="test_evaluation",
+                    message="Held-out test evaluation is complete.",
+                    detail=f"Metrics: `{json_safe(test_metrics)}`",
+                    current=_partition_length(parts.test),
+                    total=_partition_length(parts.test),
+                    unit="rows",
+                    metrics=test_metrics,
+                    force=True,
                 )
 
-            model_artifact_id = self._write_model_artifact(
-                model,
-                parts,
-                target,
-                split_spec_artifact_id=split_spec_id,
+            self._progress_report(
+                stage="saving_model",
+                message="Serialising the selected model and writing its durable manifest.",
+                force=True,
             )
+            with self._progress_activity(
+                stage="saving_model",
+                message="Writing the trained model sidecar and compatibility metadata.",
+            ):
+                model_artifact_id = self._write_model_artifact(
+                    model,
+                    parts,
+                    target,
+                    split_spec_artifact_id=split_spec_id,
+                )
             if not model_artifact_id:
                 raise RuntimeError("The trained model could not be persisted as an ml.model artifact.")
 
+            self._progress_report(
+                stage="saving_evaluation",
+                message="Writing the evaluation report and experiment provenance.",
+                force=True,
+            )
             eval_id = self._write_evaluation_report(
                 parts=parts,
                 split_spec_id=split_spec_id,
@@ -683,10 +929,26 @@ class RunHarness:
 
             predictions_id = None
             if test_records:
+                self._progress_report(
+                    stage="saving_predictions",
+                    message="Writing row-keyed held-out predictions and their bounded artifact preview.",
+                    current=0,
+                    total=len(test_records),
+                    unit="predictions",
+                    force=True,
+                )
                 predictions_id = self._write_predictions(
                     test_records,
                     parts,
                     model_artifact_id,
+                )
+                self._progress_report(
+                    stage="saving_predictions",
+                    message="Held-out predictions were saved.",
+                    current=len(test_records),
+                    total=len(test_records),
+                    unit="predictions",
+                    force=True,
                 )
 
             result = {
@@ -713,6 +975,11 @@ class RunHarness:
             if getattr(self.run, "logger", None) is not None:
                 self.run.logger.update_summary(**result)
 
+            self._progress_report(
+                stage="finalizing",
+                message="Model, metrics, and prediction artifacts are complete. Returning the run result.",
+                force=True,
+            )
             completed = True
             return result
         finally:
@@ -723,9 +990,6 @@ class RunHarness:
                 except Exception:
                     pass
 
-            # Move the live model and optimizer state off the accelerator before
-            # dropping references. This also updates references held by an exception
-            # traceback while the runner is still recording diagnostics.
             if model is not None:
                 try:
                     model.to("cpu")
@@ -759,7 +1023,6 @@ class RunHarness:
                 except Exception:
                     pass
 
-            # Drop the largest references before collecting accelerator caches.
             self._val_loader = None
             self._best_state = None
             self._frame = None
@@ -772,10 +1035,14 @@ class RunHarness:
             components = None
             model = None
             parts = None
-            cleanup_ml_runtime(
-                reason="managed recipe harness cleanup",
-                aggressive=not completed,
-            )
+            with self._progress_activity(
+                stage="finalizing",
+                message="Releasing loaders, temporary tensors, accelerator caches, and run-local resources.",
+            ):
+                cleanup_ml_runtime(
+                    reason="managed recipe harness cleanup",
+                    aggressive=not completed,
+                )
 
     def _load_partition_frame(
         self,
@@ -1811,3 +2078,26 @@ def _stratifiable(labels) -> bool:
     import numpy as np
     vals, counts = np.unique(np.asarray(labels), return_counts=True)
     return len(vals) > 1 and counts.min() >= 2
+
+def _partition_length(partition: Any) -> int:
+    if partition is None:
+        return 0
+    try:
+        return max(0, int(len(partition)))
+    except Exception:
+        pass
+    try:
+        return max(0, int(getattr(partition, "row_count", 0) or 0))
+    except Exception:
+        return 0
+
+def _configured_total_epochs(run: Any) -> Optional[int]:
+    params = dict(getattr(run, "params", {}) or {})
+    for key in ("epochs", "num_epochs", "max_epochs", "n_estimators"):
+        try:
+            value = int(params.get(key) or 0)
+        except Exception:
+            value = 0
+        if value > 0:
+            return value
+    return None

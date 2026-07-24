@@ -9,11 +9,12 @@ from astronomicAL.platform.plugins import PluginManifest
 manifest = PluginManifest(
     id="core.ml",
     name="ML Core",
-    version="0.6.0",
+    version="0.7.6",
     description=(
         "Machine-learning core: code-backed recipes, reusable recipe profiles, "
-        "protocol-enforced training, durable model artifacts, compatibility-checked "
-        "prediction, trained-model cataloguing, and training curves."
+        "protocol-enforced training, explicit recipe data-access capabilities, "
+        "resource preflight, durable model artifacts, compatibility-checked "
+        "prediction, trained-model cataloguing, live stage/batch/image-normalisation progress, main-process cooperative cancellation, and training curves."
     ),
     requires=["scikit-learn>=1.2"],
     optional_requires=["torch", "torchvision", "pillow", "matplotlib", "optuna", "joblib", "timm", "xgboost"],
@@ -106,6 +107,22 @@ def register(api) -> None:
                 "recipe_profile_id": {"type": "string"},
                 "recipe_profile_artifact_id": {"type": "string"},
                 "run_id": {"type": "string"},
+                "launcher_session_id": {
+                    "type": "string",
+                    "description": "Internal correlation id used to route live progress to the launching panel.",
+                },
+                "progress_update_interval_seconds": {
+                    "type": "number",
+                    "default": 2.0,
+                    "minimum": 0.25,
+                    "description": "Minimum interval between repeated live progress updates.",
+                },
+                "progress_min_percent_step": {
+                    "type": "number",
+                    "default": 1.0,
+                    "minimum": 0.1,
+                    "description": "Minimum percentage change that may trigger an earlier progress update.",
+                },
                 "resume_checkpoint_artifact_id": {"type": "string"},
                 "resume_manifest_path": {"type": "string"},
                 "trust_external_checkpoint": {
@@ -147,6 +164,15 @@ def register(api) -> None:
                     "type": "boolean",
                     "default": False,
                     "description": "Retain the temporary run directory after failure for debugging.",
+                },
+                "allow_unsafe_materialization": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "Explicitly override a memory-only preflight block for a "
+                        "materialised recipe. Source capability and dtype blocks "
+                        "cannot be overridden."
+                    ),
                 },
                 "protocol_materialize_split_datasets": {
                     "type": "boolean",
@@ -380,7 +406,6 @@ def create_model_manager_panel(context, **kwargs):
 
     return model_manager_module.create_model_manager_panel(context=context, **kwargs)
 
-
 def create_training_curves_panel(context, **kwargs):
     from .panels import training_curves as curves_module
 
@@ -399,9 +424,13 @@ def create_ml_predict_panel(context, **kwargs):
 def create_ml_recipe_registry(context=None):
     from . import registry as registry_module
     from .harnesses import sklearn as sklearn_harness
+    from .harnesses import sklearn_incremental as incremental_harness
+    from .harnesses import xgboost_external as xgboost_harness
     from .recipes import BUILTIN_RECIPE_CLASSES
 
     sklearn_harness.register()
+    incremental_harness.register()
+    xgboost_harness.register()
 
     registry = registry_module.MLRecipeRegistry()
     for recipe_class in BUILTIN_RECIPE_CLASSES:

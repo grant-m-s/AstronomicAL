@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Sequence
 
 from .paths import ml_run_artifact_dir
+from .progress import MLProgressReporter
 from .protocol import DataBinding, ProtocolConfig, TrainingComponents
 from .run_logging import MLRunLogger
 from .runtime import check_cancelled, publish, put_artifact
@@ -48,7 +49,7 @@ def make_run_context(
         if callable(restore):
             restore(resume_state.get("logger_state") or {})
 
-    return MLRunContext(
+    run = MLRunContext(
         context=context,
         dataset_id=dataset_id,
         recipe_id=recipe_spec.id,
@@ -63,6 +64,8 @@ def make_run_context(
         training_log_artifact_id=logger.training_log_artifact_id,
         logger=logger,
     )
+    run.progress = MLProgressReporter(run)
+    return run
 
 class MLRecipe:
     # --- identity / spec (defaults; concrete recipes override) --------------
@@ -81,6 +84,7 @@ class MLRecipe:
     produces: list = []
     params_schema: Dict[str, Any] = {"type": "object", "properties": {}}
     required_imports: list = []
+    data_access: Any = None
 
     @classmethod
     def spec(cls) -> "RecipeSpec":
@@ -107,12 +111,40 @@ class MLRecipe:
         return None      # applied to VAL and TEST rows
 
     def load_sample(self, run, row):
-        """Map one dataframe row to a raw input. The harness handles record-id
-        keying, batching, and the data binding (run.binding); the recipe only
-        knows how to read a single sample."""
+        """Map one dataframe row to a raw input.
+
+        This remains the compatibility contract used by materialised loaders,
+        image recipes, prediction, and third-party recipes that have not opted
+        into streamed batch encoding.
+        """
         raise NotImplementedError(
             "load_sample(run, row) must be implemented by a managed recipe."
         )
+
+    def encode_batch(self, run, frame, *, train: bool):
+        """Optionally encode a complete dataframe batch into model-ready inputs.
+
+        The streamed PyTorch harness calls this hook once per bounded training
+        batch when a recipe overrides it. Implementations must:
+
+        - preserve dataframe row order;
+        - return an object whose leading dimension equals ``len(frame)``;
+        - avoid retaining the dataframe after returning;
+        - apply any train/evaluation-specific input processing themselves.
+
+        When this hook is used, the harness bypasses per-row ``load_sample`` and
+        ``train_transform``/``eval_transform`` calls for that batch. Recipes that
+        do not override the hook keep the existing sample-level behaviour.
+        """
+        raise NotImplementedError(
+            "encode_batch(run, frame, *, train) is optional; override it to "
+            "enable vectorised streamed batch encoding."
+        )
+
+    @classmethod
+    def supports_batch_encoding(cls) -> bool:
+        """Return whether the recipe provides its own batch encoder."""
+        return cls.encode_batch is not MLRecipe.encode_batch
 
     def eval_forward(self, model, batch_inputs):
         """Default forward used by the harness for val/test eval and the
@@ -149,6 +181,7 @@ class MLRunContext:
     start_epoch: int = 1
     training_log_artifact_id: Optional[str] = None
     logger: Optional[MLRunLogger] = None
+    progress: Optional[MLProgressReporter] = None
 
     # Set by the runner after construction (run.protocol / run.binding) and read
     # by the harness via getattr(run, "protocol"/"binding", None). Declared here
@@ -221,7 +254,7 @@ class ManagedMLRecipe(MLRecipe):  # noqa: F821  (MLRecipe defined above in this 
     """Recipe whose run() is the harness, not hand-written.
 
     A managed recipe implements only internals (build_model / configure_training
-    / transforms / load_sample / fit). It NEVER partitions, evaluates val/test,
+    / transforms / load_sample or encode_batch / fit). It NEVER partitions, evaluates val/test,
     selects the best epoch, or writes the scientific artifacts. The harness does
     all of that and refuses to delegate it.
     """

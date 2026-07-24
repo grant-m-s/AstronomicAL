@@ -10,6 +10,8 @@ from .image import (
     ZoobotFineTuneImageRegressorRecipe,
 )
 from .sklearn import (
+    IncrementalSGDClassifierRecipe,
+    IncrementalSGDRegressorRecipe,
     SklearnTabularClassifierRecipe,
     SklearnTabularRegressorRecipe,
     XGBoostTabularClassifierRecipe,
@@ -44,6 +46,8 @@ TORCH_TABULAR_RECIPE_CLASSES = (
 SKLEARN_RECIPE_CLASSES = (
     SklearnTabularClassifierRecipe,
     SklearnTabularRegressorRecipe,
+    IncrementalSGDClassifierRecipe,
+    IncrementalSGDRegressorRecipe,
     XGBoostTabularClassifierRecipe,
     XGBoostTabularRegressorRecipe,
 )

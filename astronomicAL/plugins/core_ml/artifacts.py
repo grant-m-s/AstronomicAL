@@ -51,6 +51,161 @@ class StoredPredictionRef:
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
+@dataclass(frozen=True)
+class StoredEmbeddingIndexRef:
+    """Optional indexed representation for global embedding acquisition."""
+
+    storage: str
+    uri: str
+    format: str
+    created_at: float
+    table: Optional[str] = None
+    record_id_column: str = "row_id"
+    embedding_columns: List[str] = field(default_factory=list)
+    sha256: Optional[str] = None
+    size_bytes: Optional[int] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_value(cls, value: "StoredEmbeddingIndexRef | Mapping[str, Any]") -> "StoredEmbeddingIndexRef":
+        if isinstance(value, cls):
+            return value
+        if not isinstance(value, Mapping):
+            raise TypeError("embedding index reference must be a mapping")
+        return cls(
+            storage=str(value.get("storage") or "local_file"),
+            uri=str(value.get("uri") or ""),
+            format=str(value.get("format") or "duckdb"),
+            created_at=float(value.get("created_at") or 0.0),
+            table=(None if value.get("table") in (None, "") else str(value.get("table"))),
+            record_id_column=str(value.get("record_id_column") or "row_id"),
+            embedding_columns=embedding_columns,
+            sha256=(None if value.get("sha256") in (None, "") else str(value.get("sha256"))),
+            size_bytes=(None if value.get("size_bytes") in (None, "") else int(value.get("size_bytes"))),
+            metadata=dict(value.get("metadata") or {}),
+        )
+
+
+@dataclass(frozen=True)
+class StoredEmbeddingRef:
+    """JSON-safe pointer to a partitioned embedding table sidecar.
+
+    The canonical JSONL representation stores one ``embedding`` list per row.
+    The optional Parquet mirror stores fixed, ordered scalar columns named by
+    ``embedding_columns`` so DuckDB can scan and anti-join parts globally.
+    """
+
+    schema_version: int
+    storage: str
+    uri: str
+    format: str
+    created_at: float
+    dataset_id: str
+    model_artifact_id: str
+    row_count: int
+    dimensions: int
+    dtype: str
+    record_id_column: str
+    embedding_column: str
+    embedding_columns: List[str]
+    columns: List[str]
+    sha256: str
+    size_bytes: int
+    parts: List[str]
+    parquet_uri: Optional[str] = None
+    parquet_parts: List[str] = field(default_factory=list)
+    parquet_sha256: Optional[str] = None
+    parquet_size_bytes: Optional[int] = None
+    index_ref: Optional[StoredEmbeddingIndexRef] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        payload = asdict(self)
+        payload["index_ref"] = None if self.index_ref is None else self.index_ref.to_dict()
+        return payload
+
+    @classmethod
+    def from_value(cls, value: "StoredEmbeddingRef | Mapping[str, Any]") -> "StoredEmbeddingRef":
+        if isinstance(value, cls):
+            return value
+        if not isinstance(value, Mapping):
+            raise TypeError("embedding reference must be a mapping")
+        index_raw = value.get("index_ref")
+        index_ref = (
+            StoredEmbeddingIndexRef.from_value(index_raw)
+            if isinstance(index_raw, Mapping)
+            else None
+        )
+        embedding_columns = [
+            str(column) for column in value.get("embedding_columns") or []
+        ]
+        dimensions = int(value.get("dimensions") or len(embedding_columns))
+        if dimensions <= 0:
+            raise ValueError("embedding reference dimensions must be greater than zero")
+        if embedding_columns and len(embedding_columns) != dimensions:
+            raise ValueError(
+                "embedding_columns length does not match embedding dimensions: "
+                f"{len(embedding_columns)} != {dimensions}"
+            )
+        row_count = int(value.get("row_count") or 0)
+        if row_count < 0:
+            raise ValueError("embedding reference row_count must be zero or greater")
+        uri = str(value.get("uri") or "")
+        if not uri:
+            raise ValueError("embedding reference uri is required")
+        parts = [str(path) for path in value.get("parts") or []]
+        if not parts:
+            parts = [uri]
+        return cls(
+            schema_version=int(value.get("schema_version") or 1),
+            storage=str(value.get("storage") or "local_file"),
+            uri=uri,
+            format=str(value.get("format") or "jsonl.gz"),
+            created_at=float(value.get("created_at") or 0.0),
+            dataset_id=str(value.get("dataset_id") or ""),
+            model_artifact_id=str(value.get("model_artifact_id") or ""),
+            row_count=row_count,
+            dimensions=dimensions,
+            dtype=str(value.get("dtype") or "float32"),
+            record_id_column=str(value.get("record_id_column") or "row_id"),
+            embedding_column=str(value.get("embedding_column") or "embedding"),
+            embedding_columns=[str(column) for column in value.get("embedding_columns") or []],
+            columns=[str(column) for column in value.get("columns") or []],
+            sha256=str(value.get("sha256") or ""),
+            size_bytes=int(value.get("size_bytes") or 0),
+            parts=parts,
+            parquet_uri=(None if value.get("parquet_uri") in (None, "") else str(value.get("parquet_uri"))),
+            parquet_parts=[str(path) for path in value.get("parquet_parts") or []],
+            parquet_sha256=(None if value.get("parquet_sha256") in (None, "") else str(value.get("parquet_sha256"))),
+            parquet_size_bytes=(None if value.get("parquet_size_bytes") in (None, "") else int(value.get("parquet_size_bytes"))),
+            index_ref=index_ref,
+            metadata=dict(value.get("metadata") or {}),
+        )
+
+
+def embedding_ref_from_payload(payload: Mapping[str, Any]) -> Optional[StoredEmbeddingRef]:
+    """Resolve the standard embedding reference from an artifact-like payload."""
+
+    candidates = [
+        payload.get("embedding_ref"),
+        payload.get("embeddings_ref"),
+        payload.get("feature_embedding_ref"),
+    ]
+    table = payload.get("embedding_table")
+    if isinstance(table, Mapping):
+        candidates.extend([table.get("storage"), table.get("embedding_ref")])
+    for candidate in candidates:
+        if not isinstance(candidate, Mapping) or not candidate.get("uri"):
+            continue
+        try:
+            return StoredEmbeddingRef.from_value(candidate)
+        except Exception:
+            continue
+    return None
+
 
 @dataclass(frozen=True)
 class MLArtifactContract:
@@ -63,6 +218,7 @@ class MLArtifactContract:
     MODEL: str = "ml.model"
     EVALUATION_REPORT: str = "ml.evaluation_report"
     PREDICTIONS: str = "ml.predictions"
+    EMBEDDINGS: str = "ml.embeddings"
     TRAINING_LOG: str = "ml.training_log"
     RUN: str = "ml.run"
     RESUME_CHECKPOINT: str = "ml.resume_checkpoint"
@@ -77,14 +233,12 @@ def ensure_json_safe(payload: Mapping[str, Any]) -> Dict[str, Any]:
 
     return ensure_json_object(payload, schema_version=ML_ARTIFACT_SCHEMA_VERSION)
 
-
 def file_sha256(path: Path | str) -> str:
     digest = hashlib.sha256()
     with Path(path).open("rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
-
 
 def _torch_load(path: Path, *, map_location: str = "cpu") -> Any:
     import torch
@@ -93,7 +247,6 @@ def _torch_load(path: Path, *, map_location: str = "cpu") -> Any:
         return torch.load(path, map_location=map_location, weights_only=False)
     except TypeError:
         return torch.load(path, map_location=map_location)
-
 
 def verify_file_ref(model_ref: Mapping[str, Any], path: Path) -> None:
     metadata = dict(model_ref.get("metadata") or {})
@@ -509,7 +662,6 @@ def save_predictions_sidecar(
         size_bytes=path.stat().st_size,
     )
 
-
 def load_predictions_sidecar(prediction_ref: Mapping[str, Any]) -> List[Dict[str, Any]]:
     uri = prediction_ref.get("uri") or prediction_ref.get("path")
     if not uri:
@@ -581,7 +733,6 @@ def compact_predictions_payload(
 
     mutable["prediction_table"] = table
     return ensure_json_safe(mutable)
-
 
 def prediction_rows_from_payload(
     payload: Mapping[str, Any],

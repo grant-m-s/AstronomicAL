@@ -3,6 +3,9 @@ from __future__ import annotations
 import math
 from copy import deepcopy
 
+import numpy as np
+import pandas as pd
+
 from ..harnesses.base import RunHarness
 from ..protocol import TrainingComponents
 from ..recipe_base import ManagedMLRecipe
@@ -121,19 +124,86 @@ def _coerce_numeric_feature(run, row, column: str) -> float:
         "when zero replacement is scientifically appropriate."
     )
 
-def _load_numeric_sample(run, row):
-    import torch
-
-    feature_columns = [
-        column
+def _feature_columns(run):
+    return [
+        str(column)
         for column in (run.binding.input_columns or [])
         if column
     ]
+
+
+def _load_numeric_sample(run, row):
+    import torch
+
     values = [
         _coerce_numeric_feature(run, row, column)
-        for column in feature_columns
+        for column in _feature_columns(run)
     ]
     return torch.tensor(values, dtype=torch.float32)
+
+
+def _encode_numeric_batch(run, frame):
+    """Vectorise numeric dataframe columns into one float32 tensor.
+
+    The feature ordering comes exclusively from ``run.binding.input_columns``.
+    Invalid values are detected over the complete NumPy matrix, avoiding
+    ``DataFrame.iterrows()`` and per-sample tensor construction.
+    """
+    import torch
+
+    feature_columns = _feature_columns(run)
+    if not feature_columns:
+        raise ValueError("The tabular recipe resolved zero input feature columns.")
+
+    missing = [column for column in feature_columns if column not in frame.columns]
+    if missing:
+        raise ValueError(
+            "The streamed tabular batch is missing feature column(s): "
+            + ", ".join(repr(column) for column in missing)
+        )
+
+    raw = frame.loc[:, feature_columns]
+    try:
+        matrix = raw.to_numpy(dtype=np.float32, copy=True)
+    except (TypeError, ValueError):
+        numeric = raw.apply(pd.to_numeric, errors="coerce")
+        matrix = numeric.to_numpy(dtype=np.float32, copy=True)
+    invalid = ~np.isfinite(matrix)
+
+    if invalid.any():
+        policy = str(
+            run.params.get("missing_value_policy", "error")
+        ).strip().lower()
+
+        if policy == "zero":
+            matrix[invalid] = 0.0
+        elif policy == "error":
+            row_position, column_position = np.argwhere(invalid)[0]
+            column = feature_columns[int(column_position)]
+            record_id_column = getattr(run.binding, "record_id_column", None)
+            record_id = "<unknown>"
+            if record_id_column and record_id_column in frame.columns:
+                try:
+                    record_id = frame.iloc[int(row_position)][record_id_column]
+                except Exception:
+                    pass
+            try:
+                raw_value = raw.iloc[int(row_position), int(column_position)]
+            except Exception:
+                raw_value = None
+            raise ValueError(
+                f"Feature {column!r} for record {record_id!r} is not numeric "
+                f"or non-finite: {raw_value!r}. Set "
+                "missing_value_policy='zero' only when zero replacement is "
+                "scientifically appropriate."
+            )
+        else:
+            raise ValueError(
+                "missing_value_policy must be 'error' or 'zero', "
+                f"got {policy!r}."
+            )
+
+    return torch.from_numpy(matrix)
 
 def _make_optimizer_and_scheduler(run, model):
     import torch.optim as optim
@@ -362,6 +432,9 @@ class _TorchTabularBase(ManagedMLRecipe):
     def load_sample(self, run, row):
         return _load_numeric_sample(run, row)
 
+    def encode_batch(self, run, frame, *, train: bool):
+        return _encode_numeric_batch(run, frame)
+
 # =============================================================================
 # Baseline Torch tabular recipe.
 # =============================================================================
@@ -370,7 +443,7 @@ class TabularMLPRegressorRecipe(ManagedMLRecipe):
     required_imports = ["torch", "sklearn"]
     id = "core.ml.tabular_mlp_regressor"
     title = "Tabular MLP regressor (rtdl baseline)"
-    version = "0.1.0"
+    version = "0.2.0"
     task = "regression"
     modality = "tabular"
     framework = "torch"
@@ -520,6 +593,9 @@ class TabularMLPRegressorRecipe(ManagedMLRecipe):
     def load_sample(self, run, row):
         return _load_numeric_sample(run, row)
 
+    def encode_batch(self, run, frame, *, train: bool):
+        return _encode_numeric_batch(run, frame)
+
     def fit(self, run, *, model, components: TrainingComponents, train_loader, harness: RunHarness):
         import torch
         device = harness.device
@@ -552,7 +628,7 @@ class TabularMLPRegressorRecipe(ManagedMLRecipe):
 class FTTransformerClassifierRecipe(_TorchTabularBase):
     id = "core.ml.ft_transformer_classifier"
     title = "FT-Transformer tabular classifier"
-    version = "0.1.0"
+    version = "0.2.0"
     task = "classification"
     description = (
         "Numeric-feature FT-Transformer classifier based on the strong tabular "
@@ -599,7 +675,7 @@ class FTTransformerClassifierRecipe(_TorchTabularBase):
 class FTTransformerRegressorRecipe(FTTransformerClassifierRecipe):
     id = "core.ml.ft_transformer_regressor"
     title = "FT-Transformer tabular regressor"
-    version = "0.1.0"
+    version = "0.2.0"
     task = "regression"
     description = "FT-Transformer for continuous tabular targets under the managed regression protocol."
     tags = ["torch", "tabular", "regression", "transformer", "rtdl"]
@@ -631,7 +707,7 @@ class FTTransformerRegressorRecipe(FTTransformerClassifierRecipe):
 class TabularResNetClassifierRecipe(_TorchTabularBase):
     id = "core.ml.rtdl_resnet_classifier"
     title = "rtdl ResNet tabular classifier"
-    version = "0.1.0"
+    version = "0.2.0"
     task = "classification"
     description = (
         "Residual MLP classifier with BatchNorm and skip connections, following "
@@ -678,7 +754,7 @@ class TabularResNetClassifierRecipe(_TorchTabularBase):
 class TabularResNetRegressorRecipe(TabularResNetClassifierRecipe):
     id = "core.ml.rtdl_resnet_regressor"
     title = "rtdl ResNet tabular regressor"
-    version = "0.1.0"
+    version = "0.2.0"
     task = "regression"
     description = "Residual MLP regression baseline based on rtdl-revisiting-models."
     tags = ["torch", "tabular", "regression", "resnet", "rtdl"]

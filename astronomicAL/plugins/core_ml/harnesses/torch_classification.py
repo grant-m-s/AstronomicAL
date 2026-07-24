@@ -302,9 +302,12 @@ class TorchClassificationHarness(RunHarness):
         model.eval()
         device = self._device()
         model.to(device)
+        self.run.check_cancelled()
         x, _y, _ids = next(iter(train_loader))
+        self.run.check_cancelled()
         with torch.no_grad():
             logits = self.recipe.eval_forward(model, x.to(device))
+        self.run.check_cancelled()
         out = int(logits.shape[1])
         if out != expected:
             raise ValueError(
@@ -328,9 +331,11 @@ class TorchClassificationHarness(RunHarness):
         classes = None
         with torch.no_grad():
             for x, y, ids in loader:
+                self.run.check_cancelled()
                 x = x.to(device)
                 y = y.to(device).long()
                 logits = self.recipe.eval_forward(model, x)
+                self.run.check_cancelled()
                 loss_sum += float(crit(logits, y)) * int(y.size(0))
                 seen += int(y.size(0))
                 probs = torch.softmax(logits, dim=1).cpu().numpy()

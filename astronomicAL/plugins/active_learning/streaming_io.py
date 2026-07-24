@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional, TextIO
 
-
 @dataclass(frozen=True)
 class PredictionRecordBatch:
     records: list[Dict[str, Any]]
@@ -17,7 +16,6 @@ class PredictionRecordBatch:
     @property
     def row_count(self) -> int:
         return len(self.records)
-
 
 def iter_prediction_record_batches(
     payload: Mapping[str, Any],
@@ -111,7 +109,6 @@ def iter_prediction_record_batches(
             f"expected {expected_rows}, read {offset} from {path}."
         )
 
-
 def iter_prediction_records(
     payload: Mapping[str, Any],
     *,
@@ -125,6 +122,67 @@ def iter_prediction_records(
     ):
         yield from batch.records
 
+def prediction_records_by_ids(
+    payload: Mapping[str, Any],
+    row_ids: Sequence[Any],
+    *,
+    batch_size: int = 8192,
+    cancel_token: Any = None,
+) -> Dict[str, Dict[str, Any]]:
+    """Return a small selected-row lookup without loading the prediction table."""
+
+    requested = [str(value) for value in row_ids if str(value)]
+    if not requested:
+        return {}
+    requested_set = set(requested)
+    storage = prediction_storage_ref(payload)
+    parquet_parts = list((storage or {}).get("parquet_parts") or [])
+    if parquet_parts:
+        try:
+            import duckdb
+
+            connection = duckdb.connect(database=":memory:")
+            try:
+                connection.execute("CREATE TEMP TABLE requested_ids(row_id VARCHAR PRIMARY KEY)")
+                connection.executemany(
+                    "INSERT OR IGNORE INTO requested_ids VALUES (?)",
+                    [(row_id,) for row_id in requested],
+                )
+                paths = ", ".join(
+                    "'" + str(path).replace("'", "''") + "'"
+                    for path in parquet_parts
+                )
+                frame = connection.execute(
+                    f"SELECT p.* FROM read_parquet([{paths}]) p "
+                    "JOIN requested_ids r ON r.row_id = CAST(p.row_id AS VARCHAR)"
+                ).df()
+            finally:
+                connection.close()
+            records: Dict[str, Dict[str, Any]] = {}
+            if frame is not None and not frame.empty:
+                for raw in frame.to_dict(orient="records"):
+                    record = normalise_prediction_record(raw)
+                    row_id = str(record.get("row_id") or "")
+                    if row_id:
+                        records[row_id] = record
+                return records
+        except Exception:
+            pass
+
+    found: Dict[str, Dict[str, Any]] = {}
+    for batch in iter_prediction_record_batches(
+        payload,
+        batch_size=batch_size,
+        cancel_token=cancel_token,
+    ):
+        for raw in batch.records:
+            row_id = str(raw.get("row_id") or raw.get("record_id") or "")
+            if row_id in requested_set:
+                found[row_id] = dict(raw)
+        if len(found) >= len(requested_set):
+            break
+    return found
+
 
 def prediction_storage_ref(payload: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
     direct = payload.get("prediction_ref")
@@ -136,7 +194,6 @@ def prediction_storage_ref(payload: Mapping[str, Any]) -> Optional[Dict[str, Any
         if isinstance(storage, Mapping) and storage.get("uri"):
             return dict(storage)
     return None
-
 
 def normalise_prediction_record(value: Mapping[str, Any]) -> Dict[str, Any]:
     record = dict(value)
@@ -161,7 +218,6 @@ def normalise_prediction_record(value: Mapping[str, Any]) -> Dict[str, Any]:
             record["probabilities"] = probability_columns
     return record
 
-
 def check_cancelled(cancel_token: Any) -> None:
     if cancel_token is None:
         return
@@ -175,7 +231,6 @@ def check_cancelled(cancel_token: Any) -> None:
         cancelled = cancelled()
     if cancelled:
         raise RuntimeError("Operation cancelled")
-
 
 def _iter_sequence_batches(
     rows: Sequence[Mapping[str, Any]],
@@ -197,13 +252,11 @@ def _iter_sequence_batches(
         )
         offset += len(records)
 
-
 def _open_prediction_text(path: Path, format_name: str) -> TextIO:
     format_name = format_name.strip().lower()
     if path.suffix.lower() == ".gz" or format_name in {"jsonl.gz", "gzip-jsonl"}:
         return gzip.open(path, "rt", encoding="utf-8", newline="")
     return path.open("rt", encoding="utf-8", newline="")
-
 
 def _optional_int(value: Any) -> Optional[int]:
     if value in (None, ""):

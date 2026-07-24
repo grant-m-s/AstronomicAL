@@ -10,6 +10,8 @@ ARTIFACT_SESSION = "al.session"
 ARTIFACT_TRAINING_SET = "al.training_set"
 ARTIFACT_BATCH = "ml.active_learning_batch"
 ARTIFACT_STRATEGY_SCORES = "ml.active_learning_scores"
+ARTIFACT_LABEL_TABLE = "al.labels"
+ARTIFACT_MEMBERSHIP_TABLE = "al.memberships"
 
 UNSURE_LABEL = "__unsure__"
 UNSURE_DISPLAY = "Unsure"
@@ -50,6 +52,9 @@ LATEST_REFERENCE_KEYS = (
     "prediction_dataset_id",
     "acquisition_artifact_id",
     "strategy_scores_artifact_id",
+    "label_table_artifact_id",
+    "membership_table_artifact_id",
+    "embedding_artifact_id",
 )
 
 def now() -> float:
@@ -82,7 +87,6 @@ def is_missing_label_value(value: Any) -> bool:
         return value != value  # NaN
     except Exception:
         return False
-
 
 def label_text(value: Any) -> str:
     if is_missing_label_value(value):
@@ -195,7 +199,7 @@ def create_session(
 ) -> Dict[str, Any]:
     timestamp = now()
     return {
-        "schema_version": 4,
+        "schema_version": 5,
         "session_id": session_id or f"al:{uuid.uuid4().hex[:12]}",
         "revision": 0,
         "previous_session_artifact_id": None,
@@ -216,12 +220,18 @@ def create_session(
         "round": 0,
         "created_at": timestamp,
         "updated_at": timestamp,
-        # Canonical human decisions.
+        # Compatibility cache for current panels. The durable label table is the
+        # cross-process source of truth once label_table_ref is populated.
         "labels": {},
+        "label_table_ref": None,
+        "labels_inline_complete": True,
         # Compatibility/fast lookup fields retained for existing panels/actions.
         "ignored_row_ids": [],
         "training_row_ids": [],
         "row_states": {},
+        "membership_table_ref": None,
+        "memberships_inline_complete": True,
+        "storage": {},
         "latest": _blank_latest(),
         "last_batch": None,
         "history": [],
@@ -231,8 +241,8 @@ def create_session(
 
 def coerce_session(payload: Mapping[str, Any]) -> Dict[str, Any]:
     session = copy.deepcopy(dict(payload or {}))
-    session.setdefault("schema_version", 4)
-    session["schema_version"] = max(4, int(session.get("schema_version") or 0))
+    session.setdefault("schema_version", 5)
+    session["schema_version"] = max(5, int(session.get("schema_version") or 0))
     session.setdefault("session_id", f"al:{uuid.uuid4().hex[:12]}")
     session.setdefault("revision", 0)
     session.setdefault("previous_session_artifact_id", None)
@@ -256,9 +266,14 @@ def coerce_session(payload: Mapping[str, Any]) -> Dict[str, Any]:
     session.setdefault("created_at", now())
     session.setdefault("updated_at", now())
     session.setdefault("labels", {})
+    session.setdefault("label_table_ref", None)
+    session.setdefault("labels_inline_complete", True)
     session.setdefault("ignored_row_ids", [])
     session.setdefault("training_row_ids", [])
     session.setdefault("row_states", {})
+    session.setdefault("membership_table_ref", None)
+    session.setdefault("memberships_inline_complete", True)
+    session["storage"] = copy.deepcopy(dict(session.get("storage") or {}))
     session.setdefault("last_batch", None)
     session.setdefault("history", [])
     session.setdefault("contract", {})
@@ -547,8 +562,17 @@ def with_prediction_result(session_payload: Mapping[str, Any], *, prediction_res
     latest = dict(session.get("latest") or _blank_latest())
     latest["predictions_artifact_id"] = str(artifact_id)
     latest["strategy_scores_artifact_id"] = None
+    # Embeddings are model/prediction specific. Do not retain a stale sidecar
+    # when a new prediction result does not publish one.
+    latest["embedding_artifact_id"] = None
     if derived_dataset_id:
         latest["prediction_dataset_id"] = str(derived_dataset_id)
+    embedding_artifact_id = (
+        find_nested_value(prediction_result, "embedding_artifact_id")
+        or find_nested_value(prediction_result, "embeddings_artifact_id")
+    )
+    if embedding_artifact_id not in (None, ""):
+        latest["embedding_artifact_id"] = str(embedding_artifact_id)
     session["latest"] = latest
     session["updated_at"] = now()
     session.setdefault("history", []).append(
@@ -556,6 +580,7 @@ def with_prediction_result(session_payload: Mapping[str, Any], *, prediction_res
             "event": "pool_prediction_completed",
             "predictions_artifact_id": str(artifact_id),
             "prediction_dataset_id": str(derived_dataset_id or ""),
+            "embedding_artifact_id": str(embedding_artifact_id or ""),
             "count": find_nested_value(prediction_result, "count"),
             "timestamp": session["updated_at"],
         }
