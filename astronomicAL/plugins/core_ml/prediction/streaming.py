@@ -69,11 +69,10 @@ def predict_action(context: Any, request: Any, cancel_token: Any = None) -> Dict
             "persist_existing_model_artifact",
             None,
         )
-        if (
-            callable(persist_existing)
-            and "model" in model_payload
-            and "model_ref" not in model_payload
-        ):
+        if callable(persist_existing):
+            # Already-durable artifacts may still use legacy class aliases or
+            # retain the AL class universe only in checkpoint params. Promote
+            # that metadata before validating the prediction output contract.
             model_payload = persist_existing(
                 context=context,
                 artifact_id=model_artifact_id,
@@ -870,8 +869,10 @@ def _register_prediction_dataset(
     )
     return attached_columns
 
-
 def _prediction_table_columns(predictor: Any) -> list[str]:
+    task = str(predictor.task or "classification").strip().lower()
+    is_regression = task in {"regression", "regressor", "regress"}
+
     columns = [
         "record_id",
         "predicted_label",
@@ -893,20 +894,30 @@ def _prediction_table_columns(predictor: Any) -> list[str]:
             "active_learning_score",
         ]
     )
-    probability_columns = predictor.output_schema.get("probability_columns") or {}
-    if isinstance(probability_columns, Mapping) and probability_columns:
-        columns.extend(str(value) for value in probability_columns.values())
-    else:
-        for class_name in (
-            predictor.output_schema.get("classes")
-            or predictor.output_schema.get("class_order")
-            or []
-        ):
-            token = "".join(
-                character if character.isalnum() else "_"
-                for character in str(class_name)
-            ).strip("_")
-            columns.append(f"prob_{token or 'class'}")
+
+    # Probability columns are classification-only.  Saved profiles and older
+    # artifacts may retain stale class aliases, but they must never alter the
+    # physical schema of a regression prediction stream.
+    if not is_regression:
+        probability_columns = (
+            predictor.output_schema.get("probability_columns") or {}
+        )
+        if isinstance(probability_columns, Mapping) and probability_columns:
+            columns.extend(
+                str(value) for value in probability_columns.values()
+            )
+        else:
+            for class_name in (
+                predictor.output_schema.get("classes")
+                or predictor.output_schema.get("class_order")
+                or []
+            ):
+                token = "".join(
+                    character if character.isalnum() else "_"
+                    for character in str(class_name)
+                ).strip("_")
+                columns.append(f"prob_{token or 'class'}")
+
     columns.append("data_provenance")
     return list(dict.fromkeys(columns))
 

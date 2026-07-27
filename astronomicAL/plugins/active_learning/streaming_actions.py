@@ -19,7 +19,6 @@ from .selection_handoff import (
 
 ORIGIN = "core.active_learning"
 
-
 def train_from_session_action(
     context: Any,
     request: Any,
@@ -454,14 +453,19 @@ def materialize_training_set_action(
         params,
         source_columns,
     )
-    image_column = _image_column(
-        bridge,
+    preflight = bridge.preflight_al_training_data_contract(
         context,
-        dataset_id,
-        params,
-        recipe_params,
-        source_columns,
+        session=session,
+        params=params,
+        profile_info=profile_info,
+        dataset_id=dataset_id,
+        recipe_params=recipe_params,
+        available_columns=source_columns,
     )
+    if not preflight["ok"]:
+        raise ValueError(" ".join(preflight["errors"]))
+    recipe_params = dict(preflight["recipe_params"])
+    image_column = str(preflight.get("image_column") or "").strip()
     required_columns = _training_columns(
         bridge,
         params=params,

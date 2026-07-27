@@ -608,7 +608,6 @@ class _PredictRunShim:
     def log(self, *args, **kwargs):
         return None
 
-
 def _recipe_registry(context):
     services = getattr(context, "services", None)
     get = getattr(services, "get", None)
@@ -620,7 +619,6 @@ def _recipe_registry(context):
         except Exception:
             continue
     return None
-
 
 def _resolve_recipe(context, recipe_id, *, require_available=False):
     if not recipe_id:
@@ -639,7 +637,6 @@ def _resolve_recipe(context, recipe_id, *, require_available=False):
         if require_available:
             raise
         return None
-
 
 def _reconstruct_recipe_torch_bundle(
     *,
@@ -667,6 +664,10 @@ def _reconstruct_recipe_torch_bundle(
             "run": None,
             "checkpoint": dict(saved.get("checkpoint") or {}),
             "saved": saved,
+            "classes": artifact_utils.resolve_model_class_names(
+                model_payload,
+                saved,
+            ),
         }
 
     checkpoint = dict(saved.get("checkpoint_payload") or {})
@@ -734,23 +735,25 @@ def _reconstruct_recipe_torch_bundle(
         cancel_token=cancel_token,
     )
 
-    classes = [
-        str(value)
-        for value in (
-            model_payload.get("class_names")
-            or checkpoint.get("class_names")
-            or (model_payload.get("prediction_contract", {}).get("output_schema", {}) or {}).get("classes")
-            or []
-        )
-    ]
-    n_outputs = int(
-        model_payload.get("num_outputs")
-        or checkpoint.get("num_outputs")
-        or model_payload.get("num_classes")
-        or checkpoint.get("num_classes")
-        or len(classes)
-        or 1
+    classes = artifact_utils.resolve_model_class_names(
+        model_payload,
+        checkpoint,
+        saved,
     )
+    n_outputs = artifact_utils.resolve_model_num_outputs(
+        model_payload,
+        checkpoint,
+        saved,
+        class_names=classes,
+        default=1,
+    )
+    if modality == "image" and task == "classification" and not classes:
+        raise ValueError(
+            "Reconstructed image classification model is missing its class "
+            "ordering. Expected class_names, class_labels, classes, "
+            "label_options, target metadata, or saved training params in the "
+            "ml.model/checkpoint artifact."
+        )
     target = TargetSpec(kind=task, classes=classes, n_outputs=n_outputs)
 
     try:
@@ -776,6 +779,72 @@ def _reconstruct_recipe_torch_bundle(
         "classes": classes,
     }
 
+def _canonical_prediction_task(value: Any) -> str:
+    """Return the canonical prediction task used by every predictor."""
+
+    text = str(value or "classification").strip().lower()
+    if text in {"regression", "regressor", "regress"}:
+        return "regression"
+    if text in {"classification", "classifier", "classify"}:
+        return "classification"
+    return text or "classification"
+
+
+def _regression_prediction_records(
+    record_ids: Sequence[Any],
+    outputs: Any,
+) -> List[Dict[str, Any]]:
+    """Convert torch regression outputs into stable row-keyed records.
+
+    The prediction-table contract currently represents one scalar regression
+    target per row.  Reject wider outputs explicitly instead of accidentally
+    treating them as class logits and creating ``prob_*`` columns.
+    """
+
+    ids = [str(record_id) for record_id in record_ids]
+    values = np.asarray(outputs, dtype=float)
+
+    if values.ndim == 0:
+        values = values.reshape(1, 1)
+    elif values.ndim == 1:
+        if len(ids) == values.shape[0]:
+            values = values.reshape(-1, 1)
+        elif len(ids) == 1:
+            values = values.reshape(1, -1)
+        else:
+            raise ValueError(
+                "Regression prediction output row count does not match the "
+                f"input batch: outputs={values.shape[0]}, rows={len(ids)}."
+            )
+    else:
+        values = values.reshape(values.shape[0], -1)
+
+    if values.shape[0] != len(ids):
+        raise ValueError(
+            "Regression prediction output row count does not match the "
+            f"input batch: outputs={values.shape[0]}, rows={len(ids)}."
+        )
+    if values.shape[1] != 1:
+        raise ValueError(
+            "Core ML prediction currently requires scalar regression output; "
+            f"the reconstructed model produced {values.shape[1]} values per row."
+        )
+
+    records: List[Dict[str, Any]] = []
+    for record_id, row in zip(ids, values):
+        prediction = float(row[0])
+        records.append(
+            {
+                "record_id": record_id,
+                "row_id": record_id,
+                "prediction": prediction,
+                "predicted_value": prediction,
+                "y_pred": prediction,
+            }
+        )
+    return records
+
+
 # =============================================================================
 # Predictor base — owns the audit flow; subclasses own the forward pass only
 # =============================================================================
@@ -798,7 +867,11 @@ class Predictor:
         self.binding = dict(getattr(compatibility, "resolved_input_binding", {}) or {})
         self.output_schema = dict(getattr(compatibility, "output_schema", {}) or {})
         self.classes = [str(c) for c in self.output_schema.get("classes") or []]
-        self.task = str(self.output_schema.get("task") or "classification").lower()
+        self.task = _canonical_prediction_task(
+            self.output_schema.get("task")
+            or model_payload.get("task")
+            or "classification"
+        )
         self.run_id = str(self.params.get("run_id") or uuid.uuid4().hex)
         self.decision_threshold = self.params.get("decision_threshold")
 
@@ -1228,8 +1301,11 @@ class TorchImagePredictor(Predictor):
             raise ValueError("Reconstructed image model is missing its torch module.")
         if not self.classes:
             self.classes = [str(value) for value in bundle.get("classes") or []]
-        if not self.classes:
-            raise ValueError("Reconstructed image model is missing class names.")
+        if self.task == "classification" and not self.classes:
+            raise ValueError(
+                "Reconstructed image classification model is missing its "
+                "class ordering."
+            )
         self._model.eval()
 
         self._image_column = self.binding.get("image_column") or self.params.get("image_column")
@@ -1282,14 +1358,33 @@ class TorchImagePredictor(Predictor):
             check_cancelled(self.cancel_token)
             batch = torch.stack(tensors).to(device)
             with torch.no_grad():
+                raw_output = self._forward(self._model, batch)
+
+            if self.task == "regression":
+                raw_values = raw_output.detach().cpu().numpy()
+                records.extend(
+                    _regression_prediction_records(
+                        pending,
+                        raw_values,
+                    )
+                )
+            else:
                 probabilities = torch.softmax(
-                    self._forward(self._model, batch),
+                    raw_output,
                     dim=1,
-                ).cpu().numpy()
-            for record_id, probability in zip(pending, probabilities):
-                records.append(_classification_record(record_id, probability, self.classes))
+                ).detach().cpu().numpy()
+                for record_id, probability in zip(pending, probabilities):
+                    records.append(
+                        _classification_record(
+                            record_id,
+                            probability,
+                            self.classes,
+                        )
+                    )
+
             tensors.clear()
             pending.clear()
+            del raw_output
             del batch
 
         try:
@@ -1320,7 +1415,6 @@ class TorchImagePredictor(Predictor):
             except Exception:
                 pass
             cleanup_ml_runtime(reason="torch image prediction cleanup")
-
 
 def _normalise_probability_matrix(values: Any) -> Optional[np.ndarray]:
     """Validate and row-normalise a probability matrix."""
@@ -1589,20 +1683,7 @@ class TorchTabularPredictor(Predictor):
                 raw = np.concatenate(outputs, axis=0) if outputs else np.empty((0, 1))
 
             if self.task == "regression":
-                values = np.asarray(raw, dtype=float)
-                if values.ndim == 1:
-                    values = values.reshape(-1, 1)
-                records = []
-                for index, record_id in enumerate(ids):
-                    row = values[index]
-                    prediction = float(row[0]) if row.size == 1 else [float(value) for value in row]
-                    records.append({
-                        "record_id": record_id,
-                        "row_id": record_id,
-                        "prediction": prediction,
-                        "predicted_value": prediction,
-                    })
-                return records
+                return _regression_prediction_records(ids, raw)
 
             probs = _softmax(raw)
             classes = self.classes or (
@@ -1666,11 +1747,13 @@ def predict_action(context: Any, request: Any, cancel_token: Any = None) -> Dict
         model_payload = context.artifacts.get(model_artifact_id)
         if not isinstance(model_payload, Mapping):
             raise TypeError(f"Artifact {model_artifact_id!r} is not an ml.model payload.")
-        if "model" in model_payload and "model_ref" not in model_payload:
-            model_payload = artifact_utils.persist_existing_model_artifact(
-                context=context,
-                artifact_id=model_artifact_id,
-            )
+        # Normalise both legacy live-model artifacts and already-durable model
+        # artifacts. The latter may still keep class ordering only in aliases or
+        # checkpoint params, which must be promoted before contract validation.
+        model_payload = artifact_utils.persist_existing_model_artifact(
+            context=context,
+            artifact_id=model_artifact_id,
+        )
 
         compatibility = contract_utils.validate_model_for_dataset(
             context=context,

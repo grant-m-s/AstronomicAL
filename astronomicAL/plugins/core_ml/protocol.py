@@ -4,6 +4,8 @@ import hashlib
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Mapping, Optional
 
+SPLIT_IDENTITY_VERSION = 1
+SPLIT_DIGEST_ALGORITHM = "sha256-framed-json-v1"
 
 def resolve_selection_mode(metric: str, mode: str = "auto") -> str:
     if mode in ("max", "min"):
@@ -14,7 +16,6 @@ def resolve_selection_mode(metric: str, mode: str = "auto") -> str:
         if any(token in metric_name for token in ("loss", "error", "mae", "mse", "rmse"))
         else "max"
     )
-
 
 @dataclass
 class ProtocolConfig:
@@ -171,7 +172,6 @@ class ProtocolConfig:
         cfg.protocol_id = _stable_protocol_id(cfg)
         return cfg
 
-
 def _bool_param(value: Any, default: bool) -> bool:
     if isinstance(value, bool):
         return value
@@ -183,7 +183,6 @@ def _bool_param(value: Any, default: bool) -> bool:
     if text in {"0", "false", "no", "n", "off"}:
         return False
     return default
-
 
 def _stable_protocol_id(cfg: ProtocolConfig) -> str:
     raw = "|".join(
@@ -205,7 +204,6 @@ def _stable_protocol_id(cfg: ProtocolConfig) -> str:
     )
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
 
-
 @dataclass
 class DataBinding:
     """Resolved column binding owned by the harness, not the recipe."""
@@ -215,6 +213,58 @@ class DataBinding:
     input_columns: List[str] = field(default_factory=list)
     image_column: Optional[str] = None
 
+@dataclass(frozen=True)
+class SourceRevision:
+    """Stable identity for the ML-relevant contents of one dataset source.
+
+    The revision is independent of source paths and physical scan order. It
+    covers the bounded scan scope, relevant columns, their dtypes, and a
+    canonical record-ID-keyed digest of the values used by splitting,
+    training, or evaluation.
+    """
+
+    schema_version: int
+    identity_version: int
+    digest_algorithm: str
+    dataset_id: str
+    backend: str
+    scope: str
+    row_count: int
+    columns: List[str]
+    dtypes: Dict[str, str]
+    revision_sha256: str
+    selected_row_ids_sha256: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "SourceRevision":
+        payload = dict(value or {})
+        return cls(
+            schema_version=int(payload.get("schema_version", 1)),
+            identity_version=int(
+                payload.get("identity_version", SPLIT_IDENTITY_VERSION)
+            ),
+            digest_algorithm=str(
+                payload.get("digest_algorithm", SPLIT_DIGEST_ALGORITHM)
+            ),
+            dataset_id=str(payload.get("dataset_id", "")),
+            backend=str(payload.get("backend", "unknown")),
+            scope=str(payload.get("scope", "full_dataset")),
+            row_count=int(payload.get("row_count", 0)),
+            columns=[str(column) for column in payload.get("columns") or []],
+            dtypes={
+                str(column): str(dtype)
+                for column, dtype in dict(payload.get("dtypes") or {}).items()
+            },
+            revision_sha256=str(payload.get("revision_sha256", "")),
+            selected_row_ids_sha256=(
+                str(payload["selected_row_ids_sha256"])
+                if payload.get("selected_row_ids_sha256")
+                else None
+            ),
+        )
 
 @dataclass(frozen=True)
 class SplitManifestRef:
@@ -234,9 +284,19 @@ class SplitManifestRef:
     columns: List[str]
     sha256: str
     size_bytes: int
+    identity_version: int = SPLIT_IDENTITY_VERSION
+    digest_algorithm: str = SPLIT_DIGEST_ALGORITHM
+    membership_sha256_by_role: Dict[str, str] = field(default_factory=dict)
+    target_sha256_by_role: Dict[str, str] = field(default_factory=dict)
+    source_revisions: Dict[str, SourceRevision] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
+        payload = asdict(self)
+        payload["source_revisions"] = {
+            dataset_id: revision.to_dict()
+            for dataset_id, revision in self.source_revisions.items()
+        }
+        return payload
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "SplitManifestRef":
@@ -263,14 +323,52 @@ class SplitManifestRef:
             columns=[str(column) for column in payload.get("columns") or []],
             sha256=str(payload.get("sha256", "")),
             size_bytes=int(payload.get("size_bytes", 0)),
+            identity_version=int(
+                payload.get("identity_version", SPLIT_IDENTITY_VERSION)
+            ),
+            digest_algorithm=str(
+                payload.get("digest_algorithm", SPLIT_DIGEST_ALGORITHM)
+            ),
+            membership_sha256_by_role={
+                str(role): str(digest)
+                for role, digest in dict(
+                    payload.get("membership_sha256_by_role") or {}
+                ).items()
+            },
+            target_sha256_by_role={
+                str(role): str(digest)
+                for role, digest in dict(
+                    payload.get("target_sha256_by_role") or {}
+                ).items()
+            },
+            source_revisions={
+                str(dataset_id): (
+                    revision
+                    if isinstance(revision, SourceRevision)
+                    else SourceRevision.from_dict(revision)
+                )
+                for dataset_id, revision in dict(
+                    payload.get("source_revisions") or {}
+                ).items()
+            },
         )
+
+    def source_revision(
+        self,
+        dataset_id: Optional[str],
+    ) -> Optional[SourceRevision]:
+        if dataset_id is None:
+            return None
+        return self.source_revisions.get(str(dataset_id))
 
 
 @dataclass(frozen=True)
 class PartitionRef:
     """A partition represented by a role in a durable split manifest.
 
-    It intentionally contains counts and metadata rather than every record ID.
+    It intentionally contains counts and stable semantic identity rather than
+    every record ID. The identity fields are independent of manifest paths and
+    compressed-file bytes.
     """
 
     name: str
@@ -281,6 +379,11 @@ class PartitionRef:
     dataset_id: Optional[str] = None
     source: str = "split"  # split | dataset | none
     fingerprint: str = ""
+    identity_version: int = SPLIT_IDENTITY_VERSION
+    digest_algorithm: str = SPLIT_DIGEST_ALGORITHM
+    membership_sha256: str = ""
+    target_sha256: str = ""
+    source_revision_sha256: str = ""
 
     def __len__(self) -> int:
         return int(self.row_count)
@@ -295,24 +398,55 @@ class PartitionRef:
             "dataset_id": self.dataset_id,
             "source": self.source,
             "fingerprint": self.fingerprint,
+            "identity_version": int(self.identity_version),
+            "digest_algorithm": self.digest_algorithm,
+            "membership_sha256": self.membership_sha256,
+            "target_sha256": self.target_sha256,
+            "source_revision_sha256": self.source_revision_sha256,
         }
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "PartitionRef":
         payload = dict(value or {})
+        manifest = SplitManifestRef.from_dict(payload["manifest"])
+        role = str(payload.get("role", payload.get("name", "partition")))
+        dataset_id = (
+            str(payload["dataset_id"])
+            if payload.get("dataset_id") is not None
+            else None
+        )
+        source_revision = manifest.source_revision(dataset_id)
         return cls(
-            name=str(payload.get("name", payload.get("role", "partition"))),
-            role=str(payload.get("role", payload.get("name", "partition"))),
+            name=str(payload.get("name", role)),
+            role=role,
             row_count=int(payload.get("row_count", 0)),
-            manifest=SplitManifestRef.from_dict(payload["manifest"]),
+            manifest=manifest,
             classes=[str(item) for item in payload.get("classes") or []],
-            dataset_id=(
-                str(payload["dataset_id"])
-                if payload.get("dataset_id") is not None
-                else None
-            ),
+            dataset_id=dataset_id,
             source=str(payload.get("source", "split")),
             fingerprint=str(payload.get("fingerprint", "")),
+            identity_version=int(
+                payload.get("identity_version", manifest.identity_version)
+            ),
+            digest_algorithm=str(
+                payload.get("digest_algorithm", manifest.digest_algorithm)
+            ),
+            membership_sha256=str(
+                payload.get("membership_sha256")
+                or manifest.membership_sha256_by_role.get(role, "")
+            ),
+            target_sha256=str(
+                payload.get("target_sha256")
+                or manifest.target_sha256_by_role.get(role, "")
+            ),
+            source_revision_sha256=str(
+                payload.get("source_revision_sha256")
+                or (
+                    source_revision.revision_sha256
+                    if source_revision is not None
+                    else ""
+                )
+            ),
         )
 
 
@@ -330,9 +464,7 @@ class Partition:
     def __len__(self) -> int:
         return len(self.record_ids)
 
-
 PartitionLike = Partition | PartitionRef
-
 
 @dataclass
 class Partitions:
@@ -393,7 +525,6 @@ class Partitions:
             _canonical_partition_role(role): ref for role, ref in refs.items()
         }
 
-
 def _canonical_partition_role(role: str) -> str:
     value = str(role or "").strip().lower()
     aliases = {
@@ -409,7 +540,6 @@ def _canonical_partition_role(role: str) -> str:
     except KeyError as exc:
         raise KeyError(f"Unknown partition role {role!r}.") from exc
 
-
 @dataclass
 class TrainingComponents:
     """What ``configure_training`` returns: recipe policy, not protocol policy."""
@@ -418,7 +548,6 @@ class TrainingComponents:
     scheduler: Any = None
     criterion: Any = None
     extra: Dict[str, Any] = field(default_factory=dict)
-
 
 @dataclass
 class TargetSpec:

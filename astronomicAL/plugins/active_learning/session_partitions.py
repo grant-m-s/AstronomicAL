@@ -25,7 +25,6 @@ from .selection_handoff import (
 ORIGIN = "core.active_learning"
 HOLDOUT_SOURCES = frozenset({"split", "dataset"})
 
-
 def start_session_action(
     context: Any,
     request: Any,
@@ -301,7 +300,6 @@ def start_session_action(
         "counts": al_state.counts(session),
     }
 
-
 def create_session_protocol(
     *,
     context: Any,
@@ -550,7 +548,6 @@ def create_session_protocol(
         "data_protocol": protocol,
     }
 
-
 def _data_protocol_payload(
     *,
     source_dataset_id: str,
@@ -597,7 +594,6 @@ def _data_protocol_payload(
         "manifest": None if manifest is None else dict(manifest),
         "materialization_root": root,
     }
-
 
 def _validate_dataset_protocol(
     context: Any,
@@ -655,7 +651,6 @@ def _validate_dataset_protocol(
         role="source",
     )
 
-
 def _validate_required_columns(
     context: Any,
     *,
@@ -676,7 +671,6 @@ def _validate_required_columns(
             f"The {role} dataset {dataset_id!r} is missing required "
             f"column(s): {', '.join(missing)}."
         )
-
 
 def _register_partition_dataset(
     *,
@@ -732,7 +726,6 @@ def _register_partition_dataset(
     actions.publish(context, "dataset.registered", event)
     actions.publish(context, "dataset.loaded", event)
 
-
 def _session_split_root(context: Any, params: Mapping[str, Any]) -> Path:
     explicit = (
         params.get("session_split_output_dir")
@@ -742,17 +735,19 @@ def _session_split_root(context: Any, params: Mapping[str, Any]) -> Path:
     if explicit:
         root = Path(str(explicit)).expanduser()
     else:
-        config = getattr(context, "config", None)
-        configured = getattr(config, "ml_artifact_root", None)
+        cache_dir = getattr(
+            getattr(context, "artifacts", None),
+            "_cache_dir",
+            None,
+        )
         root = (
-            Path(str(configured)).expanduser()
-            if configured
-            else ".astronomical" / "ml_artifacts"
+            Path(str(cache_dir)).expanduser()
+            if cache_dir
+            else Path.cwd() / ".astronomical"
         )
     output = root / "active_learning" / "session_splits"
     output.mkdir(parents=True, exist_ok=True)
     return output
-
 
 def _external_dataset_id(
     params: Mapping[str, Any],
@@ -767,7 +762,6 @@ def _external_dataset_id(
         )
     return value
 
-
 def _holdout_source(value: Any, *, role: str) -> str:
     source = str(value or "split").strip().lower()
     if source not in HOLDOUT_SOURCES:
@@ -775,7 +769,6 @@ def _holdout_source(value: Any, *, role: str) -> str:
             f"{role}_source must be 'split' or 'dataset', got {value!r}."
         )
     return source
-
 
 def _split_fraction(value: Any, *, role: str, source: str) -> float:
     if source != "split":
@@ -788,13 +781,11 @@ def _split_fraction(value: Any, *, role: str, source: str) -> float:
         )
     return result
 
-
 def _required_dataset_row_count(context: Any, dataset_id: str) -> int:
     return _required_row_count(
         context.datasets.get_source(dataset_id),
         dataset_id=dataset_id,
     )
-
 
 def _required_row_count(source: Any, *, dataset_id: str) -> int:
     value = source.row_count()
@@ -808,7 +799,6 @@ def _required_row_count(source: Any, *, dataset_id: str) -> int:
         raise ValueError(f"Dataset {dataset_id!r} contains no rows.")
     return count
 
-
 def _unique_dataset_id(context: Any, base: str) -> str:
     existing = set(context.datasets.list_ids())
     if base not in existing:
@@ -819,7 +809,6 @@ def _unique_dataset_id(context: Any, base: str) -> str:
             return candidate
     return f"{base}_{uuid.uuid4().hex[:8]}"
 
-
 def _fraction(value: Any, *, name: str) -> float:
     try:
         result = float(value)
@@ -829,7 +818,6 @@ def _fraction(value: Any, *, name: str) -> float:
         raise ValueError(f"{name} must be between zero and one.")
     return result
 
-
 def _uses_index(value: Any) -> bool:
     return str(value or "").strip().lower() in {
         "use index",
@@ -837,7 +825,6 @@ def _uses_index(value: Any) -> bool:
         "__index__",
         "index",
     }
-
 
 def _check_cancelled(cancel_token: Any) -> None:
     if cancel_token is None:
@@ -854,7 +841,6 @@ def _check_cancelled(cancel_token: Any) -> None:
         cancelled = cancelled()
     if bool(cancelled):
         raise RuntimeError("Active Learning session creation was cancelled.")
-
 
 def _safe_name(value: Any) -> str:
     text = "".join(

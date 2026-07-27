@@ -35,35 +35,89 @@ def ml_event_payload(base: Mapping[str, Any], ml_result: Mapping[str, Any] | Non
             payload["training_predictions_artifact_id"] = str(training_predictions)
     return payload
 
-def collect_prediction_artifact_ids(value: Any) -> List[str]:
-    """Collect candidate prediction artifact ids from a core.ml predict result.
+PREDICTION_ARTIFACT_ID_KEYS = (
+    "predictions_artifact_id",
+    "prediction_artifact_id",
+    "ml_predictions_artifact_id",
+)
 
-    Avoid blindly using the first nested artifact id: training runs can include
-    predictions on the materialised AL training dataset, while acquisition needs
-    predictions on the original AL pool dataset.
-    """
 
-    keys = {
-        "predictions_artifact_id",
-        "prediction_artifact_id",
-        "ml_predictions_artifact_id",
-        "artifact_id",
-    }
+def _mapping_looks_like_prediction(value: Mapping[str, Any]) -> bool:
+    type_name = str(
+        value.get("type")
+        or value.get("artifact_type")
+        or value.get("kind")
+        or ""
+    ).lower()
+    if "prediction" in type_name:
+        return True
+    return any(
+        key in value
+        for key in (
+            "prediction_ref",
+            "prediction_table",
+            "predictions",
+            "prediction_dataset_id",
+            "predicted_dataset_id",
+            "prediction_source_dataset_id",
+        )
+    )
+
+
+def _explicit_prediction_artifact_ids(value: Any) -> List[str]:
     found: List[str] = []
 
     def visit(obj: Any) -> None:
         if isinstance(obj, Mapping):
-            for key, raw in obj.items():
-                if str(key) in keys and raw not in (None, ""):
+            for key in PREDICTION_ARTIFACT_ID_KEYS:
+                raw = obj.get(key)
+                if raw not in (None, ""):
                     found.append(str(raw))
             for nested in obj.values():
                 visit(nested)
-        elif isinstance(obj, Sequence) and not isinstance(obj, (str, bytes, bytearray)):
+        elif isinstance(obj, Sequence) and not isinstance(
+            obj,
+            (str, bytes, bytearray),
+        ):
             for nested in obj:
                 visit(nested)
 
     visit(value)
     return al_state.stable_unique(found)
+
+
+def collect_prediction_artifact_ids(value: Any) -> List[str]:
+    """Collect prediction-shaped artifact ids from a Core ML predict result.
+
+    Explicit prediction keys are authoritative. Generic ``artifact_id`` values
+    are considered only when the surrounding mapping is itself prediction-shaped,
+    preventing unrelated model/run artifacts from making an otherwise valid
+    prediction result appear ambiguous.
+    """
+
+    explicit = _explicit_prediction_artifact_ids(value)
+    generic: List[str] = []
+
+    def visit(obj: Any) -> None:
+        if isinstance(obj, Mapping):
+            raw = obj.get("artifact_id")
+            if (
+                raw not in (None, "")
+                and _mapping_looks_like_prediction(obj)
+            ):
+                generic.append(str(raw))
+            for nested in obj.values():
+                visit(nested)
+        elif isinstance(obj, Sequence) and not isinstance(
+            obj,
+            (str, bytes, bytearray),
+        ):
+            for nested in obj:
+                visit(nested)
+
+    visit(value)
+    return al_state.stable_unique([*explicit, *generic])
+
 
 def select_pool_predictions_artifact_id(
     context: Any,
@@ -71,46 +125,67 @@ def select_pool_predictions_artifact_id(
     *,
     pool_dataset_id: str,
 ) -> str:
-    """Return the prediction artifact generated for the AL pool dataset.
+    """Return the prediction artifact generated for the AL pool dataset."""
 
-    Raises a clear error when core.ml returns only training-dataset predictions or
-    another incompatible artifact.
-    """
-
-    candidates = collect_prediction_artifact_ids(prediction_result)
+    explicit = _explicit_prediction_artifact_ids(prediction_result)
+    candidates = explicit or collect_prediction_artifact_ids(prediction_result)
     if not candidates:
-        raise ValueError("core.ml.predict did not return a predictions artifact id.")
+        raise ValueError(
+            "core.ml.predict did not return a predictions artifact id."
+        )
 
+    expected = str(pool_dataset_id or "").strip()
+    result_identifiers = acquisition.prediction_dataset_identifiers(
+        prediction_result
+    )
     mismatches: List[str] = []
     metadata_unknown: List[str] = []
+
     for artifact_id in candidates:
         try:
             payload = context.artifacts.get(str(artifact_id))
         except Exception as exc:
-            mismatches.append(f"{artifact_id}: could not read artifact ({exc})")
+            mismatches.append(
+                f"{artifact_id}: could not read artifact ({exc})"
+            )
             continue
         if not isinstance(payload, Mapping):
-            mismatches.append(f"{artifact_id}: artifact payload is not a mapping")
+            mismatches.append(
+                f"{artifact_id}: artifact payload is not a mapping"
+            )
             continue
         identifiers = acquisition.prediction_dataset_identifiers(payload)
-        if not identifiers:
-            metadata_unknown.append(str(artifact_id))
-            continue
-        if str(pool_dataset_id or "").strip() in identifiers:
+        if expected and expected in identifiers:
             return str(artifact_id)
-        mismatches.append(f"{artifact_id}: {sorted(identifiers)}")
+        if identifiers:
+            mismatches.append(f"{artifact_id}: {sorted(identifiers)}")
+            continue
+        metadata_unknown.append(str(artifact_id))
 
-    if metadata_unknown:
-        # Older prediction payloads may not include dataset metadata.  Accept one
-        # only when no explicit incompatible candidates were found.
-        if not mismatches:
+    if len(metadata_unknown) == 1:
+        # Some older ml.predictions artifacts omit dataset provenance even
+        # though the action result identifies the predicted dataset. Explicit
+        # prediction ids remain safe to accept in that case.
+        if expected in result_identifiers or (
+            not result_identifiers and not mismatches
+        ):
             return metadata_unknown[0]
 
     raise ValueError(
         "core.ml.predict did not return predictions for the AL pool dataset "
         f"{pool_dataset_id!r}. Candidate prediction artifacts: "
-        + ("; ".join(mismatches + [f"{artifact_id}: no dataset metadata" for artifact_id in metadata_unknown]) or "none")
+        + (
+            "; ".join(
+                mismatches
+                + [
+                    f"{artifact_id}: no dataset metadata"
+                    for artifact_id in metadata_unknown
+                ]
+            )
+            or "none"
+        )
     )
+
 
 def prediction_result_for_pool(
     context: Any,
@@ -249,6 +324,172 @@ def merged_profile_recipe_params(profile: Mapping[str, Any], params: Mapping[str
     merged.update(dict(params.get("recipe_params") or {}))
     return merged
 
+def _canonical_ml_task(value: Any, *, field_name: str) -> str:
+    """Return the canonical Core ML task value without silent fallback."""
+
+    text = str(value or "").strip().lower()
+    aliases = {
+        "classification": "classification",
+        "classifier": "classification",
+        "classify": "classification",
+        "regression": "regression",
+        "regressor": "regression",
+        "regress": "regression",
+    }
+    try:
+        return aliases[text]
+    except KeyError as exc:
+        raise ValueError(
+            f"{field_name} must resolve to 'classification' or 'regression', "
+            f"got {value!r}."
+        ) from exc
+
+def _registered_recipe_spec(context: Any, recipe_id: str) -> Any:
+    """Resolve a recipe through the platform-owned Core ML registry."""
+
+    recipe_id = str(recipe_id or "").strip()
+    if not recipe_id:
+        return None
+
+    services = getattr(context, "services", None)
+    if services is None:
+        raise RuntimeError(
+            "Active Learning training requires the platform service registry."
+        )
+
+    registry = services.get("core.ml.recipe_registry")
+    if registry is None:
+        raise RuntimeError("The Core ML recipe registry is not available.")
+
+    require_available = getattr(registry, "require_available", None)
+    spec = (
+        require_available(recipe_id)
+        if callable(require_available)
+        else registry.get(recipe_id)
+    )
+    if spec is None:
+        raise KeyError(f"Unknown Core ML recipe: {recipe_id}")
+    return spec
+
+def _spec_value(spec: Any, *names: str) -> Any:
+    if spec is None:
+        return None
+    if isinstance(spec, Mapping):
+        for name in names:
+            value = spec.get(name)
+            if value not in (None, ""):
+                return value
+    for name in names:
+        value = getattr(spec, name, None)
+        if value not in (None, ""):
+            return value
+    return None
+
+def _registered_recipe_task(
+    context: Any,
+    recipe_id: str,
+) -> str:
+    """Resolve the selected recipe's authoritative task from Core ML."""
+
+    recipe_id = str(recipe_id or "").strip()
+    if not recipe_id:
+        return ""
+
+    spec = _registered_recipe_spec(context, recipe_id)
+    recipe_cls = _spec_value(spec, "recipe_cls", "recipe_class")
+    raw_task = _spec_value(spec, "task") or _spec_value(recipe_cls, "task")
+    if not raw_task:
+        raise ValueError(
+            f"Core ML recipe {recipe_id!r} does not declare an authoritative task."
+        )
+    return _canonical_ml_task(
+        raw_task,
+        field_name=f"Core ML recipe {recipe_id!r} task",
+    )
+
+def _normalise_recipe_modality(value: Any) -> str:
+    return str(value or "").strip().lower().replace(" ", "_")
+
+def registered_recipe_modality(context: Any, recipe_id: str) -> str:
+    """Return the selected recipe's declared input modality."""
+
+    recipe_id = str(recipe_id or "").strip()
+    if not recipe_id:
+        return ""
+
+    spec = _registered_recipe_spec(context, recipe_id)
+    recipe_cls = _spec_value(spec, "recipe_cls", "recipe_class")
+    raw = (
+        _spec_value(spec, "modality", "input_modality", "data_modality")
+        or _spec_value(
+            recipe_cls,
+            "modality",
+            "input_modality",
+            "data_modality",
+        )
+    )
+    return _normalise_recipe_modality(raw)
+
+def recipe_requires_image(context: Any, recipe_id: str) -> bool:
+    return (
+        registered_recipe_modality(context, recipe_id)
+        in IMAGE_RECIPE_MODALITIES
+    )
+
+def _apply_al_task_contract(
+    context: Any,
+    *,
+    recipe_id: str,
+    task_type: Any,
+    params: Mapping[str, Any],
+    strict_existing: bool = False,
+) -> Dict[str, Any]:
+    """Make the AL session task authoritative for the Core ML request.
+
+    Core ML consumes ``params['task']`` as its canonical task field. Active
+    Learning also retains ``task_type`` and ``problem_type`` in its own session
+    and artifact contracts. A saved profile may contain an older ``task`` value,
+    so a fresh AL round must overwrite all three aliases from the session.
+
+    Exact resume is stricter: any saved task alias must already agree with the
+    session, otherwise the checkpoint request is no longer the same experiment.
+    """
+
+    canonical_task = _canonical_ml_task(
+        task_type,
+        field_name="Active Learning task",
+    )
+    result = dict(params or {})
+
+    if strict_existing:
+        for key in ("task", "task_type", "problem_type"):
+            existing = result.get(key)
+            if existing in (None, ""):
+                continue
+            existing_task = _canonical_ml_task(
+                existing,
+                field_name=f"Saved Core ML parameter {key!r}",
+            )
+            if existing_task != canonical_task:
+                raise ValueError(
+                    "The saved Core ML request task no longer matches the "
+                    "Active Learning session. "
+                    f"{key}={existing_task!r}; session_task={canonical_task!r}."
+                )
+
+    recipe_task = _registered_recipe_task(context, recipe_id)
+    if recipe_task and recipe_task != canonical_task:
+        raise ValueError(
+            f"Active Learning session task {canonical_task!r} is incompatible "
+            f"with Core ML recipe {recipe_id!r}, which declares "
+            f"task {recipe_task!r}. Select a {canonical_task} recipe."
+        )
+
+    result["task"] = canonical_task
+    result["task_type"] = canonical_task
+    result["problem_type"] = canonical_task
+    return result
+
 def profile_data_contract_action(context: Any, request: Any, cancel_token: Any = None) -> Dict[str, Any]:
     """Inspect the optional core.ml-facing data contract.
 
@@ -373,13 +614,33 @@ def clean_feature_columns(value: Any, *, available_columns: Optional[Sequence[st
     return out
 
 IMAGE_COLUMN_PARAM_KEYS = (
+    "image_column",
+    "image_path_column",
+    "image_uri_column",
     "image.uri",
     "image.path",
+)
+
+IMAGE_CANONICAL_PARAM_KEYS = (
+    "image_column",
+    "image_path_column",
 )
 
 IMAGE_MAPPING_KEYS = (
     "image.uri",
     "image.path",
+)
+
+IMAGE_RECIPE_MODALITIES = frozenset(
+    {
+        "image",
+        "images",
+        "vision",
+        "computer_vision",
+        "computer-vision",
+        "image_classification",
+        "image_regression",
+    }
 )
 
 IMAGE_COLUMN_EXACT_NAMES = (
@@ -440,6 +701,72 @@ def _image_column_candidates_from_column_names(columns: Sequence[str]) -> List[s
                 candidates.append(value)
     return candidates
 
+def resolve_image_column_binding_for_al_training(
+    context: Any,
+    dataset_id: str,
+    params: Mapping[str, Any],
+    recipe_params: Mapping[str, Any],
+    *,
+    available_columns: Optional[Sequence[str]] = None,
+    session: Optional[Mapping[str, Any]] = None,
+    mapping_dataset_ids: Optional[Sequence[str]] = None,
+) -> Dict[str, str]:
+    """Resolve an image column and record where the binding came from."""
+
+    columns = list(available_columns or [])
+    if not columns:
+        columns = list_dataset_columns(context, dataset_id)
+
+    session_payload = dict(session or {})
+    mapping_ids: List[str] = []
+    for raw_dataset_id in [
+        dataset_id,
+        *(mapping_dataset_ids or []),
+    ]:
+        value = str(raw_dataset_id or "").strip()
+        if value and value not in mapping_ids:
+            mapping_ids.append(value)
+
+    candidate_groups = [
+        ("request", _image_column_candidates_from_params(params)),
+        (
+            "session",
+            _image_column_candidates_from_params(
+                {
+                    "image_column": session_payload.get("image_column"),
+                    "image_path_column": session_payload.get(
+                        "image_path_column"
+                    ),
+                    "image_uri_column": session_payload.get(
+                        "image_uri_column"
+                    ),
+                }
+            ),
+        ),
+    ]
+
+    mapped_candidates: List[str] = []
+    for mapping_dataset_id in mapping_ids:
+        mapped_candidates.extend(
+            _image_column_candidates_from_mappings(
+                context,
+                mapping_dataset_id,
+            )
+        )
+    candidate_groups.append(("mapping", mapped_candidates))
+    candidate_groups.append(
+        ("profile", _image_column_candidates_from_params(recipe_params))
+    )
+    candidate_groups.append(
+        ("inferred", _image_column_candidates_from_column_names(columns))
+    )
+
+    for source, candidates in candidate_groups:
+        column = _first_existing_column(candidates, columns)
+        if column:
+            return {"column": column, "source": source}
+    return {"column": "", "source": "none"}
+
 def resolve_image_column_for_al_training(
     context: Any,
     dataset_id: str,
@@ -447,35 +774,322 @@ def resolve_image_column_for_al_training(
     recipe_params: Mapping[str, Any],
     *,
     available_columns: Optional[Sequence[str]] = None,
+    session: Optional[Mapping[str, Any]] = None,
+    mapping_dataset_ids: Optional[Sequence[str]] = None,
 ) -> str:
-    """Resolve the image input column that must survive AL training-set materialisation.
+    """Return the resolved image column for compatibility callers."""
 
-    Before the large-data optimisation, AL materialised the entire pool dataframe for
-    training, so image columns were accidentally carried through.  Now the training
-    set is intentionally narrow; image recipes therefore need the image column to be
-    resolved from explicit params, dataset semantic mappings, or obvious image-path
-    column names and then added back deliberately.
-    """
-
-    columns = list(available_columns or [])
-    if not columns:
-        columns = list_dataset_columns(context, dataset_id)
-
-    candidates: List[str] = []
-    for source in (recipe_params, params):
-        candidates.extend(_image_column_candidates_from_params(source))
-    candidates.extend(_image_column_candidates_from_mappings(context, dataset_id))
-    candidates.extend(_image_column_candidates_from_column_names(columns))
-    return _first_existing_column(candidates, columns)
+    return str(
+        resolve_image_column_binding_for_al_training(
+            context,
+            dataset_id,
+            params,
+            recipe_params,
+            available_columns=available_columns,
+            session=session,
+            mapping_dataset_ids=mapping_dataset_ids,
+        ).get("column")
+        or ""
+    )
 
 def ensure_image_params(recipe_params: Dict[str, Any], image_column: str) -> None:
-    """Pass the resolved image column to core.ml using the aliases it accepts."""
+    """Write the authoritative image-column aliases accepted by Core ML."""
 
     image_column = str(image_column or "").strip()
     if not image_column:
         return
-    recipe_params.setdefault("image_column", image_column)
-    recipe_params.setdefault("image_path_column", image_column)
+    recipe_params["image_column"] = image_column
+    recipe_params["image_path_column"] = image_column
+
+def preflight_al_training_data_contract(
+    context: Any,
+    *,
+    session: Mapping[str, Any],
+    params: Mapping[str, Any],
+    profile_info: Optional[Mapping[str, Any]] = None,
+    dataset_id: str = "",
+    recipe_params: Optional[Mapping[str, Any]] = None,
+    available_columns: Optional[Sequence[str]] = None,
+    strict_existing: bool = False,
+) -> Dict[str, Any]:
+    """Validate the metadata-only AL-to-Core-ML data contract."""
+
+    session = dict(session or {})
+    params = dict(params or {})
+    resolved_profile = dict(
+        profile_info or resolve_recipe_profile_info(context, params) or {}
+    )
+    recipe_id = str(
+        resolved_profile.get("recipe_id")
+        or params.get("recipe_id")
+        or session.get("recipe_id")
+        or ""
+    ).strip()
+    source_dataset_id = str(
+        dataset_id
+        or acquisition.session_pool_dataset_id(session)
+        or params.get("dataset_id")
+        or ""
+    ).strip()
+
+    errors: List[str] = []
+    warnings: List[str] = []
+    modality = ""
+    if not recipe_id:
+        errors.append(
+            "The selected recipe profile does not resolve to a Core ML recipe."
+        )
+    else:
+        try:
+            modality = registered_recipe_modality(context, recipe_id)
+        except Exception as exc:
+            errors.append(
+                f"Could not inspect Core ML recipe {recipe_id!r}: {exc}"
+            )
+
+    if not source_dataset_id:
+        errors.append(
+            "The Active Learning session does not identify a training pool "
+            "dataset."
+        )
+
+    if recipe_params is None:
+        resolved_recipe_params = sanitize_recipe_params_for_al_training(
+            merged_profile_recipe_params(
+                dict(resolved_profile.get("profile") or {}),
+                params,
+            ),
+            available_columns=available_columns,
+        )
+    else:
+        resolved_recipe_params = dict(recipe_params or {})
+
+    session_dataset_resolver = getattr(
+        al_actions,
+        "active_learning_dataset_ids",
+        None,
+    )
+    if callable(session_dataset_resolver):
+        session_dataset_ids = dict(
+            session_dataset_resolver(
+                session,
+                include_source=True,
+            )
+            or {}
+        )
+    else:
+        session_dataset_ids = {
+            "source": str(session.get("dataset_id") or "").strip(),
+            "pool": source_dataset_id,
+            "validation": str(
+                session.get("validation_dataset_id") or ""
+            ).strip(),
+            "test": str(session.get("test_dataset_id") or "").strip(),
+        }
+
+    role_dataset_ids = {
+        "source": str(
+            session_dataset_ids.get("source")
+            or session.get("dataset_id")
+            or ""
+        ).strip(),
+        "training": source_dataset_id,
+        "validation": str(
+            params.get("validation_dataset_id")
+            or session_dataset_ids.get("validation")
+            or session.get("validation_dataset_id")
+            or ""
+        ).strip(),
+        "test": str(
+            params.get("test_dataset_id")
+            or session_dataset_ids.get("test")
+            or session.get("test_dataset_id")
+            or ""
+        ).strip(),
+    }
+
+    role_columns: Dict[str, List[str]] = {}
+    inspected_by_dataset: Dict[str, List[str]] = {}
+    for role, role_dataset_id in role_dataset_ids.items():
+        if not role_dataset_id:
+            continue
+        if (
+            role == "training"
+            and role_dataset_id == source_dataset_id
+            and available_columns
+        ):
+            columns = [str(column) for column in available_columns]
+        elif role_dataset_id in inspected_by_dataset:
+            columns = list(inspected_by_dataset[role_dataset_id])
+        else:
+            try:
+                columns = list_dataset_columns(context, role_dataset_id)
+            except Exception as exc:
+                errors.append(
+                    f"Could not inspect {role} dataset "
+                    f"{role_dataset_id!r}: {exc}"
+                )
+                continue
+            inspected_by_dataset[role_dataset_id] = list(columns)
+        role_columns[role] = list(columns)
+
+    training_columns = list(
+        role_columns.get("training")
+        or [str(column) for column in (available_columns or [])]
+    )
+
+    al_role_column_sets = [
+        set(role_columns[role])
+        for role in ("training", "validation", "test")
+        if role_dataset_ids.get(role) and role in role_columns
+    ]
+    if al_role_column_sets:
+        common_image_columns = sorted(
+            set.intersection(*al_role_column_sets),
+            key=str,
+        )
+    else:
+        common_image_columns = sorted(training_columns, key=str)
+
+    mapping_dataset_ids = [
+        dataset_id
+        for dataset_id in role_dataset_ids.values()
+        if dataset_id
+    ]
+    image_binding = {"column": "", "source": "none"}
+    if source_dataset_id and training_columns:
+        image_binding = resolve_image_column_binding_for_al_training(
+            context,
+            source_dataset_id,
+            params,
+            resolved_recipe_params,
+            available_columns=training_columns,
+            session=session,
+            mapping_dataset_ids=mapping_dataset_ids,
+        )
+    resolved_image_column = str(
+        image_binding.get("column") or ""
+    ).strip()
+    image_column_source = str(
+        image_binding.get("source") or "none"
+    ).strip()
+    suggested_image_column = (
+        resolved_image_column
+        if image_column_source == "inferred"
+        else ""
+    )
+    image_column = (
+        ""
+        if image_column_source == "inferred"
+        else resolved_image_column
+    )
+
+    requires_image = modality in IMAGE_RECIPE_MODALITIES
+    mapping_by_role: Dict[str, Dict[str, str]] = {}
+    for role, role_dataset_id in role_dataset_ids.items():
+        if not role_dataset_id:
+            continue
+        mapping_by_role[role] = dict(
+            al_actions.dataset_mappings(
+                context,
+                role_dataset_id,
+            )
+            or {}
+        )
+
+    if requires_image:
+        if not image_column:
+            errors.append(
+                f"Core ML recipe {recipe_id!r} requires image input. Choose "
+                "an Image column in the Active Learning Train tab, or map "
+                "dataset semantic 'image.path'/'image.uri'."
+            )
+            if suggested_image_column:
+                warnings.append(
+                    "Suggested image column from its name: "
+                    f"{suggested_image_column!r}. Confirm it in the Train tab "
+                    "to save the mapping across the AL datasets."
+                )
+        else:
+            for role in ("training", "validation", "test"):
+                role_dataset_id = role_dataset_ids.get(role)
+                if not role_dataset_id:
+                    continue
+                columns = role_columns.get(role)
+                if columns is None:
+                    continue
+                if image_column not in columns:
+                    errors.append(
+                        f"The {role} dataset {role_dataset_id!r} does not "
+                        f"contain the selected image column "
+                        f"{image_column!r}."
+                    )
+
+            existing_aliases = {
+                key: str(resolved_recipe_params.get(key) or "").strip()
+                for key in IMAGE_CANONICAL_PARAM_KEYS
+                if resolved_recipe_params.get(key) not in (None, "")
+            }
+            if strict_existing:
+                if not existing_aliases:
+                    errors.append(
+                        "The saved Core ML resume request does not contain an "
+                        "explicit image-column binding."
+                    )
+                mismatched = {
+                    key: value
+                    for key, value in existing_aliases.items()
+                    if value != image_column
+                }
+                if mismatched:
+                    errors.append(
+                        "The saved Core ML image binding no longer matches the "
+                        "Active Learning dataset: "
+                        + ", ".join(
+                            f"{key}={value!r}"
+                            for key, value in sorted(mismatched.items())
+                        )
+                        + f"; resolved={image_column!r}."
+                    )
+
+            if not strict_existing or not errors:
+                ensure_image_params(
+                    resolved_recipe_params,
+                    image_column,
+                )
+    elif image_column:
+        ensure_image_params(resolved_recipe_params, image_column)
+
+    mapped_roles = {
+        role: bool(
+            image_column
+            and mappings.get("image.path") == image_column
+            and mappings.get("image.uri") == image_column
+        )
+        for role, mappings in mapping_by_role.items()
+        if role in {"training", "validation", "test"}
+    }
+
+    return {
+        "ok": not errors,
+        "errors": errors,
+        "warnings": warnings,
+        "recipe_id": recipe_id,
+        "modality": modality or "unknown",
+        "requires_image": requires_image,
+        "image_column": image_column,
+        "image_column_source": image_column_source,
+        "suggested_image_column": suggested_image_column,
+        "image_column_options": common_image_columns,
+        "dataset_id": source_dataset_id,
+        "role_dataset_ids": role_dataset_ids,
+        "role_columns": role_columns,
+        "mapping_by_role": mapping_by_role,
+        "mapped_roles": mapped_roles,
+        "mappings_complete": bool(mapped_roles)
+        and all(mapped_roles.values()),
+        "recipe_params": resolved_recipe_params,
+    }
 
 def sanitize_recipe_params_for_al_training(params: Mapping[str, Any], *, available_columns: Optional[Sequence[str]] = None) -> Dict[str, Any]:
     """Return recipe params safe for AL scratch retraining.
@@ -527,7 +1141,6 @@ def _resolve_training_control(context: Any, control_id: str) -> Any:
         )
     return control
 
-
 def _call_registered_training_action(
     context: Any,
     request: ActionRequest,
@@ -558,8 +1171,6 @@ def _call_registered_training_action(
         return dict(raw)
     return {"ok": True, "result": raw}
 
-
-
 _RESUME_REFERENCE_KEYS = (
     "resume_checkpoint_artifact_id",
     "resume_manifest_path",
@@ -568,7 +1179,6 @@ _RESUME_REFERENCE_KEYS = (
 
 ARTIFACT_RESUME_REQUEST = "al.resume_request"
 ARTIFACT_RESUME_DIAGNOSTIC = "al.resume_diagnostic"
-
 
 _RESUME_RUNTIME_OVERRIDE_KEYS = (
     "device",
@@ -580,8 +1190,6 @@ _RESUME_RUNTIME_OVERRIDE_KEYS = (
     "keep_failed_work_dir",
     "trust_external_checkpoint",
 )
-
-
 
 def _safe_resume_value(value: Any, *, depth: int = 0) -> Any:
     """Return a bounded, status-safe representation of resume metadata."""
@@ -640,7 +1248,6 @@ def _safe_resume_value(value: Any, *, depth: int = 0) -> Any:
         }
     return repr(value)[:500]
 
-
 def _artifact_payload(context: Any, artifact_id: str) -> Dict[str, Any]:
     artifact_id = str(artifact_id or "").strip()
     if not artifact_id:
@@ -658,7 +1265,6 @@ def _artifact_payload(context: Any, artifact_id: str) -> Dict[str, Any]:
             "payload_type": type(payload).__name__,
         }
     return dict(payload)
-
 
 def _store_resume_request(
     context: Any,
@@ -703,7 +1309,6 @@ def _store_resume_request(
         )
     )
 
-
 def _load_resume_request(
     context: Any,
     *,
@@ -732,7 +1337,6 @@ def _load_resume_request(
         )
     return artifact_id, payload
 
-
 def _apply_resume_overrides(
     base_params: Mapping[str, Any],
     *,
@@ -756,14 +1360,12 @@ def _apply_resume_overrides(
     result.pop("training_control_id", None)
     return result
 
-
 def _checkpoint_reference(params: Mapping[str, Any]) -> tuple[str, str]:
     for key in _RESUME_REFERENCE_KEYS:
         value = str(params.get(key) or "").strip()
         if value:
             return key, value
     return "", ""
-
 
 def _resume_debug_snapshot(
     context: Any,
@@ -824,8 +1426,11 @@ def _resume_debug_snapshot(
                 "training_row_ids",
                 "target_column",
                 "label_column",
+                "task",
                 "task_type",
                 "problem_type",
+                "image_column",
+                "image_path_column",
                 "seed",
                 "random_seed",
             }
@@ -848,8 +1453,6 @@ def _resume_debug_snapshot(
     )
     debug["diagnostic_artifact_id"] = str(diagnostic_artifact_id)
     return debug
-
-
 
 def _exception_debug_chain(exc: BaseException) -> List[Dict[str, Any]]:
     """Capture bounded exception metadata without assuming Core ML types."""
@@ -908,7 +1511,6 @@ def _exception_debug_chain(exc: BaseException) -> List[Dict[str, Any]]:
             current = None
     return chain
 
-
 def _compact_debug_json(value: Any, *, limit: int = 12000) -> str:
     try:
         text = json.dumps(
@@ -923,7 +1525,6 @@ def _compact_debug_json(value: Any, *, limit: int = 12000) -> str:
     if len(text) > limit:
         return text[:limit] + "\n... <truncated>"
     return text
-
 
 def _resume_debug_report(debug: Mapping[str, Any]) -> str:
     return "\n".join(
@@ -999,13 +1600,11 @@ def _resume_debug_status(debug: Mapping[str, Any]) -> str:
         f"diagnostic_artifact={debug.get('diagnostic_artifact_id')!r}."
     )
 
-
 def _resume_requested(params: Mapping[str, Any]) -> bool:
     return bool(params.get("resume_al_training")) or any(
         params.get(key) not in (None, "")
         for key in _RESUME_REFERENCE_KEYS
     )
-
 
 def _training_membership_signature(row_ids: Sequence[str]) -> str:
     digest = hashlib.sha256()
@@ -1014,7 +1613,6 @@ def _training_membership_signature(row_ids: Sequence[str]) -> str:
         digest.update(len(encoded).to_bytes(8, "big"))
         digest.update(encoded)
     return digest.hexdigest()
-
 
 def _latest_paused_training_event(
     session: Mapping[str, Any],
@@ -1026,7 +1624,6 @@ def _latest_paused_training_event(
         if event in {"training_paused", "training_pause"}:
             return dict(raw_event)
     return {}
-
 
 def _paused_training_materialization(
     context: Any,
@@ -1256,7 +1853,6 @@ def _paused_training_materialization(
         "resumed_from_pause": True,
     }
 
-
 def _exact_resume_recipe_params(
     *,
     params: Mapping[str, Any],
@@ -1278,7 +1874,6 @@ def _exact_resume_recipe_params(
         if value not in (None, ""):
             resume_params[key] = value
     return resume_params
-
 
 def _interrupted_training_result(
     context: Any,
@@ -1435,14 +2030,12 @@ def _interrupted_training_result(
     al_actions.publish(context, f"al.round.training_{status}", payload)
     return {"ok": True, **payload}
 
-
 def _is_training_cancelled(exc: BaseException) -> bool:
     return type(exc).__name__ in {
         "CancelledError",
         "MLRecipeCancelled",
         "JobCancelled",
     }
-
 
 def run_training_round(
     context: Any,
@@ -1484,6 +2077,43 @@ def run_training_round(
 
     dataset_id = acquisition.session_pool_dataset_id(session)
     seed = int(params.get("seed", session.get("seed", 42)))
+
+    initial_contract = preflight_al_training_data_contract(
+        context,
+        session=session,
+        params=params,
+        profile_info=profile_info,
+        dataset_id=dataset_id,
+    )
+    if not initial_contract["ok"]:
+        raise ValueError(" ".join(initial_contract["errors"]))
+    initial_image_column = str(
+        initial_contract.get("image_column") or ""
+    ).strip()
+    if initial_image_column:
+        mapping_applier = getattr(
+            al_actions,
+            "apply_image_mapping_to_session_datasets",
+            None,
+        )
+        if callable(mapping_applier):
+            mapping_applier(
+                context,
+                session,
+                initial_image_column,
+                source=f"{ORIGIN}.train_from_session",
+                strict=True,
+            )
+        session["image_column"] = initial_image_column
+        session["image_path_column"] = initial_image_column
+        params["image_column"] = initial_image_column
+        params["image_path_column"] = initial_image_column
+        nested_recipe_params = dict(params.get("recipe_params") or {})
+        ensure_image_params(
+            nested_recipe_params,
+            initial_image_column,
+        )
+        params["recipe_params"] = nested_recipe_params
 
     start_payload = {
         "session_artifact_id": session_artifact_id,
@@ -1609,11 +2239,6 @@ def run_training_round(
                     ),
                     available_columns=train_columns,
                 )
-                image_column = str(
-                    materialized.get("image_column") or ""
-                ).strip()
-                if image_column and image_column in train_columns:
-                    ensure_image_params(recipe_params, image_column)
                 recipe_params.update(
                     {
                         "dataset_id": train_dataset_id,
@@ -1674,9 +2299,6 @@ def run_training_round(
                 ),
                 available_columns=train_columns,
             )
-            image_column = str(materialized.get("image_column") or "").strip()
-            if image_column and image_column in train_columns:
-                ensure_image_params(recipe_params, image_column)
             recipe_params.update(
                 {
                     "dataset_id": train_dataset_id,
@@ -1714,6 +2336,34 @@ def run_training_round(
             if id_column:
                 recipe_params.setdefault("record_id_column", id_column)
             request_row_ids = training_row_ids
+
+        image_contract = preflight_al_training_data_contract(
+            context,
+            session=session,
+            params=params,
+            profile_info=profile_info,
+            dataset_id=train_dataset_id,
+            recipe_params=recipe_params,
+            available_columns=train_columns,
+            strict_existing=bool(
+                resume_requested
+                and locals().get("exact_request_replayed", False)
+            ),
+        )
+        if not image_contract["ok"]:
+            raise ValueError(" ".join(image_contract["errors"]))
+        recipe_params = dict(image_contract["recipe_params"])
+
+        recipe_params = _apply_al_task_contract(
+            context,
+            recipe_id=recipe_id,
+            task_type=task_type,
+            params=recipe_params,
+            strict_existing=bool(
+                resume_requested
+                and locals().get("exact_request_replayed", False)
+            ),
+        )
 
         ml_request = ActionRequest(
             dataset_id=train_dataset_id,
@@ -1886,6 +2536,7 @@ def run_training_round(
     workflow_errors: List[Dict[str, str]] = []
 
     if bool(params.get("auto_predict", True)):
+        workflow_stage = "prediction"
         try:
             model_artifact_id = al_state.latest_reference(
                 updated_session,
@@ -1926,6 +2577,10 @@ def run_training_round(
                 updated_session,
                 prediction_result=prediction_result,
             )
+            prediction_latest = dict(updated_session.get("latest") or {})
+            prediction_latest.pop("prediction_error", None)
+            prediction_latest.pop("prediction_failure_stage", None)
+            updated_session["latest"] = prediction_latest
             prediction_session_artifact_id = al_actions.put_session(
                 context,
                 updated_session,
@@ -1934,6 +2589,7 @@ def run_training_round(
             final_session_artifact_id = prediction_session_artifact_id
 
             if bool(params.get("auto_query", False)):
+                workflow_stage = "query"
                 query_request = ActionRequest(
                     artifact_id=al_state.latest_reference(
                         updated_session,
@@ -1967,8 +2623,38 @@ def run_training_round(
                 )
         except Exception as exc:
             workflow_errors.append(
-                {"stage": "prediction_or_query", "error": str(exc)}
+                {"stage": workflow_stage, "error": str(exc)}
             )
+            failed_session = al_state.coerce_session(updated_session)
+            failed_latest = dict(failed_session.get("latest") or {})
+            failure_key = (
+                "prediction_error"
+                if workflow_stage == "prediction"
+                else "query_error"
+            )
+            failed_latest[failure_key] = str(exc)
+            failed_latest["prediction_failure_stage"] = workflow_stage
+            failed_session["latest"] = failed_latest
+            failed_session.setdefault("history", []).append(
+                {
+                    "event": f"{workflow_stage}_failed",
+                    "round": int(failed_session.get("round", 0)),
+                    "error": str(exc),
+                    "timestamp": al_state.now(),
+                }
+            )
+            try:
+                failure_session_artifact_id = al_actions.put_session(
+                    context,
+                    failed_session,
+                    previous_artifact_id=final_session_artifact_id,
+                )
+                updated_session = failed_session
+                final_session_artifact_id = failure_session_artifact_id
+            except Exception:
+                # Preserve the original workflow error even if recording the
+                # diagnostic session revision also fails.
+                pass
             al_actions.publish(
                 context,
                 "al.round.prediction_or_query_failed",
@@ -1976,6 +2662,7 @@ def run_training_round(
                     "session_artifact_id": final_session_artifact_id,
                     "session_id": updated_session.get("session_id"),
                     "dataset_id": dataset_id,
+                    "stage": workflow_stage,
                     "error": str(exc),
                     "traceback": traceback.format_exc(),
                 },
@@ -2048,6 +2735,18 @@ def run_training_round(
         "ml_result": al_state.json_safe_summary(ml_result),
         "prediction_result": al_state.json_safe_summary(prediction_result),
         "query_result": al_state.json_safe_summary(query_result),
+        "model_artifact_id": al_state.latest_reference(
+            updated_session,
+            "model_artifact_id",
+        ),
+        "predictions_artifact_id": al_state.latest_reference(
+            updated_session,
+            "predictions_artifact_id",
+        ),
+        "prediction_error": str(
+            (updated_session.get("latest") or {}).get("prediction_error")
+            or ""
+        ),
     }
 
 def training_dataframe(
@@ -2200,10 +2899,49 @@ def resolve_class_labels(*, params: Mapping[str, Any], session: Mapping[str, Any
     return values
 
 def list_dataset_columns(context: Any, dataset_id: str) -> List[str]:
-    try:
-        return [str(column) for column in context.datasets.list_columns(dataset_id)]
-    except Exception:
-        return [str(column) for column in context.datasets.get_df(dataset_id).columns]
+    """Return source metadata without materialising the dataset."""
+
+    dataset_id = str(dataset_id or "").strip()
+    if not dataset_id:
+        return []
+
+    datasets = getattr(context, "datasets", None)
+    if datasets is None:
+        raise RuntimeError("The platform dataset manager is not available.")
+
+    list_columns = getattr(datasets, "list_columns", None)
+    if callable(list_columns):
+        try:
+            columns = [
+                str(column)
+                for column in list_columns(dataset_id)
+                if column not in (None, "")
+            ]
+            if columns:
+                return columns
+        except Exception:
+            pass
+
+    get_source = getattr(datasets, "get_source", None)
+    if callable(get_source):
+        source = get_source(dataset_id)
+        columns_value = getattr(source, "columns", None)
+        columns_value = (
+            columns_value()
+            if callable(columns_value)
+            else columns_value
+        )
+        columns = [
+            str(column)
+            for column in (columns_value or [])
+            if column not in (None, "")
+        ]
+        if columns:
+            return columns
+
+    raise RuntimeError(
+        f"Dataset {dataset_id!r} does not expose column metadata."
+    )
 
 def parse_string_list(value: Any) -> List[str]:
     if value is None:

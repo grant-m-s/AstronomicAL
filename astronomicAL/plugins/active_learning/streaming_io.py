@@ -17,6 +17,128 @@ class PredictionRecordBatch:
     def row_count(self) -> int:
         return len(self.records)
 
+PREDICTION_ID_METADATA_KEYS = (
+    "record_id_column",
+    "row_id_column",
+    "id_column",
+    "prediction_id_column",
+)
+PREDICTION_ID_ALIASES = (
+    "row_id",
+    "record_id",
+    "id",
+)
+PREDICTION_METADATA_CONTAINER_KEYS = (
+    "prediction_ref",
+    "prediction_table",
+    "storage",
+    "metadata",
+    "params",
+    "request",
+    "inputs",
+    "dataset",
+    "prediction_dataset",
+    "binding",
+    "data_binding",
+    "provenance",
+)
+
+
+def prediction_record_id_column(
+    payload: Mapping[str, Any],
+    *,
+    storage: Optional[Mapping[str, Any]] = None,
+    available_columns: Optional[Sequence[str]] = None,
+) -> Optional[str]:
+    """Resolve the physical identity column declared by a prediction artifact.
+
+    Prediction tables are allowed to retain the source dataset's record-id column
+    name instead of renaming it to ``row_id``.  Consumers must therefore use the
+    artifact metadata first and only fall back to conventional aliases.
+    """
+
+    candidates: list[str] = []
+    seen_objects: set[int] = set()
+
+    def add(value: Any) -> None:
+        text = str(value or "").strip()
+        if text and text not in candidates:
+            candidates.append(text)
+
+    def visit(value: Any, depth: int = 0) -> None:
+        if depth > 5 or not isinstance(value, Mapping):
+            return
+        object_id = id(value)
+        if object_id in seen_objects:
+            return
+        seen_objects.add(object_id)
+        for key in PREDICTION_ID_METADATA_KEYS:
+            add(value.get(key))
+        for key in PREDICTION_METADATA_CONTAINER_KEYS:
+            nested = value.get(key)
+            if isinstance(nested, Mapping):
+                visit(nested, depth + 1)
+
+    if isinstance(storage, Mapping):
+        visit(storage)
+    visit(payload)
+
+    if available_columns is None:
+        return candidates[0] if candidates else None
+
+    columns = [str(column) for column in available_columns]
+    lookup = {column.lower(): column for column in columns}
+    for candidate in candidates:
+        if candidate in columns:
+            return candidate
+        matched = lookup.get(candidate.lower())
+        if matched:
+            return matched
+    for candidate in PREDICTION_ID_ALIASES:
+        if candidate in columns:
+            return candidate
+        matched = lookup.get(candidate.lower())
+        if matched:
+            return matched
+    return None
+
+
+def prediction_parquet_columns(storage: Mapping[str, Any]) -> list[str]:
+    """Return Parquet columns without materialising prediction rows."""
+
+    paths = [str(path) for path in storage.get("parquet_parts") or [] if str(path)]
+    if not paths:
+        uri = str(storage.get("uri") or "").strip()
+        format_name = str(storage.get("format") or "").strip().lower()
+        if uri and (Path(uri).suffix.lower() == ".parquet" or "parquet" in format_name):
+            paths = [uri]
+    if not paths:
+        return []
+
+    try:
+        import duckdb
+    except Exception:
+        return []
+
+    quoted_paths = ", ".join(
+        "'" + path.replace("'", "''") + "'"
+        for path in paths
+    )
+    connection = duckdb.connect(database=":memory:")
+    try:
+        rows = connection.execute(
+            f"DESCRIBE SELECT * FROM read_parquet([{quoted_paths}]) LIMIT 0"
+        ).fetchall()
+    except Exception:
+        return []
+    finally:
+        connection.close()
+    return [str(row[0]) for row in rows if row]
+
+
+def _quote_identifier(value: Any) -> str:
+    return '"' + str(value).replace('"', '""') + '"'
+
 def iter_prediction_record_batches(
     payload: Mapping[str, Any],
     *,
@@ -33,6 +155,7 @@ def iter_prediction_record_batches(
     batch_size = max(1, int(batch_size))
     inline = [dict(value) for value in payload.get("records") or [] if isinstance(value, Mapping)]
     storage = prediction_storage_ref(payload)
+    id_column = prediction_record_id_column(payload, storage=storage)
     inline_complete = bool(payload.get("records_inline_complete"))
 
     if inline and (inline_complete or storage is None):
@@ -40,6 +163,7 @@ def iter_prediction_record_batches(
             inline,
             batch_size=batch_size,
             cancel_token=cancel_token,
+            id_column=id_column,
         )
         return
 
@@ -51,6 +175,7 @@ def iter_prediction_record_batches(
                 [dict(value) for value in rows if isinstance(value, Mapping)],
                 batch_size=batch_size,
                 cancel_token=cancel_token,
+                id_column=id_column,
             )
             return
         raise ValueError(
@@ -84,7 +209,9 @@ def iter_prediction_record_batches(
                 raise TypeError(
                     f"Prediction JSONL row {line_number} must be an object, got {type(raw).__name__}."
                 )
-            buffer.append(normalise_prediction_record(raw))
+            buffer.append(
+                normalise_prediction_record(raw, id_column=id_column)
+            )
             if len(buffer) >= batch_size:
                 yield PredictionRecordBatch(
                     records=buffer,
@@ -137,7 +264,17 @@ def prediction_records_by_ids(
     requested_set = set(requested)
     storage = prediction_storage_ref(payload)
     parquet_parts = list((storage or {}).get("parquet_parts") or [])
-    if parquet_parts:
+    parquet_columns = (
+        prediction_parquet_columns(storage)
+        if storage and parquet_parts
+        else []
+    )
+    parquet_id_column = prediction_record_id_column(
+        payload,
+        storage=storage,
+        available_columns=parquet_columns,
+    )
+    if parquet_parts and parquet_id_column:
         try:
             import duckdb
 
@@ -152,21 +289,31 @@ def prediction_records_by_ids(
                     "'" + str(path).replace("'", "''") + "'"
                     for path in parquet_parts
                 )
+                quoted_id = _quote_identifier(parquet_id_column)
                 frame = connection.execute(
-                    f"SELECT p.* FROM read_parquet([{paths}]) p "
-                    "JOIN requested_ids r ON r.row_id = CAST(p.row_id AS VARCHAR)"
+                    f"SELECT p.*, CAST(p.{quoted_id} AS VARCHAR) "
+                    f"AS __al_prediction_row_id "
+                    f"FROM read_parquet([{paths}]) p "
+                    f"JOIN requested_ids r ON "
+                    f"r.row_id = CAST(p.{quoted_id} AS VARCHAR)"
                 ).df()
             finally:
                 connection.close()
             records: Dict[str, Dict[str, Any]] = {}
             if frame is not None and not frame.empty:
                 for raw in frame.to_dict(orient="records"):
-                    record = normalise_prediction_record(raw)
+                    record = normalise_prediction_record(
+                        raw,
+                        id_column="__al_prediction_row_id",
+                    )
+                    record.pop("__al_prediction_row_id", None)
                     row_id = str(record.get("row_id") or "")
                     if row_id:
                         records[row_id] = record
                 return records
         except Exception:
+            # The canonical JSONL sidecar is the correctness fallback when an
+            # optional Parquet mirror has an incomplete schema.
             pass
 
     found: Dict[str, Dict[str, Any]] = {}
@@ -183,7 +330,6 @@ def prediction_records_by_ids(
             break
     return found
 
-
 def prediction_storage_ref(payload: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
     direct = payload.get("prediction_ref")
     if isinstance(direct, Mapping) and direct.get("uri"):
@@ -195,9 +341,19 @@ def prediction_storage_ref(payload: Mapping[str, Any]) -> Optional[Dict[str, Any
             return dict(storage)
     return None
 
-def normalise_prediction_record(value: Mapping[str, Any]) -> Dict[str, Any]:
+def normalise_prediction_record(
+    value: Mapping[str, Any],
+    *,
+    id_column: Optional[str] = None,
+) -> Dict[str, Any]:
     record = dict(value)
-    row_id = record.get("row_id", record.get("record_id", record.get("id")))
+    row_id = (
+        record.get(str(id_column))
+        if id_column and str(id_column) in record
+        else None
+    )
+    if row_id in (None, ""):
+        row_id = record.get("row_id", record.get("record_id", record.get("id")))
     if row_id not in (None, ""):
         record["row_id"] = str(row_id)
         record.setdefault("record_id", str(row_id))
@@ -237,12 +393,13 @@ def _iter_sequence_batches(
     *,
     batch_size: int,
     cancel_token: Any,
+    id_column: Optional[str] = None,
 ) -> Iterator[PredictionRecordBatch]:
     offset = 0
     for batch_index, start in enumerate(range(0, len(rows), batch_size)):
         check_cancelled(cancel_token)
         records = [
-            normalise_prediction_record(value)
+            normalise_prediction_record(value, id_column=id_column)
             for value in rows[start : start + batch_size]
         ]
         yield PredictionRecordBatch(

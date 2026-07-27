@@ -1026,6 +1026,275 @@ def dataset_mappings(context: Any, dataset_id: str) -> Dict[str, str]:
     except Exception:
         return {}
 
+
+def active_learning_dataset_ids(
+    session: Mapping[str, Any],
+    *,
+    include_source: bool = True,
+) -> Dict[str, str]:
+    """Return the registered datasets participating in an AL session."""
+
+    payload = dict(session or {})
+    contract = dict(payload.get("contract") or {})
+    protocol = dict(contract.get("data_protocol") or {})
+
+    def protocol_dataset(role: str) -> str:
+        value = protocol.get(role)
+        if isinstance(value, Mapping):
+            return str(value.get("dataset_id") or "").strip()
+        return ""
+
+    source_dataset_id = str(
+        payload.get("dataset_id")
+        or protocol.get("source_dataset_id")
+        or ""
+    ).strip()
+    result: Dict[str, str] = {}
+    if include_source and source_dataset_id:
+        result["source"] = source_dataset_id
+
+    for role, value in (
+        (
+            "pool",
+            payload.get("pool_dataset_id")
+            or protocol_dataset("pool")
+            or source_dataset_id,
+        ),
+        (
+            "validation",
+            payload.get("validation_dataset_id")
+            or protocol_dataset("validation"),
+        ),
+        (
+            "test",
+            payload.get("test_dataset_id")
+            or protocol_dataset("test"),
+        ),
+    ):
+        dataset_id = str(value or "").strip()
+        if dataset_id:
+            result[role] = dataset_id
+    return result
+
+
+def _dataset_columns(context: Any, dataset_id: str) -> List[str]:
+    manager = getattr(context, "datasets", None)
+    if manager is None:
+        raise RuntimeError("Dataset manager is unavailable.")
+
+    list_columns = getattr(manager, "list_columns", None)
+    if callable(list_columns):
+        return [str(column) for column in list_columns(dataset_id)]
+
+    get_source = getattr(manager, "get_source", None)
+    if callable(get_source):
+        source = get_source(dataset_id)
+        columns = getattr(source, "columns", None)
+        if callable(columns):
+            return [str(column) for column in columns()]
+
+    raise RuntimeError(
+        f"Dataset manager cannot list columns for {dataset_id!r}."
+    )
+
+
+def apply_image_mapping_to_session_datasets(
+    context: Any,
+    session: Mapping[str, Any],
+    column_name: str,
+    *,
+    source: str = "core.active_learning",
+    strict: bool = True,
+) -> Dict[str, Any]:
+    """Apply one authoritative image binding to every AL dataset registration."""
+
+    column_name = str(column_name or "").strip()
+    if not column_name:
+        raise ValueError("An image column must be selected.")
+
+    role_dataset_ids = active_learning_dataset_ids(
+        session,
+        include_source=True,
+    )
+    unique_dataset_roles: Dict[str, List[str]] = {}
+    for role, dataset_id in role_dataset_ids.items():
+        unique_dataset_roles.setdefault(str(dataset_id), []).append(str(role))
+
+    columns_by_dataset: Dict[str, List[str]] = {}
+    missing_by_dataset: Dict[str, List[str]] = {}
+    for dataset_id, roles in unique_dataset_roles.items():
+        try:
+            columns = _dataset_columns(context, dataset_id)
+        except Exception as exc:
+            missing_by_dataset[dataset_id] = [
+                *roles,
+                f"inspection failed: {exc}",
+            ]
+            continue
+        columns_by_dataset[dataset_id] = columns
+        if column_name not in columns:
+            missing_by_dataset[dataset_id] = list(roles)
+
+    if strict and missing_by_dataset:
+        details = []
+        for dataset_id, roles in missing_by_dataset.items():
+            details.append(
+                f"{dataset_id!r} ({', '.join(str(role) for role in roles)})"
+            )
+        raise ValueError(
+            f"Image column {column_name!r} is not available in every Active "
+            "Learning dataset: "
+            + "; ".join(details)
+        )
+
+    manager = getattr(context, "datasets", None)
+    set_mapping = getattr(manager, "set_mapping", None)
+    get_mapping = getattr(manager, "get_mapping", None)
+    if not callable(set_mapping):
+        raise RuntimeError(
+            "DatasetManager.set_mapping() is required to persist the "
+            "Active Learning image binding."
+        )
+
+    changed: List[Dict[str, Any]] = []
+    unchanged: List[Dict[str, Any]] = []
+    semantic_names = ("image.path", "image.uri")
+    for dataset_id, roles in unique_dataset_roles.items():
+        if dataset_id in missing_by_dataset:
+            continue
+        for semantic_name in semantic_names:
+            old_value = (
+                get_mapping(dataset_id, semantic_name)
+                if callable(get_mapping)
+                else dataset_mappings(context, dataset_id).get(semantic_name)
+            )
+            did_change = bool(
+                set_mapping(dataset_id, semantic_name, column_name)
+            )
+            item = {
+                "dataset_id": dataset_id,
+                "roles": list(roles),
+                "semantic_name": semantic_name,
+                "column_name": column_name,
+                "old_column_name": old_value,
+                "changed": did_change,
+            }
+            if did_change:
+                changed.append(item)
+                publish(
+                    context,
+                    "dataset.mapping.updated",
+                    {
+                        **item,
+                        "source": str(source),
+                        "required": True,
+                    },
+                )
+            else:
+                unchanged.append(item)
+
+    return {
+        "ok": not missing_by_dataset,
+        "column_name": column_name,
+        "role_dataset_ids": role_dataset_ids,
+        "dataset_ids": list(unique_dataset_roles),
+        "columns_by_dataset": columns_by_dataset,
+        "missing_by_dataset": missing_by_dataset,
+        "changed": changed,
+        "unchanged": unchanged,
+    }
+
+
+def save_session_image_binding(
+    context: Any,
+    *,
+    session_artifact_id: str,
+    session: Mapping[str, Any],
+    column_name: str,
+    source: str = "core.active_learning.train_tab",
+) -> Dict[str, Any]:
+    """Persist a Train-tab image binding and propagate dataset mappings."""
+
+    session_artifact_id = str(session_artifact_id or "").strip()
+    if not session_artifact_id:
+        raise ValueError(
+            "An Active Learning session artifact is required to save the "
+            "image binding."
+        )
+    column_name = str(column_name or "").strip()
+    if not column_name:
+        raise ValueError("An image column must be selected.")
+
+    mapping_result = apply_image_mapping_to_session_datasets(
+        context,
+        session,
+        column_name,
+        source=source,
+        strict=True,
+    )
+
+    updated = al_state.coerce_session(session)
+    current_column = str(
+        updated.get("image_column")
+        or updated.get("image_path_column")
+        or ""
+    ).strip()
+    session_changed = current_column != column_name
+
+    if session_changed:
+        updated["image_column"] = column_name
+        updated["image_path_column"] = column_name
+
+        contract = dict(updated.get("contract") or {})
+        contract["image_binding"] = {
+            "schema_version": 1,
+            "column_name": column_name,
+            "semantic_names": ["image.path", "image.uri"],
+            "role_dataset_ids": dict(
+                mapping_result.get("role_dataset_ids") or {}
+            ),
+        }
+        updated["contract"] = contract
+
+        latest = dict(updated.get("latest") or {})
+        latest["image_column"] = column_name
+        updated["latest"] = latest
+
+        updated.setdefault("history", []).append(
+            {
+                "event": "image_mapping_updated",
+                "image_column": column_name,
+                "dataset_ids": list(
+                    mapping_result.get("dataset_ids") or []
+                ),
+                "timestamp": al_state.now(),
+            }
+        )
+
+    mapping_changed = bool(mapping_result.get("changed"))
+    if session_changed:
+        new_session_artifact_id = put_session(
+            context,
+            updated,
+            previous_artifact_id=session_artifact_id,
+        )
+    else:
+        new_session_artifact_id = session_artifact_id
+
+    payload = {
+        "session_artifact_id": new_session_artifact_id,
+        "previous_session_artifact_id": session_artifact_id,
+        "session_id": updated.get("session_id"),
+        "image_column": column_name,
+        "session_changed": session_changed,
+        "mapping_changed": mapping_changed,
+        "mapping_result": mapping_result,
+        "source": str(source),
+    }
+    publish(context, "al.session.image_mapping.updated", payload)
+    return {"ok": True, **payload}
+
+
 def filter_mappings_to_columns(mappings: Mapping[str, str], columns: Iterable[Any]) -> Dict[str, str]:
     available = {str(column) for column in columns}
     return {str(k): str(v) for k, v in dict(mappings or {}).items() if str(v) in available}

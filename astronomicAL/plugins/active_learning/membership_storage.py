@@ -21,6 +21,8 @@ from .streaming_io import (
     check_cancelled,
     iter_prediction_record_batches,
     normalise_prediction_record,
+    prediction_parquet_columns,
+    prediction_record_id_column,
     prediction_storage_ref,
 )
 
@@ -39,7 +41,6 @@ MEMBERSHIP_COLUMNS = (
     "round",
     "updated_at",
 )
-
 
 @dataclass(frozen=True)
 class MembershipTableRef:
@@ -110,14 +111,12 @@ class MembershipTableRef:
             parquet_size_bytes=(None if value.get("parquet_size_bytes") in (None, "") else int(value.get("parquet_size_bytes"))),
         )
 
-
 @dataclass
 class EligibilityScanStats:
     mode: str = "stream_filter"
     source_row_count: int = 0
     eligible_row_count: int = 0
     excluded_row_count: int = 0
-
 
 @dataclass
 class ExclusionPlan:
@@ -133,7 +132,6 @@ class ExclusionPlan:
     def estimated_excluded_count(self) -> int:
         durable = int(self.membership_ref.excluded_count) if self.membership_ref else 0
         return durable + len(self.explicit_row_ids | self.legacy_row_ids)
-
 
 class MembershipTableWriter:
     def __init__(
@@ -286,7 +284,6 @@ class MembershipTableWriter:
             self.abort()
         return False
 
-
 def iter_membership_rows_from_session(
     session: Mapping[str, Any],
 ) -> Iterator[Dict[str, Any]]:
@@ -329,7 +326,6 @@ def iter_membership_rows_from_session(
             "updated_at": updated_at,
         }
 
-
 def membership_rows_from_session(session: Mapping[str, Any]) -> list[Dict[str, Any]]:
     return list(iter_membership_rows_from_session(session))
 
@@ -367,7 +363,6 @@ def membership_content_sha256(session: Mapping[str, Any]) -> str:
         digest.update(b"\n")
     return digest.hexdigest()
 
-
 def ensure_membership_table(
     context: Any,
     session: Mapping[str, Any],
@@ -403,7 +398,6 @@ def ensure_membership_table(
         ref = writer.finalize(content_sha256=content_sha)
     return ref, True
 
-
 def membership_ref_from_session(session: Mapping[str, Any]) -> Optional[MembershipTableRef]:
     raw = session.get("membership_table_ref")
     if not isinstance(raw, Mapping):
@@ -413,7 +407,6 @@ def membership_ref_from_session(session: Mapping[str, Any]) -> Optional[Membersh
     except Exception:
         return None
     return ref if ref.uri else None
-
 
 def exclusion_plan_from_session(
     session: Mapping[str, Any],
@@ -437,7 +430,6 @@ def exclusion_plan_from_session(
         legacy_row_ids=legacy,
     )
 
-
 def iter_membership_rows(ref: MembershipTableRef | Mapping[str, Any]) -> Iterator[Dict[str, Any]]:
     resolved = MembershipTableRef.from_value(ref)
     path = Path(resolved.uri).expanduser()
@@ -453,7 +445,6 @@ def iter_membership_rows(ref: MembershipTableRef | Mapping[str, Any]) -> Iterato
             if not isinstance(raw, Mapping):
                 raise TypeError(f"Membership row {line_number} must be an object")
             yield dict(raw)
-
 
 class MembershipLookup:
     """Disk-backed membership lookup used when a source-side anti-join is unavailable."""
@@ -551,7 +542,6 @@ class MembershipLookup:
         self.close()
         return False
 
-
 def iter_eligible_prediction_batches(
     predictions_payload: Mapping[str, Any],
     *,
@@ -561,9 +551,19 @@ def iter_eligible_prediction_batches(
 ) -> tuple[Iterator[PredictionRecordBatch], EligibilityScanStats]:
     stats = EligibilityScanStats()
     storage = prediction_storage_ref(predictions_payload)
+    parquet_columns: list[str] = []
+    prediction_id_column: Optional[str] = None
+    if storage and storage.get("parquet_parts") and duckdb_available():
+        parquet_columns = prediction_parquet_columns(storage)
+        prediction_id_column = prediction_record_id_column(
+            predictions_payload,
+            storage=storage,
+            available_columns=parquet_columns,
+        )
     if (
         storage
         and storage.get("parquet_parts")
+        and prediction_id_column
         and exclusion_plan.membership_ref is not None
         and exclusion_plan.membership_ref.parquet_parts
         and duckdb_available()
@@ -573,6 +573,7 @@ def iter_eligible_prediction_batches(
             _iter_duckdb_anti_join_batches(
                 predictions_payload,
                 storage=storage,
+                prediction_id_column=prediction_id_column,
                 exclusion_plan=exclusion_plan,
                 batch_size=batch_size,
                 cancel_token=cancel_token,
@@ -580,7 +581,10 @@ def iter_eligible_prediction_batches(
             ),
             stats,
         )
-    stats.mode = "disk_index_filter" if exclusion_plan.membership_ref is not None else "in_memory_filter"
+    if storage and storage.get("parquet_parts") and not prediction_id_column:
+        stats.mode = "disk_index_filter_missing_parquet_identity"
+    else:
+        stats.mode = "disk_index_filter" if exclusion_plan.membership_ref is not None else "in_memory_filter"
     return (
         _iter_filtered_prediction_batches(
             predictions_payload,
@@ -591,7 +595,6 @@ def iter_eligible_prediction_batches(
         ),
         stats,
     )
-
 
 def _iter_filtered_prediction_batches(
     predictions_payload: Mapping[str, Any],
@@ -617,7 +620,17 @@ def _iter_filtered_prediction_batches(
             durable_excluded = lookup_cm.contains_many(ids) if lookup_cm is not None else set()
             for record, row_id in zip(batch.records, ids):
                 stats.source_row_count += 1
-                if not row_id or row_id in in_memory or row_id in durable_excluded:
+                if not row_id:
+                    available = ", ".join(
+                        sorted(str(key) for key in record.keys())[:20]
+                    )
+                    raise ValueError(
+                        "Prediction artifact records do not contain a usable "
+                        "record identity. Expected the declared record-id column "
+                        "or one of row_id/record_id/id. Available fields: "
+                        f"{available or 'none'}."
+                    )
+                if row_id in in_memory or row_id in durable_excluded:
                     stats.excluded_row_count += 1
                     continue
                 stats.eligible_row_count += 1
@@ -641,11 +654,11 @@ def _iter_filtered_prediction_batches(
         if lookup_cm is not None:
             lookup_cm.close()
 
-
 def _iter_duckdb_anti_join_batches(
     predictions_payload: Mapping[str, Any],
     *,
     storage: Mapping[str, Any],
+    prediction_id_column: str,
     exclusion_plan: ExclusionPlan,
     batch_size: int,
     cancel_token: Any,
@@ -673,15 +686,18 @@ def _iter_duckdb_anti_join_batches(
         member_sql = _read_parquet_sql(membership_paths)
         total = connection.execute(f"SELECT COUNT(*) FROM {pred_sql}").fetchone()[0]
         stats.source_row_count = int(total or 0)
+        quoted_prediction_id = _quote_identifier(prediction_id_column)
         sql = (
-            f"SELECT p.* FROM {pred_sql} AS p "
+            f"SELECT p.*, CAST(p.{quoted_prediction_id} AS VARCHAR) "
+            f"AS __al_prediction_row_id FROM {pred_sql} AS p "
             f"WHERE NOT EXISTS ("
             f"SELECT 1 FROM {member_sql} AS m "
-            f"WHERE CAST(m.row_id AS VARCHAR) = CAST(p.row_id AS VARCHAR) "
+            f"WHERE CAST(m.row_id AS VARCHAR) = "
+            f"CAST(p.{quoted_prediction_id} AS VARCHAR) "
             f"AND COALESCE(CAST(m.excluded AS BOOLEAN), FALSE)"
             f") AND NOT EXISTS ("
             f"SELECT 1 FROM explicit_exclusions e "
-            f"WHERE e.row_id = CAST(p.row_id AS VARCHAR)"
+            f"WHERE e.row_id = CAST(p.{quoted_prediction_id} AS VARCHAR)"
             f")"
         )
         cursor = connection.execute(sql)
@@ -693,7 +709,14 @@ def _iter_duckdb_anti_join_batches(
             rows = cursor.fetchmany(max(1, int(batch_size)))
             if not rows:
                 break
-            records = [normalise_prediction_record(dict(zip(columns, row))) for row in rows]
+            records = []
+            for row in rows:
+                record = normalise_prediction_record(
+                    dict(zip(columns, row)),
+                    id_column="__al_prediction_row_id",
+                )
+                record.pop("__al_prediction_row_id", None)
+                records.append(record)
             stats.eligible_row_count += len(records)
             yield PredictionRecordBatch(records=records, batch_index=batch_index, row_offset=offset)
             offset += len(records)
@@ -701,7 +724,6 @@ def _iter_duckdb_anti_join_batches(
         stats.excluded_row_count = max(0, stats.source_row_count - stats.eligible_row_count)
     finally:
         connection.close()
-
 
 def membership_output_root(context: Any, params: Mapping[str, Any]) -> Path:
     explicit = params.get("membership_output_dir") or params.get("artifact_root")
@@ -712,7 +734,6 @@ def membership_output_root(context: Any, params: Mapping[str, Any]) -> Path:
         root = Path(cache_dir).expanduser() / "active_learning" / "memberships" if cache_dir else Path.cwd() / ".astronomical" / "active_learning" / "memberships"
     root.mkdir(parents=True, exist_ok=True)
     return root
-
 
 def artifact_row_ids_ref(ref: MembershipTableRef | Mapping[str, Any]) -> Dict[str, Any]:
     resolved = MembershipTableRef.from_value(ref)
@@ -746,7 +767,6 @@ def artifact_row_ids_ref(ref: MembershipTableRef | Mapping[str, Any]) -> Dict[st
         },
     }
 
-
 def excluded_row_ids_preview(
     session: Mapping[str, Any],
     *,
@@ -764,7 +784,6 @@ def excluded_row_ids_preview(
             break
     return preview
 
-
 def parquet_available() -> bool:
     for module in ("duckdb", "pyarrow", "fastparquet"):
         try:
@@ -774,7 +793,6 @@ def parquet_available() -> bool:
             continue
     return False
 
-
 def duckdb_available() -> bool:
     try:
         import duckdb  # noqa: F401
@@ -782,7 +800,6 @@ def duckdb_available() -> bool:
         return True
     except Exception:
         return False
-
 
 def _write_parquet(frame: pd.DataFrame, path: Path) -> None:
     try:
@@ -802,7 +819,6 @@ def _write_parquet(frame: pd.DataFrame, path: Path) -> None:
     finally:
         connection.close()
 
-
 def _paths_sha256(paths: Iterable[Path]) -> str:
     digest = hashlib.sha256()
     for path in sorted(paths, key=lambda item: item.name):
@@ -812,10 +828,12 @@ def _paths_sha256(paths: Iterable[Path]) -> str:
                 digest.update(chunk)
     return digest.hexdigest()
 
-
 def _safe_name(value: Any) -> str:
     text = "".join(character if character.isalnum() or character in {"-", "_", "."} else "-" for character in str(value or "session")).strip("-._")
     return text[:96] or "session"
+
+def _quote_identifier(value: Any) -> str:
+    return '"' + str(value).replace('"', '""') + '"'
 
 
 def _read_parquet_sql(paths: Sequence[str]) -> str:

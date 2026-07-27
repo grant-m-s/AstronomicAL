@@ -14,11 +14,20 @@ from typing import Any, Dict, Optional
 import pandas as pd
 
 from astronomicAL.platform.dataset_sources import DatasetScan, DatasetSource
-from .protocol import DataBinding, Partitions, ProtocolConfig
+from .protocol import (
+    SPLIT_DIGEST_ALGORITHM,
+    SPLIT_IDENTITY_VERSION,
+    DataBinding,
+    Partitions,
+    ProtocolConfig,
+    SourceRevision,
+)
 from .split_manifest import (
     PartitionManifestMetadata,
     SplitManifestWriter,
+    canonical_json,
     json_scalar,
+    update_canonical_digest,
 )
 
 CancelCheck = Optional[Callable[[], None]]
@@ -37,9 +46,11 @@ def create_streaming_partitions(
     cancel_check: CancelCheck = None,
     selected_row_ids: Optional[Sequence[Any]] = None,
 ) -> Partitions:
-    """Create train/validation/test memberships without loading feature data.
+    """Create stable train/validation/test memberships using bounded scans.
 
-    Only record ID, target, and protocol-specific columns are scanned. A narrow
+    Record identity, targets, model inputs, and protocol columns are scanned so
+    source revisions cover every value capable of changing split, fit, or
+    evaluation semantics. A narrow
     temporary SQLite index provides deterministic global ranking and group/time
     operations while allowing the source scan and manifest write to remain
     bounded.
@@ -62,6 +73,7 @@ def create_streaming_partitions(
         task = _canonical_task(task_kind)
 
         scan_stats: Dict[str, Dict[str, int]] = {}
+        source_revision_inputs: Dict[str, Dict[str, Any]] = {}
         main_source = _get_source(context, source_dataset_id)
         main_columns = _required_columns(
             source=main_source,
@@ -70,6 +82,19 @@ def create_streaming_partitions(
             include_protocol_columns=need_validation_split or need_test_split,
         )
         selected_ids = _normalise_selected_row_ids(selected_row_ids)
+        source_revision_inputs[str(source_dataset_id)] = (
+            _source_revision_input(
+                source=main_source,
+                dataset_id=str(source_dataset_id),
+                columns=main_columns,
+                scope=(
+                    "selected_rows"
+                    if selected_ids is not None
+                    else "full_dataset"
+                ),
+                selected_row_ids=selected_ids,
+            )
+        )
         if selected_ids is None:
             scan_stats["train_source"] = _ingest_dataset(
                 connection,
@@ -127,6 +152,15 @@ def create_streaming_partitions(
                 protocol=protocol,
                 include_protocol_columns=False,
             )
+            source_revision_inputs[validation_dataset_id] = (
+                _source_revision_input(
+                    source=validation_source,
+                    dataset_id=validation_dataset_id,
+                    columns=validation_columns,
+                    scope="full_dataset",
+                    selected_row_ids=None,
+                )
+            )
             scan_stats["validation_source"] = _ingest_dataset(
                 connection,
                 source=validation_source,
@@ -150,6 +184,15 @@ def create_streaming_partitions(
                 binding=binding,
                 protocol=protocol,
                 include_protocol_columns=False,
+            )
+            source_revision_inputs[test_dataset_id] = (
+                _source_revision_input(
+                    source=test_source,
+                    dataset_id=test_dataset_id,
+                    columns=test_columns,
+                    scope="full_dataset",
+                    selected_row_ids=None,
+                )
             )
             scan_stats["test_source"] = _ingest_dataset(
                 connection,
@@ -179,6 +222,14 @@ def create_streaming_partitions(
         if task == "classification":
             _validate_partition_classes(connection, classes)
 
+        source_revisions = {
+            dataset_id: _build_source_revision(
+                connection,
+                **revision_input,
+            )
+            for dataset_id, revision_input in source_revision_inputs.items()
+        }
+
         writer = SplitManifestWriter(
             root=root_path,
             run_id=run_id,
@@ -186,6 +237,7 @@ def create_streaming_partitions(
             protocol_id=protocol.protocol_id,
             record_id_column=binding.record_id_column,
             target_column=binding.target_column,
+            source_revisions=source_revisions,
         )
         try:
             for role in _ROLE_ORDER:
@@ -247,6 +299,12 @@ def create_streaming_partitions(
                 "index_path_removed": True,
                 "role_counts": dict(role_counts),
                 "scan_stats": scan_stats,
+                "identity_version": SPLIT_IDENTITY_VERSION,
+                "digest_algorithm": SPLIT_DIGEST_ALGORITHM,
+                "source_revisions": {
+                    dataset_id: revision.to_dict()
+                    for dataset_id, revision in source_revisions.items()
+                },
                 "selected_row_count": (
                     None if selected_ids is None else len(selected_ids)
                 ),
@@ -293,8 +351,18 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             ON split_rows(group_key);
         CREATE INDEX split_rows_temporal
             ON split_rows(temporal_value, record_id_key);
+
+        CREATE TABLE source_revision_rows (
+            dataset_id TEXT NOT NULL,
+            record_id_key TEXT NOT NULL,
+            row_sha256 TEXT NOT NULL,
+            PRIMARY KEY (dataset_id, record_id_key)
+        );
+        CREATE INDEX source_revision_rows_dataset
+            ON source_revision_rows(dataset_id, record_id_key);
         """
     )
+
 
 def _get_source(context: Any, dataset_id: str) -> DatasetSource:
     datasets = getattr(context, "datasets", None)
@@ -320,17 +388,31 @@ def _required_columns(
     columns = [binding.record_id_column]
     if binding.target_column:
         columns.append(binding.target_column)
+    columns.extend(
+        str(column)
+        for column in (binding.input_columns or [])
+        if str(column).strip()
+    )
+    if binding.image_column:
+        columns.append(binding.image_column)
     if include_protocol_columns:
-        if protocol.split_strategy in {"by_group", "temporal"} and protocol.group_column:
+        if (
+            protocol.split_strategy in {"by_group", "temporal"}
+            and protocol.group_column
+        ):
             columns.append(protocol.group_column)
-        if protocol.split_strategy == "predefined" and protocol.split_column:
+        if (
+            protocol.split_strategy == "predefined"
+            and protocol.split_column
+        ):
             columns.append(protocol.split_column)
     columns = list(dict.fromkeys(str(column) for column in columns if column))
     available = set(source.columns())
     missing = [column for column in columns if column not in available]
     if missing:
         raise ValueError(
-            f"Dataset source is missing required split column(s): {', '.join(missing)}"
+            "Dataset source is missing ML identity column(s): "
+            + ", ".join(missing)
         )
     return columns
 
@@ -351,6 +433,159 @@ def _normalise_selected_row_ids(
     if not result:
         raise ValueError("The selected training row set is empty.")
     return result
+
+def _source_revision_input(
+    *,
+    source: DatasetSource,
+    dataset_id: str,
+    columns: Sequence[str],
+    scope: str,
+    selected_row_ids: Optional[Sequence[str]],
+) -> Dict[str, Any]:
+    canonical_columns = sorted(
+        dict.fromkeys(str(column) for column in columns if str(column))
+    )
+    source_dtypes = source.dtypes()
+    missing_dtypes = [
+        column for column in canonical_columns if column not in source_dtypes
+    ]
+    if missing_dtypes:
+        raise ValueError(
+            f"Dataset {dataset_id!r} did not report dtypes for identity "
+            f"column(s): {missing_dtypes!r}."
+        )
+    return {
+        "source": source,
+        "dataset_id": str(dataset_id),
+        "columns": canonical_columns,
+        "dtypes": {
+            column: str(source_dtypes[column])
+            for column in canonical_columns
+        },
+        "scope": str(scope),
+        "selected_row_ids": (
+            list(selected_row_ids)
+            if selected_row_ids is not None
+            else None
+        ),
+    }
+
+
+def _build_source_revision(
+    connection: sqlite3.Connection,
+    *,
+    source: DatasetSource,
+    dataset_id: str,
+    columns: Sequence[str],
+    dtypes: Mapping[str, str],
+    scope: str,
+    selected_row_ids: Optional[Sequence[str]],
+) -> SourceRevision:
+    canonical_columns = sorted(
+        dict.fromkeys(str(column) for column in columns if str(column))
+    )
+    canonical_dtypes = {
+        column: str(dtypes.get(column, ""))
+        for column in canonical_columns
+    }
+    selected_digest = (
+        _row_id_set_sha256(selected_row_ids)
+        if selected_row_ids is not None
+        else None
+    )
+    header = {
+        "identity_version": SPLIT_IDENTITY_VERSION,
+        "digest_algorithm": SPLIT_DIGEST_ALGORITHM,
+        "backend": str(getattr(source, "backend_name", "unknown")),
+        "scope": str(scope),
+        "columns": canonical_columns,
+        "dtypes": canonical_dtypes,
+        "selected_row_ids_sha256": selected_digest,
+    }
+
+    digest = hashlib.sha256()
+    update_canonical_digest(digest, header)
+    row_count = 0
+    cursor = connection.execute(
+        "SELECT record_id_key, row_sha256 "
+        "FROM source_revision_rows WHERE dataset_id = ? "
+        "ORDER BY record_id_key",
+        (str(dataset_id),),
+    )
+    for record_id_key, row_sha256 in cursor:
+        update_canonical_digest(
+            digest,
+            str(record_id_key),
+            str(row_sha256),
+        )
+        row_count += 1
+
+    if row_count <= 0:
+        raise ValueError(
+            f"Dataset {dataset_id!r} produced no rows for source revision."
+        )
+
+    return SourceRevision(
+        schema_version=1,
+        identity_version=SPLIT_IDENTITY_VERSION,
+        digest_algorithm=SPLIT_DIGEST_ALGORITHM,
+        dataset_id=str(dataset_id),
+        backend=str(getattr(source, "backend_name", "unknown")),
+        scope=str(scope),
+        row_count=int(row_count),
+        columns=canonical_columns,
+        dtypes=canonical_dtypes,
+        revision_sha256=digest.hexdigest(),
+        selected_row_ids_sha256=selected_digest,
+    )
+
+
+def _row_id_set_sha256(row_ids: Sequence[Any]) -> str:
+    digest = hashlib.sha256()
+    canonical_ids = sorted(
+        canonical_json(json_scalar(row_id))
+        for row_id in row_ids
+    )
+    for record_id in canonical_ids:
+        update_canonical_digest(digest, record_id)
+    return digest.hexdigest()
+
+
+def _row_revision_sha256(
+    values: Mapping[str, Any],
+    columns: Sequence[str],
+) -> str:
+    digest = hashlib.sha256()
+    for column in sorted(
+        dict.fromkeys(str(column) for column in columns if str(column))
+    ):
+        update_canonical_digest(
+            digest,
+            column,
+            values.get(column),
+        )
+    return digest.hexdigest()
+
+
+def _insert_source_revision_records(
+    connection: sqlite3.Connection,
+    records: Sequence[tuple[str, str, str]],
+    *,
+    dataset_id: str,
+) -> None:
+    if not records:
+        return
+    try:
+        connection.executemany(
+            "INSERT INTO source_revision_rows "
+            "(dataset_id, record_id_key, row_sha256) VALUES (?, ?, ?)",
+            records,
+        )
+    except sqlite3.IntegrityError as exc:
+        raise ValueError(
+            f"Dataset {dataset_id!r} contains duplicate record IDs in the "
+            "configured record-ID column."
+        ) from exc
 
 
 def _ingest_selected_dataset(
@@ -384,10 +619,13 @@ def _ingest_selected_dataset(
     inserted = 0
     skipped_missing_target = 0
     records: list[tuple[Any, ...]] = []
+    revision_records: list[tuple[str, str, str]] = []
 
     for start in range(0, len(row_ids), max(1, int(batch_size))):
         _check_cancel(cancel_check)
-        requested = list(row_ids[start : start + max(1, int(batch_size))])
+        requested = list(
+            row_ids[start : start + max(1, int(batch_size))]
+        )
         frame = source.get_rows_by_ids(
             requested,
             id_column=binding.record_id_column,
@@ -435,6 +673,22 @@ def _ingest_selected_dataset(
         ):
             values = dict(zip(columns, row))
             record_id = values.get(binding.record_id_column)
+            if _is_missing(record_id):
+                raise ValueError(
+                    f"Dataset {dataset_id!r} contains a missing record ID in "
+                    f"column {binding.record_id_column!r}."
+                )
+
+            record_scalar = json_scalar(record_id)
+            record_key = _value_key(record_scalar)
+            revision_records.append(
+                (
+                    str(dataset_id),
+                    record_key,
+                    _row_revision_sha256(values, columns),
+                )
+            )
+
             target = (
                 values.get(binding.target_column)
                 if binding.target_column
@@ -444,9 +698,7 @@ def _ingest_selected_dataset(
                 skipped_missing_target += 1
                 continue
 
-            record_scalar = json_scalar(record_id)
             target_scalar = json_scalar(target)
-            record_key = _value_key(record_scalar)
             target_key = (
                 _value_key(target_scalar) if binding.target_column else ""
             )
@@ -457,18 +709,10 @@ def _ingest_selected_dataset(
                 (
                     str(dataset_id),
                     "main",
-                    json.dumps(
-                        record_scalar,
-                        ensure_ascii=False,
-                        separators=(",", ":"),
-                    ),
+                    canonical_json(record_scalar),
                     record_key,
                     (
-                        json.dumps(
-                            target_scalar,
-                            ensure_ascii=False,
-                            separators=(",", ":"),
-                        )
+                        canonical_json(target_scalar)
                         if binding.target_column
                         else None
                     ),
@@ -481,6 +725,7 @@ def _ingest_selected_dataset(
                     None,
                 )
             )
+
             if len(records) >= 4096:
                 _insert_records(
                     connection,
@@ -490,6 +735,21 @@ def _ingest_selected_dataset(
                 )
                 inserted += len(records)
                 records.clear()
+            if len(revision_records) >= 4096:
+                _insert_source_revision_records(
+                    connection,
+                    revision_records,
+                    dataset_id=dataset_id,
+                )
+                revision_records.clear()
+
+        if revision_records:
+            _insert_source_revision_records(
+                connection,
+                revision_records,
+                dataset_id=dataset_id,
+            )
+            revision_records.clear()
         connection.commit()
 
     if records:
@@ -500,6 +760,12 @@ def _ingest_selected_dataset(
             dataset_id=dataset_id,
         )
         inserted += len(records)
+    if revision_records:
+        _insert_source_revision_records(
+            connection,
+            revision_records,
+            dataset_id=dataset_id,
+        )
     connection.commit()
 
     if inserted <= 0:
@@ -538,6 +804,7 @@ def _ingest_dataset(
     inserted = 0
     skipped_missing_target = 0
     records: list[tuple[Any, ...]] = []
+    revision_records: list[tuple[str, str, str]] = []
     sql = (
         "INSERT INTO split_rows ("
         "dataset_id, source_kind, record_id_json, record_id_key, "
@@ -559,16 +826,33 @@ def _ingest_dataset(
                     f"Dataset {dataset_id!r} contains a missing record ID in "
                     f"column {binding.record_id_column!r}."
                 )
-            target = values.get(binding.target_column) if binding.target_column else None
+
+            record_scalar = json_scalar(record_id)
+            record_key = _value_key(record_scalar)
+            revision_records.append(
+                (
+                    str(dataset_id),
+                    record_key,
+                    _row_revision_sha256(values, columns),
+                )
+            )
+
+            target = (
+                values.get(binding.target_column)
+                if binding.target_column
+                else None
+            )
             if binding.target_column and _is_missing(target):
                 skipped_missing_target += 1
                 continue
 
-            record_scalar = json_scalar(record_id)
             target_scalar = json_scalar(target)
-            record_key = _value_key(record_scalar)
-            target_key = _value_key(target_scalar) if binding.target_column else ""
-            stratum = target_key if task_kind == "classification" else "__all__"
+            target_key = (
+                _value_key(target_scalar) if binding.target_column else ""
+            )
+            stratum = (
+                target_key if task_kind == "classification" else "__all__"
+            )
             group_key = None
             temporal_value = None
             predefined_role = None
@@ -577,8 +861,9 @@ def _ingest_dataset(
                     group_value = values.get(protocol.group_column)
                     if _is_missing(group_value):
                         raise ValueError(
-                            f"Grouped split column {protocol.group_column!r} contains "
-                            f"a missing value for record {record_scalar!r}."
+                            f"Grouped split column {protocol.group_column!r} "
+                            f"contains a missing value for record "
+                            f"{record_scalar!r}."
                         )
                     group_key = _value_key(json_scalar(group_value))
                 elif protocol.split_strategy == "temporal":
@@ -598,10 +883,10 @@ def _ingest_dataset(
                 (
                     str(dataset_id),
                     str(source_kind),
-                    json.dumps(record_scalar, ensure_ascii=False, separators=(",", ":")),
+                    canonical_json(record_scalar),
                     record_key,
                     (
-                        json.dumps(target_scalar, ensure_ascii=False, separators=(",", ":"))
+                        canonical_json(target_scalar)
                         if binding.target_column
                         else None
                     ),
@@ -615,25 +900,51 @@ def _ingest_dataset(
                 )
             )
             if len(records) >= 4096:
-                _insert_records(connection, sql, records, dataset_id=dataset_id)
+                _insert_records(
+                    connection,
+                    sql,
+                    records,
+                    dataset_id=dataset_id,
+                )
                 inserted += len(records)
                 records.clear()
+            if len(revision_records) >= 4096:
+                _insert_source_revision_records(
+                    connection,
+                    revision_records,
+                    dataset_id=dataset_id,
+                )
+                revision_records.clear()
         connection.commit()
 
     if records:
-        _insert_records(connection, sql, records, dataset_id=dataset_id)
+        _insert_records(
+            connection,
+            sql,
+            records,
+            dataset_id=dataset_id,
+        )
         inserted += len(records)
         records.clear()
+    if revision_records:
+        _insert_source_revision_records(
+            connection,
+            revision_records,
+            dataset_id=dataset_id,
+        )
+        revision_records.clear()
     connection.commit()
     if inserted <= 0:
         raise ValueError(
-            f"Dataset {dataset_id!r} has no usable rows after dropping missing targets."
+            f"Dataset {dataset_id!r} has no usable rows after dropping "
+            "missing targets."
         )
     return {
         "scanned_rows": int(scanned),
         "usable_rows": int(inserted),
         "skipped_missing_target": int(skipped_missing_target),
     }
+
 
 def _insert_records(
     connection: sqlite3.Connection,
@@ -975,7 +1286,7 @@ def _iter_role_rows(
 ) -> Iterator[tuple[Any, Any]]:
     cursor = connection.execute(
         "SELECT record_id_json, target_json FROM split_rows "
-        "WHERE assigned_role = ? ORDER BY seq",
+        "WHERE assigned_role = ? ORDER BY record_id_key",
         (str(role),),
     )
     for record_id_json, target_json in cursor:

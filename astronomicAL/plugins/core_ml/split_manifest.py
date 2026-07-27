@@ -13,12 +13,18 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, TextIO, Tuple
 
-from .protocol import Partition, PartitionRef, SplitManifestRef
+from .protocol import (
+    SPLIT_DIGEST_ALGORITHM,
+    SPLIT_IDENTITY_VERSION,
+    Partition,
+    PartitionRef,
+    SourceRevision,
+    SplitManifestRef,
+)
 
-SPLIT_MANIFEST_SCHEMA_VERSION = 1
+SPLIT_MANIFEST_SCHEMA_VERSION = 2
 SPLIT_ROLE_COLUMN = "split_role"
 TARGET_SNAPSHOT_COLUMN = "target_snapshot"
-
 
 @dataclass(frozen=True)
 class PartitionManifestMetadata:
@@ -28,7 +34,6 @@ class PartitionManifestMetadata:
     dataset_id: Optional[str]
     source: str = "split"
     classes: tuple[str, ...] = ()
-
 
 class SplitManifestWriter:
     """Atomic incremental writer for split membership rows.
@@ -47,6 +52,7 @@ class SplitManifestWriter:
         protocol_id: str,
         record_id_column: str,
         target_column: Optional[str],
+        source_revisions: Optional[Mapping[str, SourceRevision]] = None,
     ):
         root_path = Path(root)
         root_path.mkdir(parents=True, exist_ok=True)
@@ -60,9 +66,20 @@ class SplitManifestWriter:
         self.protocol_id = str(protocol_id)
         self.record_id_column = str(record_id_column)
         self.target_column = str(target_column) if target_column else None
+        self.source_revisions = {
+            str(dataset_id): (
+                revision
+                if isinstance(revision, SourceRevision)
+                else SourceRevision.from_dict(revision)
+            )
+            for dataset_id, revision in dict(source_revisions or {}).items()
+        }
         self.created_at = time.time()
         self.role_counts: Dict[str, int] = {}
         self.row_count = 0
+        self._membership_digests: Dict[str, Any] = {}
+        self._target_digests: Dict[str, Any] = {}
+        self._last_record_keys: Dict[str, str] = {}
         self._handle: Optional[TextIO] = gzip.open(
             self.temp_path,
             "wt",
@@ -80,15 +97,56 @@ class SplitManifestWriter:
     ) -> None:
         handle = self._require_open()
         canonical_role = str(role)
+        record_scalar = json_scalar(record_id)
+        record_key = canonical_json(record_scalar)
+
+        previous_key = self._last_record_keys.get(canonical_role)
+        if previous_key is not None and record_key <= previous_key:
+            raise ValueError(
+                "Split manifest rows must be written in strict canonical "
+                f"record-ID order within role {canonical_role!r}."
+            )
+        self._last_record_keys[canonical_role] = record_key
+
+        target_scalar = json_scalar(target)
         row = {
-            self.record_id_column: json_scalar(record_id),
+            self.record_id_column: record_scalar,
             SPLIT_ROLE_COLUMN: canonical_role,
         }
         if self.target_column:
-            row[TARGET_SNAPSHOT_COLUMN] = json_scalar(target)
-        handle.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")))
+            row[TARGET_SNAPSHOT_COLUMN] = target_scalar
+
+        handle.write(
+            json.dumps(
+                row,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+        )
         handle.write("\n")
-        self.role_counts[canonical_role] = self.role_counts.get(canonical_role, 0) + 1
+
+        membership_digest = self._membership_digests.setdefault(
+            canonical_role,
+            hashlib.sha256(),
+        )
+        update_canonical_digest(membership_digest, record_scalar)
+
+        if self.target_column:
+            target_digest = self._target_digests.setdefault(
+                canonical_role,
+                hashlib.sha256(),
+            )
+            update_canonical_digest(
+                target_digest,
+                record_scalar,
+                target_scalar,
+            )
+
+        self.role_counts[canonical_role] = (
+            self.role_counts.get(canonical_role, 0) + 1
+        )
         self.row_count += 1
 
     def finalize(
@@ -105,6 +163,15 @@ class SplitManifestWriter:
             for role, metadata in dict(partitions or {}).items():
                 canonical_role = str(role)
                 count = int(self.role_counts.get(canonical_role, 0))
+                source_revision = manifest.source_revision(metadata.dataset_id)
+                membership_sha256 = manifest.membership_sha256_by_role.get(
+                    canonical_role,
+                    "",
+                )
+                target_sha256 = manifest.target_sha256_by_role.get(
+                    canonical_role,
+                    "",
+                )
                 refs[canonical_role] = PartitionRef(
                     name=str(metadata.name),
                     role=canonical_role,
@@ -113,7 +180,20 @@ class SplitManifestWriter:
                     classes=list(metadata.classes),
                     dataset_id=metadata.dataset_id,
                     source=str(metadata.source),
-                    fingerprint=partition_fingerprint(manifest, canonical_role),
+                    fingerprint=partition_fingerprint(
+                        manifest,
+                        canonical_role,
+                        dataset_id=metadata.dataset_id,
+                    ),
+                    identity_version=manifest.identity_version,
+                    digest_algorithm=manifest.digest_algorithm,
+                    membership_sha256=membership_sha256,
+                    target_sha256=target_sha256,
+                    source_revision_sha256=(
+                        source_revision.revision_sha256
+                        if source_revision is not None
+                        else ""
+                    ),
                 )
             self._finalized = True
             return manifest, refs
@@ -146,6 +226,17 @@ class SplitManifestWriter:
             columns=columns,
             sha256=file_sha256(self.final_path),
             size_bytes=self.final_path.stat().st_size,
+            identity_version=SPLIT_IDENTITY_VERSION,
+            digest_algorithm=SPLIT_DIGEST_ALGORITHM,
+            membership_sha256_by_role={
+                role: digest.hexdigest()
+                for role, digest in self._membership_digests.items()
+            },
+            target_sha256_by_role={
+                role: digest.hexdigest()
+                for role, digest in self._target_digests.items()
+            },
+            source_revisions=dict(self.source_revisions),
         )
 
     def _require_open(self) -> TextIO:
@@ -165,7 +256,6 @@ class SplitManifestWriter:
         if exc_type is not None or not self._finalized:
             self.abort()
         return False
-
 
 def create_split_manifest(
     *,
@@ -214,7 +304,6 @@ def create_split_manifest(
         writer.abort()
         raise
 
-
 def iter_split_manifest(
     manifest: SplitManifestRef | Mapping[str, Any],
     *,
@@ -249,7 +338,6 @@ def iter_split_manifest(
                 continue
             yield row
 
-
 def iter_partition_rows(
     partition: PartitionRef,
     *,
@@ -262,7 +350,6 @@ def iter_partition_rows(
         role=partition.role,
         verify_checksum=verify_checksum,
     )
-
 
 def iter_partition_row_batches(
     partition: PartitionRef,
@@ -287,7 +374,6 @@ def iter_partition_row_batches(
     if batch:
         yield batch
 
-
 def iter_partition_record_ids(
     partition: PartitionRef,
     *,
@@ -297,7 +383,6 @@ def iter_partition_record_ids(
         partition, verify_checksum=verify_checksum
     ):
         yield row[partition.manifest.record_id_column]
-
 
 def iter_partition_record_id_batches(
     partition: PartitionRef,
@@ -312,7 +397,6 @@ def iter_partition_record_id_batches(
         verify_checksum=verify_checksum,
     ):
         yield [row[record_id_column] for row in rows]
-
 
 def verify_split_manifest(manifest: SplitManifestRef | Mapping[str, Any]) -> None:
     ref = (
@@ -337,18 +421,38 @@ def verify_split_manifest(manifest: SplitManifestRef | Mapping[str, Any]) -> Non
                 f"{ref.sha256}, got {actual_hash}."
             )
 
+def partition_fingerprint(
+    manifest: SplitManifestRef,
+    role: str,
+    *,
+    dataset_id: Optional[str] = None,
+) -> str:
+    """Return the path-independent semantic identity of one partition."""
 
-def partition_fingerprint(manifest: SplitManifestRef, role: str) -> str:
-    raw = "|".join(
-        (
-            manifest.sha256,
-            str(role),
-            str(manifest.role_counts.get(str(role), 0)),
-            manifest.source_dataset_id,
-            manifest.protocol_id,
-        )
-    )
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    canonical_role = str(role)
+    source_revision = manifest.source_revision(dataset_id)
+    payload = {
+        "identity_version": int(manifest.identity_version),
+        "digest_algorithm": manifest.digest_algorithm,
+        "role": canonical_role,
+        "row_count": int(manifest.role_counts.get(canonical_role, 0)),
+        "dataset_id": str(dataset_id) if dataset_id is not None else None,
+        "protocol_id": manifest.protocol_id,
+        "membership_sha256": manifest.membership_sha256_by_role.get(
+            canonical_role,
+            "",
+        ),
+        "target_sha256": manifest.target_sha256_by_role.get(
+            canonical_role,
+            "",
+        ),
+        "source_revision_sha256": (
+            source_revision.revision_sha256
+            if source_revision is not None
+            else ""
+        ),
+    }
+    return hashlib.sha256(canonical_json(payload).encode("utf-8")).hexdigest()
 
 
 def file_sha256(path: Path | str) -> str:
@@ -358,9 +462,8 @@ def file_sha256(path: Path | str) -> str:
             digest.update(chunk)
     return digest.hexdigest()
 
-
 def json_scalar(value: Any) -> Any:
-    """Convert common dataframe scalar values to stable JSON values."""
+    """Convert common dataframe values to canonical JSON-safe values."""
 
     if value is None or isinstance(value, (str, bool, int)):
         return value
@@ -372,10 +475,52 @@ def json_scalar(value: Any) -> Any:
         )
     if isinstance(value, (datetime, date)):
         return value.isoformat()
+    if isinstance(value, bytes):
+        return {"__bytes_hex__": value.hex()}
+    if isinstance(value, Mapping):
+        return {
+            str(key): json_scalar(item)
+            for key, item in sorted(
+                value.items(),
+                key=lambda pair: str(pair[0]),
+            )
+        }
+    if isinstance(value, (list, tuple)):
+        return [json_scalar(item) for item in value]
+    if isinstance(value, (set, frozenset)):
+        items = [json_scalar(item) for item in value]
+        return sorted(items, key=canonical_json)
     item = getattr(value, "item", None)
     if callable(item):
         return json_scalar(item())
+    tolist = getattr(value, "tolist", None)
+    if callable(tolist):
+        try:
+            return json_scalar(tolist())
+        except Exception:
+            pass
     return str(value)
+
+
+def canonical_json(value: Any) -> str:
+    """Return a deterministic JSON representation for identity hashing."""
+
+    return json.dumps(
+        json_scalar(value),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+
+
+def update_canonical_digest(digest: Any, *values: Any) -> None:
+    """Append length-framed canonical values to a hashlib-compatible digest."""
+
+    for value in values:
+        encoded = canonical_json(value).encode("utf-8")
+        digest.update(len(encoded).to_bytes(8, "big"))
+        digest.update(encoded)
 
 
 def _write_partition_rows(
@@ -393,13 +538,22 @@ def _write_partition_rows(
             f"but {len(labels)} labels."
         )
 
-    for index, record_id in enumerate(record_ids):
+    rows = [
+        (
+            json_scalar(record_id),
+            json_scalar(labels[index]) if include_target else None,
+        )
+        for index, record_id in enumerate(record_ids)
+    ]
+    rows.sort(key=lambda row: canonical_json(row[0]))
+
+    for record_id, target in rows:
         writer.write(
             role=role,
             record_id=record_id,
-            target=labels[index] if include_target else None,
+            target=target,
         )
-    return len(record_ids)
+    return len(rows)
 
 
 @contextmanager
@@ -410,7 +564,6 @@ def _open_manifest(path: Path, format_name: str) -> Iterator[TextIO]:
         return
     with path.open("r", encoding="utf-8") as handle:
         yield handle
-
 
 def _safe_filename(value: Any) -> str:
     text = "".join(

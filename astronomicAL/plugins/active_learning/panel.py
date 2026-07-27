@@ -13,12 +13,10 @@ try:  # pragma: no cover - UI import is environment-specific.
 except Exception:  # pragma: no cover
     pn = None
 
-
 def _new_action_request(**kwargs: Any) -> Any:
     from astronomicAL.platform.plugins.specs import ActionRequest
 
     return ActionRequest(**kwargs)
-
 
 MAX_AUTO_LABEL_SCAN_ROWS = 50000
 XY_DEFAULT_MAX_POINTS = 5000
@@ -91,6 +89,8 @@ class ActiveLearningPanel:
         self.selected_labels: List[str] = []
         self.recipe_profile_id = ""
         self.recipe_id = ""  # legacy fallback only
+        self.train_image_column = ""
+        self._syncing_train_image_column = False
         self.status = "Ready"
         self._busy = False
         self._view = None
@@ -138,6 +138,10 @@ class ActiveLearningPanel:
             "selected_labels": list(self._widget_value("labels", self.selected_labels) or []),
             "recipe_profile_id": self._widget_value("recipe_profile_id", self.recipe_profile_id),
             "recipe_id": self.recipe_id,
+            "train_image_column": self._widget_value(
+                "train_image_column",
+                self.train_image_column,
+            ),
         }
 
     def restore_state(self, state: Mapping[str, Any]) -> None:
@@ -155,6 +159,11 @@ class ActiveLearningPanel:
         self.selected_labels = [str(label) for label in labels if label not in (None, "")]
         self.recipe_profile_id = str(state.get("recipe_profile_id") or state.get("recipe_id") or "")
         self.recipe_id = str(state.get("recipe_id") or "")
+        self.train_image_column = str(
+            state.get("train_image_column")
+            or state.get("image_column")
+            or ""
+        )
 
     def dispose(self) -> None:
         self._disposed = True
@@ -212,6 +221,17 @@ class ActiveLearningPanel:
             "label_value": pn.widgets.TextInput(name="Target value", placeholder="numeric regression value"),
             "bulk_n": pn.widgets.IntInput(name="Bulk label next N", value=5, start=1),
             "recipe_profile_id": pn.widgets.Select(name="core.ml recipe profile", options=recipe_options, value=recipe_value),
+            "train_image_column": pn.widgets.Select(
+                name="Image column",
+                options={"Select image column": ""},
+                value="",
+                visible=False,
+            ),
+            "train_preflight": pn.pane.Markdown(
+                "Select an Active Learning session and a saved Core ML recipe profile.",
+                sizing_mode="stretch_width",
+                margin=(0, 0, 6, 0),
+            ),
             "status": pn.pane.Markdown(self._status_text(), sizing_mode="stretch_width", margin=(0, 0, 4, 0)),
             "session_summary_left": pn.pane.Markdown("", sizing_mode="stretch_width", margin=(0, 0, 0, 0)),
             "session_summary_right": pn.pane.Markdown("", sizing_mode="stretch_width", margin=(0, 0, 0, 0)),
@@ -266,7 +286,17 @@ class ActiveLearningPanel:
         self._widgets["dataset_id"].param.watch(lambda event: self._on_dataset_changed(str(event.new or "")), "value")
         self._widgets["label_column"].param.watch(lambda event: self._on_label_column_changed(str(event.new or "")), "value")
         self._widgets["labels"].param.watch(lambda event: self._on_labels_changed(list(event.new or [])), "value")
+        self._widgets["session_id"].param.watch(
+            lambda event: self._on_training_session_changed(str(event.new or "")),
+            "value",
+        )
         self._widgets["recipe_profile_id"].param.watch(lambda event: self._on_recipe_profile_changed(str(event.new or "")), "value")
+        self._widgets["train_image_column"].param.watch(
+            lambda event: self._on_train_image_column_changed(
+                str(event.new or "")
+            ),
+            "value",
+        )
         self._widgets["strategy"].param.watch(lambda event: self._refresh_strategy_info(str(event.new or "")), "value")
         self._widgets["row_id"].param.watch(lambda event: self._on_review_row_changed(str(event.new or "")), "value")
         self._widgets["performance_metric"].param.watch(lambda event: self._refresh_performance(status=False, keep_metric=True), "value")
@@ -345,6 +375,8 @@ class ActiveLearningPanel:
             "### Train",
             self._widgets["session_id"],
             self._compact_row(self._widgets["recipe_profile_id"], refresh_recipe_btn),
+            self._widgets["train_image_column"],
+            self._widgets["train_preflight"],
             self._widgets["seed"],
         ]
         training_controls = self._training_controls_view(train_btn)
@@ -837,11 +869,219 @@ class ActiveLearningPanel:
         needs_classes = self.task_type != al_state.TASK_REGRESSION
         button.disabled = not bool(dataset_id and label_column and (labels or not needs_classes))
 
+    def _training_preflight(self) -> Dict[str, Any]:
+        session_artifact_id = str(
+            self._widget_value("session_id", "")
+            or self.session_artifact_id
+            or ""
+        ).strip()
+        recipe_profile_id = str(
+            self._widget_value("recipe_profile_id", "")
+            or self.recipe_profile_id
+            or ""
+        ).strip()
+
+        errors: List[str] = []
+        if not session_artifact_id:
+            errors.append(
+                "Start or select an Active Learning session before training."
+            )
+        if not recipe_profile_id:
+            errors.append(
+                "Select a saved Core ML recipe profile before training."
+            )
+        if errors:
+            return {
+                "ok": False,
+                "errors": errors,
+                "warnings": [],
+                "requires_image": False,
+                "image_column": "",
+                "modality": "unknown",
+                "recipe_id": "",
+                "role_dataset_ids": {},
+            }
+
+        session = self._session_payload(session_artifact_id)
+        if not session:
+            return {
+                "ok": False,
+                "errors": [
+                    f"Active Learning session artifact "
+                    f"{session_artifact_id!r} could not be read."
+                ],
+                "warnings": [],
+                "requires_image": False,
+                "image_column": "",
+                "modality": "unknown",
+                "recipe_id": "",
+                "role_dataset_ids": {},
+            }
+
+        try:
+            from . import core_ml_bridge as bridge
+
+            selected_image_column = str(
+                self._widget_value(
+                    "train_image_column",
+                    self.train_image_column,
+                )
+                or ""
+            ).strip()
+            params = {
+                "session_artifact_id": session_artifact_id,
+                "recipe_profile_id": recipe_profile_id,
+                "target_column": str(
+                    session.get("target_column")
+                    or self._widget_value(
+                        "label_column",
+                        self.label_column,
+                    )
+                    or ""
+                ),
+                "task_type": al_state.parse_task_type(
+                    session.get("task_type")
+                    or session.get("problem_type")
+                    or self.task_type
+                ),
+            }
+            if selected_image_column:
+                params["image_column"] = selected_image_column
+                params["image_path_column"] = selected_image_column
+                params["recipe_params"] = {
+                    "image_column": selected_image_column,
+                    "image_path_column": selected_image_column,
+                }
+            profile_info = bridge.resolve_recipe_profile_info(
+                self.context,
+                params,
+            )
+            return bridge.preflight_al_training_data_contract(
+                self.context,
+                session=session,
+                params=params,
+                profile_info=profile_info,
+            )
+        except Exception as exc:
+            return {
+                "ok": False,
+                "errors": [f"Training preflight failed: {exc}"],
+                "warnings": [],
+                "requires_image": False,
+                "image_column": "",
+                "modality": "unknown",
+                "recipe_id": "",
+                "role_dataset_ids": {},
+            }
+
+    def _training_preflight_text(
+        self,
+        preflight: Mapping[str, Any],
+    ) -> str:
+        errors = [str(value) for value in preflight.get("errors") or []]
+        warnings = [str(value) for value in preflight.get("warnings") or []]
+        recipe_id = str(preflight.get("recipe_id") or "")
+        modality = str(preflight.get("modality") or "unknown")
+        requires_image = bool(preflight.get("requires_image"))
+        image_column = str(preflight.get("image_column") or "")
+        suggested_image_column = str(
+            preflight.get("suggested_image_column") or ""
+        )
+
+        lines: List[str] = []
+        if errors:
+            lines.append("**Training preflight: blocked**")
+            lines.extend(f"- {message}" for message in errors)
+        else:
+            lines.append("**Training preflight: ready**")
+            if recipe_id:
+                lines.append(f"- Recipe: `{recipe_id}`")
+            lines.append(f"- Modality: `{modality}`")
+            if requires_image:
+                lines.append(f"- Image column: `{image_column}`")
+                mapped_roles = dict(preflight.get("mapped_roles") or {})
+                if mapped_roles and all(mapped_roles.values()):
+                    lines.append(
+                        "- Image mapping: applied to all AL datasets"
+                    )
+                else:
+                    lines.append(
+                        "- Image mapping: will be propagated to all AL "
+                        "datasets before training"
+                    )
+        if requires_image and not image_column and suggested_image_column:
+            lines.append(
+                f"- Suggested column: `{suggested_image_column}` "
+                "(select it above to confirm)"
+            )
+        if warnings:
+            lines.append("")
+            lines.append("Warnings:")
+            lines.extend(f"- {message}" for message in warnings)
+        return "\n".join(lines)
+
+    def _sync_train_image_column_widget(
+        self,
+        preflight: Mapping[str, Any],
+    ) -> bool:
+        widget = self._widgets.get("train_image_column")
+        if widget is None:
+            return False
+
+        requires_image = bool(preflight.get("requires_image"))
+        options = [
+            str(column)
+            for column in preflight.get("image_column_options") or []
+            if str(column).strip()
+        ]
+        resolved = str(preflight.get("image_column") or "").strip()
+        current = str(getattr(widget, "value", "") or "").strip()
+
+        if resolved and resolved not in options:
+            options.append(resolved)
+        options = sorted(dict.fromkeys(options), key=str)
+        option_map = {"Select image column": ""}
+        option_map.update({column: column for column in options})
+
+        if current in options:
+            preferred = current
+        elif resolved in options:
+            preferred = resolved
+        elif self.train_image_column in options:
+            preferred = self.train_image_column
+        else:
+            preferred = ""
+
+        changed = (
+            bool(getattr(widget, "visible", False)) != requires_image
+            or dict(getattr(widget, "options", {}) or {}) != option_map
+            or current != preferred
+        )
+        self._syncing_train_image_column = True
+        try:
+            widget.visible = requires_image
+            widget.options = option_map
+            widget.value = preferred
+            self.train_image_column = preferred
+        finally:
+            self._syncing_train_image_column = False
+        return changed
+
     def _sync_train_controls(self) -> None:
         button = self._widgets.get("train_btn")
+        pane = self._widgets.get("train_preflight")
+        preflight = self._training_preflight()
+
+        if self._sync_train_image_column_widget(preflight):
+            preflight = self._training_preflight()
+
+        if pane is not None:
+            pane.object = self._training_preflight_text(preflight)
+
         if button is None:
             return
-        button.disabled = not bool(self._widget_value("recipe_profile_id", ""))
+        loading = bool(getattr(button, "loading", False))
+        button.disabled = loading or not bool(preflight.get("ok"))
 
     def _run_start(self) -> None:
         self._set_status("Starting active-learning session and drawing the initial random review batch...")
@@ -945,6 +1185,30 @@ class ActiveLearningPanel:
             if not session_id:
                 raise ValueError("Start or select an active-learning session before creating a query batch.")
             if not predictions_id:
+                session = self._session_payload(session_id)
+                predictions_id = str(
+                    al_state.latest_reference(
+                        session,
+                        "predictions_artifact_id",
+                    )
+                    or ""
+                ).strip()
+                if predictions_id:
+                    self._set_artifact_widget(
+                        "predictions_id",
+                        predictions_id,
+                    )
+            if not predictions_id:
+                session = self._session_payload(session_id)
+                prediction_error = str(
+                    (session.get("latest") or {}).get("prediction_error")
+                    or ""
+                ).strip()
+                if prediction_error:
+                    raise ValueError(
+                        "Automatic pool prediction failed after training: "
+                        + prediction_error
+                    )
                 raise ValueError("Train/predict first, or enter an ml.predictions artifact id.")
 
             request = _new_action_request(
@@ -1348,43 +1612,73 @@ class ActiveLearningPanel:
         return first_sentence[:120] + ("…" if len(first_sentence) > 120 else "")
 
     def _run_train(self) -> None:
-        self._set_button_busy("train_btn", True)
-        self._set_status("Training from active-learning session...")
-
         try:
-            session_id = str(self._widget_value("session_id", "") or "").strip()
-            recipe_profile_id = str(self._widget_value("recipe_profile_id", "") or "").strip()
-            label_column = str(self._widget_value("label_column", self.label_column) or "").strip()
+            session_id = str(
+                self._widget_value("session_id", "") or ""
+            ).strip()
+            recipe_profile_id = str(
+                self._widget_value("recipe_profile_id", "") or ""
+            ).strip()
+            label_column = str(
+                self._widget_value(
+                    "label_column",
+                    self.label_column,
+                )
+                or ""
+            ).strip()
 
-            if not session_id:
-                raise ValueError("Start or select an active-learning session before training.")
-            if not recipe_profile_id:
-                raise ValueError("Select a saved core.ml recipe profile before training.")
             if not label_column:
                 raise ValueError("Select a label column before training.")
 
+            preflight = self._training_preflight()
+            if not preflight.get("ok"):
+                raise ValueError(
+                    " ".join(
+                        str(message)
+                        for message in preflight.get("errors") or []
+                    )
+                )
+
             seed_value = int(self._widget_value("seed", 42) or 42)
+            session = self._session_payload(session_id)
+            request_task_type = al_state.parse_task_type(
+                session.get("task_type")
+                or session.get("problem_type")
+                or self.task_type
+            )
 
             self.recipe_profile_id = recipe_profile_id
             self.recipe_id = ""
+
+            request_params: Dict[str, Any] = {
+                "session_artifact_id": session_id,
+                "recipe_profile_id": recipe_profile_id,
+                "target_column": label_column,
+                "label_column": label_column,
+                "task_type": request_task_type,
+                "problem_type": request_task_type,
+                "label_profile": dict(self.label_profile or {}),
+                "seed": seed_value,
+                "auto_predict": True,
+                "auto_query": False,
+                "make_selection": False,
+            }
+            image_column = str(
+                preflight.get("image_column") or ""
+            ).strip()
+            if image_column:
+                request_params["image_column"] = image_column
+                request_params["image_path_column"] = image_column
+                request_params["recipe_params"] = {
+                    "image_column": image_column,
+                    "image_path_column": image_column,
+                }
 
             request = _new_action_request(
                 dataset_id=None,
                 row_ids=None,
                 columns=[],
-                params={
-                    "session_artifact_id": session_id,
-                    "recipe_profile_id": recipe_profile_id,
-                    "target_column": label_column,
-                    "label_column": label_column,
-                    "task_type": self.task_type,
-                    "problem_type": self.task_type,
-                    "label_profile": dict(self.label_profile or {}),
-                    "seed": seed_value,
-                    "auto_predict": True,
-                    "auto_query": False,
-                    "make_selection": False,
-                },
+                params=request_params,
                 artifact_id=None,
                 origin="core.active_learning.panel",
             )
@@ -1393,6 +1687,8 @@ class ActiveLearningPanel:
             self._set_status(f"Training failed: {exc}")
             return
 
+        self._set_button_busy("train_btn", True)
+        self._set_status("Training from active-learning session...")
         handle = None
 
         def done(result: Any) -> None:
@@ -1438,18 +1734,91 @@ class ActiveLearningPanel:
 
     def _apply_training_result(self, result: Mapping[str, Any]) -> None:
         self._set_session_id(result.get("session_artifact_id"))
-        latest = self._sync_latest_from_session(result.get("session_artifact_id"))
-        self._set_artifact_widget("model_id", latest.get("model_artifact_id"))
-        self._set_artifact_widget("predictions_id", latest.get("predictions_artifact_id"))
+        latest = self._sync_latest_from_session(
+            result.get("session_artifact_id")
+        )
+
+        model_artifact_id = str(
+            latest.get("model_artifact_id")
+            or result.get("model_artifact_id")
+            or al_state.find_nested_value(
+                result.get("ml_result") or {},
+                "model_artifact_id",
+            )
+            or ""
+        )
+        predictions_artifact_id = str(
+            latest.get("predictions_artifact_id")
+            or result.get("predictions_artifact_id")
+            or al_state.find_nested_value(
+                result.get("prediction_result") or {},
+                "predictions_artifact_id",
+            )
+            or ""
+        )
+        self._set_artifact_widget("model_id", model_artifact_id)
+        self._set_artifact_widget(
+            "predictions_id",
+            predictions_artifact_id,
+        )
+
         self._refresh_session_summary(status=False)
         self._refresh_performance(status=False)
         self._refresh_xy_plot(status=False)
-        self._select_tab("Query")
-        status = result.get("workflow_status") or "complete"
-        self._set_status(
-            f"Training workflow finished with status `{status}`. "
-            f"Model `{self._widget_value('model_id', '')}` and predictions `{self._widget_value('predictions_id', '')}` are selected. Choose a query strategy and batch size, then create the next query batch."
-        )
+
+        workflow_errors = [
+            dict(item)
+            for item in result.get("workflow_errors") or []
+            if isinstance(item, Mapping)
+        ]
+        prediction_error = str(
+            result.get("prediction_error")
+            or next(
+                (
+                    item.get("error")
+                    for item in workflow_errors
+                    if str(item.get("stage") or "") == "prediction"
+                ),
+                "",
+            )
+            or ""
+        ).strip()
+        status = str(result.get("workflow_status") or "complete")
+
+        if predictions_artifact_id:
+            self._select_tab("Query")
+            warning = ""
+            if workflow_errors:
+                warning = (
+                    " A later workflow step reported: "
+                    + "; ".join(
+                        f"{item.get('stage')}: {item.get('error')}"
+                        for item in workflow_errors
+                    )
+                )
+            self._set_status(
+                f"Training workflow finished with status `{status}`. "
+                f"Model `{model_artifact_id}` and pool predictions "
+                f"`{predictions_artifact_id}` are selected. Choose a query "
+                f"strategy and batch size, then create the next query batch."
+                + warning
+            )
+            return
+
+        self._select_tab("Train")
+        if prediction_error:
+            self._set_status(
+                "Training completed and the model was saved, but automatic "
+                "pool prediction failed. Querying is unavailable until "
+                f"prediction succeeds. Error: {prediction_error}"
+            )
+        else:
+            self._set_status(
+                "Training completed, but no pool predictions artifact was "
+                "returned or saved. Querying is unavailable. Review the "
+                "training workflow result or run Core ML prediction on the "
+                "Active Learning pool dataset."
+            )
 
     def _refresh_strategies(self, *, status: bool = True) -> None:
         widget = self._widgets.get("strategy") if self._widgets else None
@@ -2137,12 +2506,19 @@ class ActiveLearningPanel:
             widget.value = self.session_artifact_id
         session = self._session_payload(self.session_artifact_id)
         if session:
+            self.train_image_column = str(
+                session.get("image_column")
+                or session.get("image_path_column")
+                or self.train_image_column
+                or ""
+            )
             self.task_type = al_state.parse_task_type(session.get("task_type") or session.get("problem_type"), default=self.task_type)
             self.label_profile = dict(session.get("label_profile") or self.label_profile or {})
             self._sync_task_controls()
             self._update_label_profile_pane()
         self._refresh_session_summary(status=False)
         self._refresh_performance(status=False)
+        self._sync_train_controls()
 
     def _set_artifact_widget(self, key: str, value: Any) -> None:
         text = str(value or "")
@@ -2253,12 +2629,12 @@ class ActiveLearningPanel:
         model_artifact_id = str(latest.get("model_artifact_id") or "")
         predictions_artifact_id = str(latest.get("predictions_artifact_id") or "")
         strategy_scores_artifact_id = str(latest.get("strategy_scores_artifact_id") or "")
-        if model_artifact_id:
-            self._set_artifact_widget("model_id", model_artifact_id)
-        if predictions_artifact_id:
-            self._set_artifact_widget("predictions_id", predictions_artifact_id)
-        if strategy_scores_artifact_id:
-            self.strategy_scores_artifact_id = strategy_scores_artifact_id
+        self._set_artifact_widget("model_id", model_artifact_id)
+        self._set_artifact_widget(
+            "predictions_id",
+            predictions_artifact_id,
+        )
+        self.strategy_scores_artifact_id = strategy_scores_artifact_id
         return {
             "model_artifact_id": model_artifact_id,
             "predictions_artifact_id": predictions_artifact_id,
@@ -2745,6 +3121,73 @@ class ActiveLearningPanel:
             for row in ordered:
                 lines.append(f"| {row.get('round')} | {row.get('labelled_count')} | {row.get('value')} |")
             return "\n".join(lines)
+
+    def _on_train_image_column_changed(self, column_name: str) -> None:
+        self.train_image_column = str(column_name or "").strip()
+        if self._syncing_train_image_column:
+            return
+        if not self.train_image_column:
+            self._sync_train_controls()
+            return
+
+        session_artifact_id = str(
+            self._widget_value("session_id", "")
+            or self.session_artifact_id
+            or ""
+        ).strip()
+        session = self._session_payload(session_artifact_id)
+        if not session:
+            self._set_status(
+                "Select an Active Learning session before assigning its "
+                "image column."
+            )
+            self._sync_train_controls()
+            return
+
+        try:
+            result = actions.save_session_image_binding(
+                self.context,
+                session_artifact_id=session_artifact_id,
+                session=session,
+                column_name=self.train_image_column,
+                source="core.active_learning.train_tab",
+            )
+            new_session_artifact_id = str(
+                result.get("session_artifact_id")
+                or session_artifact_id
+            )
+            self._set_session_id(new_session_artifact_id)
+            self._set_status(
+                f"Image column {self.train_image_column!r} mapped across "
+                "the Active Learning datasets."
+            )
+        except Exception as exc:
+            self._set_status(f"Could not assign image column: {exc}")
+        self._sync_train_controls()
+
+    def _on_training_session_changed(self, session_artifact_id: str) -> None:
+        self.session_artifact_id = str(session_artifact_id or "").strip()
+        session = self._session_payload(self.session_artifact_id)
+        if session:
+            self.train_image_column = str(
+                session.get("image_column")
+                or session.get("image_path_column")
+                or self.train_image_column
+                or ""
+            )
+            self.task_type = al_state.parse_task_type(
+                session.get("task_type")
+                or session.get("problem_type"),
+                default=self.task_type,
+            )
+            self.label_profile = dict(
+                session.get("label_profile")
+                or self.label_profile
+                or {}
+            )
+            self._sync_task_controls()
+            self._update_label_profile_pane()
+        self._sync_train_controls()
 
     def _on_recipe_profile_changed(self, profile_id: str) -> None:
         self.recipe_profile_id = str(profile_id or "").strip()
@@ -3485,7 +3928,10 @@ class ActiveLearningPanel:
             pass
         if key == "train_btn":
             try:
-                widget.disabled = bool(busy) or not bool(self._widget_value("recipe_profile_id", ""))
+                if busy:
+                    widget.disabled = True
+                else:
+                    self._sync_train_controls()
             except Exception:
                 pass
         elif key in {"score_all_btn", "query_btn", "label_btn", "bulk_label_btn"}:

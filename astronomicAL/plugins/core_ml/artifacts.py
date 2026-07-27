@@ -88,7 +88,6 @@ class StoredEmbeddingIndexRef:
             metadata=dict(value.get("metadata") or {}),
         )
 
-
 @dataclass(frozen=True)
 class StoredEmbeddingRef:
     """JSON-safe pointer to a partitioned embedding table sidecar.
@@ -185,7 +184,6 @@ class StoredEmbeddingRef:
             metadata=dict(value.get("metadata") or {}),
         )
 
-
 def embedding_ref_from_payload(payload: Mapping[str, Any]) -> Optional[StoredEmbeddingRef]:
     """Resolve the standard embedding reference from an artifact-like payload."""
 
@@ -205,7 +203,6 @@ def embedding_ref_from_payload(payload: Mapping[str, Any]) -> Optional[StoredEmb
         except Exception:
             continue
     return None
-
 
 @dataclass(frozen=True)
 class MLArtifactContract:
@@ -232,6 +229,259 @@ def ensure_json_safe(payload: Mapping[str, Any]) -> Dict[str, Any]:
     """Return a JSON-safe shallow/deep copy of an artifact payload."""
 
     return ensure_json_object(payload, schema_version=ML_ARTIFACT_SCHEMA_VERSION)
+
+
+MODEL_CLASS_NAME_KEYS = (
+    "class_names",
+    "class_labels",
+    "classes",
+    "label_options",
+    "known_classes",
+    "target_classes",
+    "class_order",
+)
+
+MODEL_CLASS_CONTAINER_KEYS = (
+    "target",
+    "class_universe",
+    "output_schema",
+    "prediction_contract",
+    "metadata",
+    "params",
+    "recipe_params",
+    "model_ref",
+    "checkpoint",
+    "checkpoint_payload",
+    "contract",
+)
+
+
+def normalise_class_names(value: Any) -> List[str]:
+    """Return a stable, non-empty class-name list from common payload shapes."""
+
+    if value is None:
+        return []
+    if isinstance(value, str):
+        if not value.strip():
+            return []
+        raw_values = [
+            item.strip()
+            for item in value.replace("\n", ",").split(",")
+        ]
+    elif isinstance(value, Mapping):
+        if not value:
+            return []
+        # label-to-index and index-to-label dictionaries are both common.
+        if all(str(key).strip().lstrip("-").isdigit() for key in value):
+            raw_values = [
+                str(item).strip()
+                for _, item in sorted(
+                    value.items(),
+                    key=lambda pair: int(str(pair[0]).strip()),
+                )
+            ]
+        else:
+            raw_values = [str(key).strip() for key in value]
+    elif isinstance(value, Iterable) and not isinstance(
+        value,
+        (str, bytes, bytearray),
+    ):
+        raw_values = [str(item).strip() for item in value]
+    else:
+        raw_values = [str(value).strip()]
+
+    result: List[str] = []
+    for item in raw_values:
+        if item and item not in result:
+            result.append(item)
+    return result
+
+
+def resolve_model_class_names(*values: Any) -> List[str]:
+    """Resolve class ordering from durable and legacy model/checkpoint aliases.
+
+    Active Learning passes the full class universe through training params, while
+    older model writers used aliases such as ``classes`` or ``class_labels``.
+    Prediction reconstruction must preserve that exact ordering rather than
+    requiring one particular top-level spelling.
+    """
+
+    queue: List[Any] = list(values)
+    seen: set[int] = set()
+    while queue:
+        value = queue.pop(0)
+        if not isinstance(value, Mapping):
+            continue
+        identity = id(value)
+        if identity in seen:
+            continue
+        seen.add(identity)
+
+        for key in MODEL_CLASS_NAME_KEYS:
+            classes = normalise_class_names(value.get(key))
+            if classes:
+                return classes
+
+        for key in MODEL_CLASS_CONTAINER_KEYS:
+            nested = value.get(key)
+            if isinstance(nested, Mapping):
+                queue.append(nested)
+
+    return []
+
+
+def resolve_model_task(*values: Any, default: str = "classification") -> str:
+    """Resolve classification/regression task aliases from model metadata."""
+
+    queue: List[Any] = list(values)
+    seen: set[int] = set()
+    while queue:
+        value = queue.pop(0)
+        if not isinstance(value, Mapping):
+            continue
+        identity = id(value)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        for key in ("task", "task_type", "problem_type"):
+            task = str(value.get(key) or "").strip().lower()
+            if task in {"classification", "classifier", "classify"}:
+                return "classification"
+            if task in {"regression", "regressor", "regress"}:
+                return "regression"
+        for key in MODEL_CLASS_CONTAINER_KEYS:
+            nested = value.get(key)
+            if isinstance(nested, Mapping):
+                queue.append(nested)
+    return str(default or "classification").strip().lower()
+
+
+def resolve_model_num_outputs(
+    *values: Any,
+    class_names: Optional[Sequence[str]] = None,
+    default: int = 1,
+) -> int:
+    """Resolve the trained output width from common artifact/checkpoint aliases."""
+
+    queue: List[Any] = list(values)
+    seen: set[int] = set()
+    while queue:
+        value = queue.pop(0)
+        if not isinstance(value, Mapping):
+            continue
+        identity = id(value)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        for key in ("num_outputs", "n_outputs", "num_classes", "class_count"):
+            raw = value.get(key)
+            if raw in (None, ""):
+                continue
+            try:
+                width = int(raw)
+            except (TypeError, ValueError):
+                continue
+            if width > 0:
+                return width
+        for key in MODEL_CLASS_CONTAINER_KEYS:
+            nested = value.get(key)
+            if isinstance(nested, Mapping):
+                queue.append(nested)
+
+    classes = normalise_class_names(class_names)
+    if classes:
+        return len(classes)
+    return max(1, int(default or 1))
+
+
+def canonicalize_model_class_contract(
+    payload: Mapping[str, Any],
+    *,
+    class_names: Optional[Sequence[str]] = None,
+    task: Optional[str] = None,
+    num_outputs: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Promote model label metadata into one durable canonical contract."""
+
+    mutable = dict(payload or {})
+    resolved_task = resolve_model_task(
+        {"task": task} if task else {},
+        mutable,
+    )
+    classes = normalise_class_names(class_names) or resolve_model_class_names(
+        mutable
+    )
+    width = (
+        max(1, int(num_outputs))
+        if num_outputs not in (None, "")
+        else resolve_model_num_outputs(
+            mutable,
+            class_names=classes,
+            default=(len(classes) or 1),
+        )
+    )
+
+    mutable["task"] = resolved_task
+    mutable["task_type"] = resolved_task
+    mutable["problem_type"] = resolved_task
+
+    if resolved_task == "classification" and classes:
+        width = len(classes)
+        mutable["class_names"] = list(classes)
+        mutable["class_labels"] = list(classes)
+        mutable["classes"] = list(classes)
+        mutable["num_classes"] = width
+        mutable["num_outputs"] = width
+    else:
+        mutable["num_outputs"] = width
+
+    metadata = dict(mutable.get("metadata") or {})
+    metadata["task"] = resolved_task
+    metadata["num_outputs"] = width
+    if resolved_task == "classification" and classes:
+        metadata["class_names"] = list(classes)
+        metadata["class_labels"] = list(classes)
+        metadata["classes"] = list(classes)
+        metadata["num_classes"] = width
+    mutable["metadata"] = metadata
+
+    model_ref = mutable.get("model_ref")
+    if isinstance(model_ref, Mapping):
+        ref = dict(model_ref)
+        ref_metadata = dict(ref.get("metadata") or {})
+        ref_metadata.update(metadata)
+        ref["metadata"] = ref_metadata
+        mutable["model_ref"] = ref
+
+    return mutable
+
+
+def persist_model_class_contract(
+    *,
+    context: Any,
+    artifact_id: str,
+    class_names: Optional[Sequence[str]] = None,
+    task: Optional[str] = None,
+    num_outputs: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Promote class metadata on an existing model artifact in-place."""
+
+    payload = context.artifacts.get(str(artifact_id))
+    if not isinstance(payload, Mapping):
+        raise TypeError(
+            f"Artifact {artifact_id!r} does not contain a model payload object."
+        )
+    normalized = canonicalize_model_class_contract(
+        payload,
+        class_names=class_names,
+        task=task,
+        num_outputs=num_outputs,
+    )
+    normalized = ensure_json_safe(normalized)
+    if isinstance(payload, dict):
+        payload.clear()
+        payload.update(normalized)
+    return normalized
 
 def file_sha256(path: Path | str) -> str:
     digest = hashlib.sha256()
@@ -490,17 +740,21 @@ def _load_recipe_torch_image_checkpoint(*, path: Path, model_ref: Mapping[str, A
         or ""
     ).strip()
 
-    class_names = [
-        str(value)
-        for value in (
-            checkpoint.get("class_names")
-            or metadata.get("class_names")
-            or []
-        )
-    ]
+    task = resolve_model_task(checkpoint, metadata)
+    class_names = resolve_model_class_names(checkpoint, metadata)
+    num_outputs = resolve_model_num_outputs(
+        checkpoint,
+        metadata,
+        class_names=class_names,
+        default=1,
+    )
 
-    if not class_names:
-        raise ValueError(f"Torch checkpoint {path} is missing class_names.")
+    if task == "classification" and not class_names:
+        raise ValueError(
+            f"Torch checkpoint {path} is missing its classification label "
+            "ordering. Expected class_names, class_labels, classes, "
+            "label_options, target metadata, or saved training params."
+        )
 
     state_dict = checkpoint.get("state_dict")
     if state_dict is None:
@@ -509,7 +763,7 @@ def _load_recipe_torch_image_checkpoint(*, path: Path, model_ref: Mapping[str, A
     model = _build_recipe_image_model(
         architecture=architecture,
         custom_model_import=custom_model_import,
-        num_classes=len(class_names),
+        num_classes=(len(class_names) if class_names else num_outputs),
     )
 
     model.load_state_dict(state_dict)
@@ -536,6 +790,10 @@ def _load_recipe_torch_image_checkpoint(*, path: Path, model_ref: Mapping[str, A
     return {
         "torch_model": model,
         "class_names": class_names,
+        "class_labels": list(class_names),
+        "classes": list(class_names),
+        "task": task,
+        "num_outputs": num_outputs,
         "image_size": image_size,
         "normalization": normalization,
         "architecture": architecture,
@@ -776,6 +1034,7 @@ def normalize_model_artifact_payload(
     mutable = dict(payload)
     mutable.setdefault("schema_version", ML_ARTIFACT_SCHEMA_VERSION)
     mutable.setdefault("artifact_type", ARTIFACTS.MODEL)
+    mutable = canonicalize_model_class_contract(mutable)
 
     if "model_ref" in mutable and "model" not in mutable:
         return ensure_json_safe(mutable)
@@ -801,6 +1060,7 @@ def normalize_model_artifact_payload(
     mutable["model_ref"] = ref.to_dict()
     mutable["model_object_stored"] = False
     mutable["updated_at"] = time.time()
+    mutable = canonicalize_model_class_contract(mutable)
 
     return ensure_json_safe(mutable)
 
