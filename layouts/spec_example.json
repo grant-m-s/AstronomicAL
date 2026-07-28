@@ -1,5 +1,5 @@
 {
-  "created_at": "2026-07-28T12:52:29.041598+00:00",
+  "created_at": "2026-07-28T12:47:57.034533+00:00",
   "datasets": {
     "active_id": "edfn_example_data",
     "items": [
@@ -622,13 +622,6 @@
     },
     "required": [
       {
-        "id": "core.record_browser",
-        "panels": [
-          "core.record_browser.panel"
-        ],
-        "version": "0.1.0"
-      },
-      {
         "id": "astro.sed",
         "panels": [
           "astro.sed.panel"
@@ -636,20 +629,19 @@
         "version": "0.1.0"
       },
       {
-        "id": "core.visualisation",
-        "panels": [
-          "core.visualisation.density",
-          "core.visualisation.histogram"
-        ],
-        "version": "0.3.2"
-      },
-      {
         "id": "astro.euclid_cutout",
         "panels": [
-          "astro.euclid_cutout.panel",
           "astro.euclid_cutout.panel"
         ],
         "version": "0.2.14"
+      },
+      {
+        "id": "astro.spectra",
+        "panels": [
+          "astro.spectra.desi",
+          "astro.spectra.euclid"
+        ],
+        "version": "0.1.0"
       }
     ]
   },
@@ -660,32 +652,15 @@
       "dataset_id": "edfn_example_data",
       "metadata": {
         "id_column": "object_id_euclid",
-        "index": 0,
-        "panel_type": "record_browser",
-        "position": 0,
-        "record_id_col": "object_id_euclid",
-        "row_index": 0,
-        "row_pos": 0,
-        "row_position": 0,
-        "row_values": {
-          "declination_euclid": 66.19863581084084,
-          "object_id_euclid": 2.7285498726619863e+18,
-          "right_ascension_euclid": 272.8549872068065
-        },
-        "semantic_values": {
-          "coords.dec": 66.19863581084084,
-          "coords.ra": 272.8549872068065
-        },
-        "values": {
-          "declination_euclid": 66.19863581084084,
-          "object_id_euclid": 2.7285498726619863e+18,
-          "right_ascension_euclid": 272.8549872068065
-        }
+        "index": 1,
+        "navigation_position": 1,
+        "navigation_revision": 1,
+        "navigation_scope": "dataset"
       },
-      "origin": "record_browser.index",
-      "panel_id": "f14e2ce8-ec87-4c9c-8b95-96930e19de62",
-      "row_id": "2728549872661986358",
-      "timestamp": 1785243103.10414
+      "origin": "application_toolbar",
+      "panel_id": null,
+      "row_id": "2722987678666891197",
+      "timestamp": 1785242858.5177255
     },
     "selection_set": null
   },
@@ -706,136 +681,86 @@
       "current_layout": [
         {
           "h": 5,
-          "i": "menu:1",
-          "static": false,
-          "w": 3,
-          "x": 0,
-          "y": 0
-        },
-        {
-          "h": 5,
           "i": "menu:2",
           "static": false,
-          "w": 4,
-          "x": 3,
-          "y": 0
-        },
-        {
-          "h": 5,
-          "i": "menu:3",
-          "static": false,
           "w": 5,
-          "x": 7,
+          "x": 0,
           "y": 0
         },
         {
           "h": 7,
           "i": "menu:4",
           "static": false,
-          "w": 4,
+          "w": 5,
           "x": 0,
           "y": 5
         },
         {
-          "h": 7,
-          "i": "menu:5",
+          "h": 5,
+          "i": "menu:7",
           "static": false,
-          "w": 4,
-          "x": 4,
-          "y": 5
+          "w": 7,
+          "x": 5,
+          "y": 0
         },
         {
-          "h": 6,
-          "i": "menu:6",
+          "h": 7,
+          "i": "menu:9",
           "static": false,
-          "w": 4,
-          "x": 8,
+          "w": 7,
+          "x": 5,
           "y": 5
         }
       ],
       "keys": [
-        "menu:1",
         "menu:2",
-        "menu:3",
         "menu:4",
-        "menu:5",
-        "menu:6"
+        "menu:7",
+        "menu:9"
       ],
       "layouts": {
         "lg": [
           {
             "h": 5,
-            "i": "menu:1",
-            "static": false,
-            "w": 3,
-            "x": 0,
-            "y": 0
-          },
-          {
-            "h": 5,
             "i": "menu:2",
             "static": false,
-            "w": 4,
-            "x": 3,
-            "y": 0
-          },
-          {
-            "h": 5,
-            "i": "menu:3",
-            "static": false,
             "w": 5,
-            "x": 7,
+            "x": 0,
             "y": 0
           },
           {
             "h": 7,
             "i": "menu:4",
             "static": false,
-            "w": 4,
+            "w": 5,
             "x": 0,
             "y": 5
           },
           {
-            "h": 7,
-            "i": "menu:5",
+            "h": 5,
+            "i": "menu:7",
             "static": false,
-            "w": 4,
-            "x": 4,
-            "y": 5
+            "w": 7,
+            "x": 5,
+            "y": 0
           },
           {
-            "h": 6,
-            "i": "menu:6",
+            "h": 7,
+            "i": "menu:9",
             "static": false,
-            "w": 4,
-            "x": 8,
+            "w": 7,
+            "x": 5,
             "y": 5
           }
         ],
         "md": [
           {
             "h": 6,
-            "i": "menu:1",
-            "static": false,
-            "w": 6,
-            "x": 0,
-            "y": 0
-          },
-          {
-            "h": 6,
             "i": "menu:2",
             "static": false,
             "w": 6,
             "x": 6,
             "y": 0
-          },
-          {
-            "h": 6,
-            "i": "menu:3",
-            "static": false,
-            "w": 6,
-            "x": 0,
-            "y": 6
           },
           {
             "h": 6,
@@ -847,7 +772,7 @@
           },
           {
             "h": 6,
-            "i": "menu:5",
+            "i": "menu:7",
             "static": false,
             "w": 6,
             "x": 0,
@@ -855,22 +780,14 @@
           },
           {
             "h": 6,
-            "i": "menu:6",
+            "i": "menu:9",
             "static": false,
             "w": 6,
-            "x": 6,
-            "y": 12
+            "x": 0,
+            "y": 6
           }
         ],
         "sm": [
-          {
-            "h": 6,
-            "i": "menu:1",
-            "static": false,
-            "w": 12,
-            "x": 0,
-            "y": 0
-          },
           {
             "h": 6,
             "i": "menu:2",
@@ -878,14 +795,6 @@
             "w": 12,
             "x": 0,
             "y": 6
-          },
-          {
-            "h": 6,
-            "i": "menu:3",
-            "static": false,
-            "w": 12,
-            "x": 0,
-            "y": 12
           },
           {
             "h": 6,
@@ -897,7 +806,7 @@
           },
           {
             "h": 6,
-            "i": "menu:5",
+            "i": "menu:7",
             "static": false,
             "w": 12,
             "x": 0,
@@ -905,11 +814,11 @@
           },
           {
             "h": 6,
-            "i": "menu:6",
+            "i": "menu:9",
             "static": false,
             "w": 12,
             "x": 0,
-            "y": 30
+            "y": 12
           }
         ]
       },
@@ -929,36 +838,13 @@
       ],
       "row_height": 80,
       "titles": {
-        "menu:1": "Record Browser",
         "menu:2": "Broadband SED",
-        "menu:3": "Density Plot",
         "menu:4": "Euclid Cutout",
-        "menu:5": "Euclid Cutout",
-        "menu:6": "Histogram Plot"
+        "menu:7": "DESI Spectra",
+        "menu:9": "Euclid Spectra"
       }
     },
     "panels": [
-      {
-        "instance_id": "menu:1",
-        "kind": "plugin_panel",
-        "metadata": {
-          "panel_category": "Single Selection",
-          "panel_registration_title": "Record Browser",
-          "restore_policy": "best_effort"
-        },
-        "open_kwargs": {},
-        "plugin_id": "core.record_browser",
-        "plugin_version": "0.1.0",
-        "registration_id": "core.record_browser.panel",
-        "state": {
-          "extra_info_cols": [
-            "right_ascension_euclid",
-            "declination_euclid"
-          ]
-        },
-        "state_version": 1,
-        "title": "Record Browser"
-      },
       {
         "instance_id": "menu:2",
         "kind": "plugin_panel",
@@ -993,7 +879,7 @@
             "u": "magerr_u_ext_megacam_templfit_euclid",
             "z": "magerr_z_ext_hsc_templfit_euclid"
           },
-          "latest_artifact_id": "74674df374c7479d8da991f2c0c769df",
+          "latest_artifact_id": "53c49662a8ef49fda359d516be62bad8",
           "mapping_applied_once": true,
           "mapping_controls_expanded": false,
           "plot_unit": "erg/s/cm\u00b2 (\u03bdF\u03bd)",
@@ -1018,49 +904,6 @@
         "title": "Broadband SED"
       },
       {
-        "instance_id": "menu:3",
-        "kind": "plugin_panel",
-        "metadata": {
-          "panel_category": "Visualisation",
-          "panel_registration_title": "Density Plot",
-          "restore_policy": "best_effort"
-        },
-        "open_kwargs": {},
-        "plugin_id": "core.visualisation",
-        "plugin_version": "0.3.2",
-        "registration_id": "core.visualisation.density",
-        "state": {
-          "bins": 35,
-          "color_by": "None",
-          "color_cmap": "Viridis",
-          "color_mode": "auto",
-          "cumulative": false,
-          "datashade_threshold": 50000,
-          "density": false,
-          "density_bins": 200,
-          "interactive_sample_limit": 50000,
-          "label_filter": [
-            "All"
-          ],
-          "log_density": true,
-          "log_x": false,
-          "log_y": false,
-          "max_selection_ids": 100000,
-          "point_alpha": 0.65,
-          "point_size": 5,
-          "render_mode": "interactive",
-          "settings_visible": false,
-          "x": "g_ext_hsc-z_ext_hsc",
-          "x_max": 5,
-          "x_min": -0.6,
-          "y": "vis-h",
-          "y_max": 4,
-          "y_min": -1
-        },
-        "state_version": 1,
-        "title": "Density Plot"
-      },
-      {
         "instance_id": "menu:4",
         "kind": "plugin_panel",
         "metadata": {
@@ -1082,10 +925,10 @@
           "environment": "PDR",
           "filter_name": "VIS",
           "profile_pixel": {
-            "col": 150,
-            "row": 149
+            "col": 49,
+            "row": 49
           },
-          "radius_arcsec": 13.5,
+          "radius_arcsec": 5,
           "save_dir": "data/cutouts",
           "settings_visible": false,
           "show_profile_crosshair": false,
@@ -1094,98 +937,69 @@
           "show_spectrum_coords": true,
           "stretch": "Log",
           "stretch_scale": 1350,
-          "surface_azimuth_deg": -48,
+          "surface_azimuth_deg": -79,
           "surface_black_cells": true,
-          "surface_elevation_deg": 16,
-          "surface_grid_size": 24
+          "surface_elevation_deg": 36,
+          "surface_grid_size": 56
         },
         "state_version": 1,
         "title": "Euclid Cutout"
       },
       {
-        "instance_id": "menu:5",
+        "instance_id": "menu:7",
         "kind": "plugin_panel",
         "metadata": {
-          "panel_category": "Images / Cutouts",
-          "panel_registration_title": "Euclid Cutout",
+          "panel_category": "Spectra",
+          "panel_registration_title": "DESI Spectra",
           "restore_policy": "best_effort"
         },
         "open_kwargs": {},
-        "plugin_id": "astro.euclid_cutout",
-        "plugin_version": "0.2.14",
-        "registration_id": "astro.euclid_cutout.panel",
+        "plugin_id": "astro.spectra",
+        "plugin_version": "0.1.0",
+        "registration_id": "astro.spectra.desi",
         "state": {
-          "active_view_tab": 0,
           "auto_reload": true,
-          "contour_base": 2.0,
-          "contour_exponent": 1.0,
-          "contour_levels": 0,
-          "credentials_filepath": "euclid_credentials.login",
-          "environment": "PDR",
-          "filter_name": "NIR_Y",
-          "profile_pixel": {
-            "col": 150,
-            "row": 149
-          },
-          "radius_arcsec": 13.5,
-          "save_dir": "data/cutouts",
+          "max_separation_arcsec": 1.0,
+          "plot_lines": false,
+          "plot_model": true,
+          "redshift": null,
+          "redshift_column": "None",
+          "retrieval_mode": "Cone Search",
           "settings_visible": false,
-          "show_profile_crosshair": false,
-          "show_scale": true,
-          "show_source_coords": true,
-          "show_spectrum_coords": true,
-          "stretch": "Log",
-          "stretch_scale": 1350,
-          "surface_azimuth_deg": -48,
-          "surface_black_cells": true,
-          "surface_elevation_deg": 16,
-          "surface_grid_size": 24
+          "smoothing_function": "Box1DKernel",
+          "smoothing_window": 10,
+          "target_id_column": "Auto"
         },
         "state_version": 1,
-        "title": "Euclid Cutout"
+        "title": "DESI Spectra"
       },
       {
-        "instance_id": "menu:6",
+        "instance_id": "menu:9",
         "kind": "plugin_panel",
         "metadata": {
-          "panel_category": "Visualisation",
-          "panel_registration_title": "Histogram Plot",
+          "panel_category": "Spectra",
+          "panel_registration_title": "Euclid Spectra",
           "restore_policy": "best_effort"
         },
         "open_kwargs": {},
-        "plugin_id": "core.visualisation",
-        "plugin_version": "0.3.2",
-        "registration_id": "core.visualisation.histogram",
+        "plugin_id": "astro.spectra",
+        "plugin_version": "0.1.0",
+        "registration_id": "astro.spectra.euclid",
         "state": {
-          "bins": 35,
-          "color_by": "None",
-          "color_cmap": "Viridis",
-          "color_mode": "auto",
-          "cumulative": false,
-          "datashade_threshold": 50000,
-          "density": false,
-          "density_bins": 50,
-          "interactive_sample_limit": 50000,
-          "label_filter": [
-            "All"
-          ],
-          "log_density": false,
-          "log_x": false,
-          "log_y": false,
-          "max_selection_ids": 100000,
-          "point_alpha": 0.65,
-          "point_size": 5,
-          "render_mode": "interactive",
+          "auto_reload": true,
+          "max_separation_arcsec": 0.5,
+          "plot_lines": false,
+          "plot_model": false,
+          "redshift": null,
+          "redshift_column": "None",
+          "retrieval_mode": "Cone Search",
           "settings_visible": false,
-          "x": "mag_detection_total_euclid",
-          "x_max": null,
-          "x_min": null,
-          "y": "declination_euclid",
-          "y_max": null,
-          "y_min": null
+          "smoothing_function": "Box1DKernel",
+          "smoothing_window": 5,
+          "target_id_column": "Auto"
         },
         "state_version": 1,
-        "title": "Histogram Plot"
+        "title": "Euclid Spectra"
       }
     ]
   }
