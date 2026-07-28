@@ -125,12 +125,12 @@ class BaseVisualisationPanel(param.Parameterized):
         self._focus_point_cache = OrderedDict()
         self._focus_point_cache_max = 256
         self._focus_frame_scan_limit = 500_000
-        
+
         self._allow_one_full_range_skip = False
 
         self._row_index_cache_key = None
         self._row_index_cache = None
-        
+
         self._last_x_range = None
         self._last_y_range = None
 
@@ -255,7 +255,6 @@ class BaseVisualisationPanel(param.Parameterized):
         except Exception:
             return None
 
-
     def _shared_visualisation_data_cache(self):
         services = getattr(self.context, "services", None)
 
@@ -276,7 +275,6 @@ class BaseVisualisationPanel(param.Parameterized):
 
         return None
 
-
     def _shared_focus_rows(self):
         cache = self._shared_visualisation_data_cache()
 
@@ -294,7 +292,6 @@ class BaseVisualisationPanel(param.Parameterized):
 
         return store
 
-
     def _shared_focus_row_get(self, key):
         store = self._shared_focus_rows()
 
@@ -307,7 +304,6 @@ class BaseVisualisationPanel(param.Parameterized):
             store.move_to_end(key)
 
         return value
-
 
     def _shared_focus_row_set(self, key, value, *, max_items: int = 256):
         store = self._shared_focus_rows()
@@ -323,7 +319,6 @@ class BaseVisualisationPanel(param.Parameterized):
         while len(store) > max_items:
             store.popitem(last=False)
 
-
     def _focus_point_cache_get(self, key):
         value = self._focus_point_cache.get(key)
 
@@ -331,7 +326,6 @@ class BaseVisualisationPanel(param.Parameterized):
             self._focus_point_cache.move_to_end(key)
 
         return value
-
 
     def _focus_point_cache_set(self, key, value):
         if key in self._focus_point_cache:
@@ -452,14 +446,12 @@ class BaseVisualisationPanel(param.Parameterized):
             data_key,
         )
 
-
     def _selection_overlay_element_cache_get(self, key):
         cache = getattr(self, "_selection_overlay_element_cache", None)
         if not cache:
             return None
 
         return cache.get(key)
-
 
     def _selection_overlay_element_cache_set(self, key, element) -> None:
         if key is None:
@@ -478,7 +470,6 @@ class BaseVisualisationPanel(param.Parameterized):
         if len(cache) > max_items:
             for old_key in list(cache.keys())[: len(cache) - max_items]:
                 cache.pop(old_key, None)
-
 
     def _selection_overlay_element_cache_clear(self) -> None:
         cache = getattr(self, "_selection_overlay_element_cache", None)
@@ -515,7 +506,7 @@ class BaseVisualisationPanel(param.Parameterized):
         cached_point = self._focus_point_cache_get(point_key)
         if cached_point is not None:
             return cached_point
-        
+
         cache = getattr(self, "_focus_coordinate_cache", {})
         cached = cache.get((str(row_id), str(x_col), str(y_col)))
         if cached is not None:
@@ -868,7 +859,6 @@ class BaseVisualisationPanel(param.Parameterized):
             flush=True,
         )
         return value
-
 
     def _prepared_cache_set(self, key, data):
         cache = getattr(self, "_shared_prepared_cache", None)
@@ -1500,7 +1490,7 @@ class BaseVisualisationPanel(param.Parameterized):
         self._stream_watchers.clear()
 
     def _clear_prepared_cache(self) -> None:
-        
+
         self._prepared_cache.clear()
         self._row_index_cache_key = None
         self._row_index_cache = None
@@ -1751,7 +1741,6 @@ class BaseVisualisationPanel(param.Parameterized):
 
         return frame[record_id_col].astype(str)
 
-
     def _classify_selection_overlay_drop(
         self,
         row: pd.Series,
@@ -1801,7 +1790,6 @@ class BaseVisualisationPanel(param.Parameterized):
             "log_x": bool(getattr(self.state, "log_x", False)),
             "log_y": bool(getattr(self.state, "log_y", False)),
         }
-
 
     def _record_selection_overlay_debug(
         self,
@@ -1913,7 +1901,6 @@ class BaseVisualisationPanel(param.Parameterized):
 
         return value
 
-
     def _selection_source_cache_set(self, key, value) -> None:
         cache = getattr(self, "_selection_source_cache", None)
         if cache is None:
@@ -1932,7 +1919,6 @@ class BaseVisualisationPanel(param.Parameterized):
                 cache.clear()
                 break
 
-
     def _selection_lookup_limit(self) -> int:
         try:
             state_limit = int(getattr(self.state, "max_selection_ids", SELECTION_SOURCE_LOOKUP_LIMIT))
@@ -1940,7 +1926,6 @@ class BaseVisualisationPanel(param.Parameterized):
             state_limit = SELECTION_SOURCE_LOOKUP_LIMIT
 
         return max(1, min(state_limit, SELECTION_SOURCE_LOOKUP_LIMIT))
-
 
     def _selection_axes_columns(self) -> tuple[Optional[str], Optional[str], Optional[str]]:
         record_id_col = getattr(self.state, "record_id_col", None)
@@ -1956,10 +1941,8 @@ class BaseVisualisationPanel(param.Parameterized):
 
         return record_id_col, x_col, y_col
 
-
     def _quote_identifier_for_source_query(self, name: str) -> str:
         return '"' + str(name).replace('"', '""') + '"'
-
 
     def _selection_rows_from_source_query(
         self,
@@ -2021,7 +2004,6 @@ class BaseVisualisationPanel(param.Parameterized):
 
         return pd.concat(frames, ignore_index=True, sort=False)
 
-
     def _selection_rows_from_source_fallback(
         self,
         *,
@@ -2079,7 +2061,6 @@ class BaseVisualisationPanel(param.Parameterized):
 
         return pd.concat(rows, ignore_index=True, sort=False)
 
-
     def _normalise_selection_overlay_rows(
         self,
         frame: pd.DataFrame,
@@ -2126,9 +2107,6 @@ class BaseVisualisationPanel(param.Parameterized):
             out = out.loc[out[INTERNAL_Y] > 0]
 
         return out.reset_index(drop=True)
-
-
-
 
     def _selection_rows_from_dataset_source(
         self,
@@ -2396,7 +2374,6 @@ class BaseVisualisationPanel(param.Parameterized):
             INTERNAL_Y: float(y_value),
         }
 
-
     def _rows_for_row_ids(
         self,
         data: PreparedFrame,
@@ -2481,7 +2458,6 @@ class BaseVisualisationPanel(param.Parameterized):
 
         return None
 
-
     def _call_first_working(self, obj, method_names, call_variants):
         for method_name in method_names:
             method = getattr(obj, method_name, None)
@@ -2498,7 +2474,6 @@ class BaseVisualisationPanel(param.Parameterized):
                     continue
 
         return None
-
 
     def _focus_row_from_dataset_source(self, dataset_id, row_id, columns):
         """
@@ -2660,7 +2635,6 @@ class BaseVisualisationPanel(param.Parameterized):
 
         return None
 
-
     def _focus_point_from_dataset_source(self, focus):
         """
         Resolve the focused point for this panel's current axes by fetching one
@@ -2773,7 +2747,6 @@ class BaseVisualisationPanel(param.Parameterized):
         point = (x, y)
         self._focus_point_cache_set(cache_key, point)
         return point
-
 
     def _focus_point_from_metadata(self, focus):
         metadata = getattr(focus, "metadata", None) or {}
@@ -2911,7 +2884,6 @@ class BaseVisualisationPanel(param.Parameterized):
 
         return x, y
 
-
     def _active_selection_ids(self) -> List[str]:
         selection = getattr(self.context, "selection", None)
         if selection is None:
@@ -2998,7 +2970,7 @@ class BaseVisualisationPanel(param.Parameterized):
         )
 
     def _focus_overlay(self, data: PreparedFrame, *, size: float = 14):
-        
+
         t0 = time.perf_counter()
         point = self._focus_point(data)
         dt = time.perf_counter() - t0
@@ -3075,7 +3047,6 @@ class BaseVisualisationPanel(param.Parameterized):
             pass
 
         return False
-
 
     def _on_workspace_restore_completed(self, topic, payload) -> None:
         """Run one coalesced refresh after a workspace load/reconcile finishes."""
@@ -3248,7 +3219,6 @@ class BaseVisualisationPanel(param.Parameterized):
             return True
 
         return False
-
 
     def _on_dataset_event(self, topic, payload) -> None:
         t0 = time.perf_counter()
@@ -3658,7 +3628,6 @@ class BaseVisualisationPanel(param.Parameterized):
             framewise=True,
         )
 
-
     def _base_opts(
         self,
         *,
@@ -3691,7 +3660,6 @@ class BaseVisualisationPanel(param.Parameterized):
         )
         opts.update(self._current_range_opts(include_y=True))
         return opts
-
 
     def _settings_controls(self):
         return pn.Column(
@@ -3741,18 +3709,49 @@ class BaseVisualisationPanel(param.Parameterized):
             },
         )
 
+    def _header_axis_parameters(self):
+        """Return the axis selectors displayed in this panel's header.
+
+        Subclasses may omit controls that are not meaningful for their plot
+        without replacing the shared header layout. The underlying state is
+        retained for persistence and compatibility with other visualisations.
+        """
+        return (
+            ("X", self.state.param.x),
+            ("Y", self.state.param.y),
+        )
+
     def _header(self):
+        axis_controls = [
+            header_select(parameter, name=name)
+            for name, parameter in self._header_axis_parameters()
+        ]
+
+        trailing_control = (
+            self.settings_button
+            if self.show_controls
+            else pn.Spacer(width=34, height=34)
+        )
+        controls = [*axis_controls, trailing_control]
+
+        axis_columns = " ".join(
+            "minmax(0, 1fr)" for _ in axis_controls
+        )
+        grid_template_columns = (
+            f"{axis_columns} 34px"
+            if axis_columns
+            else "34px"
+        )
+
         return pn.GridBox(
-            header_select(self.state.param.x, name="X"),
-            header_select(self.state.param.y, name="Y"),
-            self.settings_button if self.show_controls else pn.Spacer(width=34, height=34),
-            ncols=3,
+            *controls,
+            ncols=len(controls),
             sizing_mode="stretch_width",
             height=48,
             margin=(0, 0, 0, 0),
             styles={
                 "display": "grid",
-                "grid-template-columns": "minmax(0, 1fr) minmax(0, 1fr) 34px",
+                "grid-template-columns": grid_template_columns,
                 "gap": "4px",
                 "align-items": "start",
                 "width": "100%",

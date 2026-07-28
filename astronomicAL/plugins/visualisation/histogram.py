@@ -34,7 +34,6 @@ from .widgets import (
 
 HistogramExtent = Tuple[float, float]
 
-
 class HistogramPanel(BaseVisualisationPanel):
     title = "Histogram"
 
@@ -45,6 +44,10 @@ class HistogramPanel(BaseVisualisationPanel):
         # about the optional x-domain limits introduced here, so the histogram
         # panel watches them locally.
         self._watch_state(["x_min", "x_max"])
+
+    def _header_axis_parameters(self):
+        """Histograms use only the X column; their Y axis is derived counts."""
+        return (("X", self.state.param.x),)
 
     def _settings_controls(self):
         return settings_box(
@@ -309,7 +312,6 @@ class HistogramPanel(BaseVisualisationPanel):
             return np.geomspace(xmin, xmax, n_bins + 1)
 
         return np.linspace(xmin, xmax, n_bins + 1)
-
 
 def _group_colour(frame) -> str:
     if INTERNAL_LABEL_COLOUR not in frame.columns or frame.empty:
