@@ -400,6 +400,12 @@ class EuclidCutoutPanel:
         self._panel_storage: Any = None
         self._suppress_filter_reload = False
 
+        # The platform may restore controller state immediately after the panel
+        # factory has returned its view. Keep request-setting identity explicit so
+        # an initial request started with constructor defaults can never be accepted
+        # after restored widget values have become visible.
+        self._active_request_signature: Optional[Tuple[Any, ...]] = None
+
         self._current_target: Optional[_ResolvedTarget] = None
         self._cutout_result: Any = None
         self.euclid_object: Any = None
@@ -544,13 +550,74 @@ class EuclidCutoutPanel:
             ),
         }
 
+    def _request_settings_signature(self) -> Tuple[Any, ...]:
+        """Return the UI-thread identity of settings that affect archive retrieval.
+
+        Display-only controls are intentionally excluded. The tuple is kept
+        private to this controller and is never placed in persisted state or
+        published through the event bus.
+        """
+        try:
+            radius_arcsec: Any = float(self.radius_input.value)
+        except Exception:
+            radius_arcsec = self.radius_input.value
+
+        return (
+            str(self.environment.value or "PDR"),
+            radius_arcsec,
+            str(self.filter_input.value or "Color"),
+            str(self.save_dir_input.value or DEFAULT_SAVE_DIR),
+            str(self.credentials_file_input.value or "").strip(),
+            str(self.user_input.value or "").strip(),
+            str(self.password_input.value or ""),
+        )
+
+    def _request_settings_changed(
+        self,
+        request_signature: Optional[Tuple[Any, ...]],
+    ) -> bool:
+        if request_signature is None:
+            return False
+        try:
+            return tuple(request_signature) != self._request_settings_signature()
+        except Exception:
+            return False
+
+    def _reload_after_request_settings_change(
+        self,
+        *,
+        reason: str,
+    ) -> None:
+        """Reload or leave a clear prompt after a request-setting change."""
+        if self._disposed:
+            return
+
+        if self.auto_reload.value:
+            self.status.object = (
+                "Euclid request settings changed; loading the current values…"
+            )
+            self._schedule_auto_load(
+                reason=reason,
+                delay_ms=0,
+            )
+        else:
+            self.status.object = (
+                "Euclid request settings changed. Press **Load** to use the "
+                "current values."
+            )
+
     def restore_state(self, state: Dict[str, Any]) -> None:
         if not isinstance(state, dict):
             return
 
+        request_signature_before = self._request_settings_signature()
+
         self.settings_visible = bool(state.get("settings_visible", False))
         try:
-            self._restored_active_tab = max(0, min(2, int(state.get("active_view_tab", 0))))
+            self._restored_active_tab = max(
+                0,
+                min(2, int(state.get("active_view_tab", 0))),
+            )
         except Exception:
             self._restored_active_tab = 0
 
@@ -604,6 +671,26 @@ class EuclidCutoutPanel:
             self._apply_settings_visibility()
         except Exception:
             pass
+
+        request_settings_changed = (
+            request_signature_before != self._request_settings_signature()
+        )
+
+        # A normal constructor-time restore happens before view(), so no load has
+        # been scheduled and no further work is required. The platform can also
+        # restore state after the factory has returned the view; in that case an
+        # initial request may already have captured the default radius. Invalidate
+        # it and schedule one request from the restored widget values.
+        if request_settings_changed and self._initial_load_started:
+            self._invalidate_request(
+                reason="state.restored",
+                target=self._current_target,
+                publish=True,
+            )
+            self._active_request_signature = None
+            self._reload_after_request_settings_change(
+                reason="state.restored",
+            )
 
     # ------------------------------------------------------------------
     # UI construction
@@ -999,7 +1086,7 @@ class EuclidCutoutPanel:
             self.contour_levels,
             self.contour_base,
             self.contour_exponent,
-            self.stretch_scale_input,    
+            self.stretch_scale_input,
         ]:
             widget.param.watch(self._overlay_setting_changed, "value")
 
@@ -2163,19 +2250,23 @@ class EuclidCutoutPanel:
             return
         self._initial_load_started = True
 
+        # Share the same generation guard as focus/filter auto-load callbacks.
+        # A late platform restore can therefore invalidate this callback before it
+        # reads constructor defaults from the widgets.
+        self._auto_load_generation += 1
+        generation = self._auto_load_generation
+
         def _run() -> None:
+            if self._disposed:
+                return
+            if generation != self._auto_load_generation:
+                return
+
             self._update_target_status()
             if self.auto_reload.value:
                 self.load_cutout(reason="initial")
 
-        try:
-            doc = pn.state.curdoc
-            if doc is not None:
-                doc.add_next_tick_callback(_run)
-            else:
-                _run()
-        except Exception:
-            _run()
+        self._schedule_panel_callback(_run, delay_ms=0)
 
     def _target_html(self, target: _ResolvedTarget) -> str:
         return (
@@ -2240,6 +2331,8 @@ class EuclidCutoutPanel:
         stretch = str(self.stretch_input.value)
         stretch_scale = self._stretch_scale_value()
         save_dir = self.save_dir_input.value or DEFAULT_SAVE_DIR
+        request_signature = self._request_settings_signature()
+        self._active_request_signature = request_signature
 
         def _worker(cancel_token: Any = None) -> Any:
             return runtime.fetch_cutout(
@@ -2266,6 +2359,7 @@ class EuclidCutoutPanel:
                 target=target,
                 reason=reason,
                 generation=generation,
+                request_signature=request_signature,
             )
 
         def _error(exc: BaseException) -> None:
@@ -2274,6 +2368,7 @@ class EuclidCutoutPanel:
                 target=target,
                 reason=reason,
                 generation=generation,
+                request_signature=request_signature,
             )
 
         jobs = getattr(self.context, "jobs", None)
@@ -2312,6 +2407,7 @@ class EuclidCutoutPanel:
         handle = self._job_handle
         self._job_handle = None
         self._job_generation = None
+        self._active_request_signature = None
 
         if handle is None:
             return False
@@ -2337,25 +2433,52 @@ class EuclidCutoutPanel:
         target: _ResolvedTarget,
         reason: str,
         generation: int,
+        request_signature: Tuple[Any, ...],
     ) -> None:
+        if self._job_generation == generation:
+            self._job_handle = None
+            self._job_generation = None
+
+        generation_is_current = generation == self._request_generation
+        focus_is_current = self._target_matches_current_focus(target)
+        settings_changed = self._request_settings_changed(request_signature)
         stale = (
             self._disposed
-            or generation != self._request_generation
-            or not self._target_matches_current_focus(target)
+            or not generation_is_current
+            or not focus_is_current
+            or settings_changed
         )
 
         if stale:
             self._cleanup_result(result)
+            if self._active_request_signature == request_signature:
+                self._active_request_signature = None
+
+            stale_reason = (
+                "request_settings_changed"
+                if settings_changed and generation_is_current and focus_is_current
+                else "stale_result"
+            )
             self._publish_cutout_running(
                 False,
                 target=target,
-                reason="stale_result",
+                reason=stale_reason,
             )
+
+            # This also protects against request-setting changes made while an
+            # archive job is already running, even when no widget watcher fires.
+            if (
+                settings_changed
+                and generation_is_current
+                and focus_is_current
+                and not self._disposed
+            ):
+                self._reload_after_request_settings_change(
+                    reason="request.settings.changed",
+                )
             return
 
-        if self._job_generation == generation:
-            self._job_handle = None
-            self._job_generation = None
+        self._active_request_signature = None
 
         previous_result = self._cutout_result
         previous_object = self.euclid_object
@@ -2492,7 +2615,6 @@ class EuclidCutoutPanel:
 
         has_color = color_bands is not None
 
-
         self._invalidate_analysis_cache()
         self._tap_update_generation += 1
         self._base_cutout_elements = []
@@ -2530,28 +2652,53 @@ class EuclidCutoutPanel:
         target: _ResolvedTarget,
         reason: str,
         generation: int,
+        request_signature: Tuple[Any, ...],
     ) -> None:
         if self._job_generation == generation:
             self._job_handle = None
             self._job_generation = None
 
+        generation_is_current = generation == self._request_generation
+        focus_is_current = self._target_matches_current_focus(target)
+        settings_changed = self._request_settings_changed(request_signature)
         stale = (
             self._disposed
-            or generation != self._request_generation
-            or not self._target_matches_current_focus(target)
+            or not generation_is_current
+            or not focus_is_current
+            or settings_changed
         )
 
         if stale or isinstance(exc, CancelledError):
+            if self._active_request_signature == request_signature:
+                self._active_request_signature = None
+
+            stale_reason = (
+                "cancelled"
+                if isinstance(exc, CancelledError)
+                else (
+                    "request_settings_changed"
+                    if settings_changed and generation_is_current and focus_is_current
+                    else "stale_result"
+                )
+            )
             self._publish_cutout_running(
                 False,
                 target=target,
-                reason=(
-                    "cancelled"
-                    if isinstance(exc, CancelledError)
-                    else "stale_result"
-                ),
+                reason=stale_reason,
             )
+
+            if (
+                settings_changed
+                and generation_is_current
+                and focus_is_current
+                and not self._disposed
+            ):
+                self._reload_after_request_settings_change(
+                    reason="request.settings.changed",
+                )
             return
+
+        self._active_request_signature = None
 
         # Keep the previous successful image visible. The raw exception remains
         # in the runtime events; the status uses a concise, HTML-safe summary.
@@ -2648,7 +2795,7 @@ class EuclidCutoutPanel:
         high = global_low + channel_high * span
 
         return low, high
-    
+
     def _update_stretch_scale(self, event) -> None:
         """Fore sure there's a more elegant way to do this"""
         if self._stretch_scale_value() is None:
