@@ -232,7 +232,7 @@ class RuntimeStatusBox:
             border: 1px solid rgba(0,0,0,0.18);
             background: rgba(255,255,255,0.72);
             white-space: nowrap;
-            width: 170px;
+            width: 220px;
             height: 28px;
             overflow: hidden;
             text-overflow: ellipsis;

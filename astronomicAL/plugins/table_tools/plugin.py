@@ -237,8 +237,6 @@ def create_subset_action(context, request: ActionRequest, **_kwargs) -> ActionRe
         target_dataset_id=new_dataset_id,
     )
 
-    previous_dataset_id = base_dataset_id
-
     events = [
         EventResult(
             "dataset.loaded",
@@ -252,13 +250,19 @@ def create_subset_action(context, request: ActionRequest, **_kwargs) -> ActionRe
     ]
 
     if set_active:
-        datasets.set_active(new_dataset_id)
+        # PluginManager publishes the EventResult values in order after the action
+        # completes, so suppress DatasetManager's immediate event here.
+        datasets.set_active(
+            new_dataset_id,
+            origin=manifest.id,
+            publish=False,
+        )
         events.append(
             EventResult(
                 "dataset.active.changed",
                 {
                     "dataset_id": new_dataset_id,
-                    "previous_dataset_id": previous_dataset_id,
+                    "previous_dataset_id": base_dataset_id,
                     "origin": manifest.id,
                 },
             )
@@ -443,6 +447,13 @@ class TableTransformPanel:
         self.preview_subset_button.on_click(self._preview_subset)
         self.create_subset_button.on_click(self._create_subset_dataset)
 
+        try:
+            self._last_active_dataset_id: Optional[str] = (
+                self._active_dataset_id()
+            )
+        except Exception:
+            self._last_active_dataset_id = None
+
         self._subscribe_to_dataset_events()
         self.view = self._build_view()
         self._refresh_metadata_panes()
@@ -579,9 +590,25 @@ class TableTransformPanel:
         if self._disposed:
             return
 
-        def _refresh():
-            if not self._disposed:
-                self._refresh_metadata_panes()
+        def _refresh() -> None:
+            if self._disposed:
+                return
+
+            try:
+                active_dataset_id: Optional[str] = self._active_dataset_id()
+            except Exception:
+                active_dataset_id = None
+
+            active_changed = (
+                topic == "dataset.active.changed"
+                and active_dataset_id != self._last_active_dataset_id
+            )
+
+            if active_changed:
+                self._last_active_dataset_id = active_dataset_id
+                self._clear_dataset_specific_output(active_dataset_id)
+
+            self._refresh_metadata_panes()
 
         try:
             doc = pn.state.curdoc
@@ -689,6 +716,20 @@ class TableTransformPanel:
 
     def _set_preview_df(self, df: pd.DataFrame) -> None:
         self.preview.object = df
+
+    def _clear_dataset_specific_output(
+        self,
+        dataset_id: Optional[str],
+    ) -> None:
+        self._set_preview_df(pd.DataFrame())
+
+        if dataset_id:
+            self.status.object = (
+                f"Active dataset changed to `{dataset_id}`. "
+                "Generate a new preview before applying a transformation."
+            )
+        else:
+            self.status.object = "No active dataset is currently available."
 
     def _publish(self, topic: str, payload: Dict[str, Any]) -> None:
         events = getattr(self.context, "events", None)

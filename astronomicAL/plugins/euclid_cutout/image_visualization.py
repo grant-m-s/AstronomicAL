@@ -13,7 +13,6 @@ from astropy.wcs.utils import proj_plane_pixel_scales
 from astropy.nddata import Cutout2D
 from astropy.modeling.functional_models import Gaussian2D
 
-
 @dataclass
 class BandState:
     raw: np.ndarray
@@ -47,7 +46,6 @@ class BandState:
 
         elif level == "scale":
             pass
-
 
 class ImageVisualizationClass:
     _STRETCH_MAP = {
@@ -199,6 +197,53 @@ class ImageVisualizationClass:
                 return candidate
         return band
 
+    def get_analysis_data(
+        self,
+        band,
+        *,
+        aligned=True,
+        processed=False,
+        stretch="Linear",
+        stretch_scale=None,
+        stretch_interval="Asymmetric",
+        low_clip=0,
+        high_clip=1,
+        scale_method="MinMax",
+    ):
+        """Return a detached scalar image suitable for analysis views.
+
+        Virtual colour bands resolve to a real scalar band, preferring VIS. The
+        returned array is detached from the cached display data so callers may
+        safely normalise or downsample it without mutating the cutout view.
+        """
+        resolved_band = self.resolve_wcs_band(band)
+        if resolved_band not in self._bands:
+            raise ValueError(f"Band {resolved_band} not found")
+
+        if processed:
+            image = self.get_plot_data(
+                resolved_band,
+                stretch=stretch,
+                stretch_scale=stretch_scale,
+                stretch_interval=stretch_interval,
+                low_clip=low_clip,
+                high_clip=high_clip,
+                gamma_color=1,
+                scale_method=scale_method,
+                _internal=True,
+            )
+        else:
+            band_state = self._bands[resolved_band]
+            image = self._get_aligned_image(band_state)[0] if aligned else band_state.raw
+
+        array = np.asarray(image)
+        if array.ndim != 2:
+            raise ValueError(
+                f"Analysis data for band {resolved_band!r} must be two-dimensional; "
+                f"received shape {array.shape}."
+            )
+        return np.array(array, dtype=np.float32, copy=True)
+
     def _get_aligned_image(self, band_state: BandState):
         if self.target_wcs is None:
             return band_state.raw, band_state.wcs
@@ -273,7 +318,7 @@ class ImageVisualizationClass:
         absolute_high = image_min + float(high) * image_range
 
         return np.clip(arr, absolute_low, absolute_high)
-    
+
     @staticmethod
     def _finite_min_max(image, image_min=None, image_max=None):
         arr = np.asarray(image, dtype=np.float32)
@@ -299,7 +344,6 @@ class ImageVisualizationClass:
             return None, None
 
         return image_min, image_max
-
 
     @staticmethod
     def _scale_image(image, scale_method="minmax", image_min=None, image_max=None):
@@ -499,7 +543,6 @@ class ImageVisualizationClass:
             return np.mean(scales_arcsec)
         return scales_arcsec[0], scales_arcsec[1]
 
-
 class ALMAPlotClass:
     def __init__(self, header, data, wcs=None, radius=None, coordinates=None):
         self.data = data
@@ -606,4 +649,3 @@ class ALMAPlotClass:
 
         weighted_spectrum = (subcube * beam).sum(axis=(1, 2))
         return weighted_spectrum
-

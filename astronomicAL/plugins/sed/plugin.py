@@ -91,7 +91,7 @@ def register(api) -> None:
             "selection",
         ],
         required_mappings=["record_id"],
-        optional_mappings=["target_label", "redshift"],
+        optional_mappings=["redshift"],
         uses_services=[f"{PLUGIN_ID}.runtime"],
         produces=[
             "astro.sed.broadband",

@@ -34,7 +34,6 @@ class PanelRecord:
     open_kwargs: Dict[str, Any] = field(default_factory=dict)
     metadata: Dict[str, Any] = field(default_factory=dict)
 
-
 def _debug_layout_summary(layout):
     out = []
 
@@ -53,7 +52,6 @@ def _debug_layout_summary(layout):
         )
 
     return out
-
 
 def _debug_layouts_summary(layouts):
     return {
@@ -150,7 +148,6 @@ class WorkspaceManager:
 
         self._ensure_close_watcher()
 
-
     def _detach_close_watchers(self) -> None:
         for grid, watcher in list(self._close_watchers):
             try:
@@ -238,7 +235,33 @@ class WorkspaceManager:
         active_ids = self._layout_ids_for_keys(active_layout, keys)
         current_ids_raw = self._layout_ids_for_keys(current_layout, keys)
 
-        if active_ids != key_set or current_ids_raw != key_set:
+        # `current_layout` is browser-fed and can temporarily be empty or
+        # incomplete while `layouts[breakpoint]` already contains the real
+        # user-resized geometry. In that case, preserve the active layout.
+        # Falling back to `_last_applied_layouts` here can reset resized panels
+        # to an older/default server-applied layout when adding a new tile.
+        if (
+            active_ids == key_set
+            and current_ids_raw != key_set
+            and not getattr(self, "_skip_next_current_layout_merge", False)
+        ):
+            workspace_debug_print(
+                "merge_current_layout.return.incomplete_current_preserve_active",
+                {
+                    "breakpoint": breakpoint,
+                    "key_set": sorted(key_set),
+                    "active_ids": sorted(active_ids),
+                    "current_ids_raw": sorted(current_ids_raw),
+                    "active_layout": _debug_layout_summary(active_layout),
+                    "current_layout": _debug_layout_summary(current_layout),
+                },
+            )
+            self._last_applied_layouts = deepcopy(layouts)
+            return
+
+        # Only restore from `_last_applied_layouts` when neither the active
+        # layout nor the current browser layout is complete for the live keys.
+        if active_ids != key_set and current_ids_raw != key_set:
             fallback_layouts = deepcopy(
                 getattr(self, "_last_applied_layouts", None) or {}
             )
@@ -278,7 +301,20 @@ class WorkspaceManager:
                     layouts=fallback_layouts,
                     current_layout=deepcopy(fallback_active),
                 )
+                self._last_applied_layouts = deepcopy(fallback_layouts)
                 return
+
+            workspace_debug_print(
+                "merge_current_layout.repair_rejected",
+                {
+                    "breakpoint": breakpoint,
+                    "reason": "no_complete_layout_source",
+                    "key_set": sorted(key_set),
+                    "active_ids": sorted(active_ids),
+                    "current_ids_raw": sorted(current_ids_raw),
+                    "fallback_ids": sorted(fallback_ids),
+                },
+            )
 
         workspace_debug_print(
             "merge_current_layout.state_after_setup",
@@ -351,6 +387,7 @@ class WorkspaceManager:
                     layouts=restored_layouts,
                     current_layout=deepcopy(restored_active),
                 )
+                self._last_applied_layouts = deepcopy(restored_layouts)
 
                 workspace_debug_print(
                     "merge_current_layout.restore_guard.accepted.after_update",
@@ -472,6 +509,7 @@ class WorkspaceManager:
             return
 
         if layouts.get(breakpoint) == cleaned_current:
+            self._last_applied_layouts = deepcopy(layouts)
             workspace_debug_print(
                 "merge_current_layout.return.no_change",
                 {
@@ -513,6 +551,7 @@ class WorkspaceManager:
             layouts=layouts,
             current_layout=deepcopy(cleaned_current),
         )
+        self._last_applied_layouts = deepcopy(layouts)
 
         workspace_debug_print(
             "merge_current_layout.write.after_update",
@@ -868,7 +907,6 @@ class WorkspaceManager:
             current_keys=[str(k) for k in (self.grid.keys or [])],
         )
 
-
         keys = [str(key) for key in (self.grid.keys or [])]
 
         if panel_id not in keys:
@@ -975,6 +1013,7 @@ class WorkspaceManager:
             update["titles"] = new_titles
 
         self.grid.param.update(**update)
+        self._last_applied_layouts = deepcopy(new_layouts)
 
         workspace_panel_debug(
             "replace_panel_in_place AFTER",
@@ -1042,7 +1081,7 @@ class WorkspaceManager:
                 ),
             },
         )
-        
+
         self._merge_current_layout_into_layouts()
         workspace_debug_print(
             "add_panel.after_merge",
@@ -1314,6 +1353,7 @@ class WorkspaceManager:
             update["close_click_count"] = getattr(self.grid, "close_click_count", 0)
 
         self.grid.param.update(**update)
+        self._last_applied_layouts = deepcopy(new_layouts)
 
         workspace_debug_print(
             "remove_panel",
@@ -1362,6 +1402,8 @@ class WorkspaceManager:
             update["close_click_count"] = getattr(self.grid, "close_click_count", 0)
 
         self.grid.param.update(**update)
+        self._last_applied_layouts = None
+        self._skip_next_current_layout_merge = False
 
     def list_panels(self) -> Dict[str, PanelRecord]:
         return dict(self._panels)
@@ -1422,7 +1464,6 @@ class WorkspaceManager:
             titles = dict(getattr(self.grid, "titles", {}) or {})
             titles[panel_id] = record.title
             self.grid.param.update(titles=titles)
-
 
     def snapshot_grid(self) -> dict[str, Any]:
 
@@ -1649,7 +1690,7 @@ class WorkspaceManager:
                 "grid_keys": list(self.grid.keys or []),
             },
         )
-        
+
         return {
             "grid": self.snapshot_grid(),
             "panels": self.snapshot_panels(),

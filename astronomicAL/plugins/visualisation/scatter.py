@@ -1,7 +1,3 @@
-# BUG: Assign Label col slow
-# BUG: Individual legend "on off" colour turns all colours off - works correctly in hist
-# BUG: If label set, changing label name or colour (re-apply label settings) no update happens.
-
 from __future__ import annotations
 
 import time
@@ -16,10 +12,20 @@ import panel as pn
 from holoviews import streams
 from holoviews.operation.datashader import rasterize
 
-from bokeh.models import ColumnDataSource
+from bokeh.models import (
+    BoxSelectTool,
+    ColumnDataSource,
+    LassoSelectTool,
+    TapTool,
+)
 
 from .base import BaseVisualisationPanel
 from .constants import (
+    INTERNAL_COLOR_COLOUR,
+    INTERNAL_COLOR_DISPLAY,
+    INTERNAL_COLOR_RAW,
+    INTERNAL_COLOR_VALUE,
+    INTERNAL_LABEL_COLOUR,
     INTERNAL_LABEL_DISPLAY,
     INTERNAL_ROW_ID,
     INTERNAL_X,
@@ -39,8 +45,10 @@ from .constants import (
     INTERACTIVE_DENSITY_ALPHA_GAMMA,
     FULL_RANGE_REL_TOL,
 )
+
 from .utils import (
     DENSITY_RENDERER,
+    HOVER_COLOR,
     HOVER_LABEL,
     HOVER_ROW_ID,
     PreparedFrame,
@@ -55,6 +63,8 @@ from .utils import (
     deduplicate_toolbar_tools_hook,
     coverage_sample_prepared_frame,
     keep_pan_tool_active_hook,
+    _source_axis_is_numeric,
+    axis_tick_label_hook,
 )
 
 SELECTION_OVERLAY_METADATA_KEY = "visualisation.scatter.overlay_points"
@@ -503,14 +513,25 @@ class ScatterPanel(BaseVisualisationPanel):
         forced_ids=(),
         limit=None,
     ):
+        try:
+            colour_col = self.state.colour_column()
+        except Exception:
+            colour_col = getattr(self.state, "color_by", None)
+
+        try:
+            colour_mode = self.state.effective_colour_mode()
+        except Exception:
+            colour_mode = getattr(self.state, "color_mode", None)
+
         return (
             id(self._frame_for_cache(data)),
             self._range_cache_key(x_range),
             self._range_cache_key(y_range),
             int(limit or 0),
             tuple(str(row_id) for row_id in forced_ids or ()),
-            str(getattr(self.state, "color_by", None)),
-            str(getattr(self.state, "label_col", None)),
+            str(colour_col),
+            str(colour_mode),
+            str(getattr(self.state, "color_cmap", "") or ""),
             tuple(getattr(self.state, "label_filter", None) or ()),
             "coverage-v2-no-row-order-cap",
             int(COVERAGE_SAMPLE_X_BINS),
@@ -601,14 +622,13 @@ class ScatterPanel(BaseVisualisationPanel):
 
         return positions
 
-    def _focus_point_from_dataset_row(self) -> Optional[tuple[float, Optional[float]]]:
-        """
-        Resolve the focused point from the DatasetSource instead of scanning the
-        full prepared plotting frame.
+    def _focus_point_from_dataset_row(
+        self,
+    ) -> Optional[tuple[float, Optional[float]]]:
+        """Resolve the focused point directly from the DatasetSource.
 
-        This is important after axis changes: existing focus metadata may not
-        match the new x/y variables, but the focused row can be fetched directly
-        from the Parquet-backed dataset.
+        This shortcut is valid only when the raw source values match the plotted
+        coordinates. Encoded categorical and datetime axes use the prepared frame.
         """
         selection = getattr(self.context, "selection", None)
         datasets = getattr(self.context, "datasets", None)
@@ -627,6 +647,7 @@ class ScatterPanel(BaseVisualisationPanel):
             return None
 
         row_id = getattr(focus, "row_id", None)
+
         if row_id is None:
             return None
 
@@ -634,25 +655,29 @@ class ScatterPanel(BaseVisualisationPanel):
         y_col = getattr(self.state, "y", None)
         record_id_col = getattr(self.state, "record_id_col", None)
 
-        if not x_col or not y_col or not record_id_col or record_id_col == "Use Index":
+        if (
+            not x_col
+            or not y_col
+            or not record_id_col
+            or record_id_col == "Use Index"
+        ):
+            return None
+
+        if not (
+            _source_axis_is_numeric(self.context, dataset_id, x_col)
+            and _source_axis_is_numeric(self.context, dataset_id, y_col)
+        ):
             return None
 
         try:
             source = datasets.get_source(dataset_id)
-        except Exception:
-            return None
-
-        try:
             row_df = source.to_pandas(
                 columns=[record_id_col, x_col, y_col],
                 where_sql=f'CAST("{record_id_col}" AS VARCHAR) = ?',
                 params=[str(row_id)],
                 limit=1,
             )
-        except TypeError:
-            # Older DatasetSource implementations may not support where_sql/params.
-            return None
-        except Exception:
+        except (TypeError, Exception):
             return None
 
         if row_df is None or row_df.empty:
@@ -693,8 +718,20 @@ class ScatterPanel(BaseVisualisationPanel):
         if HOVER_LABEL not in out.columns:
             if INTERNAL_LABEL_DISPLAY in out.columns:
                 out[HOVER_LABEL] = out[INTERNAL_LABEL_DISPLAY].astype(str)
+            elif INTERNAL_COLOR_DISPLAY in out.columns:
+                out[HOVER_LABEL] = out[INTERNAL_COLOR_DISPLAY].astype(str)
             else:
                 out[HOVER_LABEL] = "—"
+
+        if HOVER_COLOR not in out.columns:
+            if INTERNAL_COLOR_DISPLAY in out.columns:
+                out[HOVER_COLOR] = out[INTERNAL_COLOR_DISPLAY].astype(str)
+            elif INTERNAL_COLOR_VALUE in out.columns:
+                out[HOVER_COLOR] = out[INTERNAL_COLOR_VALUE]
+            elif INTERNAL_COLOR_RAW in out.columns:
+                out[HOVER_COLOR] = out[INTERNAL_COLOR_RAW].astype(str)
+            else:
+                out[HOVER_COLOR] = "—"
 
         # Avoid Bokeh/JavaScript integer precision warnings.
         id_columns = [
@@ -950,16 +987,25 @@ class ScatterPanel(BaseVisualisationPanel):
         if not x_col or not y_col:
             return None
 
+        dataset_id = self._dataset_id()
+
+        # Encoded plot bounds cannot be applied to raw strings or datetimes.
+        if not (
+            _source_axis_is_numeric(self.context, dataset_id, x_col)
+            and _source_axis_is_numeric(self.context, dataset_id, y_col)
+        ):
+            return None
+
         try:
             left, bottom, right, top = bounds
-            x_min = min(float(left), float(right))
-            x_max = max(float(left), float(right))
-            y_min = min(float(bottom), float(top))
-            y_max = max(float(bottom), float(top))
+            x_min, x_max = sorted((float(left), float(right)))
+            y_min, y_max = sorted((float(bottom), float(top)))
         except Exception:
             return None
 
-        if not all(np.isfinite(value) for value in (x_min, x_max, y_min, y_max)):
+        values = (x_min, x_max, y_min, y_max)
+
+        if not all(np.isfinite(value) for value in values):
             return None
 
         qx = _quote_sql_identifier(x_col)
@@ -973,10 +1019,10 @@ class ScatterPanel(BaseVisualisationPanel):
         ]
         params: list[Any] = [x_min, x_max, y_min, y_max]
 
-        if bool(getattr(self.state, "log_x", False)):
+        if getattr(self.state, "log_x", False):
             clauses.append(f"{qx} > 0")
 
-        if bool(getattr(self.state, "log_y", False)):
+        if getattr(self.state, "log_y", False):
             clauses.append(f"{qy} > 0")
 
         return " AND ".join(clauses), params
@@ -1659,6 +1705,25 @@ class ScatterPanel(BaseVisualisationPanel):
                 flush=True,
             )
 
+    def _scatter_selection_tools_hook(self, plot, element) -> None:
+        """Keep selection tools attached only to the base scatter renderer."""
+        try:
+            figure = plot.state
+            scatter_renderers = [
+                renderer
+                for renderer in figure.renderers
+                if getattr(renderer, "name", None) == SCATTER_RENDERER
+            ]
+        except Exception:
+            return
+
+        if not scatter_renderers:
+            return
+
+        for tool in figure.tools:
+            if isinstance(tool, (TapTool, BoxSelectTool, LassoSelectTool)):
+                tool.renderers = scatter_renderers
+
     def _scatter_focus_stream_signature(self):
         return (
             str(self._dataset_id()),
@@ -1916,12 +1981,24 @@ class ScatterPanel(BaseVisualisationPanel):
                 row_ids = list(getattr(active_set, "row_ids", []) or [])
                 selection_signature = (str(set_id), len(row_ids))
 
+        try:
+            colour_col = self.state.colour_column()
+        except Exception:
+            colour_col = getattr(self.state, "color_by", None)
+
+        try:
+            colour_mode = self.state.effective_colour_mode()
+        except Exception:
+            colour_mode = getattr(self.state, "color_mode", None)
+
         return (
             getattr(self, "_last_prepared_cache_key", None),
             bool(use_raster),
             str(getattr(self.state, "x", "") or ""),
             str(getattr(self.state, "y", "") or ""),
-            str(getattr(self.state, "color_by", "") or ""),
+            str(colour_col or ""),
+            str(colour_mode or ""),
+            str(getattr(self.state, "color_cmap", "") or ""),
             tuple(getattr(self.state, "label_filter", []) or []),
             bool(getattr(self.state, "log_x", False)),
             bool(getattr(self.state, "log_y", False)),
@@ -1954,6 +2031,7 @@ class ScatterPanel(BaseVisualisationPanel):
         self._clear_stream_watchers()
 
         data = self._scatter_data_for_render()
+        preserved_range_opts = dict(self._current_range_opts(include_y=True))
         prepared_key = getattr(self, "_last_prepared_cache_key", None)
 
         last_key = getattr(self, "_last_interactive_prepared_key", None)
@@ -2079,13 +2157,15 @@ class ScatterPanel(BaseVisualisationPanel):
             show_grid=True,
             toolbar="right",
             hooks=[
-                deduplicate_toolbar_tools_hook, 
+                deduplicate_toolbar_tools_hook,
                 keep_pan_tool_active_hook,
                 self._scatter_focus_bokeh_hook,
-                ],
+                self._scatter_selection_tools_hook,
+            ],
             shared_axes=False,
             axiswise=True,
             framewise=True,
+            **preserved_range_opts,
         )
 
         t4 = time.perf_counter()
@@ -3128,14 +3208,29 @@ class ScatterPanel(BaseVisualisationPanel):
 
         return points_dmap
 
-
     def _scatter_points_element(self, data: PreparedFrame):
         frame = self._bokeh_safe_frame(data.frame)
 
-        vdims = [HOVER_ROW_ID, HOVER_LABEL, INTERNAL_ROW_ID]
+        try:
+            colour_col = self.state.colour_column()
+        except Exception:
+            colour_col = getattr(self.state, "color_by", None)
 
-        if INTERNAL_LABEL_DISPLAY in frame.columns:
-            vdims.append(INTERNAL_LABEL_DISPLAY)
+        try:
+            colour_mode = self.state.effective_colour_mode()
+        except Exception:
+            colour_mode = getattr(self.state, "color_mode", None)
+
+        vdims = [HOVER_ROW_ID, HOVER_LABEL, HOVER_COLOR, INTERNAL_ROW_ID]
+
+        for column in (
+            INTERNAL_LABEL_DISPLAY,
+            INTERNAL_COLOR_DISPLAY,
+            INTERNAL_COLOR_VALUE,
+            INTERNAL_COLOR_COLOUR,
+        ):
+            if column in frame.columns and column not in vdims:
+                vdims.append(column)
 
         if frame.empty:
             empty_frame = pd.DataFrame(
@@ -3144,12 +3239,14 @@ class ScatterPanel(BaseVisualisationPanel):
                     INTERNAL_Y: pd.Series(dtype="float64"),
                     HOVER_ROW_ID: pd.Series(dtype="object"),
                     HOVER_LABEL: pd.Series(dtype="object"),
+                    HOVER_COLOR: pd.Series(dtype="object"),
                     INTERNAL_ROW_ID: pd.Series(dtype="object"),
                 }
             )
 
-            if INTERNAL_LABEL_DISPLAY in vdims:
-                empty_frame[INTERNAL_LABEL_DISPLAY] = pd.Series(dtype="object")
+            for column in vdims:
+                if column not in empty_frame.columns:
+                    empty_frame[column] = pd.Series(dtype="object")
 
             points = hv.Points(
                 empty_frame,
@@ -3172,6 +3269,7 @@ class ScatterPanel(BaseVisualisationPanel):
 
             opts["hooks"] = list(opts.get("hooks", [])) + [
                 renderer_name_hook(SCATTER_RENDERER),
+                axis_tick_label_hook(self.state),
             ]
 
             return points.opts(**opts)
@@ -3184,16 +3282,17 @@ class ScatterPanel(BaseVisualisationPanel):
 
         hooks = [
             renderer_name_hook(SCATTER_RENDERER),
+            axis_tick_label_hook(self.state),
         ]
 
         opts = dict(
             size=self.state.point_size,
             alpha=self.state.point_alpha,
             line_alpha=0,
-            selection_alpha=1.0,
-            selection_color="orange",
-            selection_line_color="black",
-            nonselection_alpha=0.18,
+            selection_alpha=self.state.point_alpha,
+            selection_line_alpha=0.0,
+            nonselection_alpha=self.state.point_alpha,
+            nonselection_line_alpha=0.0,
             muted_alpha=0.03,
             **self._base_opts(
                 xlabel=self.state.x,
@@ -3215,40 +3314,88 @@ class ScatterPanel(BaseVisualisationPanel):
         opts["hooks"] = list(opts.get("hooks", [])) + hooks
 
         if (
-            self.state.color_by == "Labels"
-            and INTERNAL_LABEL_DISPLAY in frame.columns
-            and frame[INTERNAL_LABEL_DISPLAY].nunique(dropna=True) <= 40
+            colour_col is not None
+            and colour_mode == "categorical"
+            and INTERNAL_COLOR_DISPLAY in frame.columns
+            and frame[INTERNAL_COLOR_DISPLAY].nunique(dropna=True) <= 40
         ):
             colour_key = _colour_key_from_frame(frame)
             if colour_key:
-                opts["color"] = INTERNAL_LABEL_DISPLAY
+                opts["color"] = INTERNAL_COLOR_DISPLAY
                 opts["cmap"] = colour_key
                 opts["legend_position"] = "right"
             else:
                 opts["color"] = "#1f77b4"
+
+        elif (
+            colour_col is not None
+            and colour_mode == "continuous"
+            and INTERNAL_COLOR_VALUE in frame.columns
+        ):
+            opts["color"] = INTERNAL_COLOR_VALUE
+            opts["cmap"] = str(getattr(self.state, "color_cmap", "Viridis") or "Viridis")
+            opts["colorbar"] = True
+            opts["clabel"] = str(colour_col)
+
         else:
             opts["color"] = "#1f77b4"
 
         return points.opts(**opts)
 
     def _scatter_rasterized(self, data: PreparedFrame):
-        frame = self._bokeh_safe_frame(data.frame[[INTERNAL_X, INTERNAL_Y]])
+        try:
+            colour_col = self.state.colour_column()
+        except Exception:
+            colour_col = getattr(self.state, "color_by", None)
 
-        points = hv.Points(
-            frame,
-            kdims=[INTERNAL_X, INTERNAL_Y],
+        try:
+            colour_mode = self.state.effective_colour_mode()
+        except Exception:
+            colour_mode = getattr(self.state, "color_mode", None)
+
+        use_continuous_colour = (
+            colour_col is not None
+            and colour_mode == "continuous"
+            and INTERNAL_COLOR_VALUE in data.frame.columns
         )
+
+        columns = [INTERNAL_X, INTERNAL_Y]
+        if use_continuous_colour:
+            columns.append(INTERNAL_COLOR_VALUE)
+
+        frame = self._bokeh_safe_frame(data.frame[columns])
+
+        if use_continuous_colour:
+            points = hv.Points(
+                frame,
+                kdims=[INTERNAL_X, INTERNAL_Y],
+                vdims=[INTERNAL_COLOR_VALUE],
+            )
+            aggregator = ds.mean(INTERNAL_COLOR_VALUE)
+            cmap = str(getattr(self.state, "color_cmap", "Viridis") or "Viridis")
+            colorbar_label = str(colour_col)
+            cnorm = "linear"
+        else:
+            points = hv.Points(
+                frame,
+                kdims=[INTERNAL_X, INTERNAL_Y],
+            )
+            aggregator = ds.count()
+            cmap = VISIBLE_DENSITY_CMAP
+            colorbar_label = "count"
+            cnorm = "eq_hist"
 
         range_opts = self._current_range_opts(include_y=True)
 
         raster = rasterize(
             points,
-            aggregator=ds.count(),
+            aggregator=aggregator,
             pixel_ratio=2,
         ).opts(
-            cmap=VISIBLE_DENSITY_CMAP,
+            cmap=cmap,
             colorbar=True,
-            cnorm="eq_hist",
+            clabel=colorbar_label,
+            cnorm=cnorm,
             clipping_colors={"NaN": "white"},
             bgcolor="white",
             responsive=True,
@@ -3263,7 +3410,9 @@ class ScatterPanel(BaseVisualisationPanel):
             active_tools=[],
             toolbar=None,
 
-            hooks=[renderer_name_hook(DENSITY_RENDERER)],
+            hooks=[renderer_name_hook(DENSITY_RENDERER),
+                    axis_tick_label_hook(self.state),
+            ],
             show_grid=True,
             shared_axes=False,
             axiswise=True,
@@ -3315,7 +3464,10 @@ class ScatterPanel(BaseVisualisationPanel):
             line_alpha=0.0,
             tools=["box_select", "pan", "wheel_zoom", "box_zoom", "reset"],
             active_tools=["wheel_zoom"],
-            hooks=[force_wheel_zoom_hook],
+            hooks=[
+                axis_tick_label_hook(self.state),
+                force_wheel_zoom_hook
+            ],
             shared_axes=False,
             axiswise=True,
             framewise=True,
@@ -3569,7 +3721,6 @@ class ScatterPanel(BaseVisualisationPanel):
             f"panel_id={self.panel_id}",
             flush=True,
         )
-        self._schedule_post_selection_refresh(delay_ms=120)
 
     @staticmethod
     def _is_single_focus_selection(
@@ -3705,6 +3856,8 @@ class ScatterPanel(BaseVisualisationPanel):
                 "truncated": bool(truncated) or len(overlay_points) > self._selection_overlay_limit(),
             }
 
+        print("should publish")
+
         selection.set_selection_set(
             dataset_id=dataset_id,
             row_ids=row_ids,
@@ -3716,17 +3869,22 @@ class ScatterPanel(BaseVisualisationPanel):
             update_focus_policy="preserve_or_first",
         )
 
+        
+
         self._schedule_post_selection_refresh()
 
 def _colour_key_from_frame(frame: pd.DataFrame) -> dict:
-    if INTERNAL_LABEL_DISPLAY not in frame.columns:
-        return {}
-
-    if "__label_colour__" not in frame.columns:
+    if INTERNAL_COLOR_DISPLAY in frame.columns and INTERNAL_COLOR_COLOUR in frame.columns:
+        label_col = INTERNAL_COLOR_DISPLAY
+        colour_col = INTERNAL_COLOR_COLOUR
+    elif INTERNAL_LABEL_DISPLAY in frame.columns and INTERNAL_LABEL_COLOUR in frame.columns:
+        label_col = INTERNAL_LABEL_DISPLAY
+        colour_col = INTERNAL_LABEL_COLOUR
+    else:
         return {}
 
     pairs = (
-        frame[[INTERNAL_LABEL_DISPLAY, "__label_colour__"]]
+        frame[[label_col, colour_col]]
         .dropna()
         .drop_duplicates()
         .itertuples(index=False, name=None)
