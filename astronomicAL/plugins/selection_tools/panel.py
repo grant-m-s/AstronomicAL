@@ -10,9 +10,8 @@ import panel as pn
 
 import time
 
-from astronomicAL.platform.dataset_sources import DatasetSource
-
-from .constants import PLUGIN_ID, PANEL_ID
+from .constants import PANEL_ID, PLUGIN_ID
+from .dataset_source import SelectionSubsetDatasetSource
 
 SELECTION_PREVIEW_LIMIT = 50
 SELECTION_PREVIEW_EXTRA_COLUMNS = 4
@@ -431,131 +430,6 @@ def _publish_event(context, topic: str, payload: Dict[str, Any]) -> None:
             return
     except Exception:
         traceback.print_exc()
-
-
-class SelectionSubsetDatasetSource(DatasetSource):
-    """
-    Lazy source representing a selection-set subset of another dataset.
-
-    It does not materialise the base dataset. It fetches rows from the base
-    source by record ID or row position as needed.
-    """
-
-    backend_name = "selection_subset"
-
-    def __init__(
-        self,
-        *,
-        base_source: DatasetSource,
-        row_ids: Sequence[str],
-        id_column: str,
-        columns: Sequence[str],
-    ) -> None:
-        self.base_source = base_source
-        self.row_ids = [str(row_id) for row_id in row_ids]
-        self.id_column = id_column
-        self._columns = [str(column) for column in columns]
-
-    def columns(self) -> List[str]:
-        return list(self._columns)
-
-    def row_count(self) -> int:
-        return len(self.row_ids)
-
-    def dtypes(self) -> Dict[str, str]:
-        try:
-            base_dtypes = self.base_source.dtypes()
-            return {
-                str(column): str(base_dtypes.get(column, "object"))
-                for column in self._columns
-            }
-        except Exception:
-            return {str(column): "object" for column in self._columns}
-
-    def to_pandas(
-        self,
-        *,
-        columns: Optional[Sequence[str]] = None,
-        limit: Optional[int] = None,
-        where_sql: Optional[str] = None,
-        params: Optional[Sequence[Any]] = None,
-    ) -> pd.DataFrame:
-        if where_sql is not None:
-            raise NotImplementedError(
-                "SelectionSubsetDatasetSource does not support SQL filtering yet."
-            )
-
-        selected_ids = self.row_ids[: int(limit)] if limit is not None else self.row_ids
-        return _rows_from_source_by_selection_ids(
-            self.base_source,
-            row_ids=selected_ids,
-            id_col=self.id_column,
-            columns=columns or self._columns,
-        )
-
-    def head(
-        self,
-        n: int = 5,
-        *,
-        columns: Optional[Sequence[str]] = None,
-    ) -> pd.DataFrame:
-        return self.to_pandas(columns=columns, limit=n)
-
-    def get_row_by_position(
-        self,
-        position: int,
-        *,
-        columns: Optional[Sequence[str]] = None,
-    ) -> pd.DataFrame:
-        if position < 0 or position >= len(self.row_ids):
-            return pd.DataFrame(columns=list(columns or self._columns))
-
-        return _rows_from_source_by_selection_ids(
-            self.base_source,
-            row_ids=[self.row_ids[position]],
-            id_col=self.id_column,
-            columns=columns or self._columns,
-        )
-
-    def get_row_by_id(
-        self,
-        row_id: Any,
-        *,
-        id_column: str,
-        columns: Optional[Sequence[str]] = None,
-    ) -> pd.DataFrame:
-        row_id = str(row_id)
-
-        if row_id not in set(self.row_ids):
-            return pd.DataFrame(columns=list(columns or self._columns))
-
-        return _rows_from_source_by_selection_ids(
-            self.base_source,
-            row_ids=[row_id],
-            id_col=self.id_column,
-            columns=columns or self._columns,
-        )
-
-    def find_position_by_id(
-        self,
-        row_id: Any,
-        *,
-        id_column: str,
-    ) -> Optional[int]:
-        row_id = str(row_id)
-        try:
-            return self.row_ids.index(row_id)
-        except ValueError:
-            return None
-
-    def metadata(self) -> Dict[str, Any]:
-        return {
-            "backend": self.backend_name,
-            "base_backend": getattr(self.base_source, "backend_name", "unknown"),
-            "rows": len(self.row_ids),
-            "id_column": self.id_column,
-        }
-
 
 def _dataset_get_source(datasets, dataset_id: str):
     try:

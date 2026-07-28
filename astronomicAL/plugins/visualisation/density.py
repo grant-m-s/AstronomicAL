@@ -24,6 +24,8 @@ from .utils import (
     force_wheel_zoom_hook,
     renderer_name_hook,
     sample_prepared_frame,
+    _source_axis_is_numeric,
+    axis_tick_label_hook,
 )
 from .widgets import (
     settings_box,
@@ -634,21 +636,26 @@ class DensityPanel(BaseVisualisationPanel):
 
 
     def _can_use_backend_density_aggregate(self) -> bool:
-        """Return True when density can use a source-backed 2D aggregate.
+        """Return whether density can use a raw source-backed aggregate."""
+        dataset_id = self._dataset_id()
+        x_col = getattr(self.state, "x", None)
+        y_col = getattr(self.state, "y", None)
 
-        The aggregate path intentionally handles the common large-table case first:
-        unlabelled X/Y density over the active dataset. Label-filtered density can
-        be added later by teaching DatasetSource.aggregate_2d about label WHERE
-        clauses.
-        """
+        if not x_col or not y_col:
+            return False
+
+        # aggregate_2d receives raw source columns and numeric ranges.
+        if not (
+            _source_axis_is_numeric(self.context, dataset_id, x_col)
+            and _source_axis_is_numeric(self.context, dataset_id, y_col)
+        ):
+            return False
+
         if self._active_density_label_filter():
             return False
 
-        if not getattr(self.state, "x", None) or not getattr(self.state, "y", None):
-            return False
-
-        dataset_id = self._dataset_id()
         datasets = getattr(self.context, "datasets", None)
+
         if dataset_id is None or datasets is None:
             return False
 
@@ -657,8 +664,7 @@ class DensityPanel(BaseVisualisationPanel):
         except Exception:
             return False
 
-        method = getattr(source, "aggregate_2d", None)
-        if not callable(method):
+        if not callable(getattr(source, "aggregate_2d", None)):
             return False
 
         try:
@@ -673,16 +679,10 @@ class DensityPanel(BaseVisualisationPanel):
 
         render_mode = str(getattr(self.state, "render_mode", "") or "").lower()
 
-        # Use backend aggregation for explicitly raster/datashader modes, and for
-        # very large interactive density plots. Small tables can keep the existing
-        # HoloViews/HexTiles path.
         if render_mode in {"datashader", "raster", "rasterized"}:
             return True
 
-        if rows is not None and int(rows) >= max(1_000_000, threshold):
-            return True
-
-        return False
+        return rows is not None and int(rows) >= max(1_000_000, threshold)
 
 
     def _backend_density_ranges(self):
@@ -790,6 +790,7 @@ class DensityPanel(BaseVisualisationPanel):
                 force_wheel_zoom_hook,
                 self._density_view_range_hook,
                 renderer_name_hook(DENSITY_RENDERER),
+                axis_tick_label_hook(self.state),
             ],
             show_grid=True,
             toolbar="right",
@@ -885,6 +886,7 @@ class DensityPanel(BaseVisualisationPanel):
                 force_wheel_zoom_hook,
                 self._density_view_range_hook,
                 self._density_focus_bokeh_hook,
+                axis_tick_label_hook(self.state),
             ],
             shared_axes=False,
             axiswise=True,
@@ -1118,6 +1120,7 @@ class DensityPanel(BaseVisualisationPanel):
                     force_wheel_zoom_hook,
                     self._density_view_range_hook,
                     self._density_focus_bokeh_hook,
+                    axis_tick_label_hook(self.state),
                 ],
                 shared_axes=False,
                 axiswise=True,
@@ -1357,6 +1360,7 @@ class DensityPanel(BaseVisualisationPanel):
                 force_wheel_zoom_hook,
                 self._density_view_range_hook,
                 renderer_name_hook(DENSITY_RENDERER),
+                axis_tick_label_hook(self.state),
             ],
             show_grid=True,
             toolbar="right",
@@ -1403,6 +1407,7 @@ class DensityPanel(BaseVisualisationPanel):
                 force_wheel_zoom_hook,
                 self._density_view_range_hook,
                 renderer_name_hook(DENSITY_RENDERER),
+                axis_tick_label_hook(self.state),
             ],
             show_grid=True,
             toolbar="right",
