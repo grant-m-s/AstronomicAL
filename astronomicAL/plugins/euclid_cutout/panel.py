@@ -15,10 +15,14 @@ except Exception:
     pass
 
 from .image_visualization import ImageVisualizationClass
-from .service import DEFAULT_EUCLID_FILTERS, DEFAULT_SAVE_DIR, EuclidCutoutRuntime
+from .service import (
+    DEFAULT_EUCLID_FILTERS,
+    DEFAULT_SAVE_DIR,
+    EuclidCutoutRuntime,
+    euclid_user_error_message,
+)
 
 from concurrent.futures import CancelledError
-
 
 PLUGIN_ID = "astro.euclid_cutout"
 RUNTIME_SERVICE_KEY = f"{PLUGIN_ID}.runtime"
@@ -48,6 +52,73 @@ HEADER_HEIGHT = 52
 
 AUTO_LOAD_DELAY_MS = 750
 FILTER_LOAD_DELAY_MS = 125
+SURFACE_MAX_SAMPLES = 56
+# Keep the higher-resolution analysis mesh, but draw a lighter display grid.
+# This gives the same peak-preserving data in both face modes while avoiding
+# the visually dense 56 x 56 Matplotlib wireframe.
+SURFACE_DISPLAY_SAMPLES = 24
+SURFACE_AZIMUTH_DEG = -48.0
+SURFACE_ELEVATION_DEG = 16.0
+SURFACE_SMOOTH_PASSES = 2
+SURFACE_NOISE_FLOOR_SIGMA = 0.25
+SURFACE_HIGH_PERCENTILE = 99.7
+SURFACE_HEIGHT_FRACTION = 0.72
+SURFACE_CAMERA_ZOOM = 1.38
+SURFACE_EDGE_WIDTH = 0.62
+SURFACE_AXIS_TICKS = 5
+SURFACE_RENDER_WIDTH_PX = 760
+SURFACE_RENDER_HEIGHT_PX = 520
+# Render the static Matplotlib framebuffer above CSS resolution, then let the
+# browser downsample it into the responsive HoloViews pane.  Text and fine grid
+# edges are therefore substantially sharper without changing their layout.
+SURFACE_RENDER_SCALE = 2.0
+SURFACE_MIN_DISPLAY_SAMPLES = 8
+# Screen-space drag sensitivity for the static Matplotlib camera.  Dragging
+# follows the pointer direction: left rotates left and up lowers the camera.
+# During a gesture a 1x framebuffer is rendered into the existing Bokeh image
+# source; release produces the normal 2x high-DPI frame.
+SURFACE_DRAG_AZIMUTH_DEG_PER_PX = 0.25
+SURFACE_DRAG_ELEVATION_DEG_PER_PX = 0.18
+SURFACE_DRAG_PREVIEW_SCALE = 1.0
+SURFACE_DRAG_PREVIEW_DELAY_MS = 20
+
+ANALYSIS_TABS_STYLESHEET = """
+:host {
+  position: relative;
+  overflow: hidden;
+}
+:host .bk-tabs-header,
+.bk-tabs-header {
+  position: relative;
+  z-index: 20;
+  pointer-events: auto !important;
+}
+:host .bk-tabs-header .bk-headers-wrapper,
+:host .bk-tabs-header .bk-headers,
+.bk-tabs-header .bk-headers-wrapper,
+.bk-tabs-header .bk-headers {
+  pointer-events: auto !important;
+}
+:host .bk-tabs-header .bk-tab,
+.bk-tabs-header .bk-tab {
+  min-height: 30px;
+  padding: 6px 10px;
+  display: flex;
+  align-items: center;
+  cursor: pointer !important;
+  pointer-events: auto !important;
+  touch-action: manipulation;
+  position: relative;
+  z-index: 21;
+}
+:host .bk-tabs-header .bk-tab > *,
+.bk-tabs-header .bk-tab > * {
+  pointer-events: none !important;
+}
+"""
+
+def _first_not_none(*values: Any) -> Any:
+    return next((value for value in values if value is not None), None)
 
 def _settings_overlay_styles(open_settings: bool) -> Dict[str, str]:
     styles = {
@@ -73,6 +144,7 @@ def _settings_overlay_styles(open_settings: bool) -> Dict[str, str]:
     if open_settings:
         styles.update(
             {
+                "display": "block",
                 "opacity": "1",
                 "visibility": "visible",
                 "pointer-events": "auto",
@@ -82,6 +154,7 @@ def _settings_overlay_styles(open_settings: bool) -> Dict[str, str]:
     else:
         styles.update(
             {
+                "display": "none",
                 "opacity": "0",
                 "visibility": "hidden",
                 "pointer-events": "none",
@@ -100,7 +173,6 @@ def _set_fixed_height(widget: Any, height: int) -> None:
     except Exception:
         pass
 
-
 def _compact_input(
     widget: Any,
     *,
@@ -116,7 +188,6 @@ def _compact_input(
         pass
     return widget
 
-
 def _wide_input(
     widget: Any,
     *,
@@ -129,7 +200,6 @@ def _wide_input(
     except Exception:
         pass
     return widget
-
 
 def _compact_checkbox(
     widget: Any,
@@ -146,7 +216,6 @@ def _compact_checkbox(
         pass
     return widget
 
-
 def _compact_button(
     widget: Any,
     *,
@@ -161,7 +230,6 @@ def _compact_button(
     except Exception:
         pass
     return widget
-
 
 def _section_title(text: str) -> pn.pane.HTML:
     return pn.pane.HTML(
@@ -183,7 +251,6 @@ def _section_title(text: str) -> pn.pane.HTML:
         margin=(0, 0, 4, 0),
     )
 
-
 def _settings_row(
     *children: Any,
     height: int,
@@ -202,7 +269,6 @@ def _settings_row(
             "overflow": "hidden",
         },
     )
-
 
 def _settings_group(title: str, *children: Any, height: int) -> pn.Column:
     return pn.Column(
@@ -223,7 +289,6 @@ def _settings_group(title: str, *children: Any, height: int) -> pn.Column:
             "overflow": "hidden",
         },
     )
-
 
 def _slider_block(label: str, widget: Any) -> pn.Column:
     # Use our own compact label. Bokeh RangeSlider's built-in label consumes
@@ -267,7 +332,6 @@ def _slider_block(label: str, widget: Any) -> pn.Column:
         },
     )
 
-
 def _fallback_spectrum_colour(index: int) -> str:
     colours = [
         "#e41a1c",
@@ -292,7 +356,6 @@ class _ResolvedTarget:
     ra_column: str
     dec_column: str
     id_column: Optional[str]
-
 
 class EuclidCutoutPanel:
     """Plugin-native Euclid cutout panel with separated image processing.
@@ -322,6 +385,15 @@ class EuclidCutoutPanel:
         self._initial_load_started = False
         self._settings_built = False
         self.settings_visible = False
+        self._restored_active_tab = 0
+        self._profile_pixel: Optional[Tuple[int, int]] = None
+        self._restore_profile_pixel_pending = False
+        self._profile_initialised = False
+        self._surface_dirty = True
+        self._surface_generation = 0
+        self._cutout_tap_stream: Any = None
+        self._cutout_tap_watcher: Any = None
+        self._analysis_tab_watcher: Any = None
 
         self._runtime_service: Optional[EuclidCutoutRuntime] = None
         self._owns_runtime_service = False
@@ -343,6 +415,27 @@ class EuclidCutoutPanel:
         self.image_height = 1
         self.bar_length_pixels = 1
         self.euclid_fig: List[Any] = []
+        self._base_cutout_elements: List[Any] = []
+        self._analysis_cache_key: Optional[Tuple[Any, ...]] = None
+        self._analysis_cache_data: Optional[np.ndarray] = None
+        self._surface_cache_key: Optional[Tuple[Any, ...]] = None
+        self._surface_cache_value: Optional[Tuple[np.ndarray, Tuple[int, int]]] = None
+        self._surface_render_cache: Dict[Tuple[Any, ...], Any] = {}
+        self._surface_control_sync = False
+        self._surface_drag_active = False
+        self._surface_drag_start_sx: Optional[float] = None
+        self._surface_drag_start_sy: Optional[float] = None
+        self._surface_drag_start_elevation = float(SURFACE_ELEVATION_DEG)
+        self._surface_drag_start_azimuth = float(SURFACE_AZIMUTH_DEG)
+        self._surface_drag_elevation = float(SURFACE_ELEVATION_DEG)
+        self._surface_drag_azimuth = float(SURFACE_AZIMUTH_DEG)
+        self._surface_bound_plot_ids: set[int] = set()
+        self._surface_live_source: Any = None
+        self._surface_live_image_key: Optional[str] = None
+        self._surface_live_flip_y = False
+        self._surface_live_preview_scheduled = False
+        self._surface_last_rgba: Optional[np.ndarray] = None
+        self._tap_update_generation = 0
 
         self._auto_load_generation = 0
         self._target_status_scheduled = False
@@ -373,7 +466,22 @@ class EuclidCutoutPanel:
         self._disposed = True
         self._request_generation += 1
         self._auto_load_generation += 1
+        self._surface_generation += 1
+        self._surface_drag_active = False
+        self._surface_bound_plot_ids.clear()
+        self._surface_live_source = None
+        self._surface_live_image_key = None
+        self._surface_live_preview_scheduled = False
+        self._surface_last_rgba = None
+        self._tap_update_generation += 1
         self._cancel_job(reason="panel.disposed", publish=False)
+        self._clear_cutout_tap_stream()
+        if self._analysis_tab_watcher is not None and hasattr(self, "analysis_tabs"):
+            try:
+                self.analysis_tabs.param.unwatch(self._analysis_tab_watcher)
+            except Exception:
+                pass
+            self._analysis_tab_watcher = None
 
         result = self._cutout_result
         self._cutout_result = None
@@ -420,6 +528,20 @@ class EuclidCutoutPanel:
             "auto_reload": self.auto_reload.value,
             "save_dir": self.save_dir_input.value,
             "credentials_filepath": self.credentials_file_input.value,
+            "show_profile_crosshair": bool(self.show_profile_crosshair.value),
+            "surface_black_cells": bool(self.surface_black_cells.value),
+            "surface_elevation_deg": int(self.surface_elevation_input.value),
+            "surface_azimuth_deg": int(self.surface_azimuth_input.value),
+            "surface_grid_size": int(self.surface_grid_size_input.value),
+            "active_view_tab": int(
+                getattr(getattr(self, "analysis_tabs", None), "active", self._restored_active_tab)
+                or 0
+            ),
+            "profile_pixel": (
+                None
+                if self._profile_pixel is None
+                else {"row": int(self._profile_pixel[0]), "col": int(self._profile_pixel[1])}
+            ),
         }
 
     def restore_state(self, state: Dict[str, Any]) -> None:
@@ -427,6 +549,23 @@ class EuclidCutoutPanel:
             return
 
         self.settings_visible = bool(state.get("settings_visible", False))
+        try:
+            self._restored_active_tab = max(0, min(2, int(state.get("active_view_tab", 0))))
+        except Exception:
+            self._restored_active_tab = 0
+
+        profile_pixel = state.get("profile_pixel")
+        if isinstance(profile_pixel, dict):
+            try:
+                self._profile_pixel = (
+                    int(profile_pixel["row"]),
+                    int(profile_pixel["col"]),
+                )
+                self._restore_profile_pixel_pending = True
+            except Exception:
+                self._profile_pixel = None
+                self._restore_profile_pixel_pending = False
+
         mapping = {
             "environment": self.environment,
             "radius_arcsec": self.radius_input,
@@ -442,6 +581,11 @@ class EuclidCutoutPanel:
             "auto_reload": self.auto_reload,
             "save_dir": self.save_dir_input,
             "credentials_filepath": self.credentials_file_input,
+            "show_profile_crosshair": self.show_profile_crosshair,
+            "surface_black_cells": self.surface_black_cells,
+            "surface_elevation_deg": self.surface_elevation_input,
+            "surface_azimuth_deg": self.surface_azimuth_input,
+            "surface_grid_size": self.surface_grid_size_input,
         }
 
         self._suppress_filter_reload = True
@@ -496,6 +640,113 @@ class EuclidCutoutPanel:
             sizing_mode="stretch_both",
             min_height=320,
             margin=(0, 6, 6, 6),
+        )
+        self.profile_note = pn.pane.Markdown(
+            "Select a scalar filter or use VIS for the colour composite, then click the cutout to inspect a pixel.",
+            sizing_mode="stretch_width",
+            height=32,
+            margin=(4, 8, 0, 8),
+            styles={"font-size": "12px", "line-height": "1.25"},
+        )
+        self.profile_figure = pn.pane.HoloViews(
+            self._empty_profile(),
+            sizing_mode="stretch_both",
+            min_height=300,
+            margin=(0, 6, 6, 6),
+        )
+        self.show_profile_crosshair = pn.widgets.Checkbox(
+            name="Show cutout crosshair",
+            value=False,
+            width=160,
+            height=28,
+            sizing_mode="fixed",
+            margin=(0, 0, 0, 0),
+        )
+        self.surface_note = pn.pane.Markdown(
+            "VIS · bounded background-subtracted raw-intensity mesh",
+            sizing_mode="stretch_width",
+            height=24,
+            min_height=24,
+            max_height=24,
+            margin=(2, 6, 0, 8),
+            styles={
+                "font-size": "12px",
+                "line-height": "1.2",
+                "white-space": "nowrap",
+                "overflow": "hidden",
+                "text-overflow": "ellipsis",
+            },
+        )
+        self.surface_black_cells = pn.widgets.Checkbox(
+            name="Black cells",
+            value=True,
+            width=94,
+            height=28,
+            sizing_mode="fixed",
+            margin=(0, 10, 0, 0),
+        )
+        self.surface_elevation_label = pn.pane.HTML(
+            "<span>Elev°</span>",
+            width=36,
+            height=26,
+            sizing_mode="fixed",
+            margin=(4, 2, 0, 0),
+            styles={"font-size": "11px", "line-height": "1.1"},
+        )
+        self.surface_elevation_input = pn.widgets.IntInput(
+            name="",
+            value=int(SURFACE_ELEVATION_DEG),
+            start=1,
+            end=89,
+            step=1,
+            width=62,
+            height=30,
+            sizing_mode="fixed",
+            margin=(0, 10, 0, 0),
+        )
+        self.surface_azimuth_label = pn.pane.HTML(
+            "<span>Azim°</span>",
+            width=40,
+            height=26,
+            sizing_mode="fixed",
+            margin=(4, 2, 0, 0),
+            styles={"font-size": "11px", "line-height": "1.1"},
+        )
+        self.surface_azimuth_input = pn.widgets.IntInput(
+            name="",
+            value=int(SURFACE_AZIMUTH_DEG),
+            start=-180,
+            end=180,
+            step=5,
+            width=66,
+            height=30,
+            sizing_mode="fixed",
+            margin=(0, 10, 0, 0),
+        )
+        self.surface_grid_label = pn.pane.HTML(
+            "<span>Grid</span>",
+            width=30,
+            height=26,
+            sizing_mode="fixed",
+            margin=(4, 2, 0, 0),
+            styles={"font-size": "11px", "line-height": "1.1"},
+        )
+        self.surface_grid_size_input = pn.widgets.IntInput(
+            name="",
+            value=int(SURFACE_DISPLAY_SAMPLES),
+            start=SURFACE_MIN_DISPLAY_SAMPLES,
+            end=SURFACE_MAX_SAMPLES,
+            step=2,
+            width=60,
+            height=30,
+            sizing_mode="fixed",
+            margin=(0, 0, 0, 0),
+        )
+        self.surface_figure = pn.pane.HoloViews(
+            self._empty_surface(),
+            sizing_mode="stretch_both",
+            min_height=300,
+            margin=(0, 6, 4, 6),
         )
 
         self.filter_input = pn.widgets.Select(
@@ -726,22 +977,46 @@ class EuclidCutoutPanel:
 
         for widget in [
             self.clip_slider,
+            self.stretch_input,
+            self.stretch_scale_input,
+        ]:
+            widget.param.watch(self._analysis_setting_changed, "value")
+
+        for widget in [
             self.rgb_clip_r,
             self.rgb_clip_g,
             self.rgb_clip_b,
             self.gamma_r,
             self.gamma_g,
             self.gamma_b,
+        ]:
+            widget.param.watch(self._colour_setting_changed, "value")
+
+        for widget in [
             self.show_source_coords,
             self.show_scale,
             self.show_spectrum_coords,
             self.contour_levels,
             self.contour_base,
             self.contour_exponent,
-            self.stretch_input,
-            self.stretch_scale_input,    
         ]:
-            widget.param.watch(lambda _event: self._refresh_display(), "value")
+            widget.param.watch(self._overlay_setting_changed, "value")
+
+        self.show_profile_crosshair.param.watch(
+            self._profile_crosshair_visibility_changed,
+            "value",
+        )
+
+        for widget in [
+            self.surface_black_cells,
+            self.surface_elevation_input,
+            self.surface_azimuth_input,
+            self.surface_grid_size_input,
+        ]:
+            widget.param.watch(
+                self._surface_style_changed,
+                "value",
+            )
 
     def _header(self) -> pn.Row:
         return pn.Row(
@@ -834,7 +1109,6 @@ class EuclidCutoutPanel:
             height=CLIP_GROUP_HEIGHT,
         )
 
-
         return pn.Tabs(
             ("Request", self.request_group),
             ("Display", self.display_group),
@@ -856,9 +1130,13 @@ class EuclidCutoutPanel:
     def _apply_settings_visibility(self) -> None:
         self._ensure_settings_built()
 
-        self.settings_pane.visible = True
-        self._settings_view.visible = True
-        self.settings_pane.styles = _settings_overlay_styles(bool(self.settings_visible))
+        open_settings = bool(self.settings_visible)
+        self.settings_pane.styles = _settings_overlay_styles(open_settings)
+        # A transparent absolute pane can still intercept pointer events in some
+        # Panel/Bokeh combinations. Remove it from the rendered layout entirely
+        # while closed instead of relying only on opacity/pointer-events CSS.
+        self.settings_pane.visible = open_settings
+        self._settings_view.visible = open_settings
 
         try:
             self.settings_button.button_type = (
@@ -866,7 +1144,6 @@ class EuclidCutoutPanel:
             )
         except Exception:
             pass
-
 
     def _toggle_settings(self, _event: Any = None) -> None:
         self.settings_visible = not self.settings_visible
@@ -881,7 +1158,7 @@ class EuclidCutoutPanel:
             min_height=SETTINGS_HEIGHT,
             max_height=SETTINGS_HEIGHT,
             height_policy="fixed",
-            visible=True,
+            visible=False,
             margin=(0, 0, 0, 0),
             styles=_settings_overlay_styles(False),
         )
@@ -912,11 +1189,84 @@ class EuclidCutoutPanel:
             },
         )
 
+        self.profile_controls = pn.Row(
+            self.show_profile_crosshair,
+            sizing_mode="stretch_width",
+            height=28,
+            min_height=28,
+            max_height=28,
+            margin=(2, 8, 0, 8),
+            styles={"align-items": "center"},
+        )
+        self.profile_view = pn.Column(
+            self.profile_controls,
+            self.profile_note,
+            self.profile_figure,
+            sizing_mode="stretch_both",
+            min_height=0,
+            margin=(0, 0, 0, 0),
+        )
+        self.surface_controls = pn.Row(
+            self.surface_black_cells,
+            self.surface_elevation_label,
+            self.surface_elevation_input,
+            self.surface_azimuth_label,
+            self.surface_azimuth_input,
+            self.surface_grid_label,
+            self.surface_grid_size_input,
+            sizing_mode="stretch_width",
+            height=32,
+            min_height=32,
+            max_height=32,
+            margin=(0, 8, 2, 8),
+            styles={
+                "align-items": "center",
+                "overflow": "hidden",
+                "white-space": "nowrap",
+            },
+        )
+        self.surface_header = pn.Column(
+            self.surface_note,
+            self.surface_controls,
+            sizing_mode="stretch_width",
+            height=58,
+            min_height=58,
+            max_height=58,
+            margin=(0, 0, 0, 0),
+            styles={"overflow": "hidden"},
+        )
+        self.surface_view = pn.Column(
+            self.surface_header,
+            self.surface_figure,
+            sizing_mode="stretch_both",
+            min_height=0,
+            margin=(0, 0, 0, 0),
+        )
+        self.analysis_tabs = pn.Tabs(
+            ("Cutout", self.figure),
+            ("Light profile", self.profile_view),
+            ("Surface", self.surface_view),
+            active=self._restored_active_tab,
+            dynamic=False,
+            sizing_mode="stretch_both",
+            min_height=320,
+            margin=(0, 0, 0, 0),
+            styles={
+                "position": "relative",
+                "overflow": "hidden",
+            },
+            stylesheets=[ANALYSIS_TABS_STYLESHEET],
+        )
+        self._analysis_tab_watcher = self.analysis_tabs.param.watch(
+            self._analysis_tab_changed,
+            "active",
+        )
+
         self.body = pn.Column(
             self.settings_overlay_host,
             self.target_status,
             self.status,
-            self.figure,
+            self.analysis_tabs,
             sizing_mode="stretch_both",
             height_policy="max",
             min_height=0,
@@ -942,6 +1292,43 @@ class EuclidCutoutPanel:
                 "box-sizing": "border-box",
             },
         )
+
+    def _analysis_tab_changed(self, event: Any) -> None:
+        if self._disposed:
+            return
+        try:
+            active = int(event.new)
+        except Exception:
+            active = 0
+        self._restored_active_tab = max(0, min(2, active))
+        if active == 1:
+            self._refresh_profile()
+        elif active == 2:
+            self._schedule_surface_refresh()
+
+    def _analysis_setting_changed(self, _event: Any) -> None:
+        self._refresh_display()
+
+    def _colour_setting_changed(self, _event: Any) -> None:
+        if self.image_container is None or self.filter_input.value != "Color":
+            return
+        self._refresh_cutout_view()
+
+    def _overlay_setting_changed(self, _event: Any) -> None:
+        if self.image_container is None:
+            return
+        self._refresh_cutout_view()
+
+    def _profile_crosshair_visibility_changed(self, _event: Any) -> None:
+        """Refresh only the optional crosshair overlay.
+
+        The HoloViews Tap stream remains attached to the base cutout image, so
+        hiding the crosshair does not disable pixel selection or light-profile
+        updates.
+        """
+        if self.image_container is None:
+            return
+        self._refresh_cutout_crosshair()
 
     # ------------------------------------------------------------------
     # Event wiring
@@ -1044,7 +1431,6 @@ class EuclidCutoutPanel:
 
         self._schedule_panel_callback(_run, delay_ms=delay_ms)
 
-
     def _invalidate_request(
         self,
         *,
@@ -1059,7 +1445,6 @@ class EuclidCutoutPanel:
             reason=reason,
             publish=publish,
         )
-
 
     def _filter_changed(self, _event: Any) -> None:
         if self._disposed or self._suppress_filter_reload:
@@ -1151,6 +1536,7 @@ class EuclidCutoutPanel:
 
         if error is not None:
             payload["error"] = str(error)
+            payload["error_message"] = euclid_user_error_message(error)
 
         self._publish("astro.cutout.running", payload)
 
@@ -1179,6 +1565,7 @@ class EuclidCutoutPanel:
             {
                 "stage": str(stage),
                 "error": str(error),
+                "error_message": euclid_user_error_message(error),
                 "error_type": type(error).__name__,
             }
         )
@@ -1190,9 +1577,20 @@ class EuclidCutoutPanel:
         self.euclid_object = None
         self.image_container = None
         self._cleanup_result(result)
+        self._clear_cutout_tap_stream()
+        self._profile_pixel = None
+        self._restore_profile_pixel_pending = False
+        self._profile_initialised = False
+        self._surface_dirty = True
+        self._surface_generation += 1
+        self._tap_update_generation += 1
+        self._base_cutout_elements = []
+        self._invalidate_analysis_cache()
 
         if clear_figure:
             self.figure.object = self._empty_image()
+            self.profile_figure.object = self._empty_profile()
+            self.surface_figure.object = self._empty_surface()
 
     def _selection_changed(self, topic: str, payload: Any) -> None:
         del payload
@@ -1228,7 +1626,6 @@ class EuclidCutoutPanel:
 
         self._schedule_panel_callback(_update)
 
-
     def _selection_cleared(self, topic: str, payload: Any) -> None:
         del payload
 
@@ -1256,7 +1653,6 @@ class EuclidCutoutPanel:
             self._reset_loaded_cutout()
 
         self._schedule_panel_callback(_clear)
-
 
     def _dataset_changed(self, topic: str, payload: Any) -> None:
         del payload
@@ -1330,7 +1726,7 @@ class EuclidCutoutPanel:
             if key == str(source) or key.startswith(f"{source}:"):
                 del self.stored_spectrum_coordinates[key]
         self.stored_spectrum_coordinates[storage_key] = normalised
-        self._schedule_panel_callback(self._refresh_display)
+        self._schedule_panel_callback(self._refresh_cutout_view)
 
     # ------------------------------------------------------------------
     # Data/mapping helpers
@@ -1503,12 +1899,12 @@ class EuclidCutoutPanel:
         )
 
         if row_pos is None:
-            row_pos = (
-                metadata.get("row_position")
-                or metadata.get("row_pos")
-                or metadata.get("row_index")
-                or metadata.get("position")
-                or metadata.get("index")
+            row_pos = _first_not_none(
+                metadata.get("row_position"),
+                metadata.get("row_pos"),
+                metadata.get("row_index"),
+                metadata.get("position"),
+                metadata.get("index"),
             )
 
         row = None
@@ -1746,7 +2142,6 @@ class EuclidCutoutPanel:
         self._owns_runtime_service = True
         return self._runtime_service
 
-
     def _cleanup_result(self, result: Any) -> None:
         if result is None:
             return
@@ -1971,6 +2366,7 @@ class EuclidCutoutPanel:
             self._create_image_container(result)
             self._current_target = target
             self.status.object = ""
+            self._initialise_profile_pixel()
             self._refresh_display()
         except Exception as exc:
             self._cutout_result = previous_result
@@ -2084,6 +2480,9 @@ class EuclidCutoutPanel:
             None,
         )
 
+        self._invalidate_analysis_cache()
+        self._tap_update_generation += 1
+        self._base_cutout_elements = []
         self.image_container = ImageVisualizationClass(
             images=images,
             wcs=wcs_list,
@@ -2141,8 +2540,12 @@ class EuclidCutoutPanel:
             )
             return
 
-        # Keep the previous successful image visible.
-        self.status.object = f"**Euclid cutout unavailable:** {exc}"
+        # Keep the previous successful image visible. The raw exception remains
+        # in the runtime events; the status uses a concise, HTML-safe summary.
+        self.status.object = (
+            "**Euclid cutout unavailable:** "
+            f"{euclid_user_error_message(exc)}"
+        )
 
         self._publish_cutout_running(
             False,
@@ -2205,7 +2608,7 @@ class EuclidCutoutPanel:
         except Exception:
             traceback.print_exc()
             return None
-    
+
     def _stretch_scale_value(self) -> Optional[float]:
         value = self.stretch_scale_input.value
         if value is None:
@@ -2215,59 +2618,247 @@ class EuclidCutoutPanel:
         except Exception:
              return None
         return value if np.isfinite(value) else None
-    
+
     def _combine_global_and_channel_clip(self, channel_clip):
         """Allows the global clip bar to control all three channels"""
         global_low, global_high = self.clip_slider.value
         channel_low, channel_high = channel_clip
-    
+
         global_low = float(global_low)
         global_high = float(global_high)
         channel_low = float(channel_low)
         channel_high = float(channel_high)
-    
+
         span = max(global_high - global_low, 0.0)
-    
+
         low = global_low + channel_low * span
         high = global_low + channel_high * span
 
         return low, high
 
+    def _analysis_band(self) -> Optional[str]:
+        if self.image_container is None:
+            return None
+        selected = str(self.filter_input.value)
+        resolved = self.image_container.resolve_wcs_band(selected)
+        if resolved in self.image_container.band_names:
+            return resolved
+        for candidate in ["VIS", *self.image_container.band_names]:
+            if candidate in self.image_container.band_names:
+                return candidate
+        return None
+
+    def _invalidate_analysis_cache(self) -> None:
+        self._analysis_cache_key = None
+        self._analysis_cache_data = None
+        self._surface_cache_key = None
+        self._surface_cache_value = None
+        self._surface_render_cache.clear()
+
+    def _analysis_data(self) -> Tuple[str, np.ndarray]:
+        if self.image_container is None:
+            raise RuntimeError("No Euclid cutout is loaded.")
+
+        band = self._analysis_band()
+        if band is None:
+            raise RuntimeError("No scalar Euclid band is available for analysis.")
+
+        low_clip, high_clip = self.clip_slider.value
+        cache_key = (
+            id(self.image_container),
+            band,
+            str(self.stretch_input.value),
+            self._stretch_scale_value(),
+            float(low_clip),
+            float(high_clip),
+        )
+        if cache_key == self._analysis_cache_key and self._analysis_cache_data is not None:
+            return band, self._analysis_cache_data
+
+        data = self.image_container.get_analysis_data(
+            band,
+            processed=True,
+            stretch=self.stretch_input.value,
+            stretch_scale=self._stretch_scale_value(),
+            stretch_interval="Asymmetric",
+            low_clip=low_clip,
+            high_clip=high_clip,
+            scale_method="MinMax",
+        )
+        self._analysis_cache_key = cache_key
+        self._analysis_cache_data = data
+        return band, data
+
+    def _initialise_profile_pixel(self) -> None:
+        if self.image_container is None:
+            self._profile_pixel = None
+            return
+        try:
+            _band, data = self._analysis_data()
+        except Exception:
+            self._profile_pixel = None
+            return
+
+        height, width = data.shape
+        if self._restore_profile_pixel_pending and self._profile_pixel is not None:
+            row, col = self._profile_pixel
+            if 0 <= row < height and 0 <= col < width:
+                self._restore_profile_pixel_pending = False
+                return
+        self._restore_profile_pixel_pending = False
+
+        row = height // 2
+        col = width // 2
+        target = self._current_target
+        if target is not None:
+            try:
+                x, y = self.image_container.world2pixel(
+                    ra=target.ra,
+                    dec=target.dec,
+                    band=self._analysis_band(),
+                )
+                candidate_col = int(round(float(np.asarray(x).ravel()[0])))
+                candidate_row = int(round(float(np.asarray(y).ravel()[0])))
+                if 0 <= candidate_row < height and 0 <= candidate_col < width:
+                    row, col = candidate_row, candidate_col
+            except Exception:
+                pass
+        self._profile_pixel = (row, col)
+
+    def _ensure_profile_pixel(self, data: np.ndarray) -> Tuple[int, int]:
+        height, width = data.shape
+        if self._profile_pixel is None:
+            self._profile_pixel = (height // 2, width // 2)
+        row, col = self._profile_pixel
+        row = max(0, min(int(row), height - 1))
+        col = max(0, min(int(col), width - 1))
+        self._profile_pixel = (row, col)
+        return row, col
+
+    def _clear_cutout_tap_stream(self) -> None:
+        stream = self._cutout_tap_stream
+        watcher = self._cutout_tap_watcher
+        self._cutout_tap_stream = None
+        self._cutout_tap_watcher = None
+        if stream is None or watcher is None:
+            return
+        try:
+            stream.param.unwatch(watcher)
+        except Exception:
+            pass
+
+    def _set_cutout_tap_stream(self, image: Any) -> None:
+        self._clear_cutout_tap_stream()
+        try:
+            stream = hv.streams.Tap(source=image, x=np.nan, y=np.nan)
+            watcher = stream.param.watch_values(
+                self._cutout_tapped,
+                ["x", "y"],
+            )
+        except Exception:
+            return
+        self._cutout_tap_stream = stream
+        self._cutout_tap_watcher = watcher
+
+    def _plot_x_to_array_col(self, x: float) -> int:
+        return int(np.floor(float(x)))
+
+    def _plot_y_to_array_row(self, y: float) -> int:
+        return int(np.floor(float(y)))
+
+    def _array_col_to_plot_x(self, col: float) -> float:
+        return float(col) + 0.5
+
+    def _array_row_to_plot_y(self, row: float) -> float:
+        return float(row) + 0.5
+
+    def _array_pixel_to_plot(self, x: float, y: float) -> Tuple[float, float]:
+        return self._array_col_to_plot_x(x), self._array_row_to_plot_y(y)
+
+    def _cutout_tapped(self, **_values: Any) -> None:
+        if self._disposed or self.image_container is None:
+            return
+
+        stream = self._cutout_tap_stream
+        if stream is None:
+            return
+
+        try:
+            x = float(stream.x)
+            y = float(stream.y)
+        except (TypeError, ValueError):
+            return
+
+        if not np.isfinite(x) or not np.isfinite(y):
+            return
+
+        col = self._plot_x_to_array_col(x)
+        row = self._plot_y_to_array_row(y)
+        if not (0 <= row < self.image_height and 0 <= col < self.image_width):
+            return
+
+        self._profile_pixel = (row, col)
+
+        # Do not replace the HoloViews object while its Tap callback is still
+        # processing. Doing so destroys the active plot before HoloViews exits
+        # ``process_on_event`` and can leave the callback with ``plot=None``.
+        self._tap_update_generation += 1
+        generation = self._tap_update_generation
+
+        def _apply_tap_update() -> None:
+            if self._disposed or generation != self._tap_update_generation:
+                return
+            self._refresh_cutout_crosshair()
+            self._refresh_profile()
+
+        self._schedule_panel_callback(_apply_tap_update)
 
     def _refresh_display(self) -> None:
         if self.image_container is None:
             return
+        self._invalidate_analysis_cache()
         try:
-            filter_name = self.filter_input.value
-            if filter_name == "Color":
-                r_low, r_high = self._combine_global_and_channel_clip(self.rgb_clip_r.value)
-                g_low, g_high = self._combine_global_and_channel_clip(self.rgb_clip_g.value)
-                b_low, b_high = self._combine_global_and_channel_clip(self.rgb_clip_b.value)
-                low_clip = [r_low, g_low, b_low]
-                high_clip = [r_high, g_high, b_high]
-                gamma_color = [self.gamma_r.value,
-                               self.gamma_g.value,
-                               self.gamma_b.value,]
-            
-            else:
-                low_clip, high_clip = self.clip_slider.value
-                gamma_color = 1
-            data = self.image_container.get_plot_data(
-                                band=filter_name,
-                                stretch=self.stretch_input.value,
-                                stretch_scale= self._stretch_scale_value(),
-                                stretch_interval="Asymmetric",
-                                low_clip=low_clip,
-                                high_clip=high_clip,
-                                gamma_color=gamma_color,
-                                scale_method="MinMax")
-
-            self._build_hv_figure(data)
-            self._update_figure_object()
+            self._refresh_cutout_view()
+            self._surface_dirty = True
+            self._surface_generation += 1
+            active = int(getattr(getattr(self, "analysis_tabs", None), "active", 0) or 0)
+            if self._profile_initialised or active == 1:
+                self._refresh_profile()
+            if active == 2:
+                self._schedule_surface_refresh()
         except Exception as exc:
             self.status.object = f"**Could not display Euclid cutout:** {exc}"
             self.figure.object = self._empty_image()
 
+    def _display_data(self) -> np.ndarray:
+        if self.image_container is None:
+            raise RuntimeError("No Euclid cutout is loaded.")
+        filter_name = self.filter_input.value
+        if filter_name == "Color":
+            r_low, r_high = self._combine_global_and_channel_clip(self.rgb_clip_r.value)
+            g_low, g_high = self._combine_global_and_channel_clip(self.rgb_clip_g.value)
+            b_low, b_high = self._combine_global_and_channel_clip(self.rgb_clip_b.value)
+            low_clip = [r_low, g_low, b_low]
+            high_clip = [r_high, g_high, b_high]
+            gamma_color = [self.gamma_r.value, self.gamma_g.value, self.gamma_b.value]
+        else:
+            low_clip, high_clip = self.clip_slider.value
+            gamma_color = 1
+        return self.image_container.get_plot_data(
+            band=filter_name,
+            stretch=self.stretch_input.value,
+            stretch_scale=self._stretch_scale_value(),
+            stretch_interval="Asymmetric",
+            low_clip=low_clip,
+            high_clip=high_clip,
+            gamma_color=gamma_color,
+            scale_method="MinMax",
+        )
+
+    def _refresh_cutout_view(self) -> None:
+        data = self._display_data()
+        self._build_hv_figure(data)
+        self._update_figure_object()
 
     def _build_hv_figure(self, data: Any) -> None:
         self.image_height, self.image_width = data.shape[:2]
@@ -2296,6 +2887,7 @@ class EuclidCutoutPanel:
                 yaxis=None,
                 cmap="grey",
             )
+        self._set_cutout_tap_stream(image)
 
         elements: List[Any] = [image]
 
@@ -2317,7 +2909,1078 @@ class EuclidCutoutPanel:
             self.overplotted_coordinates = self._spectrum_coordinate_elements()
             elements.extend(self.overplotted_coordinates)
 
+        self._base_cutout_elements = elements
+        self._apply_cutout_crosshair()
+
+    def _apply_cutout_crosshair(self) -> None:
+        elements = list(self._base_cutout_elements)
+        if self.show_profile_crosshair.value and self._profile_pixel is not None:
+            row, col = self._profile_pixel
+            if 0 <= row < self.image_height and 0 <= col < self.image_width:
+                elements.extend(
+                    [
+                        hv.VLine(self._array_col_to_plot_x(col)).opts(
+                            color="#00E5FF",
+                            line_width=1,
+                            line_dash="dashed",
+                        ),
+                        hv.HLine(self._array_row_to_plot_y(row)).opts(
+                            color="#00E5FF",
+                            line_width=1,
+                            line_dash="dashed",
+                        ),
+                    ]
+                )
         self.euclid_fig = elements
+
+    def _refresh_cutout_crosshair(self) -> None:
+        if not self._base_cutout_elements:
+            self._refresh_cutout_view()
+            return
+        self._apply_cutout_crosshair()
+        self._update_figure_object()
+
+    def _refresh_profile(self) -> None:
+        if self.image_container is None:
+            self.profile_figure.object = self._empty_profile()
+            return
+
+        try:
+            band, data = self._analysis_data()
+            row, col = self._ensure_profile_pixel(data)
+            scale_x, scale_y = self.image_container.get_arcsec_per_pixel(
+                band,
+                scalar=False,
+            )
+
+            height, width = data.shape
+
+            x_offset = (np.arange(width) - col) * float(scale_x)
+            horizontal_values = np.asarray(data[row, :], dtype=np.float64)
+
+            # The displayed cutout uses data[::-1], so construct the vertical profile
+            # in the same bottom-to-top orientation.
+            display_row = height - 1 - row
+            y_offset = (np.arange(height) - display_row) * float(scale_y)
+            vertical_values = np.asarray(data[::-1, col], dtype=np.float64)
+
+            horizontal = self._profile_curve(
+                x_offset,
+                horizontal_values,
+                label="Horizontal profile",
+                color="#1f1f1f",
+            )
+            vertical = self._profile_curve(
+                y_offset,
+                vertical_values,
+                label="Vertical profile",
+                color="#1976D2",
+            )
+
+            finite_x = np.concatenate(
+                [
+                    np.asarray(x_offset, dtype=float)[np.isfinite(x_offset)],
+                    np.asarray(y_offset, dtype=float)[np.isfinite(y_offset)],
+                ]
+            )
+            finite_y = np.concatenate(
+                [
+                    horizontal_values[np.isfinite(horizontal_values)],
+                    vertical_values[np.isfinite(vertical_values)],
+                ]
+            )
+            if finite_x.size == 0 or finite_y.size == 0:
+                raise ValueError("The selected profile contains no finite samples.")
+
+            x_min = float(np.min(finite_x))
+            x_max = float(np.max(finite_x))
+            if x_max <= x_min:
+                x_min -= 0.5
+                x_max += 0.5
+
+            y_min = float(np.min(finite_y))
+            y_max = float(np.max(finite_y))
+            # Display-analysis data is normally in [0, 1]. Explicit limits avoid
+            # the collapsed/empty ranges produced by some HoloViews Layout
+            # combinations while still accommodating small numerical excursions.
+            y_low = min(-0.02, y_min - 0.04 * max(y_max - y_min, 1.0))
+            y_high = max(1.02, y_max + 0.04 * max(y_max - y_min, 1.0))
+
+            elements: List[Any] = [
+                horizontal,
+                vertical,
+                hv.VLine(0).opts(
+                    color="#D32F2F",
+                    line_width=1,
+                    line_dash="dotted",
+                ),
+            ]
+
+            psf_note = ""
+            if self.stretch_input.value == "Linear":
+                psf_fwhm = self._profile_psf_fwhm(band)
+                sigma = float(psf_fwhm) / 2.35482004503
+                peak = float(np.max(finite_y))
+                if np.isfinite(sigma) and sigma > 0 and np.isfinite(peak) and peak > 0:
+                    reference_offsets = np.linspace(x_min, x_max, 512)
+                    reference = peak * np.exp(
+                        -0.5 * (reference_offsets / sigma) ** 2
+                    )
+                    elements.append(
+                        hv.Curve(
+                            (reference_offsets, reference),
+                            kdims="Offset [arcsec]",
+                            vdims="Normalised intensity",
+                            label="Nominal PSF",
+                        ).opts(
+                            color="#D32F2F",
+                            line_width=1,
+                            line_dash="dashed",
+                        )
+                    )
+                    psf_note = " Red dashed curve: nominal PSF reference, not a fit."
+
+            profile = hv.Overlay(elements).opts(
+                toolbar="above",
+                tools=["pan", "wheel_zoom", "box_zoom", "reset", "save"],
+                active_tools=["wheel_zoom"],
+                padding=0,
+                framewise=False,
+                shared_axes=True,
+                show_legend=True,
+                legend_position="top_right",
+                xlabel="Offset [arcsec]",
+                ylabel="Normalised intensity",
+                xlim=(x_min, x_max),
+                ylim=(y_low, y_high),
+            )
+            self.profile_figure.object = profile
+
+            composite_note = (
+                " (VIS used for Color)"
+                if self.filter_input.value == "Color"
+                else ""
+            )
+            intensity_note = (
+                "Normalised VIS intensity; the RGB composite is not sampled."
+                if self.filter_input.value == "Color"
+                else "Normalised display intensity."
+            )
+
+            self.profile_note.object = (
+                f"**Band:** `{band}`{composite_note} &nbsp; "
+                f"**Pixel:** row `{row}`, column `{col}`. "
+                "Black: horizontal profile; blue: vertical profile. "
+                f"{intensity_note}{psf_note} "
+                "Click the cutout to move the sampled pixel. "
+                "Enable `Show cutout crosshair` to display its position."
+            )
+            self._profile_initialised = True
+        except Exception as exc:
+            self.profile_note.object = f"Light profile unavailable: {exc}"
+            self.profile_figure.object = self._empty_profile()
+
+    @staticmethod
+    def _profile_curve(
+        offsets: np.ndarray,
+        values: np.ndarray,
+        *,
+        label: str,
+        color: str,
+    ) -> Any:
+        x = np.asarray(offsets, dtype=np.float64)
+        y = np.asarray(values, dtype=np.float64)
+        if x.shape != y.shape:
+            raise ValueError("Profile offsets and values must have matching shapes.")
+
+        finite = np.isfinite(x) & np.isfinite(y)
+        if not finite.any():
+            raise ValueError(f"{label} contains no finite samples.")
+
+        # Retain gaps as NaNs rather than allowing infinities to poison Bokeh's
+        # automatic range calculation.
+        clean_y = np.where(np.isfinite(y), y, np.nan)
+        return hv.Curve(
+            (x, clean_y),
+            kdims="Offset [arcsec]",
+            vdims="Normalised intensity",
+            label=label,
+        ).opts(
+            color=color,
+            line_width=2,
+            muted_alpha=0.15,
+        )
+
+    @staticmethod
+    def _profile_psf_fwhm(band: str) -> float:
+        return 0.16 if str(band) == "VIS" else 0.3
+
+    def _surface_view_settings(self) -> Tuple[float, float, int]:
+        """Return validated camera and display-grid values from the UI."""
+
+        try:
+            elevation = float(self.surface_elevation_input.value)
+        except (TypeError, ValueError):
+            elevation = float(SURFACE_ELEVATION_DEG)
+        try:
+            azimuth = float(self.surface_azimuth_input.value)
+        except (TypeError, ValueError):
+            azimuth = float(SURFACE_AZIMUTH_DEG)
+        try:
+            grid_size = int(self.surface_grid_size_input.value)
+        except (TypeError, ValueError):
+            grid_size = int(SURFACE_DISPLAY_SAMPLES)
+
+        elevation = float(np.clip(elevation, 1.0, 89.0))
+        azimuth = float(np.clip(azimuth, -180.0, 180.0))
+        grid_size = int(
+            np.clip(
+                grid_size,
+                SURFACE_MIN_DISPLAY_SAMPLES,
+                SURFACE_MAX_SAMPLES,
+            )
+        )
+        return elevation, azimuth, grid_size
+
+    @staticmethod
+    def _normalise_surface_azimuth(value: float) -> float:
+        """Wrap a camera azimuth into the IntInput's inclusive range."""
+
+        raw = float(value)
+        wrapped = (raw + 180.0) % 360.0 - 180.0
+        if np.isclose(wrapped, -180.0) and raw > 0:
+            return 180.0
+        return float(wrapped)
+
+    @staticmethod
+    def _surface_drag_angles(
+        *,
+        start_elevation: float,
+        start_azimuth: float,
+        start_sx: float,
+        start_sy: float,
+        sx: float,
+        sy: float,
+    ) -> Tuple[float, float]:
+        """Translate one screen-space drag into bounded camera angles."""
+
+        delta_x = float(sx) - float(start_sx)
+        delta_y = float(sy) - float(start_sy)
+        # Follow the pointer rather than moving the scene in the opposite
+        # direction.  Bokeh screen y grows downwards, so an upward drag has a
+        # negative delta and lowers the camera elevation.
+        elevation = float(
+            np.clip(
+                float(start_elevation)
+                + delta_y * SURFACE_DRAG_ELEVATION_DEG_PER_PX,
+                1.0,
+                89.0,
+            )
+        )
+        azimuth = EuclidCutoutPanel._normalise_surface_azimuth(
+            float(start_azimuth)
+            - delta_x * SURFACE_DRAG_AZIMUTH_DEG_PER_PX
+        )
+        return elevation, azimuth
+
+    def _set_surface_camera_controls(
+        self,
+        *,
+        elevation: float,
+        azimuth: float,
+    ) -> None:
+        """Synchronise camera inputs without recursively scheduling renders."""
+
+        elevation_value = int(round(float(np.clip(elevation, 1.0, 89.0))))
+        azimuth_value = int(round(self._normalise_surface_azimuth(azimuth)))
+        self._surface_control_sync = True
+        try:
+            if int(self.surface_elevation_input.value) != elevation_value:
+                self.surface_elevation_input.value = elevation_value
+            if int(self.surface_azimuth_input.value) != azimuth_value:
+                self.surface_azimuth_input.value = azimuth_value
+        finally:
+            self._surface_control_sync = False
+
+    def _surface_pan_started(self, event: Any) -> None:
+        if self._disposed or self.image_container is None:
+            return
+        if int(getattr(getattr(self, "analysis_tabs", None), "active", 0) or 0) != 2:
+            return
+        try:
+            sx = float(event.sx)
+            sy = float(event.sy)
+        except (AttributeError, TypeError, ValueError):
+            return
+        if not np.isfinite(sx) or not np.isfinite(sy):
+            return
+
+        elevation, azimuth, _grid_size = self._surface_view_settings()
+        self._surface_drag_active = True
+        self._surface_drag_start_sx = sx
+        self._surface_drag_start_sy = sy
+        self._surface_drag_start_elevation = elevation
+        self._surface_drag_start_azimuth = azimuth
+        self._surface_drag_elevation = elevation
+        self._surface_drag_azimuth = azimuth
+        self.surface_note.object = (
+            f"Rotating · elev `{int(round(elevation))}°` · "
+            f"azim `{int(round(azimuth))}°`"
+        )
+
+    def _surface_panned(self, event: Any) -> None:
+        if not self._surface_drag_active:
+            return
+        start_sx = self._surface_drag_start_sx
+        start_sy = self._surface_drag_start_sy
+        if start_sx is None or start_sy is None:
+            return
+        try:
+            sx = float(event.sx)
+            sy = float(event.sy)
+        except (AttributeError, TypeError, ValueError):
+            return
+        if not np.isfinite(sx) or not np.isfinite(sy):
+            return
+
+        elevation, azimuth = self._surface_drag_angles(
+            start_elevation=self._surface_drag_start_elevation,
+            start_azimuth=self._surface_drag_start_azimuth,
+            start_sx=start_sx,
+            start_sy=start_sy,
+            sx=sx,
+            sy=sy,
+        )
+        rounded_elevation = float(int(round(elevation)))
+        rounded_azimuth = float(int(round(azimuth)))
+        if (
+            rounded_elevation == self._surface_drag_elevation
+            and rounded_azimuth == self._surface_drag_azimuth
+        ):
+            return
+
+        self._surface_drag_elevation = rounded_elevation
+        self._surface_drag_azimuth = rounded_azimuth
+        self._set_surface_camera_controls(
+            elevation=rounded_elevation,
+            azimuth=rounded_azimuth,
+        )
+        self.surface_note.object = (
+            f"Rotating · elev `{int(rounded_elevation)}°` · "
+            f"azim `{int(rounded_azimuth)}°`"
+        )
+        self._schedule_surface_drag_preview()
+
+    @staticmethod
+    def _rgba_to_bokeh_image(rgba: np.ndarray) -> np.ndarray:
+        """Pack an RGBA framebuffer for Bokeh's ``image_rgba`` glyph."""
+
+        array = np.asarray(rgba, dtype=np.uint8)
+        if array.ndim != 3 or array.shape[2] != 4:
+            raise ValueError("Surface framebuffer must have shape (height, width, 4).")
+        array = np.ascontiguousarray(array)
+        packed = np.empty(array.shape[:2], dtype=np.uint32)
+        packed.view(np.uint8).reshape(array.shape)[...] = array
+        return packed
+
+    def _surface_live_frame(self, *, render_scale: float) -> np.ndarray:
+        """Render the current camera into an RGBA framebuffer only."""
+
+        band, mesh, original_shape = self._surface_data()
+        scale_x, scale_y = self.image_container.get_arcsec_per_pixel(
+            band,
+            scalar=False,
+        )
+        elevation_deg, azimuth_deg, grid_size = self._surface_view_settings()
+        mesh_scale_x = float(scale_x) * original_shape[1] / mesh.shape[1]
+        mesh_scale_y = float(scale_y) * original_shape[0] / mesh.shape[0]
+        return self._render_surface_rgba(
+            mesh,
+            scale_x=mesh_scale_x,
+            scale_y=mesh_scale_y,
+            opaque_cells=bool(self.surface_black_cells.value),
+            elevation_deg=elevation_deg,
+            azimuth_deg=azimuth_deg,
+            grid_size=grid_size,
+            render_scale=render_scale,
+        )
+
+    def _update_surface_live_source(self, rgba: np.ndarray) -> bool:
+        """Replace only the image glyph data, preserving the active drag plot."""
+
+        source = self._surface_live_source
+        image_key = self._surface_live_image_key
+        if source is None or not image_key:
+            return False
+        try:
+            packed = self._rgba_to_bokeh_image(rgba)
+            if self._surface_live_flip_y:
+                packed = packed[::-1, :]
+            data = dict(source.data)
+            data[image_key] = [packed]
+            source.data = data
+            return True
+        except Exception:
+            return False
+
+    def _schedule_surface_drag_preview(self) -> None:
+        """Coalesce pan events into live, in-place low-DPI frame updates."""
+
+        if (
+            self._disposed
+            or not self._surface_drag_active
+            or self.image_container is None
+            or self._surface_live_preview_scheduled
+        ):
+            return
+        self._surface_live_preview_scheduled = True
+
+        def _run() -> None:
+            self._surface_live_preview_scheduled = False
+            if (
+                self._disposed
+                or not self._surface_drag_active
+                or self.image_container is None
+            ):
+                return
+            try:
+                rgba = self._surface_live_frame(
+                    render_scale=SURFACE_DRAG_PREVIEW_SCALE,
+                )
+                if not self._update_surface_live_source(rgba):
+                    # The current HoloViews plot may have been replaced between
+                    # scheduling and execution.  The release render will bind a
+                    # fresh source; do not replace the active plot mid-gesture.
+                    return
+            except Exception as exc:
+                self.surface_note.object = f"Live surface rotation unavailable: {exc}"
+
+        self._schedule_panel_callback(
+            _run,
+            delay_ms=SURFACE_DRAG_PREVIEW_DELAY_MS,
+        )
+
+    def _surface_pan_finished(self, event: Any) -> None:
+        if not self._surface_drag_active:
+            return
+        # Capture the final pointer position when PanEnd carries one.
+        self._surface_panned(event)
+        self._surface_drag_active = False
+        self._surface_live_preview_scheduled = False
+        self._surface_drag_start_sx = None
+        self._surface_drag_start_sy = None
+        self._surface_dirty = True
+        self._surface_generation += 1
+        self.surface_note.object = (
+            f"Rendering · elev `{int(self._surface_drag_elevation)}°` · "
+            f"azim `{int(self._surface_drag_azimuth)}°`"
+        )
+        # Defer replacement of the HoloViews object until the Bokeh PanEnd
+        # callback has completely unwound.  Replacing it inside the callback can
+        # detach the event plot and reproduce the plot.document race fixed for
+        # the cutout tap stream.
+        self._schedule_surface_refresh()
+
+    def _bind_surface_drag_events(self, plot: Any, _element: Any) -> None:
+        """Attach server-side camera dragging to one rendered Bokeh figure."""
+
+        state = getattr(plot, "state", None)
+        if state is None:
+            return
+        plot_id = id(state)
+        if plot_id in self._surface_bound_plot_ids:
+            return
+        self._surface_bound_plot_ids.add(plot_id)
+
+        handles = getattr(plot, "handles", {}) or {}
+        source = handles.get("source")
+        if source is None:
+            renderer = handles.get("glyph_renderer")
+            source = getattr(renderer, "data_source", None)
+        if source is not None:
+            try:
+                data = source.data
+                image_key = "image" if "image" in data else None
+                if image_key is None:
+                    for candidate, values in data.items():
+                        if (
+                            isinstance(values, (list, tuple))
+                            and values
+                            and np.asarray(values[0]).ndim == 2
+                        ):
+                            image_key = str(candidate)
+                            break
+                if image_key is not None:
+                    self._surface_live_source = source
+                    self._surface_live_image_key = image_key
+                    self._surface_live_flip_y = False
+                    if self._surface_last_rgba is not None:
+                        current = np.asarray(data[image_key][0])
+                        packed = self._rgba_to_bokeh_image(self._surface_last_rgba)
+                        if current.shape == packed.shape:
+                            if np.array_equal(current, packed[::-1, :]):
+                                self._surface_live_flip_y = True
+            except Exception:
+                self._surface_live_source = None
+                self._surface_live_image_key = None
+
+        try:
+            from bokeh.events import Pan, PanEnd, PanStart
+        except Exception:
+            return
+
+        # The PanTool is used only as a gesture recogniser. Lock both image
+        # ranges to their complete extents so dragging cannot translate the 2-D
+        # framebuffer while it controls the Matplotlib camera.
+        for range_name in ("x_range", "y_range"):
+            range_object = getattr(state, range_name, None)
+            if range_object is None:
+                continue
+            try:
+                start = float(range_object.start)
+                end = float(range_object.end)
+                span = abs(end - start)
+                range_object.bounds = (min(start, end), max(start, end))
+                if span > 0:
+                    range_object.min_interval = span
+                    range_object.max_interval = span
+            except Exception:
+                pass
+
+        state.on_event(PanStart, self._surface_pan_started)
+        state.on_event(Pan, self._surface_panned)
+        state.on_event(PanEnd, self._surface_pan_finished)
+
+    def _surface_style_changed(self, _event: Any) -> None:
+        if self._disposed or self._surface_control_sync:
+            return
+        self._surface_dirty = True
+        self._surface_generation += 1
+        active = int(getattr(getattr(self, "analysis_tabs", None), "active", 0) or 0)
+        if active == 2:
+            self._schedule_surface_refresh()
+
+    def _schedule_surface_refresh(self) -> None:
+        if self._disposed or self.image_container is None or not self._surface_dirty:
+            return
+        self._surface_generation += 1
+        generation = self._surface_generation
+        self.surface_note.object = "Rendering bounded surface mesh…"
+
+        def _run() -> None:
+            if self._disposed or generation != self._surface_generation:
+                return
+            if int(getattr(self.analysis_tabs, "active", 0) or 0) != 2:
+                return
+            self._refresh_surface()
+
+        self._schedule_panel_callback(_run)
+
+    def _surface_data(
+        self,
+    ) -> Tuple[str, np.ndarray, Tuple[int, int]]:
+        if self.image_container is None:
+            raise RuntimeError("No Euclid cutout is loaded.")
+
+        band = self._analysis_band()
+        if band is None:
+            raise RuntimeError("No scalar Euclid band is available for the surface view.")
+
+        cache_key = (id(self.image_container), band)
+        if cache_key == self._surface_cache_key and self._surface_cache_value is not None:
+            mesh, original_shape = self._surface_cache_value
+            return band, mesh, original_shape
+
+        # The surface should reveal astronomical structure rather than amplify
+        # every display-stretched background pixel. Start from the aligned raw
+        # scalar band, then perform bounded robust preprocessing below.
+        raw = self.image_container.get_analysis_data(
+            band,
+            aligned=True,
+            processed=False,
+        )
+        mesh, original_shape = self._bounded_surface_data(raw)
+        self._surface_cache_key = cache_key
+        self._surface_cache_value = (mesh, original_shape)
+        return band, mesh, original_shape
+
+    def _refresh_surface(self) -> None:
+        if self.image_container is None:
+            self.surface_figure.object = self._empty_surface()
+            return
+        try:
+            band, mesh, original_shape = self._surface_data()
+            scale_x, scale_y = self.image_container.get_arcsec_per_pixel(
+                band,
+                scalar=False,
+            )
+            opaque_cells = bool(self.surface_black_cells.value)
+            elevation_deg, azimuth_deg, grid_size = self._surface_view_settings()
+            mesh_scale_x = float(scale_x) * original_shape[1] / mesh.shape[1]
+            mesh_scale_y = float(scale_y) * original_shape[0] / mesh.shape[0]
+            render_key = (
+                self._surface_cache_key,
+                mesh.shape,
+                mesh_scale_x,
+                mesh_scale_y,
+                opaque_cells,
+                elevation_deg,
+                azimuth_deg,
+                grid_size,
+                SURFACE_RENDER_SCALE,
+            )
+            # Dicts retain insertion order.  Move cache hits to the end and cap
+            # the cache because high-DPI framebuffers are several megabytes.
+            surface = self._surface_render_cache.pop(render_key, None)
+            if surface is not None:
+                self._surface_render_cache[render_key] = surface
+            else:
+                surface = self._surface_wireframe(
+                    mesh,
+                    scale_x=mesh_scale_x,
+                    scale_y=mesh_scale_y,
+                    opaque_cells=opaque_cells,
+                    elevation_deg=elevation_deg,
+                    azimuth_deg=azimuth_deg,
+                    grid_size=grid_size,
+                )
+                self._surface_render_cache[render_key] = surface
+                while len(self._surface_render_cache) > 6:
+                    oldest_key = next(iter(self._surface_render_cache))
+                    self._surface_render_cache.pop(oldest_key, None)
+            self.surface_figure.object = surface
+            composite_note = " · Color→VIS" if self.filter_input.value == "Color" else ""
+            self.surface_note.object = (
+                f"**{band}**{composite_note} · "
+                f"mesh `{mesh.shape[1]}×{mesh.shape[0]}` from "
+                f"`{original_shape[1]}×{original_shape[0]}` px · "
+                "background-subtracted raw intensity · drag to rotate"
+            )
+            self._surface_dirty = False
+        except Exception as exc:
+            self.surface_note.object = f"Surface view unavailable: {exc}"
+            self.surface_figure.object = self._empty_surface()
+
+    @staticmethod
+    def _smooth_surface_array(data: np.ndarray, *, passes: int) -> np.ndarray:
+        """Apply a small separable Gaussian-like kernel without a new dependency."""
+
+        smoothed = np.asarray(data, dtype=np.float32)
+        for _ in range(max(0, int(passes))):
+            padded = np.pad(smoothed, 1, mode="edge")
+            smoothed = (
+                padded[:-2, :-2]
+                + 2.0 * padded[:-2, 1:-1]
+                + padded[:-2, 2:]
+                + 2.0 * padded[1:-1, :-2]
+                + 4.0 * padded[1:-1, 1:-1]
+                + 2.0 * padded[1:-1, 2:]
+                + padded[2:, :-2]
+                + 2.0 * padded[2:, 1:-1]
+                + padded[2:, 2:]
+            ) / 16.0
+        return np.asarray(smoothed, dtype=np.float32)
+
+    @staticmethod
+    def _block_peak_surface(
+        data: np.ndarray,
+        *,
+        target_rows: int,
+        target_cols: int,
+    ) -> np.ndarray:
+        """Reduce a surface while retaining compact peaks and broad wings.
+
+        A top-quartile mean is less spiky than max/top-three pooling and avoids
+        making unresolved sources appear artificially truncated.
+        """
+
+        rows, cols = data.shape
+        row_edges = np.linspace(0, rows, target_rows + 1, dtype=int)
+        col_edges = np.linspace(0, cols, target_cols + 1, dtype=int)
+        reduced = np.zeros((target_rows, target_cols), dtype=np.float32)
+
+        for row_index in range(target_rows):
+            row_start = int(row_edges[row_index])
+            row_stop = max(row_start + 1, int(row_edges[row_index + 1]))
+            for col_index in range(target_cols):
+                col_start = int(col_edges[col_index])
+                col_stop = max(col_start + 1, int(col_edges[col_index + 1]))
+                block = np.asarray(
+                    data[row_start:row_stop, col_start:col_stop],
+                    dtype=np.float32,
+                )
+                finite = block[np.isfinite(block)]
+                if finite.size == 0:
+                    continue
+                count = max(1, int(np.ceil(finite.size * 0.25)))
+                strongest = np.partition(finite, -count)[-count:]
+                reduced[row_index, col_index] = float(np.mean(strongest))
+
+        return reduced
+
+    @staticmethod
+    def _bounded_surface_data(data: np.ndarray) -> Tuple[np.ndarray, Tuple[int, int]]:
+        array = np.asarray(data, dtype=np.float32)
+        if array.ndim != 2 or array.size == 0:
+            raise ValueError("Surface data must be a non-empty two-dimensional array.")
+
+        original_shape = array.shape
+        target_shape = (
+            min(array.shape[0], SURFACE_MAX_SAMPLES),
+            min(array.shape[1], SURFACE_MAX_SAMPLES),
+        )
+        finite_mask = np.isfinite(array)
+        finite = array[finite_mask]
+        if finite.size == 0:
+            return np.zeros(target_shape, dtype=np.float32), original_shape
+
+        background = float(np.median(finite))
+        working = np.where(finite_mask, array, background).astype(
+            np.float32,
+            copy=False,
+        )
+        working = EuclidCutoutPanel._smooth_surface_array(
+            working,
+            passes=SURFACE_SMOOTH_PASSES,
+        )
+
+        smooth_finite = working[np.isfinite(working)]
+        background = float(np.median(smooth_finite))
+        mad = float(np.median(np.abs(smooth_finite - background)))
+        robust_sigma = 1.4826 * mad
+        if not np.isfinite(robust_sigma) or robust_sigma <= 0:
+            robust_sigma = float(np.std(smooth_finite))
+        if not np.isfinite(robust_sigma) or robust_sigma <= 0:
+            robust_sigma = 0.0
+
+        # Keep low-level wings and a small amount of the smoothed background.
+        # The former 1.75-sigma hard floor made extended sources terminate too
+        # early and produced the visibly cut-off surface base.
+        floor = background + SURFACE_NOISE_FLOOR_SIGMA * robust_sigma
+        signal = np.clip(working - floor, 0.0, None)
+        positive = signal[signal > 0]
+        if positive.size == 0:
+            return np.zeros(target_shape, dtype=np.float32), original_shape
+
+        high = float(np.percentile(positive, SURFACE_HIGH_PERCENTILE))
+        peak = float(np.max(positive))
+        if not np.isfinite(high) or high <= 0:
+            high = peak
+        if not np.isfinite(peak) or peak <= 0:
+            return np.zeros(target_shape, dtype=np.float32), original_shape
+
+        # Soft asinh scaling: use the high percentile as the softening scale but
+        # normalise by the actual peak. Unlike clipping to the percentile, this
+        # preserves the full summit and prevents flat/cut-off peaks.
+        softening = max(high / 5.0, robust_sigma, np.finfo(np.float32).eps)
+        denominator = float(np.arcsinh(peak / softening))
+        if not np.isfinite(denominator) or denominator <= 0:
+            return np.zeros(target_shape, dtype=np.float32), original_shape
+        signal = np.arcsinh(signal / softening) / denominator
+        signal = np.clip(signal, 0.0, None)
+
+        reduced = EuclidCutoutPanel._block_peak_surface(
+            signal,
+            target_rows=target_shape[0],
+            target_cols=target_shape[1],
+        )
+        reduced[~np.isfinite(reduced)] = 0.0
+        peak_reduced = float(np.max(reduced)) if reduced.size else 0.0
+        if peak_reduced > 0:
+            reduced /= peak_reduced
+        return reduced, original_shape
+
+    @staticmethod
+    def _surface_mesh_coordinates(
+        data: np.ndarray,
+        *,
+        scale_x: float,
+        scale_y: float,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Return the single mesh used by both surface display modes."""
+
+        rows, cols = data.shape
+        x = (np.arange(cols) - (cols - 1) / 2.0) * float(scale_x)
+        y = (np.arange(rows) - (rows - 1) / 2.0) * float(scale_y)
+        xx, yy = np.meshgrid(x, y)
+        zz = np.asarray(data, dtype=np.float32)
+        return xx, yy, zz
+
+    @staticmethod
+    def _surface_display_mesh(
+        data: np.ndarray,
+        *,
+        scale_x: float,
+        scale_y: float,
+        max_samples: int = SURFACE_DISPLAY_SAMPLES,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Return a lighter, peak-preserving mesh for the static 3-D renderer.
+
+        The analysis path remains bounded at ``SURFACE_MAX_SAMPLES``.  This
+        second reduction exists only to make the wire grid readable.  Both
+        transparent and black-face modes receive these exact same vertices.
+        """
+
+        source = np.asarray(data, dtype=np.float32)
+        if source.ndim != 2 or source.size == 0:
+            raise ValueError("Surface data must be a non-empty two-dimensional array.")
+
+        rows, cols = source.shape
+        target_rows = min(rows, max(2, int(max_samples)))
+        target_cols = min(cols, max(2, int(max_samples)))
+
+        if (target_rows, target_cols) == source.shape:
+            reduced = np.array(source, dtype=np.float32, copy=True)
+        else:
+            reduced = EuclidCutoutPanel._block_peak_surface(
+                source,
+                target_rows=target_rows,
+                target_cols=target_cols,
+            )
+            source_peak = float(np.nanmax(source)) if source.size else 0.0
+            reduced_peak = float(np.nanmax(reduced)) if reduced.size else 0.0
+            if source_peak > 0 and reduced_peak > 0:
+                reduced *= source_peak / reduced_peak
+
+        x_half_span = max(0.0, (cols - 1) * float(scale_x) / 2.0)
+        y_half_span = max(0.0, (rows - 1) * float(scale_y) / 2.0)
+        x = np.linspace(-x_half_span, x_half_span, target_cols)
+        y = np.linspace(-y_half_span, y_half_span, target_rows)
+        xx, yy = np.meshgrid(x, y)
+        return xx, yy, reduced
+
+    @staticmethod
+    def _render_surface_rgba(
+        data: np.ndarray,
+        *,
+        scale_x: float,
+        scale_y: float,
+        opaque_cells: bool,
+        elevation_deg: float = SURFACE_ELEVATION_DEG,
+        azimuth_deg: float = SURFACE_AZIMUTH_DEG,
+        grid_size: int = SURFACE_DISPLAY_SAMPLES,
+        render_scale: float = SURFACE_RENDER_SCALE,
+        width_px: int = SURFACE_RENDER_WIDTH_PX,
+        height_px: int = SURFACE_RENDER_HEIGHT_PX,
+    ) -> np.ndarray:
+        """Render one depth-correct surface with identical geometry in both modes.
+
+        Both checkbox states use the same ``plot_surface`` call, mesh vertices,
+        camera, axis limits and white cell edges.  The only variable is the
+        black face alpha.  Matplotlib's 3-D renderer performs the facet depth
+        ordering, avoiding the reversed painter ordering seen when thousands of
+        independent HoloViews polygons were used.
+        """
+
+        try:
+            from matplotlib.backends.backend_agg import FigureCanvasAgg
+            from matplotlib.figure import Figure
+        except Exception as exc:  # pragma: no cover - depends on deployment extras
+            raise RuntimeError(
+                "The Euclid surface view requires matplotlib."
+            ) from exc
+
+        grid_size = int(
+            np.clip(
+                int(grid_size),
+                SURFACE_MIN_DISPLAY_SAMPLES,
+                SURFACE_MAX_SAMPLES,
+            )
+        )
+        xx, yy, zz = EuclidCutoutPanel._surface_display_mesh(
+            data,
+            scale_x=scale_x,
+            scale_y=scale_y,
+            max_samples=grid_size,
+        )
+        if zz.ndim != 2 or zz.size == 0:
+            raise ValueError("Surface data must be a non-empty two-dimensional array.")
+
+        width_px = max(320, int(width_px))
+        height_px = max(240, int(height_px))
+        render_scale = float(np.clip(float(render_scale), 1.0, 3.0))
+        base_dpi = 100.0
+        render_dpi = base_dpi * render_scale
+        # Keep the figure's physical geometry unchanged while increasing its
+        # raster resolution.  The responsive pane downsamples this framebuffer,
+        # giving much sharper labels and edges on high-DPI displays.
+        figure = Figure(
+            figsize=(width_px / base_dpi, height_px / base_dpi),
+            dpi=render_dpi,
+            facecolor="black",
+        )
+        canvas = FigureCanvasAgg(figure)
+        axis = figure.add_subplot(111, projection="3d", facecolor="black")
+
+        # The same full-resolution quadrilateral mesh is used in both modes.
+        # Transparent mode exposes rear lines; opaque mode lets the black faces
+        # hide them.  No alternative sampling or line geometry is introduced.
+        face_alpha = 1.0 if opaque_cells else 0.0
+        axis.plot_surface(
+            xx,
+            yy,
+            zz,
+            rstride=1,
+            cstride=1,
+            color=(0.0, 0.0, 0.0, face_alpha),
+            edgecolor="white",
+            linewidth=SURFACE_EDGE_WIDTH,
+            antialiased=True,
+            shade=False,
+            zsort="average",
+        )
+
+        axis.view_init(
+            elev=float(np.clip(elevation_deg, 1.0, 89.0)),
+            azim=float(np.clip(azimuth_deg, -180.0, 180.0)),
+        )
+        try:
+            axis.set_proj_type("ortho")
+        except Exception:
+            pass
+
+        x_min = float(np.nanmin(xx))
+        x_max = float(np.nanmax(xx))
+        y_min = float(np.nanmin(yy))
+        y_max = float(np.nanmax(yy))
+        z_max = max(float(np.nanmax(zz)), 1.0)
+        axis.set_xlim(x_min, x_max)
+        axis.set_ylim(y_min, y_max)
+        axis.set_zlim(0.0, z_max)
+
+        x_span = max(x_max - x_min, 1.0)
+        y_span = max(y_max - y_min, 1.0)
+        footprint = max(x_span, y_span)
+        try:
+            axis.set_box_aspect(
+                (x_span, y_span, footprint * SURFACE_HEIGHT_FRACTION),
+                zoom=SURFACE_CAMERA_ZOOM,
+            )
+        except TypeError:
+            # Matplotlib < 3.6 does not expose the zoom keyword.
+            axis.set_box_aspect(
+                (x_span, y_span, footprint * SURFACE_HEIGHT_FRACTION)
+            )
+        except Exception:
+            pass
+
+        x_ticks = np.linspace(x_min, x_max, SURFACE_AXIS_TICKS)
+        y_ticks = np.linspace(y_min, y_max, SURFACE_AXIS_TICKS)
+        z_ticks = np.linspace(0.0, z_max, SURFACE_AXIS_TICKS)
+        axis.set_xticks(x_ticks)
+        axis.set_yticks(y_ticks)
+        axis.set_zticks(z_ticks)
+        axis.set_xticklabels([f"{value:.3g}" for value in x_ticks])
+        axis.set_yticklabels([f"{value:.3g}" for value in y_ticks])
+        axis.set_zticklabels([f"{value:.3g}" for value in z_ticks])
+        axis.set_xlabel(
+            "X [arcsec]",
+            color="white",
+            labelpad=3,
+            fontsize=11,
+        )
+        axis.set_ylabel(
+            "Y [arcsec]",
+            color="white",
+            labelpad=3,
+            fontsize=11,
+        )
+        axis.set_zlabel(
+            "intensity",
+            color="white",
+            labelpad=5,
+            fontsize=11,
+        )
+        axis.tick_params(colors="white", labelsize=10, pad=0, length=2)
+
+        # Keep only the useful axes.  Pane fills and the default rectangular
+        # wall grid obscure the astronomical surface and are not part of the
+        # IRAF-style presentation.
+        for axis_component in (axis.xaxis, axis.yaxis, axis.zaxis):
+            try:
+                axis_component.pane.set_facecolor((0.0, 0.0, 0.0, 0.0))
+                axis_component.pane.set_edgecolor((0.0, 0.0, 0.0, 0.0))
+                axis_component.line.set_color((1.0, 1.0, 1.0, 0.0))
+            except Exception:
+                pass
+            try:
+                axis_component._axinfo["grid"]["color"] = (
+                    1.0,
+                    1.0,
+                    1.0,
+                    0.0,
+                )
+            except Exception:
+                pass
+
+        # Fill the available pane instead of centring a small surface inside a
+        # large empty 3-D cube.  The labels remain inside the framebuffer.
+        axis.set_position([0.02, -0.02, 0.96, 1.04])
+        figure.subplots_adjust(left=0.0, right=1.0, bottom=0.0, top=1.0)
+        canvas.draw()
+        rgba = np.asarray(canvas.buffer_rgba(), dtype=np.uint8).copy()
+        figure.clear()
+        return rgba
+
+    def _surface_wireframe(
+        self,
+        data: np.ndarray,
+        *,
+        scale_x: float = 1.0,
+        scale_y: float = 1.0,
+        opaque_cells: bool = False,
+        elevation_deg: float = SURFACE_ELEVATION_DEG,
+        azimuth_deg: float = SURFACE_AZIMUTH_DEG,
+        grid_size: int = SURFACE_DISPLAY_SAMPLES,
+    ) -> Any:
+        """Return the Matplotlib-rendered surface as one static HoloViews RGB."""
+
+        rgba = self._render_surface_rgba(
+            data,
+            scale_x=scale_x,
+            scale_y=scale_y,
+            opaque_cells=opaque_cells,
+            elevation_deg=elevation_deg,
+            azimuth_deg=azimuth_deg,
+            grid_size=grid_size,
+        )
+        self._surface_last_rgba = np.asarray(rgba, dtype=np.uint8).copy()
+        height, width = rgba.shape[:2]
+        # ``hv.RGB`` already displays array rows in the orientation expected for
+        # an image element.  The Agg framebuffer is therefore passed through
+        # unchanged; flipping it here turns the complete Matplotlib rendering
+        # upside down, including its labels and vertical intensity axis.
+        return hv.RGB(
+            rgba,
+            bounds=(0.0, 0.0, float(width), float(height)),
+        ).opts(
+            tools=["pan"],
+            active_tools=["pan"],
+            hooks=[self._bind_surface_drag_events],
+            toolbar=None,
+            padding=0,
+            framewise=False,
+            shared_axes=False,
+            xaxis=None,
+            yaxis=None,
+        )
+
+    def _empty_profile(self) -> Any:
+        return hv.Curve(([], [])).opts(
+            active_tools=[],
+            toolbar=None,
+            xaxis=None,
+            yaxis=None,
+        )
+
+    def _empty_surface(self) -> Any:
+        return hv.Curve(([], [])).opts(
+            active_tools=[],
+            toolbar=None,
+            xaxis=None,
+            yaxis=None,
+            bgcolor="black",
+        )
 
     def _contour_band(self) -> Optional[str]:
         if self.image_container is None:
@@ -2369,16 +4032,31 @@ class EuclidCutoutPanel:
         if self.image_container is None:
             return []
         try:
-            arcsec_per_pix = self.image_container.get_arcsec_per_pixel(self.filter_input.value, scalar=True)
+            arcsec_per_pix, _ = self.image_container.get_arcsec_per_pixel(
+                self.filter_input.value,
+                scalar=False,
+            )
+            arcsec_per_pix = float(arcsec_per_pix)
         except Exception:
             return []
-        self.bar_length_pixels = self.image_width * 0.2
+        if not np.isfinite(arcsec_per_pix) or arcsec_per_pix <= 0:
+            return []
+
+        target_arcsec = self.image_width * 0.2 * arcsec_per_pix
+        candidates = np.asarray(
+            [0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 50, 100],
+            dtype=float,
+        )
+        eligible = candidates[candidates <= target_arcsec]
+        scale_arcsec = float(eligible[-1] if eligible.size else candidates[0])
+        self.bar_length_pixels = scale_arcsec / arcsec_per_pix
+
         x0, y0 = 0.1 * self.image_width, 0.1 * self.image_height
         x1 = x0 + self.bar_length_pixels
-        scale_arcsec = self.bar_length_pixels * arcsec_per_pix
+        label = f'{scale_arcsec:g}"'
         return [
             hv.Curve(([x0, x1], [y0, y0])).opts(color="red", line_width=3),
-            hv.Text((x0 + x1) / 2, y0 + y0 / 2, f'{scale_arcsec:.1f}"').opts(
+            hv.Text((x0 + x1) / 2, y0 + y0 / 2, label).opts(
                 text_color="red",
                 text_align="center",
                 text_baseline="bottom",
@@ -2394,8 +4072,13 @@ class EuclidCutoutPanel:
             x_value = float(np.asarray(x).ravel()[0])
             y_value = float(np.asarray(y).ravel()[0])
             if 0 <= x_value < self.image_width and 0 <= y_value < self.image_height:
+                plot_x, plot_y = self._array_pixel_to_plot(x_value, y_value)
                 label = f"{ra:.3f}, {dec:.3f}"
-                return hv.Points([(x_value, y_value)], label=label).opts(color="blue", marker="+", size=30)
+                return hv.Points([(plot_x, plot_y)], label=label).opts(
+                    color="blue",
+                    marker="+",
+                    size=30,
+                )
         except Exception:
             return None
         return None
@@ -2413,31 +4096,62 @@ class EuclidCutoutPanel:
         if not isinstance(coords, dict):
             coords = {}
 
-        ra_values = coords.get("ra") or coords.get("RA") or []
-        dec_values = coords.get("dec") or coords.get("DEC") or []
-        colors = coords.get("colors") or coords.get("colours") or []
-        labels = coords.get("labels") or []
-        points = coords.get("points") or []
-
-        if points and (not ra_values or not dec_values):
+        ra_values = coords.get("ra")
+        if ra_values is None:
+            ra_values = coords.get("RA")
+        if ra_values is None:
             ra_values = []
+
+        dec_values = coords.get("dec")
+        if dec_values is None:
+            dec_values = coords.get("DEC")
+        if dec_values is None:
             dec_values = []
-            colors = [] if not colors else colors
-            labels = [] if not labels else labels
-            for point in points:
-                if not isinstance(point, dict):
-                    continue
-                ra_values.append(point.get("ra") or point.get("RA"))
-                dec_values.append(point.get("dec") or point.get("DEC"))
-                if not colors:
-                    colors.append(point.get("color") or point.get("colour"))
-                if not labels:
-                    labels.append(point.get("label"))
+
+        colors = coords.get("colors")
+        if colors is None:
+            colors = coords.get("colours")
+        if colors is None:
+            colors = []
+
+        labels = coords.get("labels")
+        if labels is None:
+            labels = []
+
+        points = coords.get("points")
+        if points is None:
+            points = []
 
         if np.isscalar(ra_values):
             ra_values = [ra_values]
         if np.isscalar(dec_values):
             dec_values = [dec_values]
+        if np.isscalar(colors):
+            colors = [colors]
+        if np.isscalar(labels):
+            labels = [labels]
+
+        if len(ra_values) == 0 or len(dec_values) == 0:
+            point_ra: List[Any] = []
+            point_dec: List[Any] = []
+            point_colors: List[Any] = []
+            point_labels: List[Any] = []
+            for point in points:
+                if not isinstance(point, dict):
+                    continue
+                point_ra.append(_first_not_none(point.get("ra"), point.get("RA")))
+                point_dec.append(_first_not_none(point.get("dec"), point.get("DEC")))
+                point_colors.append(
+                    _first_not_none(point.get("color"), point.get("colour"))
+                )
+                point_labels.append(point.get("label"))
+            if point_ra and point_dec:
+                ra_values = point_ra
+                dec_values = point_dec
+                if len(colors) == 0:
+                    colors = point_colors
+                if len(labels) == 0:
+                    labels = point_labels
 
         out_ra: List[float] = []
         out_dec: List[float] = []
@@ -2494,8 +4208,9 @@ class EuclidCutoutPanel:
                     continue
                 color = colors[idx] if idx < len(colors) else _fallback_spectrum_colour(idx)
                 label = labels[idx] if idx < len(labels) else f"Spectrum {idx + 1}"
+                plot_x, plot_y = self._array_pixel_to_plot(xv, yv)
                 elements.append(
-                    hv.Points([(xv, yv)], label=str(label)).opts(
+                    hv.Points([(plot_x, plot_y)], label=str(label)).opts(
                         color=str(color),
                         marker="x",
                         size=18,
@@ -2552,11 +4267,23 @@ class EuclidCutoutPanel:
 
     def _clean_async_jobs(self) -> None:
         try:
-            self._runtime().clean_async_jobs()
-            self.status.object = "Cleaned Euclid archive async jobs where possible."
+            removed = self._runtime().clean_async_jobs()
+            self.status.object = (
+                f"Removed **{removed}** Euclid archive async "
+                f"job{'s' if removed != 1 else ''}."
+                if removed
+                else "No Euclid archive async jobs needed cleaning."
+            )
         except Exception as exc:
-            self.status.object = f"**Could not clean Euclid archive async jobs:** {exc}"
-
+            self.status.object = (
+                "**Could not clean Euclid archive async jobs:** "
+                f"{euclid_user_error_message(exc)}"
+            )
+            self._publish_plugin_error(
+                stage="clean_async_jobs",
+                error=exc,
+                target=self._current_target,
+            )
 
 class EuclidCutoutArtifactViewer:
     """Small viewer for in-memory Euclid cutout artifacts."""
@@ -2695,7 +4422,6 @@ class EuclidCutoutArtifactViewer:
             traceback.print_exc()
             return hv.Image(np.zeros((2, 2)), bounds=(0, 0, 2, 2)).opts(cmap="grey")
 
-
 def create_euclid_cutout_panel(
     *,
     context: Any,
@@ -2705,7 +4431,6 @@ def create_euclid_cutout_panel(
 ) -> Tuple[pn.viewable.Viewable, EuclidCutoutPanel]:
     controller = EuclidCutoutPanel(context=context, data=data, state=state, **kwargs)
     return controller.view(), controller
-
 
 def create_euclid_cutout_artifact_viewer(
     *,

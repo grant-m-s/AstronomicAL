@@ -270,7 +270,7 @@ class SpectraPanel:
         self.figure = pn.Column(
             self._empty_message("No spectrum loaded."),
             sizing_mode="stretch_both",
-            min_height=320,
+            min_height=60,
             margin=(0, 6, 6, 6),
             styles={"overflow": "hidden"},
         )

@@ -7,10 +7,8 @@ from pathlib import Path
 
 from astronomicAL.platform.plugins import PluginManifest
 
-
 PLUGIN_ID = "astro.euclid_cutout"
 _SPLIT_PACKAGE = "astronomicAL.plugins.euclid_cutout"
-
 
 def _ensure_split_package() -> None:
     """Allow this plugin to work when loaded as a local plugin file.
@@ -39,16 +37,14 @@ def _ensure_split_package() -> None:
     package.__package__ = _SPLIT_PACKAGE
     sys.modules[_SPLIT_PACKAGE] = package
 
-
 def _impl(module_name: str):
     _ensure_split_package()
     return importlib.import_module(f"{_SPLIT_PACKAGE}.{module_name}")
 
-
 manifest = PluginManifest(
     id=PLUGIN_ID,
     name="Euclid Cutout",
-    version="0.1.1",
+    version="0.2.14",
     description=(
         "Euclid archive cutout viewer for the active AstronomicAL dataset. "
         "The plugin resolves RA/Dec through semantic dataset mappings, reacts "
@@ -56,6 +52,7 @@ manifest = PluginManifest(
         "and publishes cutout artifacts for other panels."
     ),
     requires=["astroquery", "astropy", "reproject", "mocpy"],
+    optional_requires=["matplotlib"],
     capabilities=[
         "panel",
         "service",
@@ -66,7 +63,6 @@ manifest = PluginManifest(
     ],
     tags=["astronomy", "euclid", "cutout", "image", "wcs"],
 )
-
 
 def register(api) -> None:
     panel_mod = _impl("panel")
@@ -89,9 +85,9 @@ def register(api) -> None:
         title="Euclid Cutout",
         factory=panel_mod.create_euclid_cutout_panel,
         description=(
-            "Fetch, render and inspect Euclid VIS/NIR cutouts for the focused "
-            "row. Requires mapped `record_id`, `coords.ra` and `coords.dec` "
-            "columns."
+            "Fetch and inspect Euclid VIS/NIR cutouts for the focused row with "
+            "cutout, light-profile and bounded surface views. Requires mapped "
+            "`record_id`, `coords.ra` and `coords.dec` columns."
         ),
         category="Images / Cutouts",
         icon="image",
@@ -108,7 +104,7 @@ def register(api) -> None:
         persist_layout=True,
         persist_state=True,
         restore_policy="best_effort",
-        optional_requires=["astroquery", "astropy", "reproject", "mocpy"],
+        optional_requires=["astroquery", "astropy", "reproject", "mocpy", "matplotlib"],
     )
 
     api.register_artifact_viewer(

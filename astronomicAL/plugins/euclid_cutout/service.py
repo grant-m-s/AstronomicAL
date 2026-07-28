@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from concurrent.futures import CancelledError
 from dataclasses import dataclass, field
+import html
 from pathlib import Path
+import re
 from typing import Any, Dict, Iterable, Optional
 
 import numpy as np
@@ -13,7 +15,6 @@ from .storage import (
     EuclidScratchManager,
 )
 
-
 DEFAULT_EUCLID_FILTERS = ["VIS", "NIR_Y", "NIR_J", "NIR_H"]
 DEFAULT_SAVE_DIR = "data/cutouts"
 COLOR_BAND_SETS = [
@@ -22,6 +23,47 @@ COLOR_BAND_SETS = [
     ["NIR_J", "NIR_Y", "VIS"],
 ]
 
+_HTTP_STATUS_RE = re.compile(r"\b([45]\d{2})\b")
+
+def _html_tag_text(value: str, tag: str) -> str:
+    match = re.search(
+        rf"<{tag}\b[^>]*>(.*?)</{tag}>",
+        value,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if match is None:
+        return ""
+
+    without_tags = re.sub(r"<[^>]+>", " ", match.group(1))
+    return " ".join(html.unescape(without_tags).split())
+
+def euclid_user_error_message(error: Any) -> str:
+    """Return a concise, safe message while retaining the raw exception elsewhere."""
+
+    try:
+        raw = str(error).strip()
+    except Exception:
+        raw = repr(error)
+
+    if not raw:
+        return "The Euclid archive request failed without an error message."
+
+    title = _html_tag_text(raw, "h1")
+    paragraph = _html_tag_text(raw, "p")
+    status_match = _HTTP_STATUS_RE.search(raw)
+
+    if title or paragraph:
+        summary = "ESA Euclid archive returned"
+        if status_match is not None:
+            summary += f" HTTP {status_match.group(1)}"
+        if title:
+            summary += f" {title}"
+        summary = summary.rstrip(".") + "."
+        if paragraph and paragraph.casefold() != title.casefold():
+            summary += f" {paragraph}"
+        return summary
+
+    return " ".join(raw.split())
 
 def _cancelled(cancel_token: Any) -> bool:
     """Best-effort cancellation check across possible token implementations."""
@@ -44,11 +86,9 @@ def _cancelled(cancel_token: Any) -> bool:
                 pass
     return False
 
-
 def _raise_if_cancelled(cancel_token: Any, stage: str) -> None:
     if _cancelled(cancel_token):
         raise CancelledError(f"Euclid cutout request cancelled {stage}.")
-
 
 def _safe_float(value: Any) -> Optional[float]:
     try:
@@ -63,7 +103,6 @@ def _safe_float(value: Any) -> Optional[float]:
     except Exception:
         return None
 
-
 def _requested_filters(
     filter_name: str,
     configured_filters: Optional[Iterable[str]],
@@ -76,14 +115,12 @@ def _requested_filters(
         raise ValueError(f"Unknown Euclid filter: {selected!r}")
     return [selected]
 
-
 def _available_color_bands(available: Iterable[str]) -> Optional[list[str]]:
     available_set = set(available)
     for candidate in COLOR_BAND_SETS:
         if all(band in available_set for band in candidate):
             return list(candidate)
     return None
-
 
 @dataclass
 class EuclidCutoutResult:
@@ -139,7 +176,6 @@ class EuclidCutoutResult:
             payload["wcs"] = dict(self.wcs)
             payload["payload_kind"] = "in_memory_pixels"
         return payload
-
 
 class EuclidCutoutRuntime:
     """Plugin service for Euclid retrieval and request-storage ownership."""
@@ -300,11 +336,9 @@ class EuclidCutoutRuntime:
                 band for band in filters if band in raw_images and band in raw_wcs
             ]
             tracker = getattr(cutout, "error_tracker", None)
-            detail = (
-                getattr(tracker, "error_message", None)
-                if tracker is not None
-                else None
-            )
+            detail = getattr(cutout, "last_error_detail", None)
+            if not detail and tracker is not None:
+                detail = getattr(tracker, "error_message", None)
             selected_filter = str(filter_name or "Color")
             if selected_filter == "Color":
                 if _available_color_bands(available_filters) is None:
@@ -331,10 +365,9 @@ class EuclidCutoutRuntime:
             }
             return EuclidCutoutResult(
                 cutout=cutout,
-                images={
-                    band: np.array(raw_images[band], copy=True)
-                    for band in available_filters
-                },
+                # read_cutouts() already detaches these arrays from FITS files.
+                # Reuse them instead of duplicating every band in memory.
+                images={band: raw_images[band] for band in available_filters},
                 wcs={band: raw_wcs[band] for band in available_filters},
                 filters=list(available_filters),
                 ra=ra_value,
@@ -375,8 +408,8 @@ class EuclidCutoutRuntime:
         if wcs is not None:
             cutout.wcs = wcs
 
-    def clean_async_jobs(self) -> None:
-        """Clear Euclid archive async jobs for the active client, when supported."""
+    def clean_async_jobs(self) -> int:
+        """Clear Euclid archive async jobs and return the number removed."""
 
         client = self._last_client
         if client is None:
@@ -388,15 +421,13 @@ class EuclidCutoutRuntime:
                 except Exception:
                     client = None
         if client is None:
-            return
-        try:
-            joblist = client.list_async_jobs()
-            to_remove = [job.jobid for job in joblist]
-            if to_remove:
-                client.remove_jobs(to_remove)
-        except Exception:
-            return
+            raise RuntimeError("The Euclid archive client is not available.")
 
+        joblist = client.list_async_jobs()
+        to_remove = [job.jobid for job in joblist]
+        if to_remove:
+            client.remove_jobs(to_remove)
+        return len(to_remove)
 
 def create_euclid_runtime(context: Any = None, **_: Any) -> EuclidCutoutRuntime:
     return EuclidCutoutRuntime(context=context)

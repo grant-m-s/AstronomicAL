@@ -18,11 +18,9 @@ from uuid import uuid4
 
 from astronomicAL.utils.error_tracker import ErrorTracker
 
-
 DEFAULT_EUCLID_FILTERS = ["VIS", "NIR_Y", "NIR_J", "NIR_H"]
 DEFAULT_SAVE_DIR = "data/cutouts"
 DEFAULT_MOC_PATH = "data/mocs"
-
 
 def _cancel_requested(cancel_token: Any) -> bool:
     if cancel_token is None:
@@ -46,12 +44,22 @@ def _cancel_requested(cancel_token: Any) -> bool:
 
     return False
 
-
 def _raise_if_cancelled(cancel_token: Any) -> None:
     if _cancel_requested(cancel_token):
         raise concurrent.futures.CancelledError(
             "Euclid cutout request was superseded."
         )
+
+def _error_detail(error: Any, message: str) -> str:
+    summary = str(message or "Euclid archive request failed").strip()
+    try:
+        detail = str(error).strip()
+    except Exception:
+        detail = repr(error)
+
+    if not detail or detail == summary:
+        return summary
+    return f"{summary}: {detail}"
 
 class EuclidCutoutsClass:
     """Retrieve raw Euclid image cutouts from the ESA archive.
@@ -87,6 +95,7 @@ class EuclidCutoutsClass:
         os.makedirs(self.save_dir, exist_ok=True)
 
         self.error_tracker = ErrorTracker()
+        self.last_error_detail: Optional[str] = None
         self.check_moc_coverage = bool(check_moc_coverage)
         self.moc_survey = moc_survey
         self.moc_path = moc_path
@@ -97,7 +106,7 @@ class EuclidCutoutsClass:
             except Exception as exc:
                 # Missing local MOC files should not make the whole plugin
                 # unusable. The archive query can still fail gracefully later.
-                self.error_tracker.log_error(exc, "Could not load Euclid MOC coverage file")
+                self._record_error(exc, "Could not load Euclid MOC coverage file")
                 self.moc = None
 
         self.euclid_filters = list(euclid_filters or DEFAULT_EUCLID_FILTERS)
@@ -106,6 +115,10 @@ class EuclidCutoutsClass:
         self.coordinates: Optional[SkyCoord] = None
         if ra is not None and dec is not None:
             self.set_coordinates(ra=ra, dec=dec)
+
+    def _record_error(self, error: Any, message: str) -> None:
+        self.last_error_detail = _error_detail(error, message)
+        self.error_tracker.log_error(error, message)
 
     # ------------------------------------------------------------------
     # Client / context helpers
@@ -173,6 +186,7 @@ class EuclidCutoutsClass:
         if ra is not None and dec is not None:
             self.set_coordinates(ra=ra, dec=dec)
         self.error_tracker.reset()
+        self.last_error_detail = None
         self._remove_source_attributes()
 
     def _remove_source_attributes(self) -> None:
@@ -262,12 +276,12 @@ class EuclidCutoutsClass:
         except concurrent.futures.CancelledError:
             raise
         except ConnectionError as exc:
-            self.error_tracker.log_error(
+            self._record_error(
                 exc,
                 "Failed to connect to ESA Science Archive",
             )
         except Exception as exc:
-            self.error_tracker.log_error(
+            self._record_error(
                 exc,
                 "Euclid cone search failed",
             )
@@ -351,18 +365,17 @@ class EuclidCutoutsClass:
             raise
 
         except ConnectionError as exc:
-            self.error_tracker.log_error(
+            self._record_error(
                 exc,
                 "Failed to connect to ESA Science Archive",
             )
         except Exception as exc:
-            self.error_tracker.log_error(
+            self._record_error(
                 exc,
                 f"Failed to download Euclid {band} cutout",
             )
 
         return None
-
 
     def download_cutouts(
         self,
@@ -422,7 +435,7 @@ class EuclidCutoutsClass:
                         except concurrent.futures.CancelledError:
                             raise
                         except Exception as exc:
-                            self.error_tracker.log_error(
+                            self._record_error(
                                 exc,
                                 f"Failed to download Euclid {band} cutout",
                             )
@@ -495,12 +508,12 @@ class EuclidCutoutsClass:
             except concurrent.futures.CancelledError:
                 raise
             except OSError as exc:
-                self.error_tracker.log_error(
+                self._record_error(
                     exc,
                     f"Downloaded corrupted FITS file for {band}",
                 )
             except Exception as exc:
-                self.error_tracker.log_error(
+                self._record_error(
                     exc,
                     f"Could not read Euclid {band} FITS cutout",
                 )
@@ -523,6 +536,7 @@ class EuclidCutoutsClass:
         """Download and read raw Euclid cutouts."""
 
         self.error_tracker.reset()
+        self.last_error_detail = None
         _raise_if_cancelled(cancel_token)
 
         if ra is not None or dec is not None:
@@ -542,7 +556,7 @@ class EuclidCutoutsClass:
                 moc=self.moc,
             )
             if not inside:
-                self.error_tracker.log_error(
+                self._record_error(
                     "Source not in the survey",
                     "The selected source is outside the survey coverage area",
                 )
@@ -564,7 +578,7 @@ class EuclidCutoutsClass:
             or self.cone_results is None
             or len(self.cone_results) <= 0
         ):
-            self.error_tracker.log_error(
+            self._record_error(
                 "Cone search failed",
                 "No Euclid mosaic products found within the search radius",
             )
@@ -634,7 +648,6 @@ class EuclidCutoutsClass:
         except Exception:
             return
 
-
 # ----------------------------------------------------------------------
 # Small module helpers
 # ----------------------------------------------------------------------
@@ -649,7 +662,6 @@ def load_moc(survey: str, path: str = DEFAULT_MOC_PATH) -> mocpy.MOC:
     }
     assert survey in surveys, f"No MOC file available for {survey}"
     return mocpy.MOC.from_fits(os.path.join(path, surveys[survey]))
-
 
 def check_isin_survey(ra: float, dec: float, moc: mocpy.MOC) -> bool:
     value = moc.contains_lonlat(ra * u.deg, dec * u.deg)
