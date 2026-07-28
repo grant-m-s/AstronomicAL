@@ -281,9 +281,20 @@ class MappingGatedPanel:
 
         self._real_view: Any = None
         self._real_controller: Any = None
+        self._real_dataset_id: Optional[str] = None
+
         self._real_load_started = False
-        self._real_load_handle = None
+        self._real_load_handle: Any = None
+        self._real_load_generation = 0
+        self._real_load_dataset_id: Optional[str] = None
+
+        # Tracks the dataset represented by this wrapper. This also lets us ignore
+        # duplicate dataset.active.changed events from transitional call sites.
+        self._panel_dataset_id = self._dataset_id()
+
         self._disposed = False
+        self._subscribe()
+        self._refresh()
 
         self._subscribe()
         self._refresh()
@@ -412,6 +423,24 @@ class MappingGatedPanel:
     def _mapping_panel_id(self) -> str:
         return getattr(self.registration, "id", self._mapping_source())
 
+    def _withdraw_mapping_requests(
+        self,
+        *,
+        dataset_id: Optional[str] = None,
+    ) -> None:
+        events = getattr(self.context, "events", None)
+        if events is None:
+            return
+
+        events.publish(
+            "mapping.request.withdrawn",
+            {
+                "dataset_id": str(dataset_id or self._dataset_id()),
+                "panel_id": self._mapping_panel_id(),
+                "source": self._mapping_source(),
+            },
+        )
+
     def _resolve(self):
         return resolve_mapping_requirements(
             context=self.context,
@@ -483,35 +512,28 @@ class MappingGatedPanel:
         self._refresh()
 
     def _show_real_panel(self) -> None:
-        """Show the real panel after mappings are satisfied.
+        """Construct the mapped plugin panel on the Panel UI thread.
 
-        Important: do not construct Panel/Bokeh/HoloViews objects in worker threads.
-        The previous async version moved manager._create_panel_now() into
-        JobManager, which made mapping callbacks light but moved UI construction
-        into ThreadPoolExecutor threads.
-
-        Now we keep the useful behaviour:
-        - mapping callback returns quickly;
-        - placeholder appears immediately;
-        - real panel creation is delayed to a later UI tick.
-
-        Heavy data work must happen inside the panel's own JobManager-backed
-        loading/render path, not inside the panel factory.
+        Each scheduled construction is associated with both a monotonically
+        increasing generation and the active dataset ID. A delayed callback is
+        discarded when either value has changed before the callback runs.
         """
-        if self._real_view is not None:
+        if self._real_view is not None or self._real_load_started:
             return
 
-        if bool(getattr(self, "_real_load_started", False)):
-            return
+        dataset_id = self._dataset_id()
 
+        self._real_load_generation += 1
+        generation = self._real_load_generation
         self._real_load_started = True
+        self._real_load_dataset_id = dataset_id
         self._show_loading()
 
         def _finish_on_ui() -> None:
-            if self._disposed:
-                return
+            if generation == self._real_load_generation:
+                self._real_load_handle = None
 
-            if self._real_view is not None:
+            if not self._load_is_current(generation, dataset_id):
                 return
 
             try:
@@ -524,43 +546,24 @@ class MappingGatedPanel:
                     **self.kwargs,
                 )
             except BaseException as exc:
+                if not self._load_is_current(generation, dataset_id):
+                    return
+
                 self._real_load_started = False
-                self.view[:] = [
-                    pn.Column(
-                        pn.pane.Alert(
-                            f"Could not load **{escape(str(getattr(self.registration, 'title', 'Plugin panel')))}**.",
-                            alert_type="danger",
-                            sizing_mode="stretch_width",
-                            margin=(0, 0, 8, 0),
-                        ),
-                        pn.pane.HTML(
-                            f"<pre style='white-space: pre-wrap'>{escape(str(exc))}</pre>",
-                            sizing_mode="stretch_width",
-                        ),
-                        sizing_mode="stretch_both",
-                        margin=(0, 0, 0, 0),
-                        styles={
-                            "height": "100%",
-                            "width": "100%",
-                            "box-sizing": "border-box",
-                            "padding": "10px",
-                            "overflow": "auto",
-                        },
-                    )
-                ]
+                self._real_load_dataset_id = None
+                self.view[:] = [self._error_view(exc)]
                 return
 
-            if self._disposed:
-                try:
-                    if controller is not None and hasattr(controller, "dispose"):
-                        controller.dispose()
-                except Exception:
-                    pass
+            if not self._load_is_current(generation, dataset_id):
+                self._dispose_controller(controller)
                 return
 
+            self._real_load_started = False
+            self._real_load_dataset_id = None
+            self._real_dataset_id = dataset_id
             self._real_view = view
             self._real_controller = controller
-            self.view[:] = [self._real_view]
+            self.view[:] = [view]
 
         try:
             doc = pn.state.curdoc
@@ -569,17 +572,103 @@ class MappingGatedPanel:
 
         if doc is not None:
             try:
-                # Give the mapping modal / event callback a chance to finish first.
-                doc.add_timeout_callback(_finish_on_ui, 150)
+                self._real_load_handle = doc.add_timeout_callback(
+                    _finish_on_ui,
+                    150,
+                )
                 return
             except Exception:
                 try:
-                    doc.add_next_tick_callback(_finish_on_ui)
+                    self._real_load_handle = doc.add_next_tick_callback(
+                        _finish_on_ui,
+                    )
                     return
                 except Exception:
-                    pass
+                    self._real_load_handle = None
 
         _finish_on_ui()
+
+    def _load_is_current(self, generation: int, dataset_id: str) -> bool:
+        """Return whether a scheduled construction still belongs to this panel."""
+        if self._disposed:
+            return False
+
+        if not self._real_load_started:
+            return False
+
+        if generation != self._real_load_generation:
+            return False
+
+        if dataset_id != self._real_load_dataset_id:
+            return False
+
+        return dataset_id == self._dataset_id()
+
+    def _error_view(self, exc: BaseException) -> pn.Column:
+        title = escape(
+            str(getattr(self.registration, "title", "Plugin panel"))
+        )
+
+        return pn.Column(
+            pn.pane.Alert(
+                f"Could not load **{title}**.",
+                alert_type="danger",
+                sizing_mode="stretch_width",
+                margin=(0, 0, 8, 0),
+            ),
+            pn.pane.HTML(
+                f"<pre style='white-space: pre-wrap'>{escape(str(exc))}</pre>",
+                sizing_mode="stretch_width",
+            ),
+            sizing_mode="stretch_both",
+            margin=(0, 0, 0, 0),
+            styles={
+                "height": "100%",
+                "width": "100%",
+                "box-sizing": "border-box",
+                "padding": "10px",
+                "overflow": "auto",
+            },
+        )
+
+    def _capture_real_controller_state(self) -> None:
+        """Preserve current user-controlled panel state before reconstruction."""
+        controller = self._real_controller
+        if controller is None:
+            return
+
+        try:
+            state = get_controller_state(controller)
+        except Exception:
+            return
+
+        if isinstance(state, dict):
+            self.restore_state = dict(state)
+
+    def _cancel_pending_real_load(self) -> None:
+        """Invalidate and best-effort cancel the currently scheduled load."""
+        self._real_load_generation += 1
+        self._real_load_started = False
+        self._real_load_dataset_id = None
+
+        handle = self._real_load_handle
+        self._real_load_handle = None
+
+        if handle is not None and hasattr(handle, "cancel"):
+            try:
+                handle.cancel()
+            except Exception:
+                pass
+
+    def _reset_real_panel(self) -> None:
+        """Dispose the current dataset-specific controller and clear its view."""
+        self._capture_real_controller_state()
+        self._cancel_pending_real_load()
+        self._dispose_real_controller()
+
+        self._real_view = None
+        self._real_dataset_id = None
+        self.view[:] = []
 
     def _on_dataset_mapping_updated(self, _topic: str, payload: Any) -> None:
         if not payload:
@@ -590,21 +679,44 @@ class MappingGatedPanel:
 
         self._refresh()
 
-    def _on_dataset_active_changed(self, _topic: str, _payload: Any) -> None:
+    def _on_dataset_active_changed(self, _topic: str, payload: Any) -> None:
+        if self._disposed:
+            return
+
+        payload = payload if isinstance(payload, dict) else {}
+        new_dataset_id = str(
+            payload.get("dataset_id") or self._dataset_id()
+        )
+
+        if new_dataset_id == self._panel_dataset_id:
+            self._refresh()
+            return
+
+        previous_dataset_id = self._panel_dataset_id
+        if previous_dataset_id:
+            self._withdraw_mapping_requests(
+                dataset_id=previous_dataset_id,
+            )
+
+        self._panel_dataset_id = new_dataset_id
         self._mapping_requests_sent.clear()
-        self._real_view = None
-        self._dispose_real_controller()
+        self._reset_real_panel()
         self._refresh()
+
+    @staticmethod
+    def _dispose_controller(controller: Any) -> None:
+        if controller is None or not hasattr(controller, "dispose"):
+            return
+
+        try:
+            controller.dispose()
+        except Exception:
+            pass
 
     def _dispose_real_controller(self) -> None:
         controller = self._real_controller
         self._real_controller = None
-
-        if controller is not None and hasattr(controller, "dispose"):
-            try:
-                controller.dispose()
-            except Exception:
-                pass
+        self._dispose_controller(controller)
 
     def get_state(self) -> dict[str, Any]:
         if self._real_controller is not None:
@@ -622,24 +734,24 @@ class MappingGatedPanel:
         if self._disposed:
             return
 
+        self._withdraw_mapping_requests(
+            dataset_id=self._panel_dataset_id,
+        )
+
         self._disposed = True
+        self._cancel_pending_real_load()
 
         events = getattr(self.context, "events", None)
         if events is not None:
-            for sub in list(self._subscriptions):
+            for subscription in list(self._subscriptions):
                 try:
-                    events.unsubscribe(sub)
+                    events.unsubscribe(subscription)
                 except Exception:
                     pass
 
         self._subscriptions.clear()
-
-        handle = getattr(self, "_real_load_handle", None)
-        if handle is not None and hasattr(handle, "cancel"):
-            try:
-                handle.cancel()
-            except Exception:
-                pass
-        self._real_load_handle = None
-
+        self._mapping_requests_sent.clear()
         self._dispose_real_controller()
+        self._real_view = None
+        self._real_dataset_id = None
+        self.view[:] = []

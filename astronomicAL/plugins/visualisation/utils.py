@@ -20,9 +20,15 @@ from bokeh.models import (
     SaveTool,
     TapTool,
     WheelZoomTool,
+    DatetimeTickFormatter,
+    FixedTicker,
 )
 
 from .constants import (
+    INTERNAL_COLOR_COLOUR,
+    INTERNAL_COLOR_DISPLAY,
+    INTERNAL_COLOR_RAW,
+    INTERNAL_COLOR_VALUE,
     INTERNAL_LABEL_COLOUR,
     INTERNAL_LABEL_DISPLAY,
     INTERNAL_LABEL_RAW,
@@ -31,6 +37,16 @@ from .constants import (
     INTERNAL_Y,
 )
 
+from .axis_support import (
+    AXIS_KIND_CATEGORICAL,
+    AXIS_KIND_DATETIME,
+    AXIS_KIND_NUMERIC,
+    AxisEncoding,
+    encode_axis_array,
+    encode_axis_values,
+    infer_axis_kind_from_dtype,
+    plottable_columns_from_schema,
+)
 
 _HV_EXTENSION_LOADED = False
 MAX_HOVER_ROWS = 4
@@ -41,6 +57,7 @@ DENSITY_RENDERER = "astronomical_visualisation_density"
 
 HOVER_ROW_ID = "hover_record_id"
 HOVER_LABEL = "hover_label"
+HOVER_COLOR = "hover_colour_value"
 
 HOVER_CSS = """
 .bk-tooltip {
@@ -234,6 +251,7 @@ def limited_point_hover_tool() -> HoverTool:
             ("x", "$x"),
             ("y", "$y"),
             ("id", f"@{HOVER_ROW_ID}"),
+            ("colour", f"@{HOVER_COLOR}"),
             ("label", f"@{HOVER_LABEL}"),
         ],
     )
@@ -417,24 +435,22 @@ def _unique_existing_columns(
 
 
 def _plot_required_columns(context, dataset_id: Optional[str], state, *, require_y: bool) -> List[Any]:
-    """
-    Determine the minimum columns required to prepare a scatter/density/histogram
-    frame.
-
-    This is the key replacement for loading the entire dataset and then taking
-    x/y/label/id columns from it.
-    """
+    """Determine the minimum columns required to prepare a visualisation frame."""
     available_columns = _dataset_columns(context, dataset_id)
+
+    try:
+        colour_col = state.colour_column()
+    except Exception:
+        colour_col = getattr(state, "color_by", None)
 
     candidates: List[Any] = [
         state.x,
         state.y if require_y else None,
         getattr(state, "record_id_col", None),
+        colour_col,
         getattr(state, "label_col", None),
     ]
 
-    # If future state objects add hover columns, this will include them without
-    # breaking older state objects.
     hover_cols = getattr(state, "hover_cols", None) or getattr(state, "hover_columns", None) or []
     candidates.extend(list(hover_cols))
 
@@ -563,91 +579,10 @@ def _safe_series(df: pd.DataFrame, column: Any) -> pd.Series:
     return values
 
 def _numeric_array_from_array(values: Any) -> np.ndarray:
-    """Return a numeric NumPy array suitable for plotting.
-
-    This is the array-based equivalent of _numeric_array(df, column).
-    """
-    series = pd.Series(values)
-
-    if pd.api.types.is_bool_dtype(series.dtype):
-        return series.to_numpy(dtype=np.float32, copy=False, na_value=np.nan)
-
-    if pd.api.types.is_numeric_dtype(series.dtype):
-        try:
-            arr = series.to_numpy(copy=False)
-        except Exception:
-            arr = series.to_numpy(dtype=np.float64, copy=False, na_value=np.nan)
-    else:
-        arr = pd.to_numeric(series, errors="coerce").to_numpy(copy=False)
-
-    arr = np.asarray(arr)
-
-    if arr.dtype == np.float32:
-        return arr
-
-    if not np.issubdtype(arr.dtype, np.number):
-        values64 = arr.astype(np.float64, copy=False)
-    else:
-        values64 = arr.astype(np.float64, copy=False)
-
-    finite = np.isfinite(values64)
-
-    if not finite.any():
-        return values64
-
-    max_abs = np.nanmax(np.abs(values64[finite]))
-
-    if max_abs <= 1.0e20:
-        return values64.astype(np.float32, copy=False)
-
-    return values64
+    return encode_axis_array(values)
 
 def _numeric_array(df: pd.DataFrame, column: Any) -> np.ndarray:
-    """
-    Return a numeric NumPy array suitable for plotting.
-
-    Uses float32 only when safe. Very large scientific values, such as
-    luminosities, must remain float64 or they overflow to inf and disappear
-    during np.isfinite masking.
-    """
-    series = df[column]
-
-    if pd.api.types.is_bool_dtype(series.dtype):
-        return series.to_numpy(dtype=np.float32, copy=False, na_value=np.nan)
-
-    if pd.api.types.is_numeric_dtype(series.dtype):
-        try:
-            values = series.to_numpy(copy=False)
-        except Exception:
-            values = series.to_numpy(dtype=np.float64, copy=False, na_value=np.nan)
-    else:
-        values = pd.to_numeric(series, errors="coerce").to_numpy(copy=False)
-
-    values = np.asarray(values)
-
-    if values.dtype == np.float32:
-        return values
-
-    # Convert nullable/object/numeric arrays to float64 first. This avoids the
-    # overflow warning that happens when pandas casts huge values directly to
-    # float32.
-    if not np.issubdtype(values.dtype, np.number):
-        values64 = values.astype(np.float64, copy=False)
-    else:
-        values64 = values.astype(np.float64, copy=False)
-
-    finite = np.isfinite(values64)
-
-    if not finite.any():
-        return values64
-
-    max_abs = np.nanmax(np.abs(values64[finite]))
-
-    # Only downcast when it cannot overflow.
-    if max_abs <= 1.0e20:
-        return values64.astype(np.float32, copy=False)
-
-    return values64
+    return encode_axis_array(_safe_series(df, column))
 
 def _row_id_array(
     df: pd.DataFrame,
@@ -715,19 +650,118 @@ def _is_numeric_dtype_name(dtype_name: str) -> bool:
     return any(marker in dtype_name for marker in numeric_markers)
 
 
-def _numeric_columns_from_dataset(context, dataset_id: Optional[str]) -> List[str]:
+def _numeric_columns_from_dataset(
+    context,
+    dataset_id: Optional[str],
+) -> List[str]:
+    """Return all scalar columns that can be represented on a plot axis.
+
+    The historical function name is retained because VisualisationState
+    already imports it. The returned columns are no longer limited to
+    native numeric dtypes.
+    """
     columns = _dataset_columns(context, dataset_id)
     dtypes = _dataset_dtypes(context, dataset_id)
 
     if not dtypes:
         return columns
 
-    numeric_columns = [
-        column for column in columns
-        if _is_numeric_dtype_name(dtypes.get(column, ""))
-    ]
+    return plottable_columns_from_schema(columns, dtypes)
 
-    return numeric_columns
+def _source_axis_kind(
+    context,
+    dataset_id: Optional[str],
+    column: Any,
+) -> str:
+    """Return the schema-level axis kind for a source column."""
+    dtypes = _dataset_dtypes(context, dataset_id)
+    return infer_axis_kind_from_dtype(dtypes.get(str(column), ""))
+
+
+def _source_axis_is_numeric(
+    context,
+    dataset_id: Optional[str],
+    column: Any,
+) -> bool:
+    """Return whether raw numeric bounds can be applied to this source column."""
+    return _source_axis_kind(context, dataset_id, column) == AXIS_KIND_NUMERIC
+
+
+def _set_runtime_axis_encoding(
+    state,
+    column: Any,
+    encoding: AxisEncoding,
+) -> None:
+    """Store runtime encoding information for Bokeh axis formatting."""
+    if column is None:
+        return
+
+    column = str(column)
+
+    kinds = dict(getattr(state, "_axis_runtime_kinds", {}) or {})
+    kinds[column] = encoding.kind
+    state._axis_runtime_kinds = kinds
+
+    overrides = dict(getattr(state, "_axis_tick_overrides", {}) or {})
+
+    if encoding.kind == AXIS_KIND_CATEGORICAL and encoding.categories:
+        overrides[column] = {
+            float(index): str(label)
+            for index, label in enumerate(encoding.categories)
+        }
+    else:
+        overrides.pop(column, None)
+
+    state._axis_tick_overrides = overrides
+
+
+def _runtime_axis_kind(state, column: Any) -> str:
+    """Return the encoding kind selected while preparing the current frame."""
+    kinds = getattr(state, "_axis_runtime_kinds", {}) or {}
+    return str(kinds.get(str(column), AXIS_KIND_NUMERIC))
+
+
+def axis_tick_label_hook(state):
+    """Apply categorical labels and datetime formatting to Bokeh axes."""
+
+    def _hook(plot, element) -> None:
+        try:
+            figure = plot.state
+        except Exception:
+            return
+
+        runtime_kinds = getattr(state, "_axis_runtime_kinds", {}) or {}
+        tick_overrides = getattr(state, "_axis_tick_overrides", {}) or {}
+
+        for dimension, column in (
+            ("x", getattr(state, "x", None)),
+            ("y", getattr(state, "y", None)),
+        ):
+            if column is None:
+                continue
+
+            column = str(column)
+            kind = runtime_kinds.get(column)
+            axes = list(getattr(figure, f"{dimension}axis", []) or [])
+
+            for axis in axes:
+                if kind == AXIS_KIND_CATEGORICAL:
+                    labels = tick_overrides.get(column, {})
+
+                    if labels:
+                        try:
+                            axis.ticker = FixedTicker(ticks=sorted(labels))
+                            axis.major_label_overrides = labels
+                        except Exception:
+                            pass
+
+                elif kind == AXIS_KIND_DATETIME:
+                    try:
+                        axis.formatter = DatetimeTickFormatter()
+                    except Exception:
+                        pass
+
+    return _hook
 
 def _label_arrays(
     df: pd.DataFrame,
@@ -951,27 +985,8 @@ def _label_display_colour_arrays(values: np.ndarray, state):
 
 
 def _labels_needed_for_frame(state) -> bool:
-    """
-    Decide whether prepare_plot_frame needs the label column at all.
-
-    Loading raw labels is needed for label filtering and label colouring.
-    Display/colour arrays are only needed when rendering by labels or when a
-    label-filtered frame carries labels forward.
-    """
-    label_col = getattr(state, "label_col", None)
-
-    if not label_col or label_col == "No Labels":
-        return False
-
-    label_filter = getattr(state, "label_filter", None) or []
-    if label_filter and "All" not in label_filter:
-        return True
-
-    color_by = str(getattr(state, "color_by", "") or "").strip().lower()
-    if color_by == "labels":
-        return True
-
-    return False
+    """Backward-compatible alias for generic colour-column preparation."""
+    return _colour_needed_for_frame(state)
 
 
 def _load_label_arrays(context, state):
@@ -990,6 +1005,62 @@ def _load_label_arrays(context, state):
     display, colours = _label_display_colour_arrays(raw, state)
     return raw, display, colours
 
+def _colour_column_for_state(state):
+    try:
+        return state.colour_column()
+    except Exception:
+        value = getattr(state, "color_by", None)
+        if value is None or str(value) in {"", "None", "No Labels"}:
+            return None
+        if str(value) == "Labels":
+            return getattr(state, "label_col", None)
+        return value
+
+
+def _effective_colour_mode_for_state(state) -> str:
+    try:
+        return state.effective_colour_mode()
+    except Exception:
+        return "categorical"
+
+
+def _colour_needed_for_frame(state) -> bool:
+    colour_col = _colour_column_for_state(state)
+    if not colour_col:
+        return False
+
+    label_filter = getattr(state, "label_filter", None) or []
+    if label_filter and "All" not in label_filter:
+        return True
+
+    return True
+
+
+def _colour_display_colour_arrays(values: np.ndarray, state):
+    """Convert filtered categorical colour values to display strings and colours."""
+    if values is None:
+        return None, None
+
+    values = np.asarray(values)
+    unique_values = pd.unique(pd.Series(values))
+
+    display_map = {}
+    colour_map = {}
+
+    for value in unique_values:
+        try:
+            display_map[value] = state.colour_display(value)
+        except Exception:
+            display_map[value] = str(value)
+
+        try:
+            colour_map[value] = state.colour_value_colour(value)
+        except Exception:
+            colour_map[value] = "#1f77b4"
+
+    display = pd.Series(values).map(display_map).to_numpy(dtype=object)
+    colours = pd.Series(values).map(colour_map).to_numpy(dtype=object)
+    return display, colours
 
 def prepare_plot_frame(
     context,
@@ -1025,6 +1096,13 @@ def prepare_plot_frame(
     if require_y and (not state.y or state.y not in available_set):
         return _empty_frame()
 
+    colour_col = _colour_column_for_state(state)
+    colour_mode = _effective_colour_mode_for_state(state)
+
+    if colour_col not in available_set:
+        colour_col = None
+        colour_mode = "none"
+
     # ------------------------------------------------------------------
     # 1. Load raw columns in one backend call where possible.
     # ------------------------------------------------------------------
@@ -1034,18 +1112,28 @@ def prepare_plot_frame(
     if require_y:
         columns_to_load.append(state.y)
 
-    labels_needed = (
-        _labels_needed_for_frame(state)
-        and getattr(state, "label_col", None) in available_set
+    colour_needed = bool(colour_col and _colour_needed_for_frame(state))
+    if colour_needed:
+        columns_to_load.append(colour_col)
+
+    # Preserve legacy label support for panels that still expect label fields.
+    label_col = getattr(state, "label_col", None)
+    legacy_label_needed = (
+        label_col
+        and label_col in available_set
+        and label_col != colour_col
+        and getattr(state, "label_filter", None)
+        and "All" not in (getattr(state, "label_filter", None) or [])
     )
-    if labels_needed:
-        columns_to_load.append(state.label_col)
+    if legacy_label_needed:
+        columns_to_load.append(label_col)
 
     try:
         arrays = _load_column_arrays(context, state, columns_to_load)
         x_raw = arrays[state.x]
         y_raw = arrays[state.y] if require_y else None
-        label_raw_all = arrays.get(state.label_col) if labels_needed else None
+        colour_raw_all = arrays.get(colour_col) if colour_needed else None
+        legacy_label_raw_all = arrays.get(label_col) if legacy_label_needed else None
     except Exception as exc:
         print(
             "[AstronomicAL visualisation] failed to load required plot columns "
@@ -1055,8 +1143,8 @@ def prepare_plot_frame(
         return _empty_frame()
 
     load_seconds = time.perf_counter() - t_load
-    n_rows = len(x_raw)
 
+    n_rows = len(x_raw)
     if total_rows <= 0:
         total_rows = n_rows
 
@@ -1068,13 +1156,18 @@ def prepare_plot_frame(
         )
         return _empty_frame()
 
-    if label_raw_all is not None and len(label_raw_all) != n_rows:
+    if colour_raw_all is not None and len(colour_raw_all) != n_rows:
         print(
-            "[AstronomicAL visualisation] label length mismatch "
-            f"labels={len(label_raw_all):,} rows={n_rows:,}; ignoring labels",
+            "[AstronomicAL visualisation] colour length mismatch "
+            f"colour={len(colour_raw_all):,} rows={n_rows:,}; ignoring colour",
             flush=True,
         )
-        label_raw_all = None
+        colour_raw_all = None
+        colour_col = None
+        colour_mode = "none"
+
+    if legacy_label_raw_all is not None and len(legacy_label_raw_all) != n_rows:
+        legacy_label_raw_all = None
 
     if n_rows == 0:
         return _empty_frame()
@@ -1084,13 +1177,32 @@ def prepare_plot_frame(
     # ------------------------------------------------------------------
     t_arrays = time.perf_counter()
 
-    x = _numeric_array_from_array(x_raw)
+    x_encoding = encode_axis_values(x_raw)
+    x = x_encoding.values
+    _set_runtime_axis_encoding(state, state.x, x_encoding)
+
     mask = np.isfinite(x)
 
     y = None
+    y_encoding = None
+
     if require_y:
-        y = _numeric_array_from_array(y_raw)
+        y_encoding = encode_axis_values(y_raw)
+        y = y_encoding.values
+        _set_runtime_axis_encoding(state, state.y, y_encoding)
         mask &= np.isfinite(y)
+
+    # Categorical and datetime coordinates cannot use logarithmic axes.
+    if x_encoding.kind != AXIS_KIND_NUMERIC and getattr(state, "log_x", False):
+        state.log_x = False
+
+    if (
+        require_y
+        and y_encoding is not None
+        and y_encoding.kind != AXIS_KIND_NUMERIC
+        and getattr(state, "log_y", False)
+    ):
+        state.log_y = False
 
     if state.log_x:
         mask &= x > 0
@@ -1101,33 +1213,55 @@ def prepare_plot_frame(
     arrays_seconds = time.perf_counter() - t_arrays
 
     # ------------------------------------------------------------------
-    # 3. Labels: use raw labels only if filtering/colouring requires them.
+    # 3. Generic colour column.
     # ------------------------------------------------------------------
     t_labels = time.perf_counter()
 
+    colour_raw = None
+    colour_display = None
+    colour_colours = None
+    colour_values = None
+
+    if colour_raw_all is not None and colour_col is not None:
+        if colour_mode == "categorical":
+            if state.label_filter and "All" not in state.label_filter:
+                try:
+                    selected = state.selected_colour_raw_values()
+                except Exception:
+                    selected = []
+                if selected:
+                    colour_mask = pd.Series(colour_raw_all).isin(selected).to_numpy()
+                    mask &= colour_mask
+
+            colour_raw = np.asarray(colour_raw_all)[mask]
+            colour_display, colour_colours = _colour_display_colour_arrays(
+                colour_raw,
+                state,
+            )
+
+        elif colour_mode == "continuous":
+            colour_values_all = pd.to_numeric(
+                pd.Series(colour_raw_all),
+                errors="coerce",
+            ).to_numpy()
+            colour_raw = np.asarray(colour_raw_all)[mask]
+            colour_values = colour_values_all[mask]
+
+    # Legacy label support.
     label_raw = None
     label_display = None
     label_colours = None
 
-    if label_raw_all is not None:
-        if state.label_filter and "All" not in state.label_filter:
-            selected = state.selected_raw_labels()
-            label_mask = pd.Series(label_raw_all).isin(selected).to_numpy()
-            mask &= label_mask
-
-        label_raw = label_raw_all[mask]
-
-        color_by = str(getattr(state, "color_by", "") or "").strip().lower()
-        should_build_label_display = (
-            color_by == "labels"
-            or bool(state.label_filter and "All" not in state.label_filter)
-        )
-
-        if should_build_label_display:
+    if legacy_label_raw_all is not None:
+        label_raw = np.asarray(legacy_label_raw_all)[mask]
+        try:
             label_display, label_colours = _label_display_colour_arrays(
                 label_raw,
                 state,
             )
+        except Exception:
+            label_display = label_raw.astype(object, copy=False)
+            label_colours = None
 
     labels_seconds = time.perf_counter() - t_labels
 
@@ -1135,12 +1269,11 @@ def prepare_plot_frame(
     # 4. Row IDs.
     #
     # Density plots do not need row IDs for the first aggregate render. Skipping
-    # this avoids the ~1s row-id load shown in the 13M-row startup timings.
-    # Scatter still uses include_row_ids=True by default.
+    # this avoids the row-id load for non-interactive aggregate views.
     # ------------------------------------------------------------------
     t_row_ids = time.perf_counter()
-    row_ids = None
 
+    row_ids = None
     if include_row_ids:
         try:
             row_ids_all = _load_row_ids_array(context, state)
@@ -1180,14 +1313,25 @@ def prepare_plot_frame(
     if require_y and y is not None:
         data[INTERNAL_Y] = y[mask]
 
+    if colour_raw is not None:
+        data[INTERNAL_COLOR_RAW] = colour_raw
+
+    if colour_mode == "categorical" and colour_display is not None:
+        data[INTERNAL_COLOR_DISPLAY] = colour_display
+        data[INTERNAL_LABEL_DISPLAY] = colour_display
+
+        if colour_colours is not None:
+            data[INTERNAL_COLOR_COLOUR] = colour_colours
+            data[INTERNAL_LABEL_COLOUR] = colour_colours
+
+    elif colour_mode == "continuous" and colour_values is not None:
+        data[INTERNAL_COLOR_VALUE] = colour_values
+
     if label_raw is not None:
         data[INTERNAL_LABEL_RAW] = label_raw
-        if label_display is not None:
-            data[INTERNAL_LABEL_DISPLAY] = label_display
-        else:
-            data[INTERNAL_LABEL_DISPLAY] = label_raw.astype(object, copy=False)
-
-    if label_colours is not None:
+    if label_display is not None and INTERNAL_LABEL_DISPLAY not in data:
+        data[INTERNAL_LABEL_DISPLAY] = label_display
+    if label_colours is not None and INTERNAL_LABEL_COLOUR not in data:
         data[INTERNAL_LABEL_COLOUR] = label_colours
 
     data_seconds = time.perf_counter() - t_data
@@ -1197,17 +1341,20 @@ def prepare_plot_frame(
     frame_seconds = time.perf_counter() - t_frame
 
     total_seconds = time.perf_counter() - t_total
+
     print(
         "[AstronomicAL visualisation] prepare_plot_frame total "
         f"{total_seconds:.3f}s "
         f"(load={load_seconds:.3f}s, "
         f"arrays={arrays_seconds:.3f}s, "
-        f"labels={labels_seconds:.3f}s, "
+        f"colour={labels_seconds:.3f}s, "
         f"row_ids={row_ids_seconds:.3f}s, "
         f"include_row_ids={include_row_ids}, "
         f"data={data_seconds:.3f}s, "
         f"frame={frame_seconds:.3f}s, "
-        f"rows={len(frame):,})",
+        f"rows={len(frame):,} "
+        f"colour_col={colour_col!r} "
+        f"colour_mode={colour_mode!r})",
         flush=True,
     )
 
@@ -1221,7 +1368,6 @@ def prepare_plot_frame(
         row_count_after_filter=len(frame),
     )
 
-
 def prepared_cache_key(
     context,
     state,
@@ -1232,6 +1378,16 @@ def prepared_cache_key(
     dataset_id = _active_dataset_id(context)
     fingerprint = _dataset_fingerprint(context, dataset_id)
 
+    try:
+        colour_col = state.colour_column()
+    except Exception:
+        colour_col = getattr(state, "color_by", None)
+
+    try:
+        colour_mode = state.effective_colour_mode()
+    except Exception:
+        colour_mode = getattr(state, "color_mode", None)
+
     return (
         dataset_id,
         fingerprint,
@@ -1239,8 +1395,10 @@ def prepared_cache_key(
         state.y if require_y else None,
         require_y,
         bool(include_row_ids),
+        colour_col,
+        colour_mode,
+        getattr(state, "color_cmap", None),
         tuple(state.label_filter or []),
-        state.color_by,
         state.log_x,
         state.log_y if require_y else None,
         state.record_id_col,

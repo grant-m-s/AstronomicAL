@@ -1115,7 +1115,7 @@ class AnnotationsPanel:
         for col in columns:
             if col not in selected:
                 selected.append(str(col))
-            if len(selected) >= 10:
+            if len(selected) >= 3:
                 break
 
         return selected or None

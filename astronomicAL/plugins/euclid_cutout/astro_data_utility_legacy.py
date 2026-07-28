@@ -14,13 +14,52 @@ from astropy.wcs import WCS
 from astroquery.esa.euclid import EuclidClass
 import mocpy
 
-from astronomicAL.utils.error_tracker import ErrorTracker
+from uuid import uuid4
 
+from astronomicAL.utils.error_tracker import ErrorTracker
 
 DEFAULT_EUCLID_FILTERS = ["VIS", "NIR_Y", "NIR_J", "NIR_H"]
 DEFAULT_SAVE_DIR = "data/cutouts"
 DEFAULT_MOC_PATH = "data/mocs"
 
+def _cancel_requested(cancel_token: Any) -> bool:
+    if cancel_token is None:
+        return False
+
+    for name in ("cancelled", "is_cancelled", "is_cancelled_requested"):
+        value = getattr(cancel_token, name, None)
+
+        if callable(value):
+            try:
+                if bool(value()):
+                    return True
+            except Exception:
+                pass
+        elif value is not None:
+            try:
+                if bool(value):
+                    return True
+            except Exception:
+                pass
+
+    return False
+
+def _raise_if_cancelled(cancel_token: Any) -> None:
+    if _cancel_requested(cancel_token):
+        raise concurrent.futures.CancelledError(
+            "Euclid cutout request was superseded."
+        )
+
+def _error_detail(error: Any, message: str) -> str:
+    summary = str(message or "Euclid archive request failed").strip()
+    try:
+        detail = str(error).strip()
+    except Exception:
+        detail = repr(error)
+
+    if not detail or detail == summary:
+        return summary
+    return f"{summary}: {detail}"
 
 class EuclidCutoutsClass:
     """Retrieve raw Euclid image cutouts from the ESA archive.
@@ -56,6 +95,7 @@ class EuclidCutoutsClass:
         os.makedirs(self.save_dir, exist_ok=True)
 
         self.error_tracker = ErrorTracker()
+        self.last_error_detail: Optional[str] = None
         self.check_moc_coverage = bool(check_moc_coverage)
         self.moc_survey = moc_survey
         self.moc_path = moc_path
@@ -66,7 +106,7 @@ class EuclidCutoutsClass:
             except Exception as exc:
                 # Missing local MOC files should not make the whole plugin
                 # unusable. The archive query can still fail gracefully later.
-                self.error_tracker.log_error(exc, "Could not load Euclid MOC coverage file")
+                self._record_error(exc, "Could not load Euclid MOC coverage file")
                 self.moc = None
 
         self.euclid_filters = list(euclid_filters or DEFAULT_EUCLID_FILTERS)
@@ -75,6 +115,10 @@ class EuclidCutoutsClass:
         self.coordinates: Optional[SkyCoord] = None
         if ra is not None and dec is not None:
             self.set_coordinates(ra=ra, dec=dec)
+
+    def _record_error(self, error: Any, message: str) -> None:
+        self.last_error_detail = _error_detail(error, message)
+        self.error_tracker.log_error(error, message)
 
     # ------------------------------------------------------------------
     # Client / context helpers
@@ -142,6 +186,7 @@ class EuclidCutoutsClass:
         if ra is not None and dec is not None:
             self.set_coordinates(ra=ra, dec=dec)
         self.error_tracker.reset()
+        self.last_error_detail = None
         self._remove_source_attributes()
 
     def _remove_source_attributes(self) -> None:
@@ -181,15 +226,22 @@ class EuclidCutoutsClass:
         async_job: bool = False,
         verbose: bool = True,
         Nattempts_max: int = 2,
+        cancel_token: Any = None,
     ) -> None:
         """Run a cone search on the Euclid mosaic-product table."""
+
         if self.coordinates is None:
             raise ValueError("No coordinates set — provide ra and dec first")
 
         try:
+            _raise_if_cancelled(cancel_token)
+
             tic = time.perf_counter()
             self.cone_results = None
+
             for attempt in range(Nattempts_max):
+                _raise_if_cancelled(cancel_token)
+
                 radius = initial_radius * (1 + attempt)
                 job = self.client.cone_search(
                     self.coordinates,
@@ -200,23 +252,39 @@ class EuclidCutoutsClass:
                     columns="*",
                     async_job=async_job,
                 )
+
+                _raise_if_cancelled(cancel_token)
                 self.cone_results = job.get_results()
+                _raise_if_cancelled(cancel_token)
+
                 if len(self.cone_results) > 0:
                     break
 
             if verbose:
-                toc = time.perf_counter()
-                print(f"Cone search required {toc - tic:.3f} seconds")
-                if self.cone_results is not None and len(self.cone_results) == 0:
-                    print(
-                        f"No cone-search results found after {Nattempts_max} attempts "
-                        f"(max radius: {initial_radius * Nattempts_max})"
-                    )
+                print(
+                    "Cone search required "
+                    f"{time.perf_counter() - tic:.3f} seconds"
+                )
 
+            if self.cone_results is not None and len(self.cone_results) == 0:
+                print(
+                    f"No cone-search results found after {Nattempts_max} "
+                    f"attempts (max radius: "
+                    f"{initial_radius * Nattempts_max})"
+                )
+
+        except concurrent.futures.CancelledError:
+            raise
         except ConnectionError as exc:
-            self.error_tracker.log_error(exc, "Failed to connect to ESA Science Archive")
+            self._record_error(
+                exc,
+                "Failed to connect to ESA Science Archive",
+            )
         except Exception as exc:
-            self.error_tracker.log_error(exc, "Euclid cone search failed")
+            self._record_error(
+                exc,
+                "Euclid cone search failed",
+            )
 
     @staticmethod
     def get_info_cutout(cone_results: Any, filter_name: str) -> Tuple[str, Any, Any]:
@@ -235,19 +303,39 @@ class EuclidCutoutsClass:
         obs_id = line["tile_index"]
         return file_path, instrument, obs_id
 
-    def get_band_cutout(self, band: str, fname: Optional[str] = None) -> Optional[str]:
-        """Download one band and return the local FITS path."""
+    def get_band_cutout(
+        self,
+        band: str,
+        fname: Optional[str] = None,
+        cancel_token: Any = None,
+    ) -> Optional[str]:
+        """Download one band and return its isolated local FITS path."""
+
         if self.coordinates is None:
             raise ValueError("No coordinates set — provide ra and dec first")
         if not hasattr(self, "cone_results"):
             raise RuntimeError("Run get_cone before downloading cutouts")
         if not hasattr(self, "cutout_radius"):
-            raise RuntimeError("cutout_radius is not set; call download_cutouts")
+            raise RuntimeError(
+                "cutout_radius is not set; call download_cutouts"
+            )
+
+        output_file: Optional[str] = None
+        downloaded_path: Optional[str] = None
 
         try:
-            file_path, instrument, obs_id = self.get_info_cutout(self.cone_results, band)
+            _raise_if_cancelled(cancel_token)
+
+            file_path, instrument, obs_id = self.get_info_cutout(
+                self.cone_results,
+                band,
+            )
+
             stem = f"{obs_id}_{band}" if fname is None else f"{fname}_{band}"
-            output_file = os.path.join(self.save_dir, f"{stem}.fits")
+            output_file = os.path.join(
+                self.save_dir,
+                f"{stem}.fits",
+            )
 
             result = self.client.get_cutout(
                 file_path=file_path,
@@ -257,68 +345,182 @@ class EuclidCutoutsClass:
                 radius=self.cutout_radius,
                 output_file=output_file,
             )
-            return result[0] if result else output_file
+
+            if isinstance(result, (list, tuple)) and result:
+                downloaded_path = str(result[0])
+            elif result:
+                downloaded_path = str(result)
+            else:
+                downloaded_path = output_file
+
+            _raise_if_cancelled(cancel_token)
+            return downloaded_path
+
+        except concurrent.futures.CancelledError:
+            for path in {output_file, downloaded_path}:
+                if not path:
+                    continue
+                try:
+                    Path(path).unlink()
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    pass
+            raise
 
         except ConnectionError as exc:
-            self.error_tracker.log_error(exc, "Failed to connect to ESA Science Archive")
+            self._record_error(
+                exc,
+                "Failed to connect to ESA Science Archive",
+            )
         except Exception as exc:
-            self.error_tracker.log_error(exc, f"Failed to download Euclid {band} cutout")
-        return None
+            self._record_error(
+                exc,
+                f"Failed to download Euclid {band} cutout",
+            )
 
+        return None
 
     def download_cutouts(
         self,
         radius: float,
         verbose: bool = False,
         bands_to_retrieve: Optional[Iterable[str]] = None,
+        cancel_token: Any = None,
     ) -> Dict[str, str]:
-        """Download FITS cutouts for the requested bands."""
+        """Download requested bands into the request's isolated directory."""
+
         self.cutout_radius = float(radius) * u.arcsec
-        self.cutouts_paths: Dict[str, str] = {}
+        self.cutouts_paths = {}
 
-        bands = list(bands_to_retrieve or self.euclid_filters)
+        bands = list(
+            dict.fromkeys(
+                bands_to_retrieve or self.euclid_filters
+            )
+        )
+        if not bands:
+            return self.cutouts_paths
+
         tic = time.perf_counter()
+        _raise_if_cancelled(cancel_token)
 
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            futures = {
-                executor.submit(self.get_band_cutout, band, fname="tmp"): band
-                for band in bands
-            }
-            for future in concurrent.futures.as_completed(futures):
-                band = futures[future]
+        # Avoid a nested executor for the normal selected-band path.
+        if len(bands) == 1:
+            band = bands[0]
+            save_path = self.get_band_cutout(
+                band,
+                cancel_token=cancel_token,
+            )
+            if save_path is not None:
+                self.cutouts_paths[band] = str(save_path)
+
+        else:
+            max_workers = min(4, len(bands))
+
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=max_workers,
+            ) as executor:
+                futures = {
+                    executor.submit(
+                        self.get_band_cutout,
+                        band,
+                        cancel_token=cancel_token,
+                    ): band
+                    for band in bands
+                }
+
                 try:
-                    save_path = future.result()
-                except Exception as exc:
-                    self.error_tracker.log_error(exc, f"Failed to download Euclid {band} cutout")
-                    continue
-                if save_path is not None:
-                    self.cutouts_paths[band] = str(save_path)
+                    for future in concurrent.futures.as_completed(futures):
+                        _raise_if_cancelled(cancel_token)
+                        band = futures[future]
+
+                        try:
+                            save_path = future.result()
+                        except concurrent.futures.CancelledError:
+                            raise
+                        except Exception as exc:
+                            self._record_error(
+                                exc,
+                                f"Failed to download Euclid {band} cutout",
+                            )
+                            continue
+
+                        if save_path is not None:
+                            self.cutouts_paths[band] = str(save_path)
+
+                except concurrent.futures.CancelledError:
+                    for future in futures:
+                        future.cancel()
+                    raise
+
+        _raise_if_cancelled(cancel_token)
 
         if verbose:
-            toc = time.perf_counter()
-            print(f"Retrieving all cutouts required {toc - tic:.3f} seconds")
-            # BUG: Seems like being held by scatter...
+            print(
+                "Retrieving all cutouts required "
+                f"{time.perf_counter() - tic:.3f} seconds"
+            )
 
         return self.cutouts_paths
 
-    def read_cutouts(self) -> Tuple[Dict[str, np.ndarray], Dict[str, WCS]]:
-        """Read downloaded FITS cutouts into raw arrays and WCS objects."""
-        self.data: Dict[str, np.ndarray] = {}
-        self.wcs: Dict[str, WCS] = {}
-        self.headers: Dict[str, Any] = {}
+    def read_cutouts(
+        self,
+        cancel_token: Any = None,
+    ) -> Tuple[Dict[str, np.ndarray], Dict[str, WCS]]:
+        """Read FITS files into arrays that no longer reference those files."""
+
+        self.data = {}
+        self.wcs = {}
+        self.headers = {}
 
         for band, path in getattr(self, "cutouts_paths", {}).items():
             try:
-                with fits.open(path) as hdul:
-                    hdu = hdul[0]
-                    self.data[band] = np.asarray(hdu.data)
-                    self.headers[band] = hdu.header.copy()
-                    self.wcs[band] = WCS(hdu.header)
+                _raise_if_cancelled(cancel_token)
 
+                with fits.open(path, memmap=False) as hdul:
+                    hdu = next(
+                        (
+                            candidate
+                            for candidate in hdul
+                            if getattr(candidate, "data", None) is not None
+                        ),
+                        None,
+                    )
+                    if hdu is None:
+                        raise ValueError(
+                            "FITS file contains no image HDU"
+                        )
+
+                    data = np.array(hdu.data, copy=True)
+                    header = hdu.header.copy()
+
+                while data.ndim > 2:
+                    data = data[0]
+
+                if data.ndim != 2 or data.size == 0:
+                    raise ValueError(
+                        f"Unexpected Euclid {band} image shape: "
+                        f"{data.shape}"
+                    )
+
+                _raise_if_cancelled(cancel_token)
+
+                self.data[band] = data
+                self.headers[band] = header
+                self.wcs[band] = WCS(header)
+
+            except concurrent.futures.CancelledError:
+                raise
             except OSError as exc:
-                self.error_tracker.log_error(exc, f"Downloaded corrupted FITS file for {band}")
+                self._record_error(
+                    exc,
+                    f"Downloaded corrupted FITS file for {band}",
+                )
             except Exception as exc:
-                self.error_tracker.log_error(exc, f"Could not read Euclid {band} FITS cutout")
+                self._record_error(
+                    exc,
+                    f"Could not read Euclid {band} FITS cutout",
+                )
 
         return self.data, self.wcs
 
@@ -329,26 +531,23 @@ class EuclidCutoutsClass:
         ra: Optional[float] = None,
         dec: Optional[float] = None,
         bands_to_retrieve: Optional[Iterable[str]] = None,
+        cancel_token: Any = None,
         verbose: bool = False,
-    ) -> Tuple[Optional[Dict[str, np.ndarray]], Optional[Dict[str, WCS]]]:
-        """Download and read raw Euclid cutouts, returning ``(data, wcs)``.
+    ) -> Tuple[
+        Optional[Dict[str, np.ndarray]],
+        Optional[Dict[str, WCS]],
+    ]:
+        """Download and read raw Euclid cutouts."""
 
-        This is the only high-level public retrieval method. It performs:
-
-        1. optional coordinate update;
-        2. optional MOC coverage check;
-        3. archive cone search;
-        4. FITS cutout download;
-        5. FITS reading into raw arrays and WCS objects.
-
-        It intentionally does not stretch, clip, scale, reproject for display,
-        build RGB images, or create plotting objects.
-        """
         self.error_tracker.reset()
+        self.last_error_detail = None
+        _raise_if_cancelled(cancel_token)
 
         if ra is not None or dec is not None:
             if ra is None or dec is None:
-                raise ValueError("Both ra and dec must be provided together")
+                raise ValueError(
+                    "Both ra and dec must be provided together"
+                )
             self.set_coordinates(ra=ra, dec=dec)
 
         if self.coordinates is None:
@@ -361,36 +560,56 @@ class EuclidCutoutsClass:
                 moc=self.moc,
             )
             if not inside:
-                self.error_tracker.log_error(
+                self._record_error(
                     "Source not in the survey",
                     "The selected source is outside the survey coverage area",
                 )
                 return None, None
 
-        self.get_cone(verbose=verbose, async_job=False)
+        self.get_cone(
+            verbose=verbose,
+            async_job=False,
+            cancel_token=cancel_token,
+        )
+        _raise_if_cancelled(cancel_token)
+
+        # Cone-search failure is fatal because no band can be downloaded.
         if self.error_tracker.has_error:
             return None, None
 
-        if not hasattr(self, "cone_results") or self.cone_results is None or len(self.cone_results) <= 0:
-            self.error_tracker.log_error(
+        if (
+            not hasattr(self, "cone_results")
+            or self.cone_results is None
+            or len(self.cone_results) <= 0
+        ):
+            self._record_error(
                 "Cone search failed",
                 "No Euclid mosaic products found within the search radius",
             )
             return None, None
 
-        self.download_cutouts(
+        paths = self.download_cutouts(
             radius=radius,
             verbose=verbose,
             bands_to_retrieve=bands_to_retrieve,
+            cancel_token=cancel_token,
         )
-        if self.error_tracker.has_error:
+        _raise_if_cancelled(cancel_token)
+
+        # Individual-band failures are not fatal when another requested band
+        # completed successfully.
+        if not paths:
             return None, None
 
-        self.read_cutouts()
-        if self.error_tracker.has_error:
+        data, wcs = self.read_cutouts(
+            cancel_token=cancel_token,
+        )
+        _raise_if_cancelled(cancel_token)
+
+        if not data:
             return None, None
 
-        return self.data, self.wcs
+        return data, wcs
 
     # ------------------------------------------------------------------
     # Export / cleanup helpers
@@ -433,7 +652,6 @@ class EuclidCutoutsClass:
         except Exception:
             return
 
-
 # ----------------------------------------------------------------------
 # Small module helpers
 # ----------------------------------------------------------------------
@@ -448,7 +666,6 @@ def load_moc(survey: str, path: str = DEFAULT_MOC_PATH) -> mocpy.MOC:
     }
     assert survey in surveys, f"No MOC file available for {survey}"
     return mocpy.MOC.from_fits(os.path.join(path, surveys[survey]))
-
 
 def check_isin_survey(ra: float, dec: float, moc: mocpy.MOC) -> bool:
     value = moc.contains_lonlat(ra * u.deg, dec * u.deg)

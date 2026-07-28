@@ -12,6 +12,7 @@ from astronomicAL.platform.modal_utils import (
 
 PendingKey = Tuple[str, str]
 CurrentKey = Tuple[str, str]
+RequesterKey = str
 
 SHEET_STYLES = {
     "box-sizing": "border-box",
@@ -155,7 +156,14 @@ class MappingAlertController:
             )
             self._subs.append(
                 self.context.events.subscribe(
-                    "mapping.open_requested", self._on_mapping_open_requested
+                    "mapping.open_requested",
+                    self._on_mapping_open_requested,
+                )
+            )
+            self._subs.append(
+                self.context.events.subscribe(
+                    "mapping.request.withdrawn",
+                    self._on_mapping_request_withdrawn,
                 )
             )
 
@@ -211,12 +219,103 @@ class MappingAlertController:
         self._pending_values.pop(key, None)
         self._refresh_button()
 
+    def _on_mapping_request_withdrawn( self, _topic: str, payload: Any) -> None:
+        if not isinstance(payload, dict):
+            return
+
+        panel_id = payload.get("panel_id")
+        source = payload.get("source")
+        dataset_id = payload.get("dataset_id")
+
+        if not panel_id and not source:
+            return
+
+        changed = False
+
+        for key, item in list(self._pending.items()):
+            if (dataset_id is not None and str(item.get("dataset_id")) != str(dataset_id)):
+                continue
+
+            requesters = dict(
+                item.get("requesters", {}) or {}
+            )
+
+            for requester_key, requester in list(
+                requesters.items()
+            ):
+                panel_matches = (
+                    panel_id is not None
+                    and str(requester.get("panel_id"))
+                    == str(panel_id)
+                )
+                source_matches = (
+                    panel_id is None
+                    and source is not None
+                    and str(requester.get("source"))
+                    == str(source)
+                )
+
+                if panel_matches or source_matches:
+                    requesters.pop(requester_key, None)
+                    changed = True
+
+            if not requesters:
+                self._pending.pop(key, None)
+                self._pending_values.pop(key, None)
+                continue
+
+            item["requesters"] = requesters
+            self._pending[key] = (
+                self._refresh_pending_aggregate(item)
+            )
+
+        if not changed:
+            return
+
+        self._refresh_button()
+
+        try:
+            self._rebuild_modal()
+        except Exception:
+            # The modal may not currently be attached/open. The button state and
+            # pending data are still correct and the next open rebuilds it.
+            pass
+
     # ------------------------------------------------------------------
     # Normalisation and status
     # ------------------------------------------------------------------
 
     def _key_from_payload(self, payload: dict) -> PendingKey:
         return str(payload["dataset_id"]), str(payload["semantic_name"])
+
+    def _requester_key(self, payload: dict) -> RequesterKey:
+        panel_id = payload.get("panel_id")
+        if panel_id:
+            return f"panel:{panel_id}"
+
+        return f"source:{payload.get('source') or 'unknown'}"
+
+    def _requester_from_payload(self, payload: dict) -> dict:
+        return {
+            "panel_id": payload.get("panel_id"),
+            "source": str(payload.get("source") or "unknown"),
+            "required": bool(payload.get("required", True)),
+            "config_key": payload.get("config_key"),
+        }
+
+    def _refresh_pending_aggregate(self, item: dict) -> dict:
+        requesters = dict(item.get("requesters", {}) or {})
+        requester_values = list(requesters.values())
+
+        item["required"] = any(
+            bool(requester.get("required", True))
+            for requester in requester_values
+        )
+        item["sources"] = self._unique_list([requester.get("source") for requester in requester_values])
+        item["panel_ids"] = self._unique_list([requester.get("panel_id") for requester in requester_values])
+        item["config_keys"] = self._unique_list([requester.get("config_key")for requester in requester_values])
+
+        return item
 
     def _normalise_payload(self, payload: dict) -> dict:
         payload = dict(payload)
@@ -229,44 +328,52 @@ class MappingAlertController:
         payload.setdefault("suggested", None)
         payload.setdefault("panel_id", None)
 
-        panel_id = payload.get("panel_id")
-        config_key = payload.get("config_key")
-        payload["sources"] = [str(payload.get("source") or "unknown")]
-        payload["panel_ids"] = [panel_id] if panel_id else []
-        payload["config_keys"] = [config_key] if config_key else []
         payload["dataset_id"] = str(payload["dataset_id"])
         payload["semantic_name"] = str(payload["semantic_name"])
         payload["required"] = bool(payload.get("required", True))
         payload["candidates"] = self._unique_list(payload.get("candidates", []))
-        return payload
+
+        requester_key = self._requester_key(payload)
+        payload["requesters"] = {requester_key: self._requester_from_payload(payload)}
+
+        return self._refresh_pending_aggregate(payload)
 
     def _merge_pending_item(self, existing: dict, incoming: dict) -> dict:
         existing_was_required = bool(existing.get("required", True))
         incoming_is_required = bool(incoming.get("required", True))
 
-        existing["required"] = existing_was_required or incoming_is_required
-        existing["sources"] = self._unique_list(
-            list(existing.get("sources", [])) + list(incoming.get("sources", []))
-        )
-        existing["panel_ids"] = self._unique_list(
-            list(existing.get("panel_ids", [])) + list(incoming.get("panel_ids", []))
-        )
-        existing["config_keys"] = self._unique_list(
-            list(existing.get("config_keys", [])) + list(incoming.get("config_keys", []))
-        )
+        existing_requesters = dict(existing.get("requesters", {}) or {})
+        incoming_requesters = dict(incoming.get("requesters", {}) or {})
+
+        existing_requesters.update(incoming_requesters)
+        existing["requesters"] = existing_requesters
+
         existing["candidates"] = self._unique_list(
-            list(existing.get("candidates", [])) + list(incoming.get("candidates", []))
+            list(existing.get("candidates", []))
+            + list(incoming.get("candidates", []))
         )
 
         if incoming_is_required and not existing_was_required:
-            for field in ("display_name", "description", "suggested", "config_key"):
-                existing[field] = incoming.get(field) or existing.get(field)
-            return existing
+            for field in (
+                "display_name",
+                "description",
+                "suggested",
+                "config_key",
+            ):
+                existing[field] = (
+                    incoming.get(field) or existing.get(field)
+                )
+        else:
+            for field in (
+                "display_name",
+                "description",
+                "suggested",
+                "config_key",
+            ):
+                if (not existing.get(field) and incoming.get(field)):
+                    existing[field] = incoming.get(field)
 
-        for field in ("display_name", "description", "suggested", "config_key"):
-            if not existing.get(field) and incoming.get(field):
-                existing[field] = incoming.get(field)
-        return existing
+        return self._refresh_pending_aggregate(existing)
 
     def _unique_list(self, values: List[Any]) -> List[Any]:
         seen = set()
@@ -322,6 +429,64 @@ class MappingAlertController:
             return [str(dataset_id) for dataset_id in self.context.datasets.list_ids()]
         except Exception:
             return []
+
+    def _active_dataset_id(self) -> str | None:
+        try:
+            active_id = self.context.datasets.active_id()
+        except Exception:
+            return None
+
+        if active_id in (None, ""):
+            return None
+
+        return str(active_id)
+
+    def _pending_dataset_sort_key(
+        self,
+        dataset_id: str,
+        items: List[Tuple[PendingKey, dict]],
+    ) -> tuple:
+        active_dataset_id = self._active_dataset_id()
+        is_active = dataset_id == active_dataset_id
+        has_required = any(
+            bool(item.get("required", True))
+            for _key, item in items
+        )
+
+        return (
+            0 if is_active else 1,
+            0 if has_required else 1,
+            self._dataset_name(dataset_id).casefold(),
+            str(dataset_id).casefold(),
+        )
+
+    def _current_dataset_sort_key(
+        self,
+        dataset_id: str,
+    ) -> tuple:
+        active_dataset_id = self._active_dataset_id()
+
+        return (
+            0 if dataset_id == active_dataset_id else 1,
+            self._dataset_name(dataset_id).casefold(),
+            str(dataset_id).casefold(),
+        )
+
+    @staticmethod
+    def _pending_item_sort_key(
+        keyed_item: Tuple[PendingKey, dict],
+    ) -> tuple:
+        _key, item = keyed_item
+
+        return (
+            0 if bool(item.get("required", True)) else 1,
+            str(
+                item.get("display_name")
+                or item.get("semantic_name")
+                or ""
+            ).casefold(),
+            str(item.get("semantic_name") or "").casefold(),
+        )
 
     def _dataset_name(self, dataset_id: str) -> str:
         try:
@@ -431,6 +596,23 @@ class MappingAlertController:
         self.modal_body[:] = body
         self.modal_footer[:] = [self._build_action_row()]
 
+    @staticmethod
+    def _partition_pending_items(
+        items: List[Tuple[PendingKey, dict]],
+    ) -> List[Tuple[PendingKey, dict]]:
+        """Keep required and optional groups stable in request order."""
+        required = [
+            keyed_item
+            for keyed_item in items
+            if bool(keyed_item[1].get("required", True))
+        ]
+        optional = [
+            keyed_item
+            for keyed_item in items
+            if not bool(keyed_item[1].get("required", True))
+        ]
+        return required + optional
+
     def _section_header(self, dataset_id: str) -> list[Any]:
         return [
             pn.pane.HTML(
@@ -447,27 +629,52 @@ class MappingAlertController:
         if not self._pending:
             return []
 
-        grouped: Dict[str, List[Tuple[PendingKey, dict]]] = {}
+        grouped: Dict[
+            str,
+            List[Tuple[PendingKey, dict]],
+        ] = {}
+
         for key, item in self._pending.items():
-            grouped.setdefault(item["dataset_id"], []).append((key, item))
+            grouped.setdefault(
+                str(item["dataset_id"]),
+                [],
+            ).append((key, item))
+
+        ordered_groups = sorted(
+            grouped.items(),
+            key=lambda grouped_item: (
+                self._pending_dataset_sort_key(
+                    grouped_item[0],
+                    grouped_item[1],
+                )
+            ),
+        )
 
         blocks = []
-        for dataset_id, items in grouped.items():
+
+        for dataset_id, unsorted_items in ordered_groups:
+            items = self._partition_pending_items(unsorted_items)
             section = self._section_header(dataset_id)
+
             for key, item in items:
-                current = self.context.datasets.get_mapping(dataset_id, item["semantic_name"])
+                current = self.context.datasets.get_mapping(
+                    dataset_id,
+                    item["semantic_name"],
+                )
                 selected = self._pending_values.get(key, "")
                 options = self._select_options(
                     list(item.get("candidates", [])),
                     current=current,
                     selected=selected,
                 )
+
                 if selected not in (None, ""):
                     value = str(selected)
                 elif current not in (None, ""):
                     value = str(current)
                 else:
                     value = ""
+
                 if value not in options:
                     options.insert(1, value)
 
@@ -479,7 +686,13 @@ class MappingAlertController:
                     margin=(0, 12, 0, 0),
                 )
                 self._selectors[key] = selector
-                section.append(self._build_pending_card(key, item, selector))
+                section.append(
+                    self._build_pending_card(
+                        key,
+                        item,
+                        selector,
+                    )
+                )
 
             blocks.append(
                 pn.Column(
@@ -490,6 +703,7 @@ class MappingAlertController:
                     css_classes=["al-modal-section"],
                 )
             )
+
         return blocks
 
     def _pending_card_html(self, item: dict) -> str:
@@ -578,7 +792,7 @@ class MappingAlertController:
         blocks = [self._current_mapping_header()]
 
         any_mappings = False
-        for dataset_id in self._dataset_ids():
+        for dataset_id in sorted(self._dataset_ids(), key=self._current_dataset_sort_key):
             try:
                 mappings = dict(self.context.datasets.get_mappings(dataset_id) or {})
             except Exception:
