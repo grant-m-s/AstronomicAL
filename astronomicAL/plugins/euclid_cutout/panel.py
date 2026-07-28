@@ -999,6 +999,7 @@ class EuclidCutoutPanel:
             self.contour_levels,
             self.contour_base,
             self.contour_exponent,
+            self.stretch_scale_input,    
         ]:
             widget.param.watch(self._overlay_setting_changed, "value")
 
@@ -1017,6 +1018,8 @@ class EuclidCutoutPanel:
                 self._surface_style_changed,
                 "value",
             )
+
+        self.stretch_input.param.watch(self._update_stretch_scale, "value")
 
     def _header(self) -> pn.Row:
         return pn.Row(
@@ -2480,6 +2483,16 @@ class EuclidCutoutPanel:
             None,
         )
 
+        color_bands = None
+
+        for candidate in preferred_color_band_sets:
+            if all(band in bands for band in candidate):
+                color_bands = candidate
+                break
+
+        has_color = color_bands is not None
+
+
         self._invalidate_analysis_cache()
         self._tap_update_generation += 1
         self._base_cutout_elements = []
@@ -2635,6 +2648,13 @@ class EuclidCutoutPanel:
         high = global_low + channel_high * span
 
         return low, high
+    
+    def _update_stretch_scale(self, event) -> None:
+        """Fore sure there's a more elegant way to do this"""
+        if self._stretch_scale_value() is None:
+            self._refresh_display()
+        else:
+            self.stretch_scale_input.value = None
 
     def _analysis_band(self) -> Optional[str]:
         if self.image_container is None:
