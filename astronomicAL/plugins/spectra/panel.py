@@ -420,22 +420,32 @@ class SpectraPanel:
         if self.source == "EuclidSpec":
             self.plot_lines_checkbox.disabled = True
             self.plot_model_checkbox.disabled = True
+        
+        elif self.source !=  "EuclidSpec":
+            self.query_redshift_button.diabled = True
+
 
         self.load_button.on_click(lambda _event: self.load_spectra(reason="button.load"))
         self.settings_button.on_click(self._toggle_settings)
         self.query_redshift_button.on_click(self._query_euclid_redshift)
-        self.refresh_plot_button.on_click(lambda _event: self._render_existing_result())
+        self.refresh_plot_button.on_click(lambda _event: self._update_smoothing_and_render())
         self.retrieve_mode.param.watch(self._retrieve_mode_changed, "value")
-
+        self.redshift_input.param.watch(self._update_redshift_from_input, "value")
+   
         for widget in [
             self.plot_lines_checkbox,
             self.plot_model_checkbox,
-            self.smoothing_function_input,
-            self.smoothing_window_input,
-            self.redshift_input,
             self.redshift_column_selector,
         ]:
             widget.param.watch(lambda _event: self._render_existing_result(), "value")
+        
+        for widget in [
+            self.smoothing_function_input,
+            self.smoothing_window_input,
+            ]:
+            widget.param.watch(self._update_smoothing_and_render,"value",)
+
+
 
     def _header(self) -> pn.GridBox:
         return pn.GridBox(
@@ -1550,6 +1560,27 @@ class SpectraPanel:
             obj._update_info_spectra("spectype", "galaxy" if redshift > 0 else "star")
         except Exception:
             pass
+    
+ 
+    def _update_smoothing_and_render(self,_event: Any = None) -> None:
+        result = self._spectra_result
+        if result is None:
+            return
+        obj = result.spectra_object
+        if obj is None or not hasattr(obj, "get_smoothed_spectra"):
+            return
+        kernel = str(self.smoothing_function_input.value)
+        window = int(self.smoothing_window_input.value)
+
+        try:
+            obj.get_smoothed_spectra(kernel=kernel,window=window,)
+            result.smooth_kernel = kernel
+            result.smooth_window = window
+            self._render_existing_result()
+
+        except Exception as exc:
+            self.status.object = (f"**Could not smooth spectrum:** {exc}")
+
 
     def _render_existing_result(self) -> None:
         result = self._spectra_result
@@ -1661,6 +1692,26 @@ class SpectraPanel:
         if self.auto_reload.value:
             self.load_spectra(reason="spectrum.retrieve_mode.changed")
 
+    def _update_redshift_from_input(self, _event)->None:
+        value = _event.new
+        if value is None:
+            return
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            return
+        if not np.isfinite(value) or value < 0:
+            return
+        if self._spectra_result is None:
+            return
+        obj = self._spectra_result.spectra_object
+        if obj is None:
+            return
+        if hasattr(obj, "_update_info_spectra"):
+            self.plot_lines_checkbox.disabled = False
+            obj._update_info_spectra('redshift', value)
+                
+    
     def _query_euclid_redshift(self, _event: Any = None) -> None:
         if self.source != "EuclidSpec" or self._spectra_result is None:
             return
@@ -1668,7 +1719,6 @@ class SpectraPanel:
         obj = self._spectra_result.spectra_object
         if obj is None:
             return
-
         self.status.object = "Querying Euclid redshift table…"
 
         def _worker(cancel_token: Any = None) -> SpectraResult:
