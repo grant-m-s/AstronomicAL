@@ -685,10 +685,11 @@ class EuclidCutoutPanel:
             self.contour_levels,
             self.contour_base,
             self.contour_exponent,
-            self.stretch_input,
             self.stretch_scale_input,    
         ]:
             widget.param.watch(lambda _event: self._refresh_display(), "value")
+
+        self.stretch_input.param.watch(self._update_stretch_scale, "value")
 
     def _header(self) -> pn.Row:
         return pn.Row(
@@ -1947,7 +1948,13 @@ class EuclidCutoutPanel:
         high = global_low + channel_high * span
 
         return low, high
-
+    
+    def _update_stretch_scale(self, event) -> None:
+        """Fore sure there's a more elegant way to do this"""
+        if self._stretch_scale_value() is None:
+            self._refresh_display()
+        else:
+            self.stretch_scale_input.value = None
 
     def _refresh_display(self) -> None:
         if self.image_container is None:
