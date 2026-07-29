@@ -10,9 +10,6 @@ import uuid
 import panel as pn
 from bokeh.models import TextInput
 
-from astronomicAL.extensions import custom_plots, extension_plots
-
-
 @dataclass(frozen=True)
 class MenuEntry:
     """Small normalized entry for the hierarchical Add Panel menu."""
@@ -337,31 +334,6 @@ class MenuDashboard:
 
         plugin_entries = self._plugin_entries()
         plugin_titles = {entry.title for entry in plugin_entries}
-
-        try:
-            legacy_dict = custom_plots.get_customplot_dict(context=self.context)
-        except Exception:
-            traceback.print_exc()
-            legacy_dict = {}
-
-        for title in legacy_dict.keys():
-            if title in plugin_titles:
-                continue
-            domain, category = self.LEGACY_HINTS.get(title, ("Legacy", "Custom Panels"))
-            entries.append(
-                MenuEntry(
-                    title=title,
-                    value=title,
-                    source="Legacy",
-                    domain=domain,
-                    category=category,
-                )
-            )
-
-        try:
-            extension_plots.get_plot_dict()
-        except Exception:
-            traceback.print_exc()
 
         entries.extend(plugin_entries)
 

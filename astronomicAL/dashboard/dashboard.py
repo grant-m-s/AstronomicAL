@@ -1,9 +1,5 @@
-from astronomicAL.dashboard.active_learning import ActiveLearningDashboard
-from astronomicAL.dashboard.labelling import LabellingDashboard
+
 from astronomicAL.dashboard.menu import MenuDashboard
-from astronomicAL.dashboard.selected_source import SelectedSourceDashboard
-from astronomicAL.dashboard.settings_dashboard import SettingsDashboard
-from astronomicAL.extensions import extension_plots, custom_plots
 from bokeh.models import ColumnDataSource
 
 import panel as pn
@@ -11,15 +7,6 @@ import param
 
 NATIVE_CONTENTS = {
     "Menu",
-    "Selected Source Info",
-
-    # Built-in workflow/dashboard modes.
-    # These are not custom plots and should not be validated against
-    # get_customplot_dict() or get_plot_dict().
-    "Active Learning",
-    "Labelling",
-    "Labelling Test Set",
-    "Settings",
 }
 
 
@@ -83,13 +70,8 @@ class Dashboard(param.Parameterized):
         self._submit_button = pn.widgets.Button(name="Submit Column Names")
         self._submit_button.on_click(self._submit_button_cb)
 
-        self.plot_dict = extension_plots.get_plot_dict()
-        self.cust_plot_dict = custom_plots.get_customplot_dict(context=context)
         self.contents = contents
 
-    def _refresh_plot_registries(self):
-        self.plot_dict = extension_plots.get_plot_dict()
-        self.cust_plot_dict = custom_plots.get_customplot_dict(context=self.context)
 
     def _available_content_names(self) -> set[str]:
         """Return currently selectable content names.
@@ -290,44 +272,8 @@ class Dashboard(param.Parameterized):
     @param.depends("contents", watch=True)
     def _update_contents(self):
 
-        if self.contents == "Settings":
-            self.mode = ""
-            self.panel_contents = SettingsDashboard(self, self.src, context=self.context)
-
-        elif self.contents == "Menu":
+        if self.contents == "Menu":
             self.panel_contents = MenuDashboard(self, context=self.context)
-
-        elif self.contents == "Active Learning":
-            if not self._require_loaded_dataset():
-                return
-            self.df = self.config.main_df
-            self.panel_contents = ActiveLearningDashboard(self.src, self.df, context=self.context)
-
-        elif self.contents == "Histogram Plot":
-            if not self._require_loaded_dataset():
-                return
-            self.panel_contents = HistoDashboard(self._close_button, context=self.context)
-
-        elif self.contents == "Basic Plot":
-            if not self._require_loaded_dataset():
-                return
-            self.panel_contents = ScatterPlotDashboard(self._close_button, context=self.context)
-
-        elif self.contents == "Density Plot":
-            if not self._require_loaded_dataset():
-                return
-            self.panel_contents = DensityPlotDashboard(self._close_button, context=self.context)
-
-        elif self.contents == "Labelling":
-            if not self._require_loaded_dataset():
-                return
-            self.df = self.config.main_df
-            self.panel_contents = LabellingDashboard(self.src, self.df, context=self.context)
-
-        elif self.contents == "Selected Source Info":
-            if not self._require_loaded_dataset():
-                return
-            self.panel_contents = SelectedSourceDashboard(self.src, self._close_button, context=self.context)
 
         elif self.contents in self.cust_plot_dict:
             if not self._require_loaded_dataset():
