@@ -26,33 +26,44 @@ def job_debug(label: str, **values: Any) -> None:
         print(f"[AL_DEBUG][JobManager][{label}] ", flush=True)
 
 
-def _call_on_ui_thread(fn: Callable[[], None]) -> None:
-    """
-    Best-effort UI thread marshalling for Panel/Bokeh.
-
-    If Panel is available and we have a current document, schedule on next tick.
-    Otherwise, run immediately in the current thread.
-    """
+def _current_document() -> Any | None:
+    """Return the current Panel/Bokeh document when one is available."""
     try:
         import panel as pn  # local import to avoid hard dependency during tests
 
-        doc = pn.state.curdoc
+        return pn.state.curdoc
     except Exception:
-        doc = None
+        return None
 
-    if doc is None:
+
+def _call_on_ui_thread(
+    fn: Callable[[], None],
+    *,
+    document: Any | None = None,
+) -> None:
+    """Best-effort UI-thread marshalling for Panel/Bokeh.
+
+    ``Future`` completion callbacks execute on executor threads. Looking up
+    ``pn.state.curdoc`` from those threads usually returns ``None``, even when
+    the job was submitted from a live Panel session. Callers should therefore
+    pass the session document captured at submission time.
+
+    When no document is available, the callback runs immediately. This keeps
+    the job manager usable in tests and non-Panel contexts.
+    """
+    target_document = document if document is not None else _current_document()
+    if target_document is None:
         fn()
-    else:
-        try:
-            doc.add_next_tick_callback(fn)
-        except Exception:
-            fn()
+        return
+
+    try:
+        target_document.add_next_tick_callback(fn)
+    except Exception:
+        fn()
 
 
 class CancellationToken:
-    """
-    Cooperative cancellation token.
-    """
+    """Cooperative cancellation token."""
 
     def __init__(self) -> None:
         self._evt = threading.Event()
@@ -74,10 +85,10 @@ class JobHandle:
     submitted_at: float = 0.0
 
     def cancel(self) -> bool:
-        """
-        Best-effort cancel:
-        - Cancels if not started.
-        - Always sets cancellation token for cooperative checks.
+        """Best-effort cancellation.
+
+        Cancels the future when it has not started and always sets the
+        cooperative cancellation token.
         """
         self.token.cancel()
         return self.future.cancel()
@@ -112,15 +123,14 @@ class _JobState:
 
 
 class JobManager:
-    """
-    Central job runner.
+    """Central background-job runner.
 
-    - Uses a shared ThreadPoolExecutor by default.
-    - Supports dedupe via key.
-    - Tracks all active jobs, not just keyed jobs.
-    - Stores recent completed jobs for the runtime status box.
-    - Ensures on_done/on_error callbacks are invoked on the Panel/Bokeh UI
-      thread when available.
+    - Uses a shared ``ThreadPoolExecutor`` by default.
+    - Supports deduplication through a job key.
+    - Tracks keyed and unkeyed active jobs.
+    - Stores recent completed jobs for runtime diagnostics.
+    - Marshals ``on_done`` and ``on_error`` to the Panel/Bokeh session document
+      captured when each callback was registered.
     """
 
     def __init__(
@@ -149,7 +159,6 @@ class JobManager:
         end = state.finished_at or now
         start = state.started_at or state.submitted_at
         elapsed = max(0.0, end - start)
-
         return JobSnapshot(
             job_id=state.job_id,
             title=state.title,
@@ -165,9 +174,7 @@ class JobManager:
         )
 
     def active_jobs(self) -> List[JobSnapshot]:
-        """
-        Return snapshots for all currently active jobs, keyed and unkeyed.
-        """
+        """Return snapshots for all currently active jobs."""
         with self._lock:
             snapshots = [
                 self._snapshot_from_state(state)
@@ -179,9 +186,7 @@ class JobManager:
         return snapshots
 
     def recent_jobs(self, n: int = 50) -> List[JobSnapshot]:
-        """
-        Return recently completed job snapshots.
-        """
+        """Return recently completed job snapshots."""
         with self._lock:
             if n <= 0:
                 return []
@@ -197,18 +202,19 @@ class JobManager:
         on_error: Optional[ErrorCallback] = None,
         **kwargs: Any,
     ) -> JobHandle:
-        """
-        Submit work to the threadpool.
+        """Submit work to the thread pool.
 
-        If key is provided and a job with that key is running, re-use it.
-        In that case, provided on_done/on_error callbacks are added to the
-        existing future so late joiners still get notified.
+        If ``key`` identifies an active job, that job is reused. Any callbacks
+        supplied by the late joiner are attached to the existing future and
+        retain the late joiner's own session document.
 
-        kwargs are passed into fn, plus reserved kwarg cancel_token.
+        ``kwargs`` are passed to ``fn`` together with the reserved
+        ``cancel_token`` keyword argument.
         """
+        callback_document = _current_document()
+
         with self._lock:
             active_keys = list(self._inflight.keys())
-
         job_debug(
             "submit ENTER",
             title=title,
@@ -227,12 +233,18 @@ class JobManager:
 
                         def _late_join_callback(_f: Future) -> None:
                             try:
-                                res = _f.result()
+                                result = _f.result()
                                 if on_done:
-                                    _call_on_ui_thread(lambda res=res: on_done(res))
-                            except BaseException as e:
+                                    _call_on_ui_thread(
+                                        lambda result=result: on_done(result),
+                                        document=callback_document,
+                                    )
+                            except BaseException as exc:
                                 if on_error:
-                                    _call_on_ui_thread(lambda e=e: on_error(e))
+                                    _call_on_ui_thread(
+                                        lambda exc=exc: on_error(exc),
+                                        document=callback_document,
+                                    )
                                 else:
                                     traceback.print_exc()
 
@@ -262,12 +274,10 @@ class JobManager:
             with self._lock:
                 state.started_at = started
                 state.status = "running"
-
             job_debug("runner START", title=title, key=key, job_id=job_id)
 
             try:
                 result = fn(cancel_token=token, **kwargs)
-
                 job_debug(
                     "runner DONE",
                     title=title,
@@ -275,9 +285,7 @@ class JobManager:
                     job_id=job_id,
                     elapsed=round(time.time() - started, 3),
                 )
-
                 return result
-
             except BaseException as exc:
                 with self._lock:
                     state.status = "error"
@@ -291,14 +299,13 @@ class JobManager:
                     elapsed=round(time.time() - started, 3),
                     error=repr(exc),
                 )
-
                 raise
 
-        fut = self._executor.submit(_runner)
+        future = self._executor.submit(_runner)
         handle = JobHandle(
             job_id=job_id,
             title=title,
-            future=fut,
+            future=future,
             token=token,
             key=key,
             submitted_at=submitted_at,
@@ -320,7 +327,6 @@ class JobManager:
             )
 
             finished_at = time.time()
-
             with self._lock:
                 if _f.cancelled():
                     state.status = "cancelled"
@@ -328,22 +334,21 @@ class JobManager:
                     state.error = None
                 else:
                     try:
-                        exc = _f.exception()
+                        exception = _f.exception()
                     except CancelledError:
-                        exc = None
+                        exception = None
                         state.status = "cancelled"
                         state.cancelled = True
 
                     if state.status != "cancelled":
-                        if exc is None:
+                        if exception is None:
                             if state.status != "error":
                                 state.status = "finished"
                         else:
                             state.status = "error"
-                            state.error = repr(exc)
+                            state.error = repr(exception)
 
                 state.finished_at = finished_at
-
                 self._active_by_id.pop(job_id, None)
                 self._states.pop(job_id, None)
 
@@ -357,17 +362,22 @@ class JobManager:
                 )
 
             try:
-                res = _f.result()
+                result = _f.result()
                 if on_done:
-                    _call_on_ui_thread(lambda res=res: on_done(res))
-            except BaseException as e:
+                    _call_on_ui_thread(
+                        lambda result=result: on_done(result),
+                        document=callback_document,
+                    )
+            except BaseException as exc:
                 if on_error:
-                    _call_on_ui_thread(lambda e=e: on_error(e))
+                    _call_on_ui_thread(
+                        lambda exc=exc: on_error(exc),
+                        document=callback_document,
+                    )
                 else:
                     traceback.print_exc()
 
-        fut.add_done_callback(_cleanup_callback)
-
+        future.add_done_callback(_cleanup_callback)
         return handle
 
     def shutdown(self, wait: bool = False) -> None:

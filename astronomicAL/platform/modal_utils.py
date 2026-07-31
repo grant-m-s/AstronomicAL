@@ -4,11 +4,9 @@ from typing import Any, Callable, Optional
 
 import panel as pn
 
-
 _MODAL_HOST_ATTR = "_al_overlay_modal_host"
 _MODAL_CLOSE_CALLBACKS_ATTR = "_al_overlay_modal_close_callbacks"
-_MODAL_TOP_OFFSET_PX = 42
-
+_MODAL_TOP_OFFSET_PX = 64
 
 def _install_modal_css() -> None:
     css = f"""
@@ -273,7 +271,6 @@ def _install_modal_css() -> None:
     except Exception:
         pass
 
-
 def _get_close_callbacks(template: Any) -> list[Callable[[], None]]:
     callbacks = getattr(template, _MODAL_CLOSE_CALLBACKS_ATTR, None)
     if callbacks is None:
@@ -281,13 +278,11 @@ def _get_close_callbacks(template: Any) -> list[Callable[[], None]]:
         setattr(template, _MODAL_CLOSE_CALLBACKS_ATTR, callbacks)
     return callbacks
 
-
 def _set_close_callbacks(
     template: Any,
     callbacks: list[Callable[[], None]],
 ) -> None:
     setattr(template, _MODAL_CLOSE_CALLBACKS_ATTR, callbacks)
-
 
 def _run_close_callbacks(template: Any) -> None:
     """
@@ -309,7 +304,6 @@ def _run_close_callbacks(template: Any) -> None:
                 repr(exc),
                 flush=True,
             )
-
 
 def _clear_native_template_modal(template: Any) -> None:
     """
@@ -333,7 +327,6 @@ def _clear_native_template_modal(template: Any) -> None:
                 template.modal.clear()
             except Exception:
                 pass
-
 
 def _append_once(area: Any, obj: Any) -> bool:
     try:
@@ -364,7 +357,6 @@ def _append_once(area: Any, obj: Any) -> bool:
 
     return False
 
-
 def ensure_template_modal_host(template: Any) -> pn.Column:
     """
     Ensure the template has one stable AstronomicAL overlay modal host.
@@ -386,14 +378,18 @@ def ensure_template_modal_host(template: Any) -> pn.Column:
 
     mounted = False
 
-    header = getattr(template, "header", None)
-    if header is not None:
-        mounted = _append_once(header, host)
+    # Prefer the main template area. Header containers are commonly height-
+    # constrained and may clip fixed-position descendants even when the direct
+    # header element advertises overflow: visible. The zero-sized host does not
+    # affect main layout, while its fixed shell still covers the viewport.
+    main = getattr(template, "main", None)
+    if main is not None:
+        mounted = _append_once(main, host)
 
     if not mounted:
-        main = getattr(template, "main", None)
-        if main is not None:
-            mounted = _append_once(main, host)
+        header = getattr(template, "header", None)
+        if header is not None:
+            mounted = _append_once(header, host)
 
     if not mounted:
         sidebar = getattr(template, "sidebar", None)
@@ -403,7 +399,6 @@ def ensure_template_modal_host(template: Any) -> pn.Column:
     _clear_native_template_modal(template)
 
     return host
-
 
 def close_template_modal(
     template: Any,
@@ -436,7 +431,6 @@ def close_template_modal(
 
     if notify:
         _run_close_callbacks(template)
-
 
 def mount_template_modal(
     template: Any,
@@ -513,11 +507,27 @@ def mount_template_modal(
 
         objects.append(backdrop_button)
 
+    card_kwargs: dict[str, int] = {}
+    for attribute in ("width", "height"):
+        raw_value = getattr(content, attribute, None)
+        try:
+            dimension = int(raw_value)
+        except (TypeError, ValueError):
+            continue
+        if dimension > 0:
+            card_kwargs[attribute] = dimension
+
+    # Give the wrapper concrete Bokeh layout dimensions whenever the content
+    # provides them. A stretch-sized child cannot resolve against the modal
+    # host because that host intentionally occupies 0 x 0 pixels in normal
+    # template flow. Without this bridge, the model can collapse to a thin line
+    # even though CSS later gives the DOM element a visible width and height.
     card = pn.Column(
         content,
         sizing_mode="fixed",
         margin=(0, 0, 0, 0),
         css_classes=["al-template-modal-card"],
+        **card_kwargs,
     )
 
     try:
@@ -572,7 +582,6 @@ def mount_template_modal(
         except Exception:
             host.clear()
             host.append(shell)
-
 
 def open_template_modal(
     template: Any,

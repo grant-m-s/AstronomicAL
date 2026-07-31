@@ -5,7 +5,7 @@ import time
 import traceback as traceback_mod
 from collections import deque
 from dataclasses import dataclass
-from typing import Any, Deque, List, Optional
+from typing import Deque, List, Optional
 
 
 @dataclass(frozen=True)
@@ -33,13 +33,22 @@ class StatusNoteRecord:
     details: Optional[str] = None
 
 
-class RuntimeStatus:
-    """
-    Small shared runtime diagnostics service.
+@dataclass(frozen=True)
+class RuntimeDiagnosticsSnapshot:
+    """Consistent, read-only copy of RuntimeStatus diagnostic history."""
 
-    This intentionally does not publish events when it records diagnostics,
-    because it may be called from inside EventBus/Panel/Bokeh callback paths.
-    The permanent status box polls this service directly.
+    captured_at: float
+    ui_lags: tuple[UiLagRecord, ...]
+    errors: tuple[RuntimeErrorRecord, ...]
+    notes: tuple[StatusNoteRecord, ...]
+
+
+class RuntimeStatus:
+    """Small shared runtime diagnostics service.
+
+    The service intentionally does not publish events when recording diagnostics,
+    because it may be called from inside EventBus, Panel, or Bokeh callback paths.
+    Runtime observability views poll this service directly.
     """
 
     def __init__(self, *, history_limit: int = 500) -> None:
@@ -67,7 +76,7 @@ class RuntimeStatus:
                     timestamp=time.time(),
                     lag=lag,
                     expected_interval=expected_interval,
-                    source=source,
+                    source=str(source),
                 )
             )
 
@@ -88,11 +97,7 @@ class RuntimeStatus:
     ) -> None:
         if traceback_text is None and exc is not None:
             traceback_text = "".join(
-                traceback_mod.format_exception(
-                    type(exc),
-                    exc,
-                    exc.__traceback__,
-                )
+                traceback_mod.format_exception(type(exc), exc, exc.__traceback__)
             )
 
         with self._lock:
@@ -134,6 +139,17 @@ class RuntimeStatus:
             if n <= 0:
                 return []
             return list(self._notes)[-n:]
+
+    def diagnostic_snapshot(self, *, limit: int = 50) -> RuntimeDiagnosticsSnapshot:
+        """Return runtime diagnostics from one lock-protected capture."""
+        safe_limit = max(1, int(limit))
+        with self._lock:
+            return RuntimeDiagnosticsSnapshot(
+                captured_at=time.time(),
+                ui_lags=tuple(list(self._ui_lags)[-safe_limit:]),
+                errors=tuple(list(self._errors)[-safe_limit:]),
+                notes=tuple(list(self._notes)[-safe_limit:]),
+            )
 
     def clear(self) -> None:
         with self._lock:
