@@ -296,9 +296,6 @@ class MappingGatedPanel:
         self._subscribe()
         self._refresh()
 
-        self._subscribe()
-        self._refresh()
-
     def _show_loading(self) -> None:
         title = getattr(self.registration, "title", "Plugin panel")
 

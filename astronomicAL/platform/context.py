@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Optional
 
 from astronomicAL.platform.artifacts import ArtifactStore
@@ -13,15 +14,14 @@ from astronomicAL.platform.selection import SelectionManager
 from astronomicAL.platform.services import ServiceRegistry
 from astronomicAL.platform.workspace import WorkspaceManager
 
-
 @dataclass
 class AppContext:
     """
-    Runtime dependency object for platform services.
+    Runtime dependency object for platform services and application paths.
 
-    config remains temporarily available during the transition, but new runtime
-    state should live in datasets, selection, artifacts, events, jobs,
-    workspace, navigation, services, plugins, persistence, or runtime_status.
+    Runtime state lives in the explicit platform services below. Application
+    paths are carried directly rather than through a process-global config
+    module.
     """
 
     events: EventBus
@@ -32,8 +32,10 @@ class AppContext:
     selection: SelectionManager
     services: ServiceRegistry
 
+    layout_file: Path = Path("astronomicAL/layout.json")
+    layout_directory: Path = Path("layouts")
+
     navigation: Optional[RecordNavigationManager] = None
-    config: Optional[Any] = None
     plugins: Optional[Any] = None
     persistence: Optional[Any] = None
     runtime_status: Optional[RuntimeStatus] = None

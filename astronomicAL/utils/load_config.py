@@ -1,16 +1,11 @@
 from __future__ import annotations
 
-import json
-import os
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-import pandas as pd
 import panel as pn
-
-from astronomicAL.dashboard.dashboard import Dashboard
-from astronomicAL.extensions.dynamic_react_layout import DynamicReactGrid
+from astronomicAL.platform.panel_catalogue import PanelCatalogueController
+from astronomicAL.platform.workspace_grid import DynamicReactGrid
 from astronomicAL.platform.application_chrome_styles import (
     APPLICATION_CHROME_CSS,
     HEADER_BUTTON_STYLESHEET,
@@ -24,7 +19,6 @@ from astronomicAL.platform.layout_controls import create_layout_controls
 from astronomicAL.platform.mapping_header import MappingAlertController
 from astronomicAL.platform.modal_utils import ensure_template_modal_host
 from astronomicAL.platform.runtime_status_box import RuntimeStatusBox
-
 
 DEFAULT_BREAKPOINTS = {"lg": 1500, "md": 1050, "sm": 0}
 DEFAULT_COLS_BY_BREAKPOINT = {"lg": 12, "md": 12, "sm": 12}
@@ -87,12 +81,10 @@ def _publish(context: Any, topic: str, payload: dict[str, Any]) -> None:
     except Exception:
         pass
 
-
 def _append_raw_css(css: str, marker: str) -> None:
     if any(marker in item for item in pn.config.raw_css):
         return
     pn.config.raw_css.append(css)
-
 
 def _append_stylesheet(widget: Any, stylesheet: str) -> None:
     try:
@@ -103,7 +95,6 @@ def _append_stylesheet(widget: Any, stylesheet: str) -> None:
     except Exception:
         pass
 
-
 def _extend_css_classes(obj: Any, *classes: str) -> None:
     try:
         current = list(getattr(obj, "css_classes", []) or [])
@@ -113,7 +104,6 @@ def _extend_css_classes(obj: Any, *classes: str) -> None:
         obj.css_classes = current
     except Exception:
         pass
-
 
 def _prepare_layout_controls_mount(layout_controls: Any) -> list[Any]:
     """Hide the original buttons while keeping their drawer/toast models mounted."""
@@ -168,7 +158,6 @@ def _prepare_layout_controls_mount(layout_controls: Any) -> list[Any]:
                 pass
     return actions
 
-
 def _layout_menu_heading(label: str) -> pn.pane.HTML:
     return pn.pane.HTML(
         label,
@@ -177,7 +166,6 @@ def _layout_menu_heading(label: str) -> pn.pane.HTML:
         margin=(0, 0, 0, 0),
         css_classes=["al-toolbar-popover-heading"],
     )
-
 
 def _attach_layout_actions_to_toolbar(
     application_toolbar: Any,
@@ -252,7 +240,6 @@ def _attach_layout_actions_to_toolbar(
     # creates a Bokeh tooltip model whose empty callout can remain visible
     # beside an open popover.
 
-
 def _set_css_class(obj: Any, class_name: str, enabled: bool) -> None:
     try:
         classes = list(getattr(obj, "css_classes", []) or [])
@@ -262,7 +249,6 @@ def _set_css_class(obj: Any, class_name: str, enabled: bool) -> None:
         obj.css_classes = classes
     except Exception:
         pass
-
 
 def _clear_widget_tooltip(widget: Any) -> None:
     """Remove Panel/Bokeh tooltip state before the widget is first rendered."""
@@ -278,7 +264,6 @@ def _clear_widget_tooltip(widget: Any) -> None:
             widget.param.update(tooltip=None)
     except Exception:
         pass
-
 
 def _configure_toolbar_popovers(application_toolbar: Any) -> None:
     """Keep both toolbar menus inside the viewport without tooltip callouts."""
@@ -322,7 +307,6 @@ def _configure_toolbar_popovers(application_toolbar: Any) -> None:
         "al-toolbar-menu-trigger",
     )
 
-
 def create_layout_skeleton(
     react: pn.template.ReactTemplate,
     *,
@@ -347,7 +331,6 @@ def create_layout_skeleton(
         return react, grid
     return react
 
-
 def create_header(
     react: pn.template.ReactTemplate,
     grid: DynamicReactGrid,
@@ -356,8 +339,6 @@ def create_header(
     """Build the coordinated application header and record toolbar."""
     if context is None:
         raise ValueError("create_header requires context.")
-    if getattr(context, "config", None) is None:
-        raise ValueError("create_header requires context.config.")
 
     _append_raw_css(APPLICATION_CHROME_CSS, "--al-application-chrome-connected")
     _append_raw_css(_MODAL_HOST_CSS, "#pn-Modal .pn-modal-content")
@@ -429,17 +410,14 @@ def create_header(
 
     def _on_add_menu(_event: Any) -> None:
         try:
-            add_menu_panel(grid, context=context)
+            add_panel_catalogue(context=context)
         except Exception as exc:
             import traceback
 
-            print("[add_menu_panel] ERROR:", exc)
+            print("[add_panel_catalogue] ERROR:", exc)
             traceback.print_exc()
 
     add_menu_btn.on_click(_on_add_menu)
-
-    # Retained for compatibility; it is currently not placed in the header.
-    _export_fits_file_button = _build_export_labelled_data_button(context)
 
     old_runtime_status_box = getattr(react, "_runtime_status_box", None)
     if old_runtime_status_box is not None and hasattr(
@@ -471,7 +449,6 @@ def create_header(
 
     _append_stylesheet(runtime_status_box.toggle, HEADER_RUNTIME_BUTTON_STYLESHEET)
     _append_stylesheet(runtime_status_box.toggle, _RUNTIME_DETAILS_STYLESHEET)
-
 
     old_application_toolbar = getattr(react, "_application_toolbar", None)
     if old_application_toolbar is not None and hasattr(
@@ -631,7 +608,6 @@ def create_header(
     _sync_dataset_controls()
     return react
 
-
 def _header_divider() -> pn.pane.HTML:
     return pn.pane.HTML(
         "",
@@ -641,218 +617,58 @@ def _header_divider() -> pn.pane.HTML:
         css_classes=["al-header-inner-divider"],
     )
 
-
-def _build_export_labelled_data_button(context: Any):
-    """Build the legacy labelled-data export control."""
-    button = pn.widgets.Button(name="Export Labelled Data to Fits File")
-
-    def export_fits_file_cb(_event: Any) -> None:
-        config = context.config
-        settings = getattr(config, "settings", {}) or {}
-        list_ids: list[str] = []
-        list_labels: list[str] = []
-
-        if settings.get("confirmed"):
-            classifiers = settings.get("classifiers") or {}
-            for _label, entry in classifiers.items():
-                if isinstance(entry, dict) and "id" in entry and "y" in entry:
-                    list_ids.extend(entry["id"])
-                    list_labels.extend(entry["y"])
-
-        test_set_file = settings.get("test_set_file")
-        if test_set_file and os.path.exists("data/test_set.json"):
-            with open("data/test_set.json", "r", encoding="utf-8") as handle:
-                orig_labelled_data = json.load(handle)
-            for source_id, label in orig_labelled_data.items():
-                list_ids.append(source_id)
-                list_labels.append(label)
-
-        if not list_ids:
-            button.disabled = True
-            button.name = "No Labelled Data Found"
-            button.disabled = False
-            button.name = "Export Labelled Data to Fits File"
-            return
-
-        exported_labels = pd.DataFrame(
-            {"id": list_ids, "label": list_labels},
-            dtype="string",
-        )
-        from astronomicAL.utils.save_config import save_dataframe_to_fits
-
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        path = f"data/labelled_data_{timestamp}.fits"
-        save_dataframe_to_fits(exported_labels, path)
-        button.disabled = True
-        button.name = f"{len(list_ids)} labelled sources saved to '{path}'"
-        button.disabled = False
-        button.name = "Export Labelled Data to Fits File"
-
-    button.on_click(export_fits_file_cb)
-    return button
+PANEL_CATALOGUE_LAYOUT_ITEMS = {
+    "lg": {"x": 0, "y": 0, "w": 4, "h": 6},
+    "md": {"x": 0, "y": 0, "w": 6, "h": 6},
+    "sm": {"x": 0, "y": 0, "w": 12, "h": 6},
+}
 
 
-def bind_controller(view: Any, controller: Any):
-    """Attach a legacy controller to a Panel view."""
-    if view is None or controller is None:
-        return view
+def _next_platform_panel_id(context: Any, prefix: str) -> str:
+    workspace = getattr(context, "workspace", None)
+    if workspace is None:
+        raise ValueError("_next_platform_panel_id requires context.workspace.")
+
     try:
-        setattr(view, "_al_controller", controller)
-        if hasattr(controller, "dispose"):
-            setattr(view, "dispose", controller.dispose)
+        live_ids = {str(panel_id) for panel_id in workspace.list_panels()}
     except Exception:
-        pass
-    return view
+        live_ids = set()
+
+    index = 1
+    while f"{prefix}:{index}" in live_ids:
+        index += 1
+    return f"{prefix}:{index}"
 
 
-def _overlaps(a: dict[str, int], b: dict[str, int]) -> bool:
-    return not (
-        a["x"] + a["w"] <= b["x"]
-        or b["x"] + b["w"] <= a["x"]
-        or a["y"] + a["h"] <= b["y"]
-        or b["y"] + b["h"] <= a["y"]
-    )
+def add_panel_catalogue(*, context: Any) -> str:
+    """Add a non-persistent platform panel for registered plugin discovery."""
 
-
-def _find_first_fit(
-    layout_items: list[dict[str, Any]],
-    *,
-    cols: int,
-    w: int,
-    h: int,
-) -> tuple[int, int]:
-    items = [
-        {
-            "x": int(item.get("x", 0)),
-            "y": int(item.get("y", 0)),
-            "w": int(item.get("w", 1)),
-            "h": int(item.get("h", 1)),
-        }
-        for item in (layout_items or [])
-        if item is not None
-    ]
-
-    max_y = 0
-    for item in items:
-        max_y = max(max_y, item["y"] + item["h"])
-
-    for y in range(0, max_y + 100):
-        for x in range(0, cols - w + 1):
-            candidate = {"x": x, "y": y, "w": w, "h": h}
-            if not any(_overlaps(candidate, item) for item in items):
-                return x, y
-    return 0, max_y
-
-
-def _menu_geometry_for_breakpoint(breakpoint: str) -> tuple[int, int]:
-    if breakpoint == "lg":
-        return 4, 6
-    if breakpoint == "md":
-        return 6, 6
-    return 12, 6
-
-
-def _next_platform_panel_id(context: Any, prefix: str = "platform") -> str:
-    settings = getattr(context.config, "settings", None)
-    if settings is None:
-        context.config.settings = {}
-        settings = context.config.settings
-
-    counter_key = "_panel_id_counter"
-    current = int(settings.get(counter_key, 0))
-    live_keys = [
-        str(key)
-        for key in (getattr(context.workspace.grid, "keys", None) or [])
-    ]
-    numeric_suffixes: list[int] = []
-    for key in live_keys:
-        if key.startswith(f"{prefix}:"):
-            try:
-                numeric_suffixes.append(int(key.split(":", 1)[1]))
-            except Exception:
-                pass
-
-    if numeric_suffixes:
-        current = max(current, max(numeric_suffixes))
-    current += 1
-    settings[counter_key] = current
-    return f"{prefix}:{current}"
-
-
-def _layout_items_for_new_tile(
-    grid: DynamicReactGrid,
-    *,
-    default_w_by_breakpoint: dict[str, int],
-    default_h_by_breakpoint: dict[str, int],
-) -> dict[str, dict[str, Any]]:
-    layouts = dict(grid.layouts or {})
-    cols_by_breakpoint = dict(
-        grid.cols_by_breakpoint or DEFAULT_COLS_BY_BREAKPOINT
-    )
-    breakpoints = list(cols_by_breakpoint.keys()) or ["lg", "md", "sm"]
-
-    layout_items: dict[str, dict[str, Any]] = {}
-    for breakpoint in breakpoints:
-        cols = int(cols_by_breakpoint.get(breakpoint, 12))
-        w = int(default_w_by_breakpoint.get(breakpoint, 12))
-        h = int(default_h_by_breakpoint.get(breakpoint, 6))
-        w = max(1, min(w, cols))
-        existing = list(layouts.get(breakpoint, []))
-        x, y = _find_first_fit(existing, cols=cols, w=w, h=h)
-        layout_items[breakpoint] = {"x": x, "y": y, "w": w, "h": h}
-    return layout_items
-
-
-def add_menu_panel(
-    grid: DynamicReactGrid | None = None,
-    context: Any | None = None,
-) -> str:
-    """Add the current Menu dashboard as a non-persistent platform panel."""
     if context is None:
-        raise ValueError("add_menu_panel requires context.")
+        raise ValueError("add_panel_catalogue requires context.")
     if getattr(context, "workspace", None) is None:
-        raise ValueError("add_menu_panel requires context.workspace.")
-    if getattr(context, "config", None) is None:
-        raise ValueError("add_menu_panel requires context.config.")
+        raise ValueError("add_panel_catalogue requires context.workspace.")
+    if getattr(context, "plugins", None) is None:
+        raise ValueError("add_panel_catalogue requires context.plugins.")
 
-    grid = context.workspace.grid
-    context.workspace._sync_grid()
-    context.workspace._merge_current_layout_into_layouts()
-    context.workspace._normalize_grid_state()
+    panel_id = _next_platform_panel_id(context, prefix="panel-catalogue")
+    controller = PanelCatalogueController(context=context)
 
-    panel_id = _next_platform_panel_id(context, prefix="menu")
-    dashboard = Dashboard(
-        src=context.config.source,
-        contents="Menu",
-        context=context,
-    )
-    dashboard._al_panel_id = panel_id
-    dashboard._al_kind = "platform_panel"
-    dashboard._al_registration_id = "platform.menu"
-    dashboard._al_persistent = False
-
-    try:
-        view = dashboard.panel(in_grid=True)
-    except TypeError:
-        view = dashboard.panel()
-    view = bind_controller(view, dashboard)
-
-    layout_items = _layout_items_for_new_tile(
-        grid,
-        default_w_by_breakpoint={"lg": 4, "md": 6, "sm": 12},
-        default_h_by_breakpoint={"lg": 6, "md": 6, "sm": 6},
-    )
     context.workspace.add_panel(
         panel_id,
-        view,
-        title="Menu",
-        controller=dashboard,
-        layout_items=layout_items,
+        controller.panel(),
+        title="Add Panel",
+        controller=controller,
+        layout_items={
+            breakpoint: dict(item)
+            for breakpoint, item in PANEL_CATALOGUE_LAYOUT_ITEMS.items()
+        },
         kind="platform_panel",
         plugin_id=None,
-        registration_id="platform.menu",
+        registration_id="platform.panel_catalogue",
         persistent=False,
-        metadata={"description": "Temporary add-panel menu."},
+        metadata={
+            "description": "Temporary catalogue of enabled plugin panels.",
+        },
     )
     return panel_id
 
@@ -869,13 +685,9 @@ def create_layout_from_file(
     if getattr(context, "persistence", None) is None:
         raise RuntimeError("context.persistence is not configured.")
 
-    config = getattr(context, "config", None)
-    if config is None:
-        raise ValueError("create_layout_from_file requires context.config.")
-
-    layout_file = getattr(config, "layout_file", None)
+    layout_file = getattr(context, "layout_file", None)
     if not layout_file:
-        raise ValueError("context.config.layout_file is not set.")
+        raise ValueError("context.layout_file is not set.")
 
     grid = getattr(react, "_dynamic_grid", None)
     if grid is None:
@@ -894,13 +706,13 @@ def create_layout_from_file(
     if len(context.workspace.list_panels()) == 0:
         print(
             "[create_layout_from_file] Restored workspace contains no panels; "
-            "adding temporary Menu panel."
+            "adding temporary panel catalogue."
         )
         try:
-            add_menu_panel(context.workspace.grid, context=context)
+            add_panel_catalogue(context=context)
         except Exception as exc:
             print(
-                "[create_layout_from_file] Could not add fallback Menu panel:",
+                "[create_layout_from_file] Could not add fallback panel catalogue:",
                 exc,
             )
 
@@ -913,7 +725,6 @@ def create_layout_from_file(
     if return_grid:
         return react, context.workspace.grid
     return react
-
 
 def create_default_layout(
     react: pn.template.ReactTemplate,
@@ -931,9 +742,9 @@ def create_default_layout(
     react = create_header(react, grid, context=context)
 
     try:
-        add_menu_panel(grid, context=context)
+        add_panel_catalogue(context=context)
     except Exception as exc:
-        print("[create_default_layout] could not add menu panel:", exc)
+        print("[create_default_layout] could not add panel catalogue:", exc)
 
     _publish(
         context,

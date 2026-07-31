@@ -22,7 +22,6 @@ from astronomicAL.platform.runtime_diagnostics import (
 )
 from astronomicAL.platform.runtime_status_styles import RUNTIME_STATUS_CSS
 
-
 class RuntimeStatusBox:
     """Compact runtime indicator and UI-latency diagnostics modal.
 
@@ -277,10 +276,7 @@ class RuntimeStatusBox:
             if template is not None:
                 return template
 
-        config = getattr(self.context, "config", None)
-        app_context = getattr(config, "app_context", None) if config is not None else None
-        workspace = getattr(app_context, "workspace", None)
-        return getattr(workspace, "react", None) if workspace is not None else None
+        return None
 
     def _open_details(self, _event: Any = None) -> None:
         if self._disposed or self._details_open:

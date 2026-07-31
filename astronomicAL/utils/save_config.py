@@ -9,7 +9,6 @@ from typing import Any
 import numpy as np
 from astropy.table import Table
 
-
 class NumpyEncoder(json.JSONEncoder):
     """JSON encoder that handles common numpy values."""
 
@@ -25,41 +24,32 @@ class NumpyEncoder(json.JSONEncoder):
 
         return super().default(obj)
 
-
 def default_layout_directory(context: Any | None = None) -> Path:
     """
     Canonical user layout directory.
 
-    context.config.layout_directory can override this, but by default layouts
-    live beside user-installed plugins under ~/.astronomical/.
+    context.layout_directory can override this, but by default layouts live
+    beside user-installed plugins under ~/.astronomical/.
     """
 
     if context is not None:
-        config = getattr(context, "config", None)
-        configured = getattr(config, "layout_directory", None)
+        configured = getattr(context, "layout_directory", None)
         if configured:
             return Path(configured).expanduser()
 
     return Path.home() / ".astronomical" / "layouts"
 
-
 def _default_workspace_path(context: Any | None = None) -> Path:
     """
-    Compatibility path for older save paths.
-
-    New UI save actions should prefer timestamped/named saves, but keeping this
-    helper avoids breaking any older code that still calls save_workspace()
-    without a path.
+    Return the context's active workspace path, or the default user path.
     """
 
     if context is not None:
-        config = getattr(context, "config", None)
-        layout_file = getattr(config, "layout_file", None)
+        layout_file = getattr(context, "layout_file", None)
         if layout_file:
             return Path(layout_file).expanduser()
 
     return default_layout_directory(context) / "workspace.json"
-
 
 def sanitize_layout_name(name: str) -> str:
     """
@@ -84,7 +74,6 @@ def sanitize_layout_name(name: str) -> str:
 
     return raw
 
-
 def list_workspace_layouts(
     *,
     context: Any | None = None,
@@ -101,7 +90,6 @@ def list_workspace_layouts(
     paths = [path for path in root.glob("*.json") if path.is_file()]
     paths.sort(key=lambda path: path.stat().st_mtime, reverse=True)
     return paths
-
 
 def save_workspace(
     context: Any,
@@ -124,6 +112,7 @@ def save_workspace(
 
     target = Path(path).expanduser() if path is not None else _default_workspace_path(context)
     snapshot = persistence.save(target)
+    context.layout_file = target
 
     panel_count = len(snapshot.get("workspace", {}).get("panels", []))
     grid_keys = snapshot.get("workspace", {}).get("grid", {}).get("keys", [])
@@ -134,7 +123,6 @@ def save_workspace(
     )
 
     return snapshot
-
 
 def save_workspace_timestamped(
     context: Any,
@@ -156,7 +144,6 @@ def save_workspace_timestamped(
     save_workspace(context, path)
     return path
 
-
 def save_workspace_as(
     context: Any,
     name: str,
@@ -175,7 +162,6 @@ def save_workspace_as(
     save_workspace(context, path)
     return path
 
-
 def load_workspace_file(path: str | Path) -> dict[str, Any]:
     """
     Small helper for reading a workspace JSON file directly.
@@ -189,7 +175,6 @@ def load_workspace_file(path: str | Path) -> dict[str, Any]:
         raise TypeError("Workspace JSON must contain an object at the top level.")
 
     return snapshot
-
 
 def load_workspace_path(
     context: Any,
@@ -218,7 +203,6 @@ def load_workspace_path(
         return persistence.reconcile(snapshot, strict=strict)
 
     return persistence.restore(snapshot, strict=strict)
-
 
 def save_dataframe_to_fits(
     df,

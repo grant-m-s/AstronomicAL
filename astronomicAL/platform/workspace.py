@@ -8,7 +8,7 @@ import panel as pn
 
 import threading
 
-from astronomicAL.extensions.dynamic_react_layout import DynamicReactGrid
+from astronomicAL.platform.workspace_grid import DynamicReactGrid
 from astronomicAL.platform.panel_state import (
     get_controller_state,
     get_controller_state_version,

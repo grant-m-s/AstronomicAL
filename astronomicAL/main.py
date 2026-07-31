@@ -90,7 +90,6 @@ sys.path.insert(1, os.path.join(sys.path[0], "../"))
 # AstronomicAL imports
 # ---------------------------------------------------------------------
 
-import astronomicAL.config as config
 from astronomicAL.utils import load_config
 from astronomicAL.utils.debug import boot_print, plugin_debug_print
 
@@ -106,7 +105,6 @@ from astronomicAL.platform.services import ServiceRegistry
 from astronomicAL.platform.plugins import PluginManager
 from astronomicAL.platform.persistence import WorkspacePersistence
 from astronomicAL.platform.runtime_status import RuntimeStatus
-
 
 def _plugin_dirs() -> list[Path]:
     """Return plugin roots scanned by PluginManager.
@@ -198,7 +196,6 @@ def _discover_and_enable_plugins(context: AppContext) -> None:
             print(f"[plugins] failed to enable {info.id}: {exc}")
             traceback.print_exc()
 
-
 # ---------------------------------------------------------------------
 # Template and platform service construction
 # ---------------------------------------------------------------------
@@ -254,7 +251,6 @@ boot_print(f"main.py: services={type(services).__name__}")
 boot_print(f"main.py: navigation={type(navigation).__name__}")
 boot_print(f"main.py: runtime_status={type(runtime_status).__name__}")
 
-
 plugins = PluginManager(
     local_plugin_dirs=_plugin_dirs(),
     auto_discover=False,
@@ -274,42 +270,22 @@ context = AppContext(
     selection=selection,
     services=services,
     navigation=navigation,
-    config=config,
+    layout_file=Path("astronomicAL/layout.json"),
+    layout_directory=Path("layouts"),
     plugins=plugins,
     runtime_status=runtime_status,
 )
 
 boot_print("main.py: AppContext created")
 boot_print(f"main.py: context.plugins={type(context.plugins).__name__}")
-boot_print(f"main.py: context.config={type(context.config).__name__}")
 
 context.persistence = WorkspacePersistence(context)
 
 boot_print(f"main.py: context.persistence={type(context.persistence).__name__}")
 
-
-context.config.layout_file = getattr(
-    context.config,
-    "layout_file",
-    "astronomicAL/layout.json",
-)
-
-context.config.layout_directory = getattr(
-    context.config,
-    "layout_directory",
-    "layouts",
-)
-
-# Optional compatibility handles for older code that reaches into config.
-context.config.plugins = plugins
-context.config.app_context = context
-context.config.runtime_status = runtime_status
-context.config.navigation = navigation
-
 react._app_context = context
 
 required = [
-    "config",
     "events",
     "jobs",
     "artifacts",
@@ -320,7 +296,9 @@ required = [
     "services",
     "plugins",
     "persistence",
-    "runtime_status"
+    "runtime_status",
+    "layout_file",
+    "layout_directory",
 ]
 
 missing = [name for name in required if getattr(context, name, None) is None]
@@ -338,7 +316,7 @@ _discover_and_enable_plugins(context)
 
 boot_print("main.py: layout creation start")
 
-boot_print(f"main.py: layout_directory={context.config.layout_directory}")
+boot_print(f"main.py: layout_directory={context.layout_directory}")
 
 boot_print(
     "main.py: plugin panels before layout="

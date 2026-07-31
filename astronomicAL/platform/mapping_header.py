@@ -62,7 +62,6 @@ BADGE_OPTIONAL = """
 <span style="display:inline-block;background:#dbeafe;color:#1d4ed8;border:1px solid #bfdbfe;border-radius:999px;padding:3px 10px;font-size:0.78rem;font-weight:700;line-height:1.2;white-space:nowrap;">Optional</span>
 """
 
-
 class MappingAlertController:
     """Header/modal controller for semantic dataset-column mappings.
 
@@ -300,7 +299,6 @@ class MappingAlertController:
             "panel_id": payload.get("panel_id"),
             "source": str(payload.get("source") or "unknown"),
             "required": bool(payload.get("required", True)),
-            "config_key": payload.get("config_key"),
         }
 
     def _refresh_pending_aggregate(self, item: dict) -> dict:
@@ -313,7 +311,6 @@ class MappingAlertController:
         )
         item["sources"] = self._unique_list([requester.get("source") for requester in requester_values])
         item["panel_ids"] = self._unique_list([requester.get("panel_id") for requester in requester_values])
-        item["config_keys"] = self._unique_list([requester.get("config_key")for requester in requester_values])
 
         return item
 
@@ -324,7 +321,11 @@ class MappingAlertController:
         payload.setdefault("candidates", [])
         payload.setdefault("display_name", payload.get("semantic_name", "Column"))
         payload.setdefault("description", "")
-        payload.setdefault("config_key", None)
+        if "config_key" in payload:
+            raise ValueError(
+                "mapping request config_key is no longer supported; "
+                "store mappings through DatasetManager instead"
+            )
         payload.setdefault("suggested", None)
         payload.setdefault("panel_id", None)
 
@@ -358,7 +359,6 @@ class MappingAlertController:
                 "display_name",
                 "description",
                 "suggested",
-                "config_key",
             ):
                 existing[field] = (
                     incoming.get(field) or existing.get(field)
@@ -368,7 +368,6 @@ class MappingAlertController:
                 "display_name",
                 "description",
                 "suggested",
-                "config_key",
             ):
                 if (not existing.get(field) and incoming.get(field)):
                     existing[field] = incoming.get(field)
@@ -931,10 +930,6 @@ class MappingAlertController:
         semantic_name = item["semantic_name"]
         old_value = self.context.datasets.get_mapping(dataset_id, semantic_name)
         changed = self.context.datasets.set_mapping(dataset_id, semantic_name, str(chosen))
-
-        for config_key in item.get("config_keys", []):
-            if config_key and getattr(self.context, "config", None) is not None:
-                self.context.config.settings[config_key] = str(chosen)
 
         payload = {
             "source": "mapping_header",

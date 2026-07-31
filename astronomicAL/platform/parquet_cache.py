@@ -7,13 +7,11 @@ from typing import Any, Optional
 
 import pandas as pd
 
-
 def normalise_dataset_id(value: str) -> str:
     value = (value or "dataset").strip().lower()
     value = re.sub(r"[^a-z0-9_]+", "_", value)
     value = re.sub(r"_+", "_", value).strip("_")
     return value or "dataset"
-
 
 def default_cache_dir_for_context(context, *, fallback_name: str = ".astronomical_cache") -> Path:
     """
@@ -22,18 +20,19 @@ def default_cache_dir_for_context(context, *, fallback_name: str = ".astronomica
     This intentionally avoids requiring users to know where Parquet/DuckDB are
     being used. Later, this can be replaced with a project/workspace cache path.
     """
-    config = getattr(context, "config", None)
-
-    try:
-        settings = getattr(config, "settings", {}) or {}
-        dataset_path = settings.get("dataset_filepath")
-        if dataset_path:
-            return Path(dataset_path).expanduser().resolve().parent / fallback_name
-    except Exception:
-        pass
+    datasets = getattr(context, "datasets", None)
+    if datasets is not None:
+        try:
+            dataset_path = datasets.get_meta().get("source_path")
+            if dataset_path:
+                return (
+                    Path(dataset_path).expanduser().resolve().parent
+                    / fallback_name
+                )
+        except Exception:
+            pass
 
     return Path.cwd() / fallback_name
-
 
 def register_dataframe_as_parquet(
     datasets,
@@ -126,7 +125,6 @@ def register_dataframe_as_parquet(
     )
 
     return parquet_path
-
 
 def replace_dataset_with_dataframe_parquet(
     context,

@@ -8,6 +8,7 @@ from typing import Any, Dict, Optional
 
 import pandas as pd
 import panel as pn
+from bokeh.models import ColumnDataSource
 
 from astronomicAL.platform.application_chrome_styles import (
     APPLICATION_CHROME_CSS,
@@ -18,7 +19,6 @@ from astronomicAL.platform.application_chrome_styles import (
 from astronomicAL.platform.fits_import import register_fits_table
 from astronomicAL.platform.modal_utils import close_template_modal, open_template_modal
 from astronomicAL.settings.data_selection import DataSelection
-
 
 _MODAL_SELECT_STYLESHEET = """
 :host {
@@ -70,7 +70,6 @@ input[type="checkbox"] {
 }
 """
 
-
 def _append_stylesheet(widget: Any, stylesheet: str) -> None:
     try:
         stylesheets = list(getattr(widget, "stylesheets", []) or [])
@@ -80,13 +79,11 @@ def _append_stylesheet(widget: Any, stylesheet: str) -> None:
     except Exception:
         pass
 
-
 def _install_application_chrome_css() -> None:
     marker = "--al-application-chrome-v7"
     if any(marker in css for css in pn.config.raw_css):
         return
     pn.config.raw_css.append(APPLICATION_CHROME_CSS)
-
 
 class DatasetHeaderController:
     """Global dataset switcher and dataset-loading modal controller."""
@@ -169,7 +166,7 @@ class DatasetHeaderController:
         )
 
         self.data_selection = HeaderDataSelection(
-            src=self._legacy_source(),
+            src=ColumnDataSource(data={}),
             mode="Exploring",
             context=self.context,
             close_settings_button=self.close_button,
@@ -461,20 +458,6 @@ class DatasetHeaderController:
             columns = self.context.datasets.list_columns(dataset_id)
         except Exception:
             columns = list(df.columns) if df is not None else []
-        try:
-            preview_df = self.context.datasets.head(dataset_id, n=1)
-        except Exception:
-            preview_df = (
-                df.head(1) if df is not None else pd.DataFrame(columns=columns)
-            )
-
-        self._sync_legacy_config(
-            dataset_id=dataset_id,
-            filename=filename,
-            df=preview_df,
-            columns=columns,
-            optimise_data=optimise_data,
-        )
         self._publish(
             "dataset.loaded",
             {
@@ -500,101 +483,12 @@ class DatasetHeaderController:
         return result
 
     def _set_active_dataset(self, dataset_id: str) -> None:
-        try:
-            dataset = self.context.datasets.get(dataset_id)
-            filename = dataset.meta.get("source_path", "")
-            optimise_data = bool(dataset.meta.get("optimise_data", True))
-        except Exception:
-            filename = ""
-            optimise_data = True
-
-        try:
-            columns = self.context.datasets.list_columns(dataset_id)
-        except Exception:
-            columns = []
-
-        self._sync_legacy_config(
-            dataset_id=dataset_id,
-            filename=filename,
-            df=pd.DataFrame(columns=columns),
-            columns=columns,
-            optimise_data=optimise_data,
-        )
         self._clear_selection_for_dataset_switch()
         self.context.datasets.set_active(
             dataset_id,
             origin="platform.dataset_header",
         )
         self._refresh_header()
-
-    # ------------------------------------------------------------------
-    # Legacy compatibility
-    # ------------------------------------------------------------------
-
-    def _legacy_source(self) -> Any:
-        config = getattr(self.context, "config", None)
-        if config is not None:
-            try:
-                return config.source
-            except Exception:
-                pass
-        return None
-
-    @staticmethod
-    def _normalise_columns(
-        *,
-        df: pd.DataFrame | None = None,
-        columns: object | None = None,
-    ) -> list[str]:
-        if columns is None:
-            raw_columns = [] if df is None else getattr(df, "columns", [])
-        else:
-            raw_columns = columns
-
-        if raw_columns is None:
-            return []
-        if isinstance(raw_columns, pd.Index):
-            raw_columns = raw_columns.tolist()
-
-        normalised: list[str] = []
-        for col in list(raw_columns):
-            if isinstance(col, dict) and "name" in col:
-                col = col["name"]
-            normalised.append(str(col))
-        return normalised
-
-    def _sync_legacy_config(
-        self,
-        *,
-        dataset_id: str,
-        filename: str,
-        df: pd.DataFrame | None,
-        columns: list[str] | pd.Index | None = None,
-        optimise_data: bool,
-    ) -> None:
-        config = getattr(self.context, "config", None)
-        if config is None:
-            return
-
-        if not hasattr(config, "settings") or config.settings is None:
-            config.settings = {}
-
-        normalised_columns = self._normalise_columns(df=df, columns=columns)
-        config.settings["dataset_filepath"] = filename
-        config.settings["optimise_data"] = optimise_data
-        config.settings["active_dataset_id"] = dataset_id
-
-        # Do not retain the complete data frame for lazy sources.
-        try:
-            config.main_df = pd.DataFrame(columns=normalised_columns)
-        except Exception:
-            pass
-        try:
-            config.source.data = {
-                str(column): [] for column in normalised_columns
-            }
-        except Exception:
-            pass
 
     # ------------------------------------------------------------------
     # Helpers
@@ -617,7 +511,6 @@ class DatasetHeaderController:
             selection.clear_selection_set(origin="dataset.active.changed")
         except Exception:
             pass
-
 
     def has_active_dataset(self) -> bool:
         """Return whether an active dataset is registered with the manager."""
@@ -719,7 +612,6 @@ class DatasetHeaderController:
             css_classes=["al-modal-card", "al-dataset-modal-card"],
         )
 
-
 class HeaderDataSelection(DataSelection):
     """DataSelection variant used inside the dataset-header modal."""
 
@@ -774,27 +666,17 @@ class HeaderDataSelection(DataSelection):
             margin=(0, 0, 0, 0),
             styles={"overflow": "visible"},
         )
-        config_file_block = pn.Column(
-            self._field_label("Configuration file"),
-            self.config_file_widget,
+        workspace_file_block = pn.Column(
+            self._field_label("Workspace file"),
+            self.workspace_file_widget,
             sizing_mode="fixed",
             width=340,
             min_height=58,
             margin=(0, 0, 0, 0),
             styles={"overflow": "visible"},
         )
-        load_option_block = pn.Column(
-            self._field_label("Load config options"),
-            self.load_config_select_widget,
-            sizing_mode="fixed",
-            width=340,
-            min_height=58,
-            margin=(0, 0, 0, 0),
-            styles={"overflow": "visible"},
-        )
-
         button = (
-            self.load_data_button_js
+            self.load_workspace_button
             if self.load_layout_check
             else self.load_data_button
         )
@@ -810,9 +692,7 @@ class HeaderDataSelection(DataSelection):
             return pn.Column(
                 self.load_layout_widget,
                 pn.Spacer(height=6),
-                config_file_block,
-                pn.Spacer(height=8),
-                load_option_block,
+                workspace_file_block,
                 pn.Spacer(height=10),
                 button_block,
                 sizing_mode="fixed",
@@ -841,10 +721,9 @@ class HeaderDataSelection(DataSelection):
             getattr(self, "load_layout_widget", None),
             getattr(self, "memory_optimisation_check", None),
             getattr(self, "dataset_widget", None),
-            getattr(self, "config_file_widget", None),
-            getattr(self, "load_config_select_widget", None),
+            getattr(self, "workspace_file_widget", None),
             getattr(self, "load_data_button", None),
-            getattr(self, "load_data_button_js", None),
+            getattr(self, "load_workspace_button", None),
         ]
         for widget in widgets:
             if widget is None:
@@ -871,8 +750,7 @@ class HeaderDataSelection(DataSelection):
 
         for select_widget in (
             getattr(self, "dataset_widget", None),
-            getattr(self, "config_file_widget", None),
-            getattr(self, "load_config_select_widget", None),
+            getattr(self, "workspace_file_widget", None),
         ):
             if select_widget is None:
                 continue
@@ -893,7 +771,7 @@ class HeaderDataSelection(DataSelection):
 
         for button in (
             getattr(self, "load_data_button", None),
-            getattr(self, "load_data_button_js", None),
+            getattr(self, "load_workspace_button", None),
         ):
             if button is None:
                 continue
@@ -922,9 +800,6 @@ class HeaderDataSelection(DataSelection):
         try:
             filename = self.dataset
             optimise_data = bool(self.memory_optimisation_check.value)
-            if self.config is not None:
-                self.config.settings["dataset_filepath"] = filename
-
             dataset_id = self._unique_dataset_id(
                 self._normalise_dataset_id(Path(filename).stem)
             )
@@ -959,9 +834,6 @@ class HeaderDataSelection(DataSelection):
                 except Exception:
                     columns = []
                 self.df = pd.DataFrame(columns=columns)
-
-            if self.config is not None:
-                self.config.main_df = self.df
 
             self._initialise_src()
             self.ready = True

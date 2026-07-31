@@ -23,23 +23,16 @@ class MenuEntry:
     plugin_name: Optional[str] = None
 
 
-class MenuDashboard:
-    """Hierarchical 'Add Panel' menu.
+class PanelCatalogueController:
+    """Platform-owned hierarchical catalogue of registered plugin panels.
 
-    The popover lives INSIDE the menu root as an absolutely-positioned child of
-    the trigger button. It therefore moves with the button when the ReactGrid
-    reflows the tile -- there is no body portal, no manual positioning, no
-    backdrop, and no host registry to lose. ReactGrid clipping is handled by
-    temporarily setting overflow:visible up the ancestor chain while the menu is
-    open, and by raising the enclosing grid item's z-index.
+    The rendered HTML, CSS, and JavaScript preserve the original Add Panel menu
+    appearance and interaction. Panel discovery uses the public PluginManager
+    API, while panel construction and workspace ownership remain delegated to
+    ``PluginManager.open_panel`` and ``WorkspaceManager``.
     """
 
     NATIVE_ENTRIES: Tuple[MenuEntry, ...] = ()
-
-    LEGACY_HINTS: Dict[str, Tuple[str, str]] = {
-        "SAMP Send": ("Astro", "Interop"),
-        "SAMP Receive": ("Astro", "Interop"),
-    }
 
     DOMAIN_ORDER: Dict[str, int] = {
         "Core": 0,
@@ -55,9 +48,15 @@ class MenuDashboard:
         "Other": 99,
     }
 
-    def __init__(self, main, context=None):
-        self.main = main
-        self.context = context if context is not None else getattr(main, "context", None)
+    def __init__(self, *, context: Any):
+        if context is None:
+            raise ValueError("PanelCatalogueController requires context.")
+        if getattr(context, "plugins", None) is None:
+            raise ValueError("PanelCatalogueController requires context.plugins.")
+        if getattr(context, "workspace", None) is None:
+            raise ValueError("PanelCatalogueController requires context.workspace.")
+
+        self.context = context
 
         self._disposed = False
         self._subscriptions: List[Any] = []
@@ -81,7 +80,7 @@ class MenuDashboard:
         self._refresh_menu()
 
     # ------------------------------------------------------------------
-    # Dashboard API
+    # Platform panel API
     # ------------------------------------------------------------------
 
     def get_toolbar(self):
@@ -109,6 +108,11 @@ class MenuDashboard:
                     pass
         self._subscriptions.clear()
 
+        try:
+            self._target.remove_on_change("value", self._on_target_changed)
+        except Exception:
+            pass
+
     # ------------------------------------------------------------------
     # Event handling
     # ------------------------------------------------------------------
@@ -123,9 +127,9 @@ class MenuDashboard:
                 sub = events.subscribe(
                     topic,
                     self._on_plugin_registry_changed,
-                    owner_id=f"menu.dashboard.{self._token}",
-                    owner_label="Hierarchical Panel Menu",
-                    owner_kind="dashboard",
+                    owner_id=f"platform.panel_catalogue.{self._token}",
+                    owner_label="Panel catalogue",
+                    owner_kind="platform_panel",
                 )
             except TypeError:
                 sub = events.subscribe(topic, self._on_plugin_registry_changed)
@@ -148,131 +152,34 @@ class MenuDashboard:
         except Exception:
             _refresh()
 
-    def _workspace_grid(self):
-        workspace = getattr(self.context, "workspace", None)
-        if workspace is None:
-            return None
-        return getattr(workspace, "grid", None)
-
     def _current_workspace_panel_id(self) -> Optional[str]:
-        panel_id = getattr(self.main, "_al_panel_id", None)
+        panel_id = getattr(self, "_al_panel_id", None)
         if panel_id:
             return str(panel_id)
 
         workspace = getattr(self.context, "workspace", None)
         if workspace is None:
             return None
+
         try:
             for candidate_id, record in workspace.list_panels().items():
-                if record.controller is self.main:
+                if record.controller is self:
                     return str(candidate_id)
         except Exception:
             return None
         return None
 
-    def _layout_items_for_existing_tile(self, panel_id: str) -> Dict[str, Dict[str, Any]]:
-        grid = self._workspace_grid()
-        if grid is None:
-            return {}
-
-        layout_items: Dict[str, Dict[str, Any]] = {}
-        for breakpoint, breakpoint_layout in (getattr(grid, "layouts", None) or {}).items():
-            for item in breakpoint_layout or []:
-                if str(item.get("i")) != str(panel_id):
-                    continue
-                item_copy = dict(item)
-                item_copy["i"] = str(panel_id)
-                layout_items[str(breakpoint)] = item_copy
-                break
-        return layout_items
-
-    @staticmethod
-    def _rects_overlap(a, b) -> bool:
-        return not (
-            a["x"] + a["w"] <= b["x"]
-            or b["x"] + b["w"] <= a["x"]
-            or a["y"] + a["h"] <= b["y"]
-            or b["y"] + b["h"] <= a["y"]
-        )
-
-    def _find_first_fit(self, layout_items, *, cols: int, w: int, h: int):
-        items = []
-        for item in layout_items or []:
-            try:
-                items.append(
-                    {
-                        "x": int(item.get("x", 0)),
-                        "y": int(item.get("y", 0)),
-                        "w": int(item.get("w", 1)),
-                        "h": int(item.get("h", 1)),
-                    }
-                )
-            except Exception:
-                continue
-
-        max_y = 0
-        for item in items:
-            max_y = max(max_y, item["y"] + item["h"])
-
-        for y in range(0, max_y + 100):
-            for x in range(0, max(1, cols - w + 1)):
-                candidate = {"x": x, "y": y, "w": w, "h": h}
-                if not any(self._rects_overlap(candidate, item) for item in items):
-                    return x, y
-        return 0, max_y
-
-    def _new_panel_layout_items(self, *, default_w=6, default_h=8):
-        grid = self._workspace_grid()
-        if grid is None:
-            return None
-
-        layouts = dict(getattr(grid, "layouts", None) or {})
-        cols_by_breakpoint = dict(
-            getattr(grid, "cols_by_breakpoint", None) or {"lg": 12, "md": 12, "sm": 12}
-        )
-
-        layout_items = {}
-        for breakpoint, cols in cols_by_breakpoint.items():
-            cols = int(cols)
-            w = min(int(default_w), cols)
-            h = int(default_h)
-            if breakpoint == "sm":
-                w = cols
-            existing = list(layouts.get(breakpoint, []))
-            x, y = self._find_first_fit(existing, cols=cols, w=w, h=h)
-            layout_items[breakpoint] = {"x": x, "y": y, "w": w, "h": h}
-        return layout_items
-
     def _open_plugin_panel(self, registration_id: str) -> None:
         manager = getattr(self.context, "plugins", None)
         if manager is None:
-            print("[MenuDashboard] Cannot open plugin panel: context.plugins is unavailable")
-            return
+            raise RuntimeError("Panel catalogue requires context.plugins.")
 
-        current_panel_id = self._current_workspace_panel_id()
-        if current_panel_id:
-            layout_items = self._layout_items_for_existing_tile(current_panel_id)
-            print(
-                "[MenuDashboard] replacing menu tile "
-                f"panel_id={current_panel_id} with plugin panel "
-                f"registration_id={registration_id}"
-            )
-            manager.open_panel(
-                registration_id,
-                context=self.context,
-                instance_id=current_panel_id,
-                layout_items=layout_items,
-            )
-            return
+        manager.get_panel(registration_id)
 
-        print(
-            "[MenuDashboard] menu tile id unavailable; opening plugin panel "
-            f"as a new tile registration_id={registration_id}"
-        )
         manager.open_panel(
             registration_id,
             context=self.context,
-            layout_items=self._new_panel_layout_items(default_w=6, default_h=8),
+            instance_id=self._current_workspace_panel_id(),
         )
 
     def _on_target_changed(self, attr: str, old: str, new: str) -> None:
@@ -298,11 +205,10 @@ class MenuDashboard:
             return
 
         try:
-            if value.startswith("plugin:"):
-                registration_id = value.split("plugin:", 1)[1]
-                self._open_plugin_panel(registration_id)
+            if not value.startswith("plugin:"):
                 return
-            self.main.set_contents(value)
+            registration_id = value.split("plugin:", 1)[1]
+            self._open_plugin_panel(registration_id)
         except Exception:
             traceback.print_exc()
 
@@ -332,10 +238,7 @@ class MenuDashboard:
     def _build_entries(self) -> List[MenuEntry]:
         entries: List[MenuEntry] = list(self.NATIVE_ENTRIES)
 
-        plugin_entries = self._plugin_entries()
-        plugin_titles = {entry.title for entry in plugin_entries}
-
-        entries.extend(plugin_entries)
+        entries.extend(self._plugin_entries())
 
         seen = set()
         deduped: List[MenuEntry] = []
@@ -368,36 +271,23 @@ class MenuDashboard:
         except Exception:
             plugin_info_by_id = {}
 
-        panel_regs: List[Any] = []
         try:
-            panel_regs.extend(list(manager.list_panels()))
+            panel_regs = list(manager.list_panels())
         except Exception:
             traceback.print_exc()
-
-        try:
-            raw_panels = getattr(manager, "_panels", {}) or {}
-            for reg in raw_panels.values():
-                if reg not in panel_regs:
-                    panel_regs.append(reg)
-        except Exception:
-            pass
-
-        deduped_regs: List[Any] = []
-        seen_ids = set()
-        for reg in panel_regs:
-            reg_id = getattr(reg, "id", None)
-            if not reg_id or reg_id in seen_ids:
-                continue
-            seen_ids.add(reg_id)
-            deduped_regs.append(reg)
+            return []
 
         entries: List[MenuEntry] = []
-        for reg in deduped_regs:
+        seen_ids = set()
+        for reg in panel_regs:
+            registration_id = str(getattr(reg, "id", "") or "").strip()
+            if not registration_id or registration_id in seen_ids:
+                continue
+            seen_ids.add(registration_id)
             plugin_id = getattr(reg, "plugin_id", "") or ""
             info = plugin_info_by_id.get(plugin_id)
             title = getattr(reg, "title", None) or getattr(reg, "id", "Plugin Panel")
             category = getattr(reg, "category", None) or "Panels"
-            registration_id = getattr(reg, "id", "") or title
             entries.append(
                 MenuEntry(
                     title=title,
@@ -415,7 +305,18 @@ class MenuDashboard:
         plugin_id = (getattr(reg, "plugin_id", "") or "").lower()
         tags = {str(t).lower() for t in (getattr(reg, "tags", None) or [])}
         capabilities = {str(c).lower() for c in (getattr(info, "capabilities", None) or [])}
-        required_mappings = {str(m).lower() for m in (getattr(reg, "required_mappings", None) or [])}
+        required_mappings = {
+            str(
+                mapping
+                if isinstance(mapping, str)
+                else (
+                    mapping.get("semantic_name", "")
+                    if isinstance(mapping, dict)
+                    else getattr(mapping, "semantic_name", "")
+                )
+            ).lower()
+            for mapping in (getattr(reg, "required_mappings", None) or [])
+        }
 
         prefix = plugin_id.split(".", 1)[0] if plugin_id else ""
 
@@ -432,7 +333,7 @@ class MenuDashboard:
 
         if {"astro", "astronomy"} & tags:
             return "Astro"
-        if {"ra", "dec"} <= required_mappings:
+        if {"coords.ra", "coords.dec"} <= required_mappings:
             return "Astro"
         if {"active-learning", "active_learning", "labelling", "labeling"} & tags:
             return "Active Learning"
@@ -1158,3 +1059,6 @@ class MenuDashboard:
         text = text.replace("\n", "\\n")
         text = text.replace("\r", "\\r")
         return f"'{text}'"
+
+
+__all__ = ["MenuEntry", "PanelCatalogueController"]

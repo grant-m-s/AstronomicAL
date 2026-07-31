@@ -44,7 +44,6 @@ _COMMON_ALIASES: Dict[str, List[str]] = {
     ],
 }
 
-
 @dataclass(frozen=True)
 class MappingRequirement:
     """Declarative semantic-column requirement.
@@ -60,7 +59,6 @@ class MappingRequirement:
     display_name: Optional[str] = None
     description: str = ""
     required: bool = True
-    config_key: Optional[str] = None
     candidates: Optional[List[str]] = None
     suggested: Optional[str] = None
     aliases: List[str] = field(default_factory=list)
@@ -81,7 +79,6 @@ class MappingRequirement:
                 display_name=value.display_name,
                 description=value.description,
                 required=required_default,
-                config_key=value.config_key,
                 candidates=list(value.candidates) if value.candidates is not None else None,
                 suggested=value.suggested,
                 aliases=list(value.aliases),
@@ -144,15 +141,12 @@ class MappingRequirement:
             "display_name": self.display_name or _default_display_name(self.semantic_name),
             "description": self.description,
             "required": self.required,
-            "config_key": self.config_key,
             "candidates": candidates,
             "suggested": suggested,
         }
         return payload
 
-
 MappingRequirementLike = Union[str, Mapping[str, Any], MappingRequirement]
-
 
 @dataclass(frozen=True)
 class MappingResolution:
@@ -170,7 +164,6 @@ class MappingResolution:
     def can_open(self) -> bool:
         return not self.missing_required
 
-
 def coerce_mapping_requirements(
     values: Optional[Sequence[MappingRequirementLike]],
     *,
@@ -180,7 +173,6 @@ def coerce_mapping_requirements(
         MappingRequirement.from_any(value, required_default=required_default)
         for value in (values or [])
     ]
-
 
 def dataset_exists(context: Any, dataset_id: Optional[str]) -> bool:
     if context is None or dataset_id is None:
@@ -244,7 +236,6 @@ def _mapping_column_is_valid(
         return False
 
     return column_name in {str(col) for col in columns}
-
 
 def resolve_mapping_requirements(
     *,
@@ -314,7 +305,7 @@ def resolve_mapping_requirements(
             column_name=column_name,
             allow_index=req.allow_index,
         ):
-            missing_required.append(req)
+            missing_optional.append(req)
 
     mapping_debug_print(
         "resolve requirements",
@@ -334,7 +325,6 @@ def resolve_mapping_requirements(
         missing_required=missing_required,
         missing_optional=missing_optional,
     )
-
 
 def publish_mapping_requests(
     *,
@@ -367,7 +357,6 @@ def publish_mapping_requests(
         if sent_keys is not None:
             sent_keys.add(key)
 
-
 def active_dataset_id(context: Any) -> Optional[str]:
     datasets = getattr(context, "datasets", None)
     if datasets is None:
@@ -388,7 +377,6 @@ def active_dataset_id(context: Any) -> Optional[str]:
         return str(value) if value else None
     except Exception:
         return None
-
 
 def get_mapping(context: Any, dataset_id: str, semantic_name: str) -> Optional[str]:
     datasets = getattr(context, "datasets", None)
@@ -415,7 +403,6 @@ def get_mapping(context: Any, dataset_id: str, semantic_name: str) -> Optional[s
 
     return None
 
-
 def list_dataset_columns(context: Any, dataset_id: str) -> List[str]:
     datasets = getattr(context, "datasets", None)
     if datasets is None:
@@ -441,7 +428,6 @@ def list_dataset_columns(context: Any, dataset_id: str) -> List[str]:
 
     return []
 
-
 def guess_column(columns: Sequence[str], aliases: Sequence[str]) -> Optional[str]:
     if not columns:
         return None
@@ -460,14 +446,12 @@ def guess_column(columns: Sequence[str], aliases: Sequence[str]) -> Optional[str
 
     return None
 
-
 def _default_aliases(semantic_name: str) -> List[str]:
     aliases = list(_COMMON_ALIASES.get(semantic_name, []))
     tail = semantic_name.split(".")[-1]
     if tail not in aliases:
         aliases.append(tail)
     return aliases
-
 
 def _default_display_name(semantic_name: str) -> str:
     if semantic_name == "record_id":
@@ -479,7 +463,6 @@ def _default_display_name(semantic_name: str) -> str:
     if semantic_name == "target_label":
         return "Label column"
     return semantic_name.replace("_", " ").replace(".", " / ").title()
-
 
 def _normalise_name(value: str) -> str:
     return (
