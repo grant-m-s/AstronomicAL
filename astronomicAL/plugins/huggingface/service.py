@@ -76,7 +76,6 @@ GENERIC_FOLDERS = {
     "testing",
 }
 
-
 GENERIC_FOLDER_PATTERNS = [
     r"^data[_-]?\d+$",
     r"^part[_-]?\d+$",
@@ -88,7 +87,6 @@ GENERIC_FOLDER_PATTERNS = [
     r"^records?[_-]?\d+$",
     r"^samples?[_-]?\d+$",
 ]
-
 
 class SilentTqdm:
     """
@@ -172,6 +170,27 @@ class HFDatasetSearchResult:
     private: bool = False
     card_summary: str = ""
 
+@dataclass
+class HFCacheStatus:
+    repo_id: str
+    hub_cached: bool = False
+    datasets_cached: bool = False
+    locations: list[str] = field(default_factory=list)
+
+    @property
+    def cached(self) -> bool:
+        return bool(self.hub_cached or self.datasets_cached)
+
+    @property
+    def label(self) -> str:
+        if self.hub_cached and self.datasets_cached:
+            return "Hub files + prepared dataset"
+        if self.datasets_cached:
+            return "Prepared dataset"
+        if self.hub_cached:
+            return "Hub files"
+        return "Not detected"
+
 
 @dataclass
 class HFImageFile:
@@ -187,7 +206,6 @@ class HFImageFile:
             "label": self.label,
             "size": self.size,
         }
-
 
 @dataclass
 class HFDatasetDetails:
@@ -206,14 +224,14 @@ class HFDatasetDetails:
     def error(self) -> str:
         return "\n".join(self.warnings)
 
-
 class HuggingFaceDatasetService:
     """
     Hugging Face dataset helper.
 
-    Inspect and Preview avoid datasets.load_dataset so they do not trigger
-    Datasets' "Resolving data files" phase. Import uses snapshot_download for
-    batch/concurrent download.
+    Search and inspection use lightweight Hub metadata where possible. Preview
+    prefers prepared local Datasets/Arrow data or cached Hub files, then falls
+    back to network-backed streaming only when local caches cannot satisfy the
+    request. Full file imports use filtered snapshot downloads.
     """
 
     def __init__(
@@ -223,8 +241,369 @@ class HuggingFaceDatasetService:
         cache_dir: str | Path | None = None,
     ) -> None:
         self.token = token or os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_TOKEN")
-        self.cache_dir = Path(cache_dir or ".astronomical_cache/huggingface").expanduser()
+
+        # Hugging Face's standard caches are the primary source.  Omitting
+        # cache_dir from Hub/Datasets calls lets downloads made by notebooks,
+        # the CLI, and other applications be reused automatically.
+        self.configured_cache_dir = (
+            Path(cache_dir).expanduser().resolve()
+            if cache_dir not in (None, "")
+            else None
+        )
+
+        # Plugin-owned generated assets and legacy downloads remain under the
+        # AstronomicAL cache root.  Legacy locations are probed before network
+        # access so existing installations do not redownload their data.
+        self.cache_dir = Path(".astronomical_cache/huggingface").expanduser().resolve()
         self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self.assets_dir = self.cache_dir / "assets"
+        self.assets_dir.mkdir(parents=True, exist_ok=True)
+
+        # The plugin service is long-lived, so preview thumbnails, prepared local
+        # Dataset handles, and repository file listings can be reused safely.
+        self._preview_lock = threading.RLock()
+        self._preview_cache: dict[tuple[Any, ...], dict[str, Any]] = {}
+        self._preview_dataset_cache: dict[tuple[str, str, str], Any] = {}
+        self._image_file_cache: dict[str, tuple[list[HFImageFile], bool]] = {}
+
+    def _preview_cache_get(self, key: tuple[Any, ...]) -> dict[str, Any] | None:
+        with self._preview_lock:
+            cached = self._preview_cache.get(key)
+            if cached is None:
+                return None
+            return {
+                **cached,
+                "items": [dict(item) for item in cached.get("items", [])],
+            }
+
+    def _preview_cache_put(self, key: tuple[Any, ...], result: dict[str, Any]) -> None:
+        stored = {
+            **dict(result),
+            "items": [dict(item) for item in result.get("items", [])],
+        }
+        with self._preview_lock:
+            self._preview_cache[key] = stored
+            while len(self._preview_cache) > 24:
+                oldest = next(iter(self._preview_cache))
+                self._preview_cache.pop(oldest, None)
+
+    def _load_split_local_only(
+        self,
+        *,
+        repo_id: str,
+        config_name: str | None,
+        split: str,
+        token: str | None,
+        trust_remote_code: bool,
+        streaming: bool,
+    ) -> Any | None:
+        from datasets import load_dataset
+
+        def load(kwargs: dict[str, Any]):
+            try:
+                if config_name:
+                    return load_dataset(repo_id, name=config_name, split=split, **kwargs)
+                return load_dataset(repo_id, split=split, **kwargs)
+            except TypeError:
+                retry = dict(kwargs)
+                retry.pop("trust_remote_code", None)
+                retry.pop("token", None)
+                if config_name:
+                    return load_dataset(repo_id, name=config_name, split=split, **retry)
+                return load_dataset(repo_id, split=split, **retry)
+
+        for cache_root in self._datasets_cache_roots():
+            kwargs = self._datasets_kwargs_for_cache(
+                token=token,
+                trust_remote_code=trust_remote_code,
+                cache_root=cache_root,
+                local_files_only=True,
+                streaming=streaming,
+            )
+            try:
+                return load(kwargs)
+            except Exception:
+                continue
+        return None
+
+    @staticmethod
+    def _preview_result_to_html(result: dict[str, Any], *, thumb_size: int) -> str:
+        items = list(result.get("items", []) or [])
+        note = html.escape(str(result.get("note", "") or ""))
+        if not items:
+            return f"<p>{note or 'No preview rows were returned.'}</p>"
+
+        cards: list[str] = []
+        for item in items:
+            data_uri = str(item.get("data_uri", "") or "")
+            if data_uri:
+                image_html = (
+                    f'<img src="{data_uri}" style="display:block;width:100%;height:{thumb_size}px;object-fit:contain;background:#111;" />'
+                )
+            else:
+                image_html = (
+                    f'<div style="height:{thumb_size}px;display:flex;align-items:center;justify-content:center;background:#eef2f6;color:#687386;">Preview unavailable</div>'
+                )
+            title = html.escape(str(item.get("record_id", "") or ""))
+            label = html.escape(str(item.get("label", "") or ""))
+            image_col = html.escape(str(item.get("image_column", "") or ""))
+            label_col = html.escape(str(item.get("label_column", "") or ""))
+            cards.append(
+                '<div style="border:1px solid #d8dee8;border-radius:8px;padding:8px;background:#fff;">'
+                + image_html
+                + f'<div style="margin-top:7px;font-size:12px;line-height:1.4;overflow-wrap:anywhere;"><strong>{title}</strong><br>{label}<br><span style="color:#687386;">image: {image_col}</span><br><span style="color:#687386;">label: {label_col}</span></div></div>'
+            )
+        return (
+            f'<p style="font-size:11px;color:#687386;line-height:1.4;">{note}</p>'
+            '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:10px;width:100%;">'
+            + ''.join(cards)
+            + '</div>'
+        )
+
+    # ------------------------------------------------------------------
+    # Cache discovery and local-first helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _normalised_repo_cache_name(repo_id: str) -> str:
+        return "datasets--" + str(repo_id).strip().replace("/", "--")
+
+    def _hub_cache_roots(self) -> list[Path | None]:
+        roots: list[Path | None] = [None]
+
+        if self.configured_cache_dir is not None:
+            roots.extend(
+                [
+                    self.configured_cache_dir,
+                    self.configured_cache_dir / "hub",
+                    self.configured_cache_dir / "hub_files",
+                    self.configured_cache_dir / "snapshots",
+                ]
+            )
+
+        roots.extend(
+            [
+                self.cache_dir / "hub",
+                self.cache_dir / "hub_files",
+                self.cache_dir / "snapshots",
+            ]
+        )
+
+        seen: set[str] = set()
+        out: list[Path | None] = []
+        for root in roots:
+            key = "<default>" if root is None else str(root.expanduser())
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(root)
+        return out
+
+    def _datasets_cache_roots(self) -> list[Path | None]:
+        roots: list[Path | None] = [None]
+
+        if self.configured_cache_dir is not None:
+            roots.extend(
+                [
+                    self.configured_cache_dir,
+                    self.configured_cache_dir / "datasets",
+                    self.configured_cache_dir / "datasets_cache",
+                ]
+            )
+
+        roots.extend(
+            [
+                self.cache_dir / "datasets",
+                self.cache_dir / "datasets_cache",
+            ]
+        )
+
+        seen: set[str] = set()
+        out: list[Path | None] = []
+        for root in roots:
+            key = "<default>" if root is None else str(root.expanduser())
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(root)
+        return out
+
+    @staticmethod
+    def _default_hub_cache_dir() -> Path:
+        try:
+            from huggingface_hub.constants import HF_HUB_CACHE
+
+            return Path(HF_HUB_CACHE).expanduser()
+        except Exception:
+            root = os.environ.get("HF_HOME")
+            if root:
+                return Path(root).expanduser() / "hub"
+            root = os.environ.get("HF_HUB_CACHE")
+            if root:
+                return Path(root).expanduser()
+            return Path.home() / ".cache" / "huggingface" / "hub"
+
+    @staticmethod
+    def _default_datasets_cache_dir() -> Path:
+        try:
+            import datasets
+
+            value = getattr(getattr(datasets, "config", None), "HF_DATASETS_CACHE", None)
+            if value:
+                return Path(value).expanduser()
+        except Exception:
+            pass
+
+        root = os.environ.get("HF_DATASETS_CACHE")
+        if root:
+            return Path(root).expanduser()
+        root = os.environ.get("HF_HOME")
+        if root:
+            return Path(root).expanduser() / "datasets"
+        return Path.home() / ".cache" / "huggingface" / "datasets"
+
+    def cache_status(self, repo_id: str) -> HFCacheStatus:
+        repo_id = str(repo_id or "").strip()
+        status = HFCacheStatus(repo_id=repo_id)
+        if not repo_id:
+            return status
+
+        repo_cache_name = self._normalised_repo_cache_name(repo_id)
+        locations: list[str] = []
+
+        hub_roots: list[Path] = [self._default_hub_cache_dir()]
+        hub_roots.extend(
+            root
+            for root in self._hub_cache_roots()
+            if root is not None
+        )
+
+        for root in hub_roots:
+            root = Path(root).expanduser()
+            candidates = [
+                root / repo_cache_name,
+                root / "hub" / repo_cache_name,
+                root / "hub_files" / repo_cache_name,
+                root / "snapshots" / repo_cache_name,
+            ]
+            for candidate in candidates:
+                if candidate.exists():
+                    status.hub_cached = True
+                    locations.append(str(candidate))
+                    break
+
+        datasets_roots: list[Path] = [self._default_datasets_cache_dir()]
+        datasets_roots.extend(
+            root
+            for root in self._datasets_cache_roots()
+            if root is not None
+        )
+
+        owner, _, name = repo_id.partition("/")
+        search_tokens = {
+            repo_id.replace("/", "___"),
+            repo_id.replace("/", "--"),
+            repo_id.replace("/", "_"),
+            name,
+        }
+        if owner:
+            search_tokens.add(owner)
+
+        for root in datasets_roots:
+            root = Path(root).expanduser()
+            if not root.exists():
+                continue
+            matched = False
+            try:
+                for child in root.iterdir():
+                    child_name = child.name
+                    if name and name not in child_name:
+                        continue
+                    if any(token and token in child_name for token in search_tokens):
+                        status.datasets_cached = True
+                        locations.append(str(child))
+                        matched = True
+                        break
+            except Exception:
+                matched = False
+            if matched:
+                continue
+
+        status.locations = list(dict.fromkeys(locations))
+        return status
+
+    def _hub_download_kwargs(
+        self,
+        *,
+        repo_id: str,
+        filename: str | None = None,
+        token: str | None = None,
+        cache_root: Path | None = None,
+        local_files_only: bool = False,
+    ) -> dict[str, Any]:
+        kwargs: dict[str, Any] = {
+            "repo_id": repo_id,
+            "repo_type": "dataset",
+            "token": token or self.token,
+            "local_files_only": bool(local_files_only),
+        }
+        if filename is not None:
+            kwargs["filename"] = filename
+        if cache_root is not None:
+            kwargs["cache_dir"] = str(cache_root)
+        return kwargs
+
+    @staticmethod
+    def _call_with_compatible_kwargs(func: Any, kwargs: dict[str, Any]) -> Any:
+        attempt = dict(kwargs)
+        removable = (
+            "token",
+            "tqdm_class",
+            "max_workers",
+        )
+        while True:
+            try:
+                return func(**attempt)
+            except TypeError as exc:
+                message = str(exc)
+                removed = False
+                for key in removable:
+                    if key in attempt and key in message:
+                        attempt.pop(key, None)
+                        removed = True
+                        break
+                if not removed:
+                    raise
+
+    def _datasets_kwargs_for_cache(
+        self,
+        *,
+        token: str | None,
+        trust_remote_code: bool,
+        cache_root: Path | None,
+        local_files_only: bool,
+        streaming: bool | None = None,
+    ) -> dict[str, Any]:
+        kwargs: dict[str, Any] = {}
+        if cache_root is not None:
+            kwargs["cache_dir"] = str(cache_root)
+        if trust_remote_code:
+            kwargs["trust_remote_code"] = True
+        resolved_token = token or self.token
+        if resolved_token:
+            kwargs["token"] = resolved_token
+        if streaming is not None:
+            kwargs["streaming"] = bool(streaming)
+
+        if local_files_only:
+            try:
+                from datasets import DownloadConfig
+
+                kwargs["download_config"] = DownloadConfig(local_files_only=True)
+            except Exception:
+                pass
+
+        return kwargs
 
     # ------------------------------------------------------------------
     # Search
@@ -240,20 +619,44 @@ class HuggingFaceDatasetService:
     ):
         from datasets import load_dataset_builder
 
-        kwargs = self._hf_kwargs(
+        def _load(kwargs: dict[str, Any]):
+            try:
+                if config_name:
+                    return load_dataset_builder(repo_id, name=config_name, **kwargs)
+                return load_dataset_builder(repo_id, **kwargs)
+            except TypeError:
+                retry = dict(kwargs)
+                retry.pop("trust_remote_code", None)
+                retry.pop("token", None)
+                if config_name:
+                    return load_dataset_builder(repo_id, name=config_name, **retry)
+                return load_dataset_builder(repo_id, **retry)
+
+        last_local_error: BaseException | None = None
+        for cache_root in self._datasets_cache_roots():
+            kwargs = self._datasets_kwargs_for_cache(
+                token=token,
+                trust_remote_code=trust_remote_code,
+                cache_root=cache_root,
+                local_files_only=True,
+            )
+            try:
+                return _load(kwargs)
+            except Exception as exc:
+                last_local_error = exc
+
+        kwargs = self._datasets_kwargs_for_cache(
             token=token,
             trust_remote_code=trust_remote_code,
+            cache_root=self.configured_cache_dir,
+            local_files_only=False,
         )
-
         try:
-            if config_name:
-                return load_dataset_builder(repo_id, name=config_name, **kwargs)
-            return load_dataset_builder(repo_id, **kwargs)
-        except TypeError:
-            kwargs.pop("trust_remote_code", None)
-            if config_name:
-                return load_dataset_builder(repo_id, name=config_name, **kwargs)
-            return load_dataset_builder(repo_id, **kwargs)
+            return _load(kwargs)
+        except Exception:
+            if last_local_error is not None:
+                raise
+            raise
 
     def search_datasets(
         self,
@@ -313,6 +716,42 @@ class HuggingFaceDatasetService:
             if last_exc:
                 raise last_exc
             infos = []
+
+        if query and "/" in query:
+            exact_query = str(query).strip()
+            try:
+                exact_info = api.dataset_info(
+                    exact_query,
+                    files_metadata=False,
+                    token=resolved_token,
+                )
+            except TypeError:
+                try:
+                    exact_info = api.dataset_info(exact_query, token=resolved_token)
+                except Exception:
+                    exact_info = None
+            except Exception:
+                exact_info = None
+
+            if exact_info is not None:
+                exact_id = (
+                    getattr(exact_info, "id", None)
+                    or getattr(exact_info, "repo_id", None)
+                    or exact_query
+                )
+                infos = [
+                    exact_info,
+                    *[
+                        info
+                        for info in infos
+                        if str(
+                            getattr(info, "id", None)
+                            or getattr(info, "repo_id", None)
+                            or ""
+                        ).casefold()
+                        != str(exact_id).casefold()
+                    ],
+                ]
 
         results: list[HFDatasetSearchResult] = []
         for info in infos:
@@ -387,9 +826,12 @@ class HuggingFaceDatasetService:
             sort=sort,
             token=token,
         ):
+            cache = self.cache_status(result.repo_id)
             rows.append(
                 {
                     "repo_id": result.repo_id,
+                    "cached": "Yes" if cache.cached else "",
+                    "cache": cache.label,
                     "downloads": result.downloads,
                     "likes": result.likes,
                     "last_modified": result.last_modified,
@@ -417,7 +859,6 @@ class HuggingFaceDatasetService:
             return str(features.get(column, ""))
         except Exception:
             return ""
-
 
     def feature_looks_like_shard_labels(self, feature_text: str) -> bool:
         """
@@ -447,7 +888,6 @@ class HuggingFaceDatasetService:
 
         return shard_like / max(len(names), 1) >= 0.8
 
-
     def selected_builder_label_is_non_semantic(
         self,
         details: Any,
@@ -464,7 +904,6 @@ class HuggingFaceDatasetService:
             column=label_column,
         )
         return self.feature_looks_like_shard_labels(feature_text)
-
 
     def _looks_like_non_label_folder(self, folder_name: str) -> bool:
         cleaned = str(folder_name or "").strip().lower()
@@ -506,7 +945,6 @@ class HuggingFaceDatasetService:
                     label_candidates.append(col)
 
         return image_candidates, label_candidates
-
 
     def get_dataset_details_builder(
         self,
@@ -643,7 +1081,6 @@ class HuggingFaceDatasetService:
 
         return details
 
-
     def get_config_names_builder(
         self,
         repo_id: str,
@@ -662,7 +1099,6 @@ class HuggingFaceDatasetService:
             configs = list(get_dataset_config_names(repo_id, **kwargs))
 
         return [str(config) for config in configs] or ["default"]
-
 
     def get_split_names_builder(
         self,
@@ -689,7 +1125,6 @@ class HuggingFaceDatasetService:
                 splits = list(get_dataset_split_names(repo_id, **kwargs))
 
         return [str(split) for split in splits] or ["train"]
-
 
     def get_features_builder(
         self,
@@ -735,136 +1170,161 @@ class HuggingFaceDatasetService:
         trust_remote_code: bool = False,
         thumb_size: int = 180,
     ) -> str:
-        """
-        Preview through Hugging Face Datasets.
-
-        This is slower than Hub-file preview, but it can show actual label columns
-        when the dataset exposes them.
-        """
-
-        dataset = self.load_split(
+        result = self.preview_image_items_builder(
             repo_id=repo_id,
             config_name=config_name,
             split=split,
+            image_column=image_column,
+            label_column=label_column,
+            id_column=id_column,
+            limit=limit,
             token=token,
             trust_remote_code=trust_remote_code,
-            streaming=True,
+            thumb_size=thumb_size,
         )
+        return self._preview_result_to_html(result, thumb_size=thumb_size)
 
-        features = getattr(dataset, "features", {}) or {}
+    def preview_image_items_builder(
+        self,
+        *,
+        repo_id: str,
+        config_name: str | None,
+        split: str,
+        image_column: str | None = None,
+        label_column: str | None = None,
+        id_column: str | None = None,
+        limit: int = 12,
+        token: str | None = None,
+        trust_remote_code: bool = False,
+        thumb_size: int = 180,
+    ) -> dict[str, Any]:
+        """Preview structured rows, preferring prepared local Arrow data."""
+        repo_id = str(repo_id or "").strip()
+        config_key = str(config_name or "default")
+        split = str(split or "train")
+        limit = max(1, int(limit or 12))
+        thumb_size = max(32, int(thumb_size or 180))
+        key = (
+            "builder", repo_id, config_key, split, str(image_column or ""),
+            str(label_column or ""), str(id_column or ""), limit, thumb_size,
+        )
+        cached = self._preview_cache_get(key)
+        if cached is not None:
+            cached["cache_source"] = "preview memory cache"
+            return cached
 
-        image_column = image_column or self.infer_image_column(features, dataset=dataset)
+        dataset_key = (repo_id, config_key, split)
+        with self._preview_lock:
+            dataset = self._preview_dataset_cache.get(dataset_key)
+        cache_source = "prepared local Datasets cache"
 
-        # Prefer explicit UI choice, then normal inference, then common fallback.
-        label_column = label_column or self.infer_label_column(features, dataset=dataset)
-
-        if not image_column:
-            image_column = "image"
-
-        rows = []
-        import itertools
-
-        for index, row in enumerate(itertools.islice(iter(dataset), max(int(limit or 12), 1))):
-            row = dict(row)
-
-            if not label_column:
-                if "label" in row:
-                    label_column = "label"
-                elif "labels" in row:
-                    label_column = "labels"
-                elif "target" in row:
-                    label_column = "target"
-                elif "class" in row:
-                    label_column = "class"
-
-            record_id = self.record_id_for_row(
-                row,
-                index=index,
+        if dataset is None:
+            dataset = self._load_split_local_only(
+                repo_id=repo_id,
+                config_name=config_name,
                 split=split,
-                id_column=id_column,
+                token=token,
+                trust_remote_code=trust_remote_code,
+                streaming=False,
+            )
+            if dataset is not None:
+                with self._preview_lock:
+                    self._preview_dataset_cache[dataset_key] = dataset
+
+        if dataset is None:
+            cache_source = "streamed from Hugging Face"
+            dataset = self.load_split(
+                repo_id=repo_id,
+                config_name=config_name,
+                split=split,
+                token=token,
+                trust_remote_code=trust_remote_code,
+                streaming=True,
             )
 
+        features = getattr(dataset, "features", {}) or {}
+        image_column = image_column or self.infer_image_column(features, dataset=dataset) or "image"
+        label_column = label_column or self.infer_label_column(features, dataset=dataset)
+
+        # Decode=False keeps row access cheap and lets thumbnail conversion run
+        # concurrently below instead of decoding every image serially here.
+        preview_dataset = self.cast_image_decode_false(dataset, image_column)
+
+        import itertools
+        if hasattr(preview_dataset, "select"):
+            try:
+                available = len(preview_dataset)
+                rows_iter = (preview_dataset[index] for index in range(min(limit, available)))
+            except Exception:
+                rows_iter = itertools.islice(iter(preview_dataset), limit)
+        else:
+            rows_iter = itertools.islice(iter(preview_dataset), limit)
+
+        raw_rows = [(index, dict(row)) for index, row in enumerate(rows_iter)]
+        if not label_column:
+            for _index, row in raw_rows:
+                for candidate in ("label", "labels", "target", "class", "category"):
+                    if candidate in row:
+                        label_column = candidate
+                        break
+                if label_column:
+                    break
+
+        def build_item(index_and_row: tuple[int, dict[str, Any]]) -> dict[str, Any]:
+            index, row = index_and_row
+            record_id = self.record_id_for_row(row, index=index, split=split, id_column=id_column)
             label_value = row.get(label_column) if label_column else ""
             label_name = self.label_to_name(features, label_column, label_value)
             label_display = label_name if label_name != "" else label_value
-
-            data_uri = ""
             try:
-                data_uri = self.image_value_to_data_uri(
-                    row.get(image_column),
-                    max_size=thumb_size,
-                )
+                data_uri = self.image_value_to_data_uri(row.get(image_column), max_size=thumb_size)
             except Exception:
                 data_uri = ""
+            return {
+                "record_id": str(record_id),
+                "label": "" if label_display is None else str(label_display),
+                "image_column": str(image_column or ""),
+                "label_column": str(label_column or ""),
+                "source": cache_source,
+                "data_uri": data_uri,
+            }
 
-            rows.append(
-                {
-                    "record_id": record_id,
-                    "label": label_display,
-                    "image_column": image_column,
-                    "label_column": label_column or "",
-                    "data_uri": data_uri,
-                }
-            )
+        workers = min(8, max(1, len(raw_rows)))
+        if workers > 1:
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                items = list(executor.map(build_item, raw_rows))
+        else:
+            items = [build_item(row) for row in raw_rows]
 
-        if not rows:
-            return "<p>No preview rows were returned.</p>"
-
-        cards = []
-        for row in rows:
-            img = row.get("data_uri", "")
-            title = html.escape(str(row.get("record_id", "")))
-            label = html.escape(str(row.get("label", "")))
-            image_col = html.escape(str(row.get("image_column", "")))
-            label_col = html.escape(str(row.get("label_column", "")))
-
-            if img:
-                image_html = (
-                    f'<img src="{img}" style="max-width:100%; max-height:{thumb_size}px; '
-                    f'object-fit:contain; display:block; margin:auto;" />'
-                )
-            else:
-                image_html = (
-                    '<div style="height:150px; display:flex; align-items:center; '
-                    'justify-content:center; background:#eee; color:#777;">Preview unavailable</div>'
-                )
-
-            cards.append(
-                f"""
-                <div style="border:1px solid #ddd; border-radius:6px; padding:8px; background:white;">
-                <div style="height:{thumb_size}px; display:flex; align-items:center; justify-content:center; background:#111;">
-                    {image_html}
-                </div>
-                <div style="font-size:12px; margin-top:6px; word-break:break-all;">
-                    <b>{title}</b><br/>
-                    <span>{label}</span><br/>
-                    <span style="color:#777;">image: {image_col}</span><br/>
-                    <span style="color:#777;">label: {label_col}</span>
-                </div>
-                </div>
-                """
-            )
-
-        return f"""
-        <p style="font-size:12px; color:#555;">
-        Builder preview may resolve dataset files, but can expose actual label columns.
-        </p>
-        <div style="
-        display:grid;
-        grid-template-columns:repeat(auto-fill, minmax(180px, 1fr));
-        gap:10px;
-        width:100%;
-        ">
-        {''.join(cards)}
-        </div>
-        """
+        result = {
+            "items": items,
+            "count": len(items),
+            "cache_source": cache_source,
+            "note": (
+                "Prepared local dataset data were used."
+                if cache_source.startswith("prepared")
+                else "No prepared local copy was available, so preview rows were streamed."
+            ),
+        }
+        self._preview_cache_put(key, result)
+        return result
 
     def image_value_to_data_uri(self, value: Any, *, max_size: int = 180) -> str:
         from PIL import Image as PILImage
-        from PIL import ImageOps
+
+        if value is None:
+            return ""
+        if hasattr(value, "copy") and hasattr(value, "save"):
+            try:
+                return self.image_to_preview_data_uri(
+                    value.copy(),
+                    size=int(max_size or 180),
+                    fill=True,
+                )
+            except Exception:
+                pass
 
         raw: bytes | None = None
-
         if isinstance(value, dict):
             if value.get("bytes") is not None:
                 raw = value["bytes"]
@@ -874,22 +1334,17 @@ class HuggingFaceDatasetService:
                     return ""
                 path = Path(path_text).expanduser()
                 if path.exists():
-                    raw = path.read_bytes()
+                    return self.local_image_to_data_uri(path, max_size=max_size)
         elif isinstance(value, (str, Path)):
             text = str(value)
             if text.startswith("hf://"):
                 return ""
             path = Path(text).expanduser()
             if path.exists():
-                raw = path.read_bytes()
-        elif hasattr(value, "save"):
-            buffer = BytesIO()
-            value.save(buffer, format="PNG")
-            raw = buffer.getvalue()
+                return self.local_image_to_data_uri(path, max_size=max_size)
 
         if raw is None:
             return ""
-
         with PILImage.open(BytesIO(raw)) as image:
             return self.image_to_preview_data_uri(
                 image,
@@ -1002,14 +1457,24 @@ class HuggingFaceDatasetService:
         split: str | None = None,
         max_files: int = 0,
     ) -> list[HFImageFile]:
-        from huggingface_hub import HfApi
-
-        api = HfApi(token=token or self.token)
-        max_files = int(max_files or 0)
+        """List image files while reusing the listing produced by inspection."""
+        repo_id = str(repo_id or "").strip()
+        max_files = max(0, int(max_files or 0))
         wanted_split = self._normalise_split(split) if split else None
 
-        files: list[HFImageFile] = []
+        with self._preview_lock:
+            cached_entry = self._image_file_cache.get(repo_id)
+        if cached_entry is not None:
+            cached_files, complete = cached_entry
+            filtered = [
+                item for item in cached_files
+                if wanted_split is None or item.split == wanted_split
+            ]
+            if complete or (max_files and len(filtered) >= max_files):
+                return list(filtered[:max_files] if max_files else filtered)
 
+        from huggingface_hub import HfApi
+        api = HfApi(token=token or self.token)
         try:
             tree_iter = api.list_repo_tree(
                 repo_id=repo_id,
@@ -1024,39 +1489,41 @@ class HuggingFaceDatasetService:
                 recursive=True,
             )
 
+        files: list[HFImageFile] = []
+        exhausted = True
+        matching_count = 0
         for item in tree_iter:
-            path = (
-                getattr(item, "path", None)
-                or getattr(item, "rfilename", None)
-                or ""
-            )
-            if not path:
+            path = getattr(item, "path", None) or getattr(item, "rfilename", None) or ""
+            if not path or not self._is_image_path(path):
                 continue
-
-            if not self._is_image_path(path):
-                continue
-
             detected_split = self.infer_split_from_path(path)
-            if wanted_split and detected_split != wanted_split:
-                continue
-
-            files.append(
-                HFImageFile(
-                    path=str(path),
-                    split=detected_split,
-                    label=self.infer_label_from_path(path, detected_split),
-                    size=getattr(item, "size", None),
-                )
+            image_file = HFImageFile(
+                path=str(path),
+                split=detected_split,
+                label=self.infer_label_from_path(path, detected_split),
+                size=getattr(item, "size", None),
             )
-
-            if max_files and len(files) >= max_files:
+            files.append(image_file)
+            if wanted_split is None or detected_split == wanted_split:
+                matching_count += 1
+            if max_files and matching_count >= max_files:
+                exhausted = False
                 break
 
-        return files
+        with self._preview_lock:
+            previous, previous_complete = self._image_file_cache.get(repo_id, ([], False))
+            by_path = {item.path: item for item in previous}
+            by_path.update({item.path: item for item in files})
+            self._image_file_cache[repo_id] = (
+                list(by_path.values()),
+                bool(previous_complete or exhausted),
+            )
 
-    # ------------------------------------------------------------------
-    # Preview: download only displayed files
-    # ------------------------------------------------------------------
+        filtered = [
+            item for item in files
+            if wanted_split is None or item.split == wanted_split
+        ]
+        return filtered[:max_files] if max_files else filtered
 
     def preview_image_grid_html(
         self,
@@ -1072,82 +1539,92 @@ class HuggingFaceDatasetService:
         trust_remote_code: bool = False,
         thumb_size: int = 180,
     ) -> str:
+        del config_name, image_column, label_column, id_column, trust_remote_code
+        result = self.preview_image_items(
+            repo_id=repo_id,
+            split=split,
+            limit=limit,
+            token=token,
+            thumb_size=thumb_size,
+        )
+        return self._preview_result_to_html(result, thumb_size=thumb_size)
+
+    def preview_image_items(
+        self,
+        *,
+        repo_id: str,
+        split: str,
+        limit: int = 12,
+        token: str | None = None,
+        thumb_size: int = 180,
+    ) -> dict[str, Any]:
+        """Resolve file previews concurrently and consult local caches first."""
+        repo_id = str(repo_id or "").strip()
+        split = str(split or "train")
+        limit = max(1, int(limit or 12))
+        thumb_size = max(32, int(thumb_size or 180))
+        key = ("files", repo_id, split, limit, thumb_size)
+        cached = self._preview_cache_get(key)
+        if cached is not None:
+            cached["cache_source"] = "preview memory cache"
+            return cached
+
         files = self.list_image_files(
             repo_id,
             token=token or self.token,
-            split=split or "train",
-            max_files=max(int(limit or 12), 1),
+            split=split,
+            max_files=limit,
+        )
+        if not files:
+            result = {
+                "items": [],
+                "count": 0,
+                "cache_source": "none",
+                "note": "No image files were found for this split.",
+            }
+            self._preview_cache_put(key, result)
+            return result
+
+        resolved = self.download_files_parallel(
+            repo_id,
+            [item.path for item in files],
+            token=token or self.token,
+            max_workers=min(8, len(files)),
         )
 
-        if not files:
-            return (
-                "<p>No image files were found for this split. "
-                "Try a different split or import with the full dataset path.</p>"
-            )
-
-        cards = []
-        for index, file in enumerate(files):
-            record_id = f"{file.split}:{index}"
-            label = file.label or "no inferred label"
-
-            data_uri = ""
+        def build_item(index_and_file: tuple[int, HFImageFile]) -> dict[str, Any]:
+            index, file = index_and_file
+            local_path = resolved.get(file.path, "")
             try:
-                local_path = self.download_file(
-                    repo_id,
-                    file.path,
-                    token=token or self.token,
-                )
-                data_uri = self.local_image_to_data_uri(
-                    local_path,
-                    max_size=thumb_size,
-                )
+                data_uri = self.local_image_to_data_uri(local_path, max_size=thumb_size)
             except Exception:
                 data_uri = ""
+            return {
+                "record_id": f"{file.split}:{index}",
+                "label": str(file.label or "no inferred label"),
+                "image_column": "Hub image file",
+                "label_column": "folder/path inference",
+                "path": file.path,
+                "source": "local Hugging Face cache or resolved Hub file",
+                "data_uri": data_uri,
+            }
 
-            title = html.escape(record_id)
-            label_text = html.escape(str(label))
-            path_text = html.escape(file.path)
+        workers = min(8, max(1, len(files)))
+        if workers > 1:
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                items = list(executor.map(build_item, enumerate(files)))
+        else:
+            items = [build_item(item) for item in enumerate(files)]
 
-            if data_uri:
-                image_html = (
-                    f'<img src="{data_uri}" style="max-width:100%; max-height:{thumb_size}px; '
-                    f'object-fit:contain; display:block; margin:auto;" />'
-                )
-            else:
-                image_html = (
-                    '<div style="height:150px; display:flex; align-items:center; '
-                    'justify-content:center; background:#eee; color:#777;">Preview unavailable</div>'
-                )
+        result = {
+            "items": items,
+            "count": len(items),
+            "cache_source": "local-first Hugging Face file cache",
+            "note": f"Resolved {len(items)} preview image(s) concurrently; cached files were reused first.",
+        }
+        self._preview_cache_put(key, result)
+        return result
 
-            cards.append(
-                f"""
-                <div style="border:1px solid #ddd; border-radius:6px; padding:8px; background:white;">
-                  <div style="height:{thumb_size}px; display:flex; align-items:center; justify-content:center; background:#111;">
-                    {image_html}
-                  </div>
-                  <div style="font-size:12px; margin-top:6px; word-break:break-all;">
-                    <b>{title}</b><br/>
-                    <span>{label_text}</span><br/>
-                    <span style="color:#777;">{path_text}</span>
-                  </div>
-                </div>
-                """
-            )
-
-        return f"""
-        <p style="font-size:12px; color:#555;">
-          Preview downloaded only {len(files)} displayed file(s). Full split registration uses batch snapshot download.
-        </p>
-        <div style="
-          display:grid;
-          grid-template-columns:repeat(auto-fill, minmax(180px, 1fr));
-          gap:10px;
-          width:100%;
-        ">
-          {''.join(cards)}
-        </div>
-        """
-    
     def download_files_parallel(
         self,
         repo_id: str,
@@ -1163,9 +1640,9 @@ class HuggingFaceDatasetService:
         Returns:
             {hub_relative_path: local_cache_path}
 
-        This is intentionally used for full import/register, where the UI needs
-        useful progress feedback. Preview still uses single-file downloads because
-        it only displays a few images.
+        This is used by full imports and by small preview batches. Every worker
+        probes local caches before network access, so cached previews complete
+        without serial per-file Hub requests.
         """
 
         clean_paths = [str(path) for path in file_paths if str(path).strip()]
@@ -1268,19 +1745,29 @@ class HuggingFaceDatasetService:
     ) -> str:
         from huggingface_hub import hf_hub_download
 
-        kwargs = {
-            "repo_id": repo_id,
-            "filename": filename,
-            "repo_type": "dataset",
-            "cache_dir": str(self.cache_dir / "hub_files"),
-            "token": token or self.token,
-        }
+        # Probe all known caches without network access first.  This includes
+        # the standard Hugging Face cache and AstronomicAL's legacy locations.
+        for cache_root in self._hub_cache_roots():
+            kwargs = self._hub_download_kwargs(
+                repo_id=repo_id,
+                filename=filename,
+                token=token,
+                cache_root=cache_root,
+                local_files_only=True,
+            )
+            try:
+                return str(self._call_with_compatible_kwargs(hf_hub_download, kwargs))
+            except Exception:
+                continue
 
-        try:
-            return hf_hub_download(**kwargs)
-        except TypeError:
-            kwargs.pop("token", None)
-            return hf_hub_download(**kwargs)
+        kwargs = self._hub_download_kwargs(
+            repo_id=repo_id,
+            filename=filename,
+            token=token,
+            cache_root=self.configured_cache_dir,
+            local_files_only=False,
+        )
+        return str(self._call_with_compatible_kwargs(hf_hub_download, kwargs))
 
     # ------------------------------------------------------------------
     # Import: batch snapshot download
@@ -1295,13 +1782,7 @@ class HuggingFaceDatasetService:
         max_workers: int = 16,
         quiet: bool = True,
     ) -> str:
-        """
-        Download a set of files in one snapshot_download call.
-
-        Returns the local snapshot directory. Local file path for a Hub path is:
-
-            Path(snapshot_dir) / hub_relative_path
-        """
+        """Resolve a filtered dataset snapshot, preferring local caches."""
 
         from huggingface_hub import snapshot_download
 
@@ -1309,37 +1790,38 @@ class HuggingFaceDatasetService:
         if not clean_paths:
             raise ValueError("No file paths supplied for snapshot download.")
 
-        kwargs: dict[str, Any] = {
-            "repo_id": repo_id,
-            "repo_type": "dataset",
-            "cache_dir": str(self.cache_dir / "snapshots"),
-            "allow_patterns": clean_paths,
-            "max_workers": max(int(max_workers or 16), 1),
-            "token": token or self.token,
-        }
+        def _kwargs(cache_root: Path | None, *, local_only: bool) -> dict[str, Any]:
+            kwargs: dict[str, Any] = {
+                "repo_id": repo_id,
+                "repo_type": "dataset",
+                "allow_patterns": clean_paths,
+                "max_workers": max(int(max_workers or 16), 1),
+                "token": token or self.token,
+                "local_files_only": bool(local_only),
+            }
+            if cache_root is not None:
+                kwargs["cache_dir"] = str(cache_root)
+            if quiet:
+                kwargs["tqdm_class"] = SilentTqdm
+            return kwargs
 
-        if quiet:
-            kwargs["tqdm_class"] = SilentTqdm
+        for cache_root in self._hub_cache_roots():
+            try:
+                return str(
+                    self._call_with_compatible_kwargs(
+                        snapshot_download,
+                        _kwargs(cache_root, local_only=True),
+                    )
+                )
+            except Exception:
+                continue
 
-        # Different huggingface_hub versions support slightly different kwargs.
-        try:
-            return snapshot_download(**kwargs)
-        except TypeError as exc:
-            message = str(exc)
-
-            if "tqdm_class" in message:
-                kwargs.pop("tqdm_class", None)
-                return snapshot_download(**kwargs)
-
-            if "max_workers" in message:
-                kwargs.pop("max_workers", None)
-                return snapshot_download(**kwargs)
-
-            if "token" in message:
-                kwargs.pop("token", None)
-                return snapshot_download(**kwargs)
-
-            raise
+        return str(
+            self._call_with_compatible_kwargs(
+                snapshot_download,
+                _kwargs(self.configured_cache_dir, local_only=False),
+            )
+        )
 
     def image_to_preview_data_uri(
         self,
@@ -1424,18 +1906,40 @@ class HuggingFaceDatasetService:
     ):
         from datasets import load_dataset
 
-        kwargs = self._hf_kwargs(token=token, trust_remote_code=trust_remote_code)
-        kwargs["streaming"] = bool(streaming)
+        def _load(kwargs: dict[str, Any]):
+            try:
+                if config_name:
+                    return load_dataset(repo_id, name=config_name, split=split, **kwargs)
+                return load_dataset(repo_id, split=split, **kwargs)
+            except TypeError:
+                retry = dict(kwargs)
+                retry.pop("trust_remote_code", None)
+                retry.pop("token", None)
+                if config_name:
+                    return load_dataset(repo_id, name=config_name, split=split, **retry)
+                return load_dataset(repo_id, split=split, **retry)
 
-        try:
-            if config_name:
-                return load_dataset(repo_id, name=config_name, split=split, **kwargs)
-            return load_dataset(repo_id, split=split, **kwargs)
-        except TypeError:
-            kwargs.pop("trust_remote_code", None)
-            if config_name:
-                return load_dataset(repo_id, name=config_name, split=split, **kwargs)
-            return load_dataset(repo_id, split=split, **kwargs)
+        for cache_root in self._datasets_cache_roots():
+            kwargs = self._datasets_kwargs_for_cache(
+                token=token,
+                trust_remote_code=trust_remote_code,
+                cache_root=cache_root,
+                local_files_only=True,
+                streaming=streaming,
+            )
+            try:
+                return _load(kwargs)
+            except Exception:
+                continue
+
+        kwargs = self._datasets_kwargs_for_cache(
+            token=token,
+            trust_remote_code=trust_remote_code,
+            cache_root=self.configured_cache_dir,
+            local_files_only=False,
+            streaming=streaming,
+        )
+        return _load(kwargs)
 
     def cast_image_decode_false(self, dataset: Any, image_column: str) -> Any:
         try:
@@ -1486,23 +1990,92 @@ class HuggingFaceDatasetService:
         return f"{split}:{index}"
 
     def label_to_name(self, features: Any, label_column: str | None, value: Any) -> str:
-        if label_column is None:
-            return ""
-        try:
-            feature = features[label_column]
-        except Exception:
+        if value is None:
             return ""
 
-        if hasattr(feature, "int2str"):
+        if isinstance(value, str):
+            return value
+
+        feature = None
+        if label_column is not None:
+            try:
+                feature = features[label_column]
+            except Exception:
+                feature = None
+
+        if isinstance(value, (list, tuple)):
+            names = [
+                self.label_to_name(features, label_column, item)
+                for item in value
+            ]
+            return ", ".join(name for name in names if name)
+
+        if feature is not None and hasattr(feature, "int2str"):
             try:
                 return str(feature.int2str(int(value)))
             except Exception:
-                return ""
+                pass
 
-        return ""
+        names = getattr(feature, "names", None)
+        if names is not None:
+            try:
+                return str(names[int(value)])
+            except Exception:
+                pass
+
+        try:
+            import numpy as np
+
+            if isinstance(value, np.generic):
+                value = value.item()
+        except Exception:
+            pass
+
+        return str(value)
+
+    def choose_builder_columns(
+        self,
+        details: HFDatasetDetails,
+        *,
+        config: str,
+    ) -> tuple[str | None, str | None, str | None]:
+        features = dict(details.features_by_config.get(config, {}) or {})
+        columns = list(features)
+
+        image_candidates = list(details.image_column_candidates or [])
+        if not image_candidates:
+            image_candidates, _ = self._feature_candidates_from_features(features)
+
+        label_candidates = list(details.label_column_candidates or [])
+        if not label_candidates:
+            _, label_candidates = self._feature_candidates_from_features(features)
+
+        image_column = image_candidates[0] if image_candidates else None
+
+        label_column = None
+        for candidate in label_candidates:
+            if not self.feature_looks_like_shard_labels(features.get(candidate, "")):
+                label_column = candidate
+                break
+
+        id_column = None
+        for candidate in (
+            "record_id",
+            "id",
+            "image_id",
+            "file_name",
+            "filename",
+            "path",
+        ):
+            if candidate in columns:
+                id_column = candidate
+                break
+
+        return image_column, label_column, id_column
 
     # ------------------------------------------------------------------
     # Path inference helpers
+
     # ------------------------------------------------------------------
 
     @staticmethod
@@ -1568,7 +2141,6 @@ class HuggingFaceDatasetService:
 
         return self.infer_label_from_filename(path)
 
-
     def infer_label_from_filename(self, path: str) -> str:
         """
         Infer labels from filenames only when the filename looks intentionally
@@ -1620,7 +2192,6 @@ class HuggingFaceDatasetService:
         )
         return ranked[0][0]
 
-
     def _normalise_filename_label_candidate(self, value: str) -> str:
         text = str(value or "").strip()
         if not text:
@@ -1645,7 +2216,6 @@ class HuggingFaceDatasetService:
         text = re.sub(r"\s+", " ", text).strip()
 
         return text
-
 
     def _looks_like_filename_label_candidate(self, value: str) -> bool:
         text = str(value or "").strip()
@@ -1695,18 +2265,12 @@ class HuggingFaceDatasetService:
         token: str | None = None,
         trust_remote_code: bool = False,
     ) -> dict[str, Any]:
-        kwargs: dict[str, Any] = {
-            "cache_dir": str(self.cache_dir / "datasets_cache"),
-        }
-
-        if trust_remote_code:
-            kwargs["trust_remote_code"] = True
-
-        resolved_token = token or self.token
-        if resolved_token:
-            kwargs["token"] = resolved_token
-
-        return kwargs
+        return self._datasets_kwargs_for_cache(
+            token=token,
+            trust_remote_code=trust_remote_code,
+            cache_root=self.configured_cache_dir,
+            local_files_only=False,
+        )
 
     @staticmethod
     def _feature_to_string(feature: Any) -> str:

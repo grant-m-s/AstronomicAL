@@ -16,10 +16,65 @@ try:
 except ImportError:
     from .service import HuggingFaceDatasetService
 
-
 def slugify(value: str, *, fallback: str = "hf_dataset") -> str:
     slug = re.sub(r"[^a-zA-Z0-9_.-]+", "_", str(value)).strip("._-")
     return slug or fallback
+
+def find_registered_hf_dataset(
+    context: Any,
+    *,
+    repo_id: str,
+    config_name: str | None,
+    split: str,
+) -> str | None:
+    datasets = getattr(context, "datasets", None)
+    if datasets is None:
+        return None
+
+    try:
+        dataset_ids = list(datasets.list_ids())
+    except Exception:
+        return None
+
+    wanted_repo = str(repo_id or "")
+    wanted_config = str(config_name or "")
+    wanted_split = str(split or "train")
+
+    for dataset_id in dataset_ids:
+        try:
+            meta = dict(datasets.get_meta(dataset_id) or {})
+        except Exception:
+            continue
+
+        if str(meta.get("hf_dataset_id") or "") != wanted_repo:
+            continue
+        if str(meta.get("hf_config") or "") != wanted_config:
+            continue
+        if str(meta.get("hf_split") or "") != wanted_split:
+            continue
+        return str(dataset_id)
+
+    return None
+
+
+def _unique_dataset_id(context: Any, base: str) -> str:
+    datasets = getattr(context, "datasets", None)
+    if datasets is None:
+        return slugify(base)
+
+    candidate = slugify(base)
+    try:
+        existing = set(str(value) for value in datasets.list_ids())
+    except Exception:
+        existing = set()
+
+    if candidate not in existing:
+        return candidate
+
+    index = 2
+    while f"{candidate}_{index}" in existing:
+        index += 1
+    return f"{candidate}_{index}"
 
 
 def _emit_progress(progress_callback: Any, **payload: Any) -> None:
@@ -84,7 +139,6 @@ def import_hf_image_dataset_as_manifest(
         progress_callback=progress_callback,
     )
 
-
 def import_hf_files_as_manifest(
     context: Any,
     *,
@@ -114,9 +168,35 @@ def import_hf_files_as_manifest(
 
     service = _get_hf_service(context, token=token)
 
-    dataset_id = slugify(
+    existing_id = find_registered_hf_dataset(
+        context,
+        repo_id=repo_id,
+        config_name=None,
+        split=split,
+    )
+    if existing_id is not None:
+        if set_active:
+            context.datasets.set_active(
+                existing_id,
+                origin="integrations.huggingface",
+            )
+        return {
+            "dataset_id": existing_id,
+            "name": getattr(context.datasets.get(existing_id), "name", existing_id),
+            "rows": context.datasets.row_count(existing_id),
+            "backend": context.datasets.get_meta(existing_id).get("backend", "unknown"),
+            "repo_id": repo_id,
+            "config_name": "",
+            "split": split,
+            "download_method": "existing_registration",
+            "existing": True,
+            "cache_reused": True,
+            "preview": context.datasets.head(existing_id, n=25),
+        }
+
+    dataset_id = _unique_dataset_id(
+        context,
         dataset_id or f"hf_{repo_id}_files_{split}",
-        fallback="hf_image_dataset",
     )
     dataset_name = dataset_name or f"HF {repo_id} [files / {split}]"
 
@@ -154,7 +234,7 @@ def import_hf_files_as_manifest(
         completed=0,
         total=total,
         percent=5,
-        message=f"Found {total} image file(s). Starting download…",
+        message=f"Found {total} image file(s). Resolving local cache before download…",
     )
 
     file_paths = [file.path for file in files]
@@ -272,12 +352,12 @@ def import_hf_files_as_manifest(
             "split": split,
             "image_column": "__hf_file__",
             "label_column": "__hf_path_label__",
-            "download_method": "parallel_hf_hub_download",
+            "download_method": "local_cache_or_hf_hub_download",
+            "cache_reused": True,
             "preview": manifest_df.head(25),
         }
     )
     return result
-
 
 def import_hf_dataset_builder_as_manifest(
     context: Any,
@@ -298,7 +378,7 @@ def import_hf_dataset_builder_as_manifest(
     cancel_token: Any = None,
     progress_callback: Any = None,
 ) -> dict[str, Any]:
-    
+
     repo_id = str(repo_id or "").strip()
 
     _emit_progress(
@@ -337,15 +417,41 @@ def import_hf_dataset_builder_as_manifest(
 
     dataset = service.cast_image_decode_false(dataset, image_column)
 
-    dataset_id = slugify(
+    existing_id = find_registered_hf_dataset(
+        context,
+        repo_id=repo_id,
+        config_name=config_name,
+        split=split,
+    )
+    if existing_id is not None:
+        if set_active:
+            context.datasets.set_active(
+                existing_id,
+                origin="integrations.huggingface",
+            )
+        return {
+            "dataset_id": existing_id,
+            "name": getattr(context.datasets.get(existing_id), "name", existing_id),
+            "rows": context.datasets.row_count(existing_id),
+            "backend": context.datasets.get_meta(existing_id).get("backend", "unknown"),
+            "repo_id": repo_id,
+            "config_name": config_name or "",
+            "split": split,
+            "download_method": "existing_registration",
+            "existing": True,
+            "cache_reused": True,
+            "preview": context.datasets.head(existing_id, n=25),
+        }
+
+    dataset_id = _unique_dataset_id(
+        context,
         dataset_id
         or f"hf_{repo_id}_{config_name or 'default'}_{split}",
-        fallback="hf_image_dataset",
     )
     dataset_name = dataset_name or f"HF {repo_id} [{config_name or 'default'} / {split}]"
 
     asset_cache_dir = (
-        Path(".astronomical_cache/huggingface/assets")
+        service.assets_dir
         / slugify(repo_id)
         / slugify(config_name or "default")
         / slugify(split)
@@ -380,6 +486,9 @@ def import_hf_dataset_builder_as_manifest(
 
         label_value = row.get(label_column) if label_column else None
         label_name = service.label_to_name(features, label_column, label_value)
+        display_label = label_name
+        if display_label in (None, "") and label_value not in (None, ""):
+            display_label = str(_json_safe_scalar(label_value))
 
         manifest_row: dict[str, Any] = {
             "record_id": str(record_id),
@@ -387,7 +496,7 @@ def import_hf_dataset_builder_as_manifest(
             "image_uri": image_uri,
             "media_type": media_type,
             "target_label": _json_safe_scalar(label_value),
-            "target_label_name": label_name,
+            "target_label_name": display_label or "",
             "hf_dataset_id": repo_id,
             "hf_config": config_name or "",
             "hf_split": split,
@@ -450,7 +559,8 @@ def import_hf_dataset_builder_as_manifest(
             "split": split,
             "image_column": image_column,
             "label_column": label_column or "",
-            "download_method": "datasets_builder",
+            "download_method": "datasets_builder_local_first",
+            "cache_reused": True,
             "preview": manifest_df.head(25),
         }
     )
@@ -465,7 +575,6 @@ def import_hf_dataset_builder_as_manifest(
     )
 
     return result
-
 
 def register_manifest_dataset(
     context: Any,
@@ -494,6 +603,7 @@ def register_manifest_dataset(
         "hf_split": split,
         "hf_image_column": image_column,
         "hf_label_column": label_column or "",
+        "loader_id": "integrations.huggingface",
         "row_count": int(len(manifest_df)),
         "columns": [str(col) for col in manifest_df.columns],
         "column_mappings": {
@@ -520,6 +630,7 @@ def register_manifest_dataset(
                     dataset_id,
                     parquet_path,
                     name=dataset_name,
+                    source_path=str(parquet_path),
                     **meta,
                 )
                 backend = "duckdb_parquet"
@@ -587,8 +698,8 @@ def register_manifest_dataset(
         "backend": backend,
         "parquet_path": str(parquet_path) if parquet_path else None,
         "mappings": dict(meta["column_mappings"]),
+        "existing": False,
     }
-
 
 def _get_hf_service(context: Any, *, token: str | None = None) -> HuggingFaceDatasetService:
     services = getattr(context, "services", None)
@@ -607,7 +718,6 @@ def _get_hf_service(context: Any, *, token: str | None = None) -> HuggingFaceDat
                 pass
     return HuggingFaceDatasetService(token=token)
 
-
 def _iter_dataset_rows(dataset: Any, *, max_rows: int = 0):
     if max_rows and max_rows > 0:
         if hasattr(dataset, "select"):
@@ -619,13 +729,11 @@ def _iter_dataset_rows(dataset: Any, *, max_rows: int = 0):
         return iter_limit(dataset, int(max_rows))
     return iter(dataset)
 
-
 def iter_limit(dataset: Any, limit: int):
     for index, row in enumerate(dataset):
         if index >= limit:
             break
         yield row
-
 
 def _materialise_image_reference(
     value: Any,
@@ -678,7 +786,6 @@ def _materialise_image_reference(
         f"Could not convert image value for row {row_index} into a path/URI."
     )
 
-
 def _write_image_bytes(
     raw: bytes,
     *,
@@ -697,7 +804,6 @@ def _write_image_bytes(
         path.write_bytes(raw)
 
     return str(path), path.resolve().as_uri(), media_type
-
 
 def _json_safe_scalar(value: Any) -> Any:
     if value is None:

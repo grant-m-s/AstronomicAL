@@ -14,14 +14,13 @@ from . import importer as importer_mod
 HuggingFaceDatasetService = service_mod.HuggingFaceDatasetService
 import_hf_image_dataset_as_manifest = importer_mod.import_hf_image_dataset_as_manifest
 
-
 manifest = PluginManifest(
     id="integrations.huggingface",
     name="Hugging Face Datasets",
-    version="0.1.0",
+    version="0.2.0",
     description=(
-        "Optional Hugging Face integration for searching, previewing, and "
-        "registering image datasets as AstronomicAL manifest datasets."
+        "Search Hugging Face, inspect image datasets automatically, reuse local "
+        "caches, and register labelled splits as AstronomicAL datasets."
     ),
     requires=[
         "huggingface_hub>=0.24",
@@ -54,7 +53,6 @@ manifest = PluginManifest(
     },
 )
 
-
 def register(api) -> None:
     api.register_service(
         key="client",
@@ -66,12 +64,12 @@ def register(api) -> None:
 
     api.register_panel(
         id="browser",
-        title="Hugging Face Dataset Browser",
+        title="Hugging Face Dataset Importer",
         factory=create_browser_panel,
         description=(
-            "Search Hugging Face datasets, inspect configs/splits/features, "
-            "preview image samples, and register selected splits as "
-            "AstronomicAL image-manifest datasets."
+            "Search Hugging Face datasets, detect configs, splits, image and label "
+            "columns, reuse local caches, preview samples, and import labelled "
+            "splits into AstronomicAL."
         ),
         category="Dataset Importers",
         icon="cloud-download",
@@ -177,7 +175,6 @@ def register(api) -> None:
         },
     )
 
-
 def create_huggingface_service(
     context: Any = None,
     manager: Any = None,
@@ -188,13 +185,11 @@ def create_huggingface_service(
     cache_dir = settings.get("cache_dir")
     return HuggingFaceDatasetService(token=token, cache_dir=cache_dir)
 
-
 def create_browser_panel(context: Any, **kwargs):
     from . import browser as browser_mod
 
     controller = browser_mod.HuggingFaceBrowserPanel(context=context)
     return controller.panel(), controller
-
 
 def import_image_dataset_action(
     context: Any,
@@ -224,7 +219,6 @@ def import_image_dataset_action(
         set_active=bool(params.get("set_active", True)),
         cancel_token=cancel_token,
     )
-
 
 def _empty_to_none(value: Any) -> str | None:
     if value is None:
