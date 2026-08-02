@@ -5,6 +5,9 @@ from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping, Sequence
 
 
+_COMMUNITY_ORIGINS = {"user", "entry_point"}
+
+
 @dataclass(frozen=True)
 class Contribution:
     kind: str
@@ -35,6 +38,8 @@ class PluginSnapshot:
     status: str
     description: str = ""
     source: str = ""
+    origin: str = "unknown"
+    configured_enabled: bool | None = None
     path: str | None = None
     error: str | None = None
     capabilities: tuple[str, ...] = ()
@@ -77,9 +82,24 @@ class PluginSnapshot:
         return self.status in {"disabled", "discovered"}
 
     @property
-    def is_local(self) -> bool:
-        source = self.source.lower()
-        return "local" in source or bool(self.path)
+    def is_community(self) -> bool:
+        return self.origin in _COMMUNITY_ORIGINS
+
+    @property
+    def is_bundled(self) -> bool:
+        return self.origin == "bundled"
+
+    @property
+    def is_development(self) -> bool:
+        return self.origin == "development"
+
+    @property
+    def is_runtime(self) -> bool:
+        return self.origin == "runtime"
+
+    @property
+    def is_reloadable(self) -> bool:
+        return self.is_development
 
     @property
     def contribution_count(self) -> int:
@@ -100,6 +120,8 @@ class PluginManagerSnapshot:
     captured_at: datetime
     plugins: tuple[PluginSnapshot, ...]
     discovery_issues: tuple[DiscoveryIssue, ...]
+    community_plugins_enabled: bool = False
+    plugin_state_error: str | None = None
 
     @property
     def enabled_count(self) -> int:
@@ -117,11 +139,35 @@ class PluginManagerSnapshot:
     def open_panel_count(self) -> int:
         return sum(len(plugin.open_instances) for plugin in self.plugins)
 
+    @property
+    def community_count(self) -> int:
+        return sum(plugin.is_community for plugin in self.plugins)
+
+    @property
+    def configured_community_count(self) -> int:
+        return sum(
+            plugin.is_community and plugin.configured_enabled is True
+            for plugin in self.plugins
+        )
+
+    @property
+    def active_community_count(self) -> int:
+        return sum(
+            plugin.is_community and plugin.status == "enabled"
+            for plugin in self.plugins
+        )
+
 
 def collect_snapshot(context: Any) -> PluginManagerSnapshot:
     manager = getattr(context, "plugins", None)
     if manager is None:
         raise RuntimeError("PluginManager is not available on AppContext.")
+
+    state = _plugin_state(context)
+    community_plugins_enabled = bool(
+        getattr(state, "community_plugins_enabled", False)
+    )
+    plugin_state_error = _optional_text(getattr(state, "load_error", None))
 
     infos = _safe_sequence(manager, "list_plugins")
     open_by_plugin = _open_instances_by_plugin(context, manager)
@@ -167,6 +213,16 @@ def collect_snapshot(context: Any) -> PluginManagerSnapshot:
         if not plugin_id:
             continue
 
+        origin = _origin_text(getattr(info, "origin", "unknown"))
+        configured_enabled: bool | None = None
+        if origin in _COMMUNITY_ORIGINS and state is not None:
+            is_enabled = getattr(state, "is_enabled", None)
+            if callable(is_enabled):
+                try:
+                    configured_enabled = bool(is_enabled(plugin_id))
+                except Exception:
+                    configured_enabled = None
+
         settings: Mapping[str, Any] = {}
         get_settings = getattr(manager, "get_plugin_settings", None)
         if callable(get_settings):
@@ -183,6 +239,8 @@ def collect_snapshot(context: Any) -> PluginManagerSnapshot:
                 status=_status_text(getattr(info, "status", "")),
                 description=str(getattr(info, "description", "") or ""),
                 source=str(getattr(info, "source", "") or ""),
+                origin=origin,
+                configured_enabled=configured_enabled,
                 path=_optional_text(getattr(info, "path", None)),
                 error=_optional_text(getattr(info, "error", None)),
                 capabilities=_strings(getattr(info, "capabilities", ())),
@@ -213,13 +271,17 @@ def collect_snapshot(context: Any) -> PluginManagerSnapshot:
             errors = {}
         issues = [
             DiscoveryIssue(candidate=str(candidate), error=str(error))
-            for candidate, error in sorted(errors.items(), key=lambda item: str(item[0]).lower())
+            for candidate, error in sorted(
+                errors.items(), key=lambda item: str(item[0]).lower()
+            )
         ]
 
     return PluginManagerSnapshot(
         captured_at=datetime.now(timezone.utc),
         plugins=tuple(plugins),
         discovery_issues=tuple(issues),
+        community_plugins_enabled=community_plugins_enabled,
+        plugin_state_error=plugin_state_error,
     )
 
 
@@ -247,6 +309,8 @@ def filter_plugins(
                 plugin.name,
                 plugin.description,
                 plugin.source,
+                plugin.origin,
+                source_label(plugin.origin, plugin.source),
                 plugin.error or "",
                 *plugin.capabilities,
                 *plugin.tags,
@@ -269,18 +333,29 @@ def filter_plugins(
     return filtered
 
 
-def source_label(source: str) -> str:
-    value = str(source or "").lower()
-    if value == "runtime_registration":
+def source_label(origin: str, source: str = "") -> str:
+    origin_value = _origin_text(origin)
+    labels = {
+        "bundled": "Bundled plugin",
+        "user": "Community plugin",
+        "development": "Development plugin",
+        "entry_point": "Python package",
+        "runtime": "Runtime registration",
+    }
+    if origin_value in labels:
+        return labels[origin_value]
+
+    source_value = str(source or "").strip().lower()
+    if source_value == "runtime_registration":
         return "Runtime registration"
-    if "local" in value:
-        return "Local plugin"
-    if "entry_point" in value:
+    if "entry_point" in source_value:
         return "Installed package"
-    if "static_manifest" in value:
+    if "static_manifest" in source_value:
         return "Static manifest"
-    if value:
-        return value.replace("_", " ").title()
+    if "local" in source_value:
+        return "Local plugin"
+    if source_value:
+        return source_value.replace("_", " ").title()
     return "Unknown source"
 
 
@@ -296,6 +371,15 @@ def provides_summary(plugin: PluginSnapshot) -> str:
         if count:
             parts.append(f"{count} {singular}{'' if count == 1 else 's'}")
     return " · ".join(parts) if parts else "No registered features"
+
+
+def _plugin_state(context: Any) -> Any:
+    state = getattr(context, "plugin_state", None)
+    if state is not None:
+        return state
+
+    activation = getattr(context, "plugin_activation", None)
+    return getattr(activation, "state", None)
 
 
 def _safe_sequence(obj: Any, method_name: str) -> list[Any]:
@@ -373,7 +457,9 @@ def _open_instances_by_plugin(
             grouped.setdefault(plugin_id, []).append(
                 OpenPanelInstance(
                     instance_id=str(item.get("instance_id", "") or ""),
-                    title=str(item.get("title", "") or item.get("panel_id", "") or "Panel"),
+                    title=str(
+                        item.get("title", "") or item.get("panel_id", "") or "Panel"
+                    ),
                     panel_id=str(item.get("panel_id", "") or ""),
                     source=str(item.get("source", "") or ""),
                 )
@@ -438,6 +524,11 @@ def _plugin_sort_key(plugin: PluginSnapshot) -> tuple[int, str, str]:
 def _status_text(status: Any) -> str:
     value = getattr(status, "value", status)
     return str(value or "").strip().lower()
+
+
+def _origin_text(origin: Any) -> str:
+    value = getattr(origin, "value", origin)
+    return str(value or "unknown").strip().lower() or "unknown"
 
 
 def _optional_text(value: Any) -> str | None:

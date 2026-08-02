@@ -37,5 +37,9 @@ class AppContext:
 
     navigation: Optional[RecordNavigationManager] = None
     plugins: Optional[Any] = None
+    plugin_state: Optional[Any] = None
+    plugin_activation: Optional[Any] = None
+    installed_plugins: Optional[Any] = None
+    plugin_installer: Optional[Any] = None
     persistence: Optional[Any] = None
     runtime_status: Optional[RuntimeStatus] = None

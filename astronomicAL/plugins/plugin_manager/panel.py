@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import html
 import json
+import math
 import traceback
 from datetime import datetime
 from typing import Any, Callable, Mapping
@@ -19,9 +20,8 @@ from .diagnostics import (
 )
 from .styles import PLUGIN_MANAGER_CSS
 
-
 class PluginManagerPanel:
-    """Simple, user-facing management surface for AstronomicAL plugins."""
+    """User-facing management surface for AstronomicAL plugins."""
 
     state_version = 1
     SELF_PLUGIN_ID = "core.plugin_manager"
@@ -29,15 +29,20 @@ class PluginManagerPanel:
     def __init__(self, context: Any):
         self.context = context
         self.manager = getattr(context, "plugins", None)
+        self.activation = getattr(context, "plugin_activation", None)
+
         self._disposed = False
         self._restoring = False
         self._refresh_scheduled = False
         self._syncing_selection = False
+        self._syncing_page = False
+        self._syncing_community_toggle = False
         self._subscriptions: list[Any] = []
         self._watchers: list[tuple[Any, Any]] = []
         self._snapshot: PluginManagerSnapshot | None = None
         self._visible_plugins: list[PluginSnapshot] = []
         self._selected_plugin_id: str | None = None
+        self._lifecycle_message_plugin_id: str | None = None
 
         self.search = pn.widgets.TextInput(
             name="Search plugins",
@@ -72,6 +77,13 @@ class PluginManagerPanel:
             margin=0,
         )
 
+        self.community_toggle = pn.widgets.Switch(
+            name="",
+            value=False,
+            width=46,
+            margin=(1, 0, 0, 8),
+        )
+
         self.enable_button = pn.widgets.Button(
             name="Enable plugin",
             button_type="primary",
@@ -87,7 +99,7 @@ class PluginManagerPanel:
             margin=0,
         )
         self.reload_button = pn.widgets.Button(
-            name="Reload local plugin",
+            name="Reload development plugin",
             button_type="default",
             sizing_mode="stretch_width",
             height=34,
@@ -102,10 +114,17 @@ class PluginManagerPanel:
             show_index=False,
             selectable=1,
             pagination="local",
-            page_size=12,
+            # Keep a complete page inside the fixed table viewport. With
+            # responsiveLayout="collapse", each plugin can occupy a normal row
+            # plus a collapsed "Provides" row. A 12-row page therefore created
+            # a second vertical scroller inside the already-scrollable Plugin
+            # Manager panel. Tabulator restores that internal scroll during page
+            # changes, which causes the visible jump/snap ("rubber band"). Five
+            # plugins fit in this viewport without an internal vertical scroll.
+            page_size=5,
             sizing_mode="stretch_width",
-            height=360,
-            min_height=250,
+            height=400,
+            min_height=400,
             margin=0,
             hidden_columns=["plugin_id"],
             widths={
@@ -118,14 +137,23 @@ class PluginManagerPanel:
                 "layout": "fitColumns",
                 "responsiveLayout": "collapse",
                 "placeholder": "No plugins match this view.",
+                # Tabulator otherwise preserves selection across pagination. A
+                # selected row on another page can be restored while the page DOM
+                # is being rebuilt, which is what caused the surrounding plugin
+                # manager scroller to jump and then snap back when returning to a
+                # previous page.
+                "selectableRowsPersistence": False,
             },
             css_classes=["al-pm-table"],
+            styles={"overflow-anchor": "none"},
             stylesheets=[PLUGIN_MANAGER_CSS],
         )
 
         self.header = self._html_pane()
         self.summary = self._html_pane()
+        self.community_status = self._html_pane()
         self.operation_banner = self._html_pane()
+        self.lifecycle_banner = self._html_pane()
         self.selected_details = self._html_pane()
         self.action_note = self._html_pane()
         self.discovery_issues = self._html_pane()
@@ -139,7 +167,9 @@ class PluginManagerPanel:
         self._watch(self.search, self._filters_changed, "value")
         self._watch(self.search, self._filters_changed, "value_input")
         self._watch(self.status_filter, self._filters_changed, "value")
+        self._watch(self.community_toggle, self._community_toggle_changed, "value")
         self._watch(self.plugin_table, self._table_selection_changed, "selection")
+        self._watch(self.plugin_table, self._table_page_changed, "page")
         self._subscribe_to_plugin_events()
 
         self.discovery_section = self._section(
@@ -174,13 +204,30 @@ class PluginManagerPanel:
             ),
             sizing_mode="stretch_width",
             css_classes=["al-pm-card"],
-            styles={
-                "background": "#ffffff",
-                "border": "1px solid #dfe5ee",
-                "border-radius": "9px",
-                "box-shadow": "0 2px 8px rgba(27, 43, 65, 0.045)",
-                "padding": "12px",
-            },
+            styles=self._card_styles(),
+            margin=(0, 0, 10, 0),
+        )
+
+        community_heading = pn.pane.HTML(
+            '<div class="al-pm-section-title">'
+            "<h3>Community plugins</h3>"
+            "<span>Allow third-party plugins to execute in AstronomicAL</span>"
+            "</div>",
+            sizing_mode="stretch_width",
+            stylesheets=[PLUGIN_MANAGER_CSS],
+            margin=0,
+        )
+        community = pn.Column(
+            pn.Row(
+                community_heading,
+                self.community_toggle,
+                sizing_mode="stretch_width",
+                margin=0,
+            ),
+            self.community_status,
+            sizing_mode="stretch_width",
+            css_classes=["al-pm-card"],
+            styles=self._card_styles(),
             margin=(0, 0, 10, 0),
         )
 
@@ -202,23 +249,21 @@ class PluginManagerPanel:
         selected = pn.Column(
             pn.pane.HTML(
                 '<div class="al-pm-section-title"><h3>Selected plugin</h3>'
-                '<span>Health, useful features, open panels, and lifecycle controls</span></div>',
+                "<span>Health, useful features, open panels, and lifecycle controls</span></div>",
                 sizing_mode="stretch_width",
                 stylesheets=[PLUGIN_MANAGER_CSS],
                 margin=0,
             ),
             self.selected_details,
             self.action_note,
+            # Plugin lifecycle feedback belongs next to the lifecycle controls.
+            # Keeping enable/disable/reload failures here prevents an important
+            # refusal from appearing far above the button the user just clicked.
+            self.lifecycle_banner,
             actions,
             sizing_mode="stretch_width",
             css_classes=["al-pm-card"],
-            styles={
-                "background": "#ffffff",
-                "border": "1px solid #dfe5ee",
-                "border-radius": "9px",
-                "box-shadow": "0 2px 8px rgba(27, 43, 65, 0.045)",
-                "padding": "12px",
-            },
+            styles=self._card_styles(),
             margin=(0, 0, 10, 0),
         )
 
@@ -226,6 +271,7 @@ class PluginManagerPanel:
             self.header,
             self.operation_banner,
             self.summary,
+            community,
             controls,
             plugin_list,
             selected,
@@ -239,11 +285,24 @@ class PluginManagerPanel:
                 "box-sizing": "border-box",
                 "overflow-x": "hidden",
                 "overflow-y": "auto",
+                # Prevent browser scroll anchoring from reacting to Tabulator's
+                # paginated row DOM replacement inside this nested scroller.
+                "overflow-anchor": "none",
                 "padding": "8px",
             },
             stylesheets=[PLUGIN_MANAGER_CSS],
             margin=0,
         )
+
+    @staticmethod
+    def _card_styles() -> dict[str, str]:
+        return {
+            "background": "#ffffff",
+            "border": "1px solid #dfe5ee",
+            "border-radius": "9px",
+            "box-shadow": "0 2px 8px rgba(27, 43, 65, 0.045)",
+            "padding": "12px",
+        }
 
     @staticmethod
     def _section(title: str, detail: str, content: Any) -> pn.Column:
@@ -261,13 +320,7 @@ class PluginManagerPanel:
             content,
             sizing_mode="stretch_width",
             css_classes=["al-pm-card"],
-            styles={
-                "background": "#ffffff",
-                "border": "1px solid #dfe5ee",
-                "border-radius": "9px",
-                "box-shadow": "0 2px 8px rgba(27, 43, 65, 0.045)",
-                "padding": "12px",
-            },
+            styles=PluginManagerPanel._card_styles(),
             margin=(0, 0, 10, 0),
         )
 
@@ -285,12 +338,16 @@ class PluginManagerPanel:
             self._snapshot = None
             self.header.object = self._header_html(None)
             self.summary.object = self._empty_html("Plugin information is unavailable.")
+            self.community_status.object = self._banner_html(
+                "danger", "Community plugin state is unavailable."
+            )
             self.selected_details.object = self._empty_html("No plugin can be selected.")
             self.discovery_issues.object = self._empty_html("No discovery information.")
             self.discovery_section.visible = False
-            self.plugin_table.value = pd.DataFrame()
+            self._replace_table_value(pd.DataFrame())
             self._set_operation_message("danger", f"Unable to read plugin state: {exc}")
             self._update_action_state(None)
+            self.community_toggle.disabled = True
             return
 
         self._snapshot = snapshot
@@ -298,9 +355,10 @@ class PluginManagerPanel:
         self.summary.object = self._summary_html(snapshot)
         self.discovery_issues.object = self._discovery_issues_html(snapshot)
         self.discovery_section.visible = bool(snapshot.discovery_issues)
+        self._sync_community_controls(snapshot)
         self._apply_filters()
 
-    def _apply_filters(self) -> None:
+    def _apply_filters(self, *, reset_page: bool = False) -> None:
         snapshot = self._snapshot
         if snapshot is None:
             return
@@ -323,17 +381,39 @@ class PluginManagerPanel:
             }
             for plugin in visible
         ]
-        self.plugin_table.value = pd.DataFrame(
-            rows,
-            columns=["Plugin", "Status", "Version", "Open", "Provides", "plugin_id"],
+
+        current_page = 1 if reset_page else self._current_page()
+        self._replace_table_value(
+            pd.DataFrame(
+                rows,
+                columns=["Plugin", "Status", "Version", "Open", "Provides", "plugin_id"],
+            )
         )
 
-        visible_ids = [plugin.id for plugin in visible]
-        if self._selected_plugin_id not in visible_ids:
-            self._selected_plugin_id = visible_ids[0] if visible_ids else None
+        target_page = min(current_page, self._max_page(len(visible)))
+        self._set_table_page(target_page)
+
+        page_plugins = self._plugins_on_page(target_page)
+        page_ids = {plugin.id for plugin in page_plugins}
+        if self._selected_plugin_id not in page_ids:
+            self._selected_plugin_id = page_plugins[0].id if page_plugins else None
 
         self._sync_table_selection()
         self._render_selected_plugin()
+
+    def _replace_table_value(self, value: pd.DataFrame) -> None:
+        # Clearing the selection before replacing the data prevents the frontend
+        # from trying to restore a selected row while Tabulator is rebuilding a
+        # paginated page. Suppress page callbacks too because replacing the value
+        # may reset Tabulator's current page before we restore the intended page.
+        self._syncing_selection = True
+        self._syncing_page = True
+        try:
+            self.plugin_table.selection = []
+            self.plugin_table.value = value
+        finally:
+            self._syncing_page = False
+            self._syncing_selection = False
 
     def _sync_table_selection(self) -> None:
         self._syncing_selection = True
@@ -341,10 +421,14 @@ class PluginManagerPanel:
             if self._selected_plugin_id is None:
                 self.plugin_table.selection = []
                 return
-            for index, plugin in enumerate(self._visible_plugins):
-                if plugin.id == self._selected_plugin_id:
+
+            page = self._current_page()
+            start, end = self._page_bounds(page)
+            for index in range(start, min(end, len(self._visible_plugins))):
+                if self._visible_plugins[index].id == self._selected_plugin_id:
                     self.plugin_table.selection = [index]
                     return
+
             self.plugin_table.selection = []
         finally:
             self._syncing_selection = False
@@ -352,27 +436,92 @@ class PluginManagerPanel:
     def _table_selection_changed(self, event: Any) -> None:
         if self._disposed or self._syncing_selection or self._restoring:
             return
+
         selection = list(getattr(event, "new", None) or [])
         if not selection:
             return
+
         try:
             index = int(selection[0])
             plugin = self._visible_plugins[index]
         except Exception:
             return
+
         self._selected_plugin_id = plugin.id
         self._render_selected_plugin()
+
+    def _table_page_changed(self, event: Any) -> None:
+        if self._disposed or self._restoring or self._syncing_page:
+            return
+
+        try:
+            page = max(1, int(getattr(event, "new", None) or 1))
+        except Exception:
+            page = 1
+
+        page_plugins = self._plugins_on_page(page)
+        if not page_plugins:
+            self._selected_plugin_id = None
+        elif self._selected_plugin_id not in {plugin.id for plugin in page_plugins}:
+            # Update the details pane to the new page, but deliberately do not
+            # programmatically select the row in Tabulator. Setting selection
+            # while a page is being rebuilt makes Tabulator scroll the selected
+            # row into view, which is the second source of the page-change jump.
+            self._selected_plugin_id = page_plugins[0].id
+
+        self._clear_table_selection()
+        self._render_selected_plugin()
+
+    def _clear_table_selection(self) -> None:
+        self._syncing_selection = True
+        try:
+            if self.plugin_table.selection:
+                self.plugin_table.selection = []
+        finally:
+            self._syncing_selection = False
 
     def _filters_changed(self, _event: Any = None) -> None:
         if self._disposed or self._restoring:
             return
-        self._apply_filters()
+        self._apply_filters(reset_page=True)
 
     def _search_value(self) -> str:
         value_input = getattr(self.search, "value_input", None)
         if value_input is not None:
             return str(value_input or "")
         return str(self.search.value or "")
+
+    def _current_page(self) -> int:
+        try:
+            return max(1, int(getattr(self.plugin_table, "page", 1) or 1))
+        except Exception:
+            return 1
+
+    def _page_size(self) -> int:
+        try:
+            return max(1, int(getattr(self.plugin_table, "page_size", 5) or 5))
+        except Exception:
+            return 5
+
+    def _max_page(self, row_count: int) -> int:
+        return max(1, math.ceil(max(0, int(row_count)) / self._page_size()))
+
+    def _page_bounds(self, page: int) -> tuple[int, int]:
+        page_size = self._page_size()
+        start = (max(1, int(page)) - 1) * page_size
+        return start, start + page_size
+
+    def _plugins_on_page(self, page: int) -> list[PluginSnapshot]:
+        start, end = self._page_bounds(page)
+        return self._visible_plugins[start:end]
+
+    def _set_table_page(self, page: int) -> None:
+        self._syncing_page = True
+        try:
+            if getattr(self.plugin_table, "page", 1) != page:
+                self.plugin_table.page = page
+        finally:
+            self._syncing_page = False
 
     # ------------------------------------------------------------------
     # Rendering
@@ -388,7 +537,10 @@ class PluginManagerPanel:
             total = len(snapshot.plugins)
             refreshed = self._clock(snapshot.captured_at)
             if snapshot.issue_count:
-                health_label = f"{snapshot.issue_count} issue{'s' if snapshot.issue_count != 1 else ''}"
+                health_label = (
+                    f"{snapshot.issue_count} issue"
+                    f"{'s' if snapshot.issue_count != 1 else ''}"
+                )
                 health_tone = "warning"
             else:
                 health_label = "Healthy"
@@ -447,9 +599,63 @@ class PluginManagerPanel:
         </div>
         """
 
+    def _sync_community_controls(self, snapshot: PluginManagerSnapshot) -> None:
+        self._syncing_community_toggle = True
+        try:
+            self.community_toggle.value = bool(snapshot.community_plugins_enabled)
+        finally:
+            self._syncing_community_toggle = False
+
+        self.community_toggle.disabled = (
+            self.activation is None or bool(snapshot.plugin_state_error)
+        )
+        self.community_status.object = self._community_status_html(snapshot)
+
+    def _community_status_html(self, snapshot: PluginManagerSnapshot) -> str:
+        if snapshot.plugin_state_error:
+            return self._banner_html(
+                "danger",
+                "Plugin state could not be loaded. Community plugins remain disabled "
+                f"until the state file is repaired: {snapshot.plugin_state_error}",
+            )
+
+        if self.activation is None:
+            return self._banner_html(
+                "danger",
+                "PluginActivationService is not available on AppContext.",
+            )
+
+        if snapshot.community_plugins_enabled:
+            return self._banner_html(
+                "success",
+                "Community plugins are enabled. Third-party plugins configured as "
+                "enabled may execute in this AstronomicAL session.",
+            )
+
+        configured = snapshot.configured_community_count
+        if configured:
+            return self._banner_html(
+                "warning",
+                f"Community plugins are disabled. {configured} plugin"
+                f"{'s are' if configured != 1 else ' is'} configured to run but "
+                "blocked by the global community-plugin setting.",
+            )
+
+        return self._banner_html(
+            "info",
+            "Community plugins are disabled. Installed community plugins can still "
+            "be discovered from their static manifests, but their Python code will not run.",
+        )
+
     def _render_selected_plugin(self) -> None:
         plugin = self._selected_plugin()
         self._update_action_state(plugin)
+
+        if (
+            self._lifecycle_message_plugin_id is not None
+            and (plugin is None or plugin.id != self._lifecycle_message_plugin_id)
+        ):
+            self._clear_lifecycle_message()
 
         if plugin is None:
             self.selected_details.object = self._empty_html(
@@ -469,13 +675,27 @@ class PluginManagerPanel:
         workflows = self._contribution_chips("Workflow", plugin.workflows)
         open_instances = self._open_instances_html(plugin)
         readiness = self._readiness_html(plugin, validation)
+        activation_policy = self._activation_policy_html(plugin)
+
         registration_note = ""
         if plugin.status != "enabled" and plugin.contribution_count == 0:
             registration_note = self._banner_html(
                 "info",
                 "This plugin registers its panels and actions when it is enabled.",
             )
+
+        configured_card = ""
+        if plugin.is_community:
+            configured_card = (
+                '<div class="al-pm-mini">'
+                '<div class="al-pm-mini-label">Configured</div>'
+                '<div class="al-pm-mini-value">'
+                f"{'Enabled' if plugin.configured_enabled else 'Disabled'}"
+                "</div></div>"
+            )
+
         technical = self._technical_html(plugin)
+        status_label, status_tone = self._display_status(plugin)
 
         return f"""
         <div class="al-pm-plugin-head">
@@ -483,16 +703,18 @@ class PluginManagerPanel:
             <h3 class="al-pm-plugin-name">{html.escape(plugin.name)}</h3>
             <div class="al-pm-plugin-version">Version {html.escape(plugin.version)}</div>
           </div>
-          <span class="al-pm-status-pill {plugin.status_tone}">{html.escape(plugin.status_label)}</span>
+          <span class="al-pm-status-pill {status_tone}">{html.escape(status_label)}</span>
         </div>
         <p class="al-pm-description">{html.escape(description)}</p>
         <div class="al-pm-mini-grid">
-          <div class="al-pm-mini"><div class="al-pm-mini-label">Source</div><div class="al-pm-mini-value">{html.escape(source_label(plugin.source))}</div></div>
+          <div class="al-pm-mini"><div class="al-pm-mini-label">Source</div><div class="al-pm-mini-value">{html.escape(source_label(plugin.origin, plugin.source))}</div></div>
           <div class="al-pm-mini"><div class="al-pm-mini-label">Open panels</div><div class="al-pm-mini-value">{len(plugin.open_instances):,}</div></div>
           <div class="al-pm-mini"><div class="al-pm-mini-label">Panels</div><div class="al-pm-mini-value">{len(plugin.panels):,}</div></div>
           <div class="al-pm-mini"><div class="al-pm-mini-label">Actions</div><div class="al-pm-mini-value">{len(plugin.actions):,}</div></div>
+          {configured_card}
         </div>
         {readiness}
+        {activation_policy}
         {registration_note}
         {self._optional_group("Panels added to the workspace", panels)}
         {self._optional_group("Actions and tools", actions)}
@@ -501,32 +723,101 @@ class PluginManagerPanel:
         {technical}
         """
 
+    def _display_status(self, plugin: PluginSnapshot) -> tuple[str, str]:
+        snapshot = self._snapshot
+        if (
+            plugin.is_community
+            and plugin.status != "enabled"
+            and plugin.configured_enabled is True
+            and snapshot is not None
+            and not snapshot.community_plugins_enabled
+        ):
+            return "Blocked", "muted"
+        return plugin.status_label, plugin.status_tone
+
     def _readiness_html(self, plugin: PluginSnapshot, validation: Any) -> str:
-        errors = list(getattr(validation, "errors", None) or []) if validation is not None else []
-        warnings = list(getattr(validation, "warnings", None) or []) if validation is not None else []
+        errors = (
+            list(getattr(validation, "errors", None) or [])
+            if validation is not None
+            else []
+        )
+        warnings = (
+            list(getattr(validation, "warnings", None) or [])
+            if validation is not None
+            else []
+        )
 
         if plugin.error:
             errors.insert(0, plugin.error)
 
         if not errors and not warnings:
             if plugin.status == "enabled":
-                return '<div class="al-pm-banner success al-pm-readiness">Plugin is enabled and ready.</div>'
-            return '<div class="al-pm-banner info al-pm-readiness">No dependency problems were found.</div>'
+                return (
+                    '<div class="al-pm-banner success al-pm-readiness">'
+                    "Plugin is enabled and ready.</div>"
+                )
+            return (
+                '<div class="al-pm-banner info al-pm-readiness">'
+                "No dependency problems were found.</div>"
+            )
 
         chunks: list[str] = []
         if errors:
             items = "".join(f"<li>{html.escape(str(item))}</li>" for item in errors)
             chunks.append(
-                '<div class="al-pm-banner danger al-pm-readiness"><strong>Cannot start cleanly</strong>'
+                '<div class="al-pm-banner danger al-pm-readiness">'
+                "<strong>Cannot start cleanly</strong>"
                 f"<ul>{items}</ul></div>"
             )
         if warnings:
             items = "".join(f"<li>{html.escape(str(item))}</li>" for item in warnings)
             chunks.append(
-                '<div class="al-pm-banner warning al-pm-readiness"><strong>Optional items unavailable</strong>'
+                '<div class="al-pm-banner warning al-pm-readiness">'
+                "<strong>Optional items unavailable</strong>"
                 f"<ul>{items}</ul></div>"
             )
         return "".join(chunks)
+
+    def _activation_policy_html(self, plugin: PluginSnapshot) -> str:
+        snapshot = self._snapshot
+        if snapshot is None:
+            return ""
+
+        if plugin.is_community:
+            if not snapshot.community_plugins_enabled:
+                if plugin.configured_enabled:
+                    return self._banner_html(
+                        "warning",
+                        "This community plugin is configured as enabled, but it is "
+                        "blocked while Community plugins are turned off.",
+                    )
+                return self._banner_html(
+                    "info",
+                    "Community plugins are turned off. Enable the global community "
+                    "plugin setting before enabling this plugin.",
+                )
+
+            if plugin.configured_enabled and plugin.status != "enabled":
+                return self._banner_html(
+                    "warning",
+                    "This plugin is configured as enabled but is not currently running. "
+                    "Retry enabling it and review any validation errors above.",
+                )
+
+            if not plugin.configured_enabled and plugin.status != "enabled":
+                return self._banner_html(
+                    "info",
+                    "This community plugin is installed and available, but disabled.",
+                )
+
+        if plugin.is_bundled and plugin.status != "enabled":
+            return self._banner_html(
+                "info",
+                "Bundled plugins are part of AstronomicAL and are enabled automatically "
+                "on application startup.",
+            )
+
+        return ""
 
     @staticmethod
     def _optional_group(title: str, content: str) -> str:
@@ -568,11 +859,22 @@ class PluginManagerPanel:
         capabilities = ", ".join(plugin.capabilities) or "None"
         tags = ", ".join(plugin.tags) or "None"
         path = plugin.path or "Not provided"
-        settings = json.dumps(dict(plugin.settings), indent=2, default=str) if plugin.settings else "None"
+        settings = (
+            json.dumps(dict(plugin.settings), indent=2, default=str)
+            if plugin.settings
+            else "None"
+        )
+        configured = (
+            "Enabled" if plugin.configured_enabled else "Disabled"
+            if plugin.configured_enabled is not None
+            else "Not applicable"
+        )
 
         rows = [
             ("Plugin ID", plugin.id),
-            ("Source", plugin.source or "Unknown"),
+            ("Origin", plugin.origin or "unknown"),
+            ("Discovery source", plugin.source or "Unknown"),
+            ("Configured enabled", configured),
             ("Path", path),
             ("Capabilities", capabilities),
             ("Tags", tags),
@@ -614,21 +916,61 @@ class PluginManagerPanel:
                 "info",
                 "Plugin Manager cannot disable or reload itself from inside this panel.",
             )
-        if plugin.status == "enabled" and plugin.open_instances:
-            count = len(plugin.open_instances)
-            return self._banner_html(
-                "warning",
-                f"Disabling or reloading this plugin closes {count} open panel{'s' if count != 1 else ''} and cancels its tracked jobs.",
-            )
-        if plugin.is_local:
+
+        snapshot = self._snapshot
+        if plugin.is_community and snapshot is not None and not snapshot.community_plugins_enabled:
+            if plugin.configured_enabled:
+                return self._banner_html(
+                    "warning",
+                    "This plugin remains configured as enabled, but the global Community "
+                    "plugins switch is preventing it from running.",
+                )
             return self._banner_html(
                 "info",
-                "Reload is intended for local development after editing plugin code.",
+                "Turn on Community plugins before enabling this third-party plugin.",
             )
+
+        if plugin.status == "enabled" and plugin.open_instances:
+            count = len(plugin.open_instances)
+            action = "Disabling or reloading" if plugin.is_reloadable else "Disabling"
+            return self._banner_html(
+                "warning",
+                f"{action} this plugin closes {count} open panel"
+                f"{'s' if count != 1 else ''} and cancels its tracked jobs.",
+            )
+
+        if plugin.is_development:
+            return self._banner_html(
+                "info",
+                "Reload is available only for development plugins after editing their code.",
+            )
+
+        if plugin.is_bundled and plugin.status != "enabled":
+            return self._banner_html(
+                "info",
+                "This bundled plugin is disabled for the current session and will be "
+                "enabled again on the next AstronomicAL startup.",
+            )
+
+        if plugin.is_runtime:
+            return self._banner_html(
+                "info",
+                "Runtime registrations do not expose install or lifecycle controls here.",
+            )
+
         return ""
 
-    @staticmethod
-    def _table_status(plugin: PluginSnapshot) -> str:
+    def _table_status(self, plugin: PluginSnapshot) -> str:
+        snapshot = self._snapshot
+        if (
+            plugin.is_community
+            and plugin.status != "enabled"
+            and plugin.configured_enabled is True
+            and snapshot is not None
+            and not snapshot.community_plugins_enabled
+        ):
+            return "⊘ Blocked"
+
         marker = {
             "enabled": "●",
             "disabled": "○",
@@ -643,7 +985,10 @@ class PluginManagerPanel:
 
     @staticmethod
     def _banner_html(tone: str, message: str) -> str:
-        return f'<div class="al-pm-banner {html.escape(tone)}">{html.escape(message)}</div>'
+        return (
+            f'<div class="al-pm-banner {html.escape(tone)}">'
+            f"{html.escape(message)}</div>"
+        )
 
     # ------------------------------------------------------------------
     # Actions
@@ -661,15 +1006,92 @@ class PluginManagerPanel:
             callback=self.manager.discover,
             success_message="Plugin scan completed.",
             registry_operation="discovered",
+            message_target="global",
         )
+
+    def _community_toggle_changed(self, event: Any) -> None:
+        if self._disposed or self._restoring or self._syncing_community_toggle:
+            return
+
+        if self.activation is None:
+            self._set_operation_message(
+                "danger", "PluginActivationService is not available."
+            )
+            self.refresh()
+            return
+
+        enabled = bool(getattr(event, "new", False))
+        label = "Enabling community plugins" if enabled else "Disabling community plugins"
+        self._set_busy(True)
+        self._set_operation_message("info", f"{label}…")
+
+        try:
+            failures = self.activation.set_community_plugins_enabled(
+                enabled,
+                context=self.context,
+            )
+            self._publish_registry_changed(
+                None,
+                "community_enabled" if enabled else "community_disabled",
+            )
+        except Exception as exc:
+            traceback.print_exc()
+            self._set_operation_message("danger", f"{label} failed: {exc}")
+        else:
+            if failures:
+                details = "; ".join(
+                    f"{plugin_id}: {message}"
+                    for plugin_id, message in sorted(failures.items())
+                )
+                self._set_operation_message(
+                    "warning",
+                    f"Community plugin setting changed, but some plugins could not "
+                    f"be reconciled: {details}",
+                )
+            else:
+                self._set_operation_message(
+                    "success",
+                    "Community plugins enabled."
+                    if enabled
+                    else "Community plugins disabled.",
+                )
+        finally:
+            self._set_busy(False)
+            self.refresh()
 
     def _enable_clicked(self, _event: Any = None) -> None:
         plugin = self._selected_plugin()
-        if plugin is None or self.manager is None:
+        if plugin is None:
             return
+        if self.activation is None:
+            self._set_lifecycle_message(
+                plugin.id,
+                "danger",
+                "PluginActivationService is not available.",
+            )
+            return
+        if plugin.is_runtime or plugin.origin == "unknown":
+            return
+
+        snapshot = self._snapshot
+        if (
+            plugin.is_community
+            and snapshot is not None
+            and not snapshot.community_plugins_enabled
+        ):
+            self._set_lifecycle_message(
+                plugin.id,
+                "warning",
+                "Community plugins are disabled. Turn on the Community plugins switch first.",
+            )
+            return
+
         self._run_operation(
             label=f"Enabling {plugin.name}",
-            callback=lambda: self.manager.enable(plugin.id, self.context),
+            callback=lambda: self.activation.enable(
+                plugin.id,
+                context=self.context,
+            ),
             success_message=f"Enabled {plugin.name}.",
             plugin_id=plugin.id,
             registry_operation="enabled",
@@ -677,11 +1099,24 @@ class PluginManagerPanel:
 
     def _disable_clicked(self, _event: Any = None) -> None:
         plugin = self._selected_plugin()
-        if plugin is None or self.manager is None or plugin.id == self.SELF_PLUGIN_ID:
+        if plugin is None or plugin.id == self.SELF_PLUGIN_ID:
             return
+        if self.activation is None:
+            self._set_lifecycle_message(
+                plugin.id,
+                "danger",
+                "PluginActivationService is not available.",
+            )
+            return
+        if plugin.is_runtime or plugin.origin == "unknown":
+            return
+
         self._run_operation(
             label=f"Disabling {plugin.name}",
-            callback=lambda: self.manager.disable(plugin.id, context=self.context),
+            callback=lambda: self.activation.disable(
+                plugin.id,
+                context=self.context,
+            ),
             success_message=f"Disabled {plugin.name}.",
             plugin_id=plugin.id,
             registry_operation="disabled",
@@ -693,9 +1128,10 @@ class PluginManagerPanel:
             plugin is None
             or self.manager is None
             or plugin.id == self.SELF_PLUGIN_ID
-            or not plugin.is_local
+            or not plugin.is_reloadable
         ):
             return
+
         self._run_operation(
             label=f"Reloading {plugin.name}",
             callback=lambda: self.manager.reload(plugin.id, self.context),
@@ -712,17 +1148,24 @@ class PluginManagerPanel:
         success_message: str,
         registry_operation: str,
         plugin_id: str | None = None,
+        message_target: str = "plugin",
     ) -> None:
+        def set_message(tone: str, message: str) -> None:
+            if message_target == "plugin" and plugin_id:
+                self._set_lifecycle_message(plugin_id, tone, message)
+            else:
+                self._set_operation_message(tone, message)
+
         self._set_busy(True)
-        self._set_operation_message("info", f"{label}…")
+        set_message("info", f"{label}…")
         try:
             callback()
             self._publish_registry_changed(plugin_id, registry_operation)
         except Exception as exc:
             traceback.print_exc()
-            self._set_operation_message("danger", f"{label} failed: {exc}")
+            set_message("danger", f"{label} failed: {exc}")
         else:
-            self._set_operation_message("success", success_message)
+            set_message("success", success_message)
         finally:
             self._set_busy(False)
             self.refresh()
@@ -739,16 +1182,41 @@ class PluginManagerPanel:
                 button.loading = busy
             except Exception:
                 pass
+
         self.search.disabled = busy
         self.status_filter.disabled = busy
+        self.community_toggle.disabled = busy or self.activation is None
+
         if not busy:
+            state_error = bool(
+                self._snapshot is not None and self._snapshot.plugin_state_error
+            )
+            self.community_toggle.disabled = self.activation is None or state_error
             self._update_action_state(self._selected_plugin())
 
     def _set_operation_message(self, tone: str, message: str) -> None:
         self.operation_banner.object = self._banner_html(tone, message) if message else ""
 
+    def _set_lifecycle_message(
+        self,
+        plugin_id: str,
+        tone: str,
+        message: str,
+    ) -> None:
+        self._lifecycle_message_plugin_id = str(plugin_id or "") or None
+        self.lifecycle_banner.object = (
+            self._banner_html(tone, message) if message else ""
+        )
+
+    def _clear_lifecycle_message(self) -> None:
+        self._lifecycle_message_plugin_id = None
+        self.lifecycle_banner.object = ""
+
     def _update_action_state(self, plugin: PluginSnapshot | None) -> None:
         if plugin is None:
+            self.enable_button.name = "Enable plugin"
+            self.disable_button.name = "Disable plugin"
+            self.reload_button.name = "Reload development plugin"
             self.enable_button.disabled = True
             self.disable_button.disabled = True
             self.reload_button.disabled = True
@@ -756,21 +1224,53 @@ class PluginManagerPanel:
             return
 
         is_self = plugin.id == self.SELF_PLUGIN_ID
-        self.enable_button.disabled = plugin.status == "enabled"
-        self.disable_button.disabled = is_self or plugin.status != "enabled"
-        self.reload_button.visible = plugin.is_local and not is_self
-        self.reload_button.disabled = plugin.status != "enabled"
+        activation_missing = self.activation is None
+        runtime_enabled = plugin.status == "enabled"
+        snapshot = self._snapshot
+        community_allowed = bool(
+            snapshot is not None and snapshot.community_plugins_enabled
+        )
+
+        self.enable_button.name = (
+            "Retry enabling plugin"
+            if plugin.is_community
+            and plugin.configured_enabled
+            and not runtime_enabled
+            and community_allowed
+            else "Enable plugin"
+        )
+
+        if plugin.is_runtime or plugin.origin == "unknown":
+            self.enable_button.disabled = True
+            self.disable_button.disabled = True
+        elif plugin.is_community:
+            self.enable_button.disabled = (
+                activation_missing or runtime_enabled or not community_allowed
+            )
+            self.disable_button.disabled = (
+                is_self
+                or activation_missing
+                or not (runtime_enabled or plugin.configured_enabled is True)
+            )
+        else:
+            self.enable_button.disabled = activation_missing or runtime_enabled
+            self.disable_button.disabled = (
+                is_self or activation_missing or not runtime_enabled
+            )
+
+        self.reload_button.visible = plugin.is_reloadable and not is_self
+        self.reload_button.disabled = not runtime_enabled
 
         open_count = len(plugin.open_instances)
         self.disable_button.name = (
             f"Disable and close {open_count} panel{'s' if open_count != 1 else ''}"
-            if plugin.status == "enabled" and open_count
+            if runtime_enabled and open_count
             else "Disable plugin"
         )
         self.reload_button.name = (
             f"Reload and close {open_count} panel{'s' if open_count != 1 else ''}"
             if open_count
-            else "Reload local plugin"
+            else "Reload development plugin"
         )
 
     def _publish_registry_changed(self, plugin_id: str | None, operation: str) -> None:
@@ -909,7 +1409,7 @@ class PluginManagerPanel:
             self._selected_plugin_id = str(selected) if selected else None
         finally:
             self._restoring = False
-        self._apply_filters()
+        self._apply_filters(reset_page=True)
 
     def dispose(self) -> None:
         if self._disposed:
@@ -931,4 +1431,3 @@ class PluginManagerPanel:
             except Exception:
                 pass
         self._watchers.clear()
-

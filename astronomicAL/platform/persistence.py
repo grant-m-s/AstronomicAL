@@ -19,7 +19,6 @@ from astronomicAL.utils.debug import (
 SCHEMA_NAME = "astronomical.workspace"
 SCHEMA_VERSION = 1
 
-
 class WorkspacePersistence:
     """
     Save/load service for the plugin workspace.
@@ -247,12 +246,16 @@ class WorkspacePersistence:
                 if not plugin_id:
                     continue
 
+                origin = getattr(info, "origin", None)
+                origin_value = getattr(origin, "value", origin)
+
                 plugin_info[plugin_id] = {
                     "id": plugin_id,
                     "name": getattr(info, "name", None),
                     "version": getattr(info, "version", None),
                     "status": status_value,
                     "source": getattr(info, "source", None),
+                    "origin": origin_value,
                 }
 
                 if status_value == "enabled":
@@ -329,6 +332,7 @@ class WorkspacePersistence:
         issues: list[dict[str, Any]] = []
 
         plugins = getattr(self.context, "plugins", None)
+        activation = getattr(self.context, "plugin_activation", None)
         if plugins is None:
             return issues
 
@@ -366,6 +370,23 @@ class WorkspacePersistence:
         for plugin_id in plugin_ids_to_enable:
             if plugin_id in currently_enabled:
                 continue
+
+            if activation is not None and hasattr(plugins, "plugin_info"):
+                try:
+                    info = plugins.plugin_info(plugin_id)
+                except Exception:
+                    info = None
+
+                if info is not None and not activation.should_enable(info):
+                    issue = {
+                        "type": "plugin_activation_blocked",
+                        "plugin_id": plugin_id,
+                        "message": activation.blocked_reason(info),
+                    }
+                    issues.append(issue)
+                    if strict:
+                        return issues
+                    continue
 
             try:
                 plugins.enable(plugin_id, self.context, validate=False)

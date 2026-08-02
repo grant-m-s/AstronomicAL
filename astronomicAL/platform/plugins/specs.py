@@ -5,6 +5,7 @@ from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from astronomicAL.platform.mapping_requirements import MappingRequirementLike
+from .sources import PluginOrigin
 
 class PluginStatus(str, Enum):
     DISCOVERED = "discovered"
@@ -12,19 +13,16 @@ class PluginStatus(str, Enum):
     ENABLED = "enabled"
     ERROR = "error"
 
-
 class SelectionRequirement(str, Enum):
     NONE = "none"
     OPTIONAL = "optional"
     REQUIRED = "required"
-
 
 class ColumnRequirement(str, Enum):
     NONE = "none"
     ONE = "one"
     MANY = "many"
     OPTIONAL = "optional"
-
 
 @dataclass(frozen=True)
 class ValidationResult:
@@ -52,7 +50,6 @@ class ValidationResult:
             missing_dependencies=list(missing_dependencies or []),
         )
 
-
 @dataclass(frozen=True)
 class InputSpec:
     """Declarative inputs for a plugin action.
@@ -79,7 +76,6 @@ class InputSpec:
     def from_dict(cls, data: Dict[str, Any]) -> "InputSpec":
         return cls(**data)
 
-
 @dataclass(frozen=True)
 class OutputSpec:
     type: str
@@ -95,7 +91,6 @@ class OutputSpec:
         if isinstance(value, dict):
             return cls(**value)
         raise TypeError(f"Cannot convert {value!r} to OutputSpec")
-
 
 @dataclass
 class ActionRequest:
@@ -114,7 +109,6 @@ class ActionRequest:
             return cls()
         return cls(**data)
 
-
 @dataclass
 class ArtifactResult:
     type: str
@@ -125,7 +119,6 @@ class ArtifactResult:
     publish: bool = True
     artifact_id: Optional[str] = None
 
-
 @dataclass
 class DatasetResult:
     id: str
@@ -134,12 +127,10 @@ class DatasetResult:
     metadata: Dict[str, Any] = field(default_factory=dict)
     set_active: bool = False
 
-
 @dataclass
 class EventResult:
     topic: str
     payload: Dict[str, Any] = field(default_factory=dict)
-
 
 @dataclass
 class ActionResult:
@@ -147,7 +138,6 @@ class ActionResult:
     artifacts: List[ArtifactResult] = field(default_factory=list)
     datasets: List[DatasetResult] = field(default_factory=list)
     events: List[EventResult] = field(default_factory=list)
-
 
 @dataclass
 class ProcessedActionResult:
@@ -179,7 +169,6 @@ class ProcessedActionResult:
             return self.result
         return self.raw
 
-
 @dataclass
 class PluginRegistration:
     plugin_id: str
@@ -189,7 +178,6 @@ class PluginRegistration:
     category: Optional[str] = None
     icon: Optional[str] = None
     tags: List[str] = field(default_factory=list)
-
 
 @dataclass
 class PanelRegistration(PluginRegistration):
@@ -232,14 +220,12 @@ class ActionRegistration(PluginRegistration):
     requires: List[str] = field(default_factory=list)
     optional_requires: List[str] = field(default_factory=list)
 
-
 @dataclass
 class WorkflowRegistration(PluginRegistration):
     builder: Callable[..., Any] = None  # type: ignore[assignment]
     settings_schema: Dict[str, Any] = field(default_factory=dict)
     requires: List[str] = field(default_factory=list)
     optional_requires: List[str] = field(default_factory=list)
-
 
 @dataclass
 class ServiceRegistration:
@@ -251,7 +237,6 @@ class ServiceRegistration:
     description: str = ""
     requires: List[str] = field(default_factory=list)
     optional_requires: List[str] = field(default_factory=list)
-
 
 @dataclass
 class ArtifactViewerRegistration:
@@ -266,7 +251,6 @@ class ArtifactViewerRegistration:
     requires: List[str] = field(default_factory=list)
     optional_requires: List[str] = field(default_factory=list)
 
-
 @dataclass
 class PluginInfo:
     id: str
@@ -275,6 +259,7 @@ class PluginInfo:
     status: PluginStatus
     description: str = ""
     source: str = ""
+    origin: PluginOrigin = PluginOrigin.UNKNOWN
     path: Optional[str] = None
     error: Optional[str] = None
     capabilities: List[str] = field(default_factory=list)
@@ -287,7 +272,6 @@ class PluginInfo:
     workflows: List[str] = field(default_factory=list)
     services: List[str] = field(default_factory=list)
     artifact_viewers: List[str] = field(default_factory=list)
-
 
 def _validate_choice(name: str, value: str, enum_cls: type[Enum]) -> None:
     allowed = {item.value for item in enum_cls}

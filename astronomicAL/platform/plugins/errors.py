@@ -23,3 +23,15 @@ class PluginRegistrationError(PluginError):
 
 class PluginExecutionError(PluginError):
     """Raised when a registered plugin action/panel/workflow fails."""
+
+
+class PluginPackageError(PluginError):
+    """Raised when an .alplugin archive is malformed, unsafe, or invalid."""
+
+
+class PluginInstallError(PluginError):
+    """Raised when a plugin install, update, or uninstall transaction cannot complete."""
+
+
+class InstalledPluginStoreError(PluginError):
+    """Raised when persistent installed-plugin metadata cannot be read or changed."""

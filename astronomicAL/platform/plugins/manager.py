@@ -35,7 +35,12 @@ from .errors import (
     PluginRegistrationError,
     PluginValidationError,
 )
-from .manifest import PluginManifest, coerce_manifest
+from .manifest import (
+    PluginManifest,
+    PluginRequirement,
+    coerce_manifest,
+    parse_plugin_requirement,
+)
 from .specs import (
     ActionRegistration,
     ActionRequest,
@@ -54,6 +59,7 @@ from .specs import (
     ValidationResult,
     WorkflowRegistration,
 )
+from .sources import PluginOrigin, PluginSearchPath
 
 try:
     from packaging.requirements import Requirement
@@ -77,7 +83,6 @@ def plugin_open_debug(label: str, **values: Any) -> None:
     except Exception:
         print(f"[AL_DEBUG][PluginManager][{label}] <print failed>", flush=True)
 
-
 class LoadingPanelController:
     """Temporary controller shown while a plugin panel is being constructed."""
 
@@ -98,7 +103,6 @@ class LoadingPanelController:
             "detail": self.detail,
             "started_at": self.started_at,
         }
-
 
 def make_loading_panel(title: str, detail: str = "") -> tuple[Any, Any]:
     safe_title = html.escape(str(title or "Panel"), quote=True)
@@ -143,7 +147,6 @@ def make_loading_panel(title: str, detail: str = "") -> tuple[Any, Any]:
 
     return view, LoadingPanelController(title=title, detail=detail)
 
-
 class PanelLoadErrorController:
     state_version = 1
 
@@ -160,7 +163,6 @@ class PanelLoadErrorController:
             "title": self.title,
             "message": self.error,
         }
-
 
 def make_panel_load_error_panel(title: str, error: BaseException | str) -> tuple[Any, Any]:
     safe_title = html.escape(str(title or "Panel"), quote=True)
@@ -196,7 +198,6 @@ def make_panel_load_error_panel(title: str, error: BaseException | str) -> tuple
 
     return view, PanelLoadErrorController(title=title, error=str(error))
 
-
 def schedule_panel_callback(callback) -> None:
     """Run callback shortly after the current UI callback returns.
 
@@ -228,6 +229,7 @@ class PluginCandidate:
 
     source: str
     module_name: str
+    origin: PluginOrigin = PluginOrigin.UNKNOWN
     path: Optional[Path] = None
     entry_point_name: Optional[str] = None
     entry_point_object: Optional[str] = None
@@ -235,7 +237,6 @@ class PluginCandidate:
     manifest: Optional[PluginManifest] = None
     module: Optional[ModuleType] = None
     error: Optional[str] = None
-
 
 @dataclass
 class PluginRecord:
@@ -245,7 +246,6 @@ class PluginRecord:
     module: Optional[ModuleType] = None
     error: Optional[str] = None
     settings_schema: Dict[str, Any] = field(default_factory=dict)
-
 
 class PluginSettingsStore:
     """In-memory settings store for plugin configuration.
@@ -275,7 +275,6 @@ class PluginSettingsStore:
         else:
             self._settings.pop(plugin_id, None)
 
-
 class PluginManager:
     """Discovers, validates, enables, and exposes AstronomicAL plugins.
 
@@ -292,12 +291,16 @@ class PluginManager:
         *,
         entry_point_group: str = ENTRY_POINT_GROUP,
         static_manifest_entry_point_group: str = STATIC_MANIFEST_ENTRY_POINT_GROUP,
-        local_plugin_dirs: Optional[Sequence[str | Path]] = None,
+        local_plugin_dirs: Optional[Sequence[str | Path | PluginSearchPath]] = None,
         auto_discover: bool = False,
     ) -> None:
         self.entry_point_group = entry_point_group
         self.static_manifest_entry_point_group = static_manifest_entry_point_group
-        self.local_plugin_dirs = [Path(p).expanduser() for p in (local_plugin_dirs or [])]
+        self.local_plugin_sources = [
+            PluginSearchPath.from_any(source) for source in (local_plugin_dirs or [])
+        ]
+        # Backwards-compatible path-only view used by existing diagnostics/UI.
+        self.local_plugin_dirs = [source.path for source in self.local_plugin_sources]
 
         self.settings = PluginSettingsStore()
 
@@ -339,6 +342,7 @@ class PluginManager:
             boot_print(
                 "PluginManager.discover: candidate "
                 f"source={candidate.source} "
+                f"origin={candidate.origin.value} "
                 f"module={candidate.module_name} "
                 f"path={candidate.path} "
                 f"manifest_path={candidate.manifest_path}"
@@ -347,7 +351,7 @@ class PluginManager:
                 if candidate.manifest_path is not None:
                     module = None
                     manifest = self._read_static_manifest(candidate.manifest_path)
-                    
+
                 else:
                     module = self._load_module(candidate)
                     candidate.module = module
@@ -392,6 +396,55 @@ class PluginManager:
         )
         return self.list_plugins()
 
+    def forget_user_plugin(self, plugin_id: str) -> None:
+        """Forget one disabled USER-origin discovery record.
+
+        This host-only operation exists for transactional package update/uninstall.
+        It never disables a running plugin and never applies to bundled,
+        development, entry-point, or runtime registrations. After the filesystem
+        transaction commits, the installer may call ``discover()`` to rebuild the
+        record from the new static manifest (or leave it absent after uninstall).
+        """
+
+        record = self._records.get(plugin_id)
+        if record is None:
+            raise KeyError(f"Unknown AstronomicAL plugin: {plugin_id}")
+        if record.candidate.origin != PluginOrigin.USER:
+            raise PluginValidationError(
+                f"Only USER-origin plugins may be forgotten by the package installer; "
+                f"{plugin_id!r} has origin {record.candidate.origin.value!r}."
+            )
+        if record.status == PluginStatus.ENABLED:
+            raise PluginValidationError(
+                f"Cannot forget enabled plugin {plugin_id!r}; disable it first."
+            )
+
+        for registry in (
+            self._panels,
+            self._actions,
+            self._workflows,
+            self._services,
+        ):
+            for key, registration in list(registry.items()):
+                if getattr(registration, "plugin_id", None) == plugin_id:
+                    raise PluginValidationError(
+                        f"Cannot forget plugin {plugin_id!r}; live registrations remain."
+                    )
+
+        for artifact_type, registrations in self._artifact_viewers.items():
+            if any(getattr(registration, "plugin_id", None) == plugin_id for registration in registrations):
+                raise PluginValidationError(
+                    f"Cannot forget plugin {plugin_id!r}; live artifact viewer "
+                    "registrations remain."
+                )
+
+        self._records.pop(plugin_id, None)
+        candidate = record.candidate
+        if candidate.module_name:
+            current = self._candidates_by_module.get(candidate.module_name)
+            if current is candidate:
+                self._candidates_by_module.pop(candidate.module_name, None)
+
     def _discover_entry_points(self) -> List[PluginCandidate]:
         candidates: List[PluginCandidate] = []
         try:
@@ -415,6 +468,7 @@ class PluginManager:
                     PluginCandidate(
                         source="entry_point_static_manifest" if manifest_path else "entry_point",
                         module_name=module_name,
+                        origin=PluginOrigin.ENTRY_POINT,
                         entry_point_name=ep.name,
                         entry_point_object=object_name,
                         manifest_path=manifest_path,
@@ -448,6 +502,7 @@ class PluginManager:
                     PluginCandidate(
                         source="static_manifest_entry_point",
                         module_name=module_name if object_name else "",
+                        origin=PluginOrigin.ENTRY_POINT,
                         entry_point_name=ep.name,
                         entry_point_object=object_name,
                         manifest_path=manifest_path,
@@ -461,38 +516,81 @@ class PluginManager:
 
     def _discover_local_dirs(self) -> List[PluginCandidate]:
         candidates: List[PluginCandidate] = []
-        for root in self.local_plugin_dirs:
+
+        for search_path in self.local_plugin_sources:
+            root = search_path.path
             if not root.exists():
                 continue
+
             for item in root.iterdir():
                 if item.name.startswith("."):
                     continue
+
                 if item.is_file() and item.name.endswith(".py"):
-                    candidates.append(
-                        PluginCandidate(
-                            source="local_file",
-                            module_name=self._local_module_name(item, item.stem),
-                            path=item,
-                        )
+                    candidate = PluginCandidate(
+                        source="local_file",
+                        module_name=self._local_module_name(item, item.stem),
+                        origin=search_path.origin,
+                        path=item,
                     )
-                elif item.is_dir():
-                    plugin_py = item / "plugin.py"
-                    manifest_path = self._find_local_manifest(item)
-                    if plugin_py.exists():
-                        candidates.append(
-                            PluginCandidate(
-                                source="local_dir_static_manifest" if manifest_path else "local_dir",
-                                module_name=self._local_module_name(plugin_py, item.name),
-                                path=plugin_py,
-                                manifest_path=manifest_path,
-                            )
+                    if search_path.require_static_manifest:
+                        self._record_discovery_error(
+                            candidate,
+                            (
+                                "Plugins from this user-managed directory must be "
+                                "directory plugins with a static manifest."
+                            ),
                         )
+                        continue
+                    candidates.append(candidate)
+                    continue
+
+                if not item.is_dir():
+                    continue
+
+                plugin_py = item / "plugin.py"
+                manifest_path = self._find_local_manifest(item)
+                if not plugin_py.exists():
+                    continue
+
+                candidate = PluginCandidate(
+                    source="local_dir_static_manifest" if manifest_path else "local_dir",
+                    module_name=self._local_module_name(plugin_py, item.name),
+                    origin=search_path.origin,
+                    path=plugin_py,
+                    manifest_path=manifest_path,
+                )
+
+                if search_path.require_static_manifest and manifest_path is None:
+                    self._record_discovery_error(
+                        candidate,
+                        (
+                            "Plugins from this user-managed directory must provide "
+                            "a static astronomical-plugin.json or supported TOML manifest."
+                        ),
+                    )
+                    continue
+
+                candidates.append(candidate)
+
         return candidates
 
-    def add_local_plugin_dir(self, path: str | Path) -> None:
-        p = Path(path).expanduser()
-        if p not in self.local_plugin_dirs:
-            self.local_plugin_dirs.append(p)
+    def add_local_plugin_dir(
+        self,
+        path: str | Path,
+        *,
+        origin: PluginOrigin = PluginOrigin.DEVELOPMENT,
+        require_static_manifest: bool = False,
+    ) -> None:
+        source = PluginSearchPath(
+            path=Path(path).expanduser(),
+            origin=origin,
+            require_static_manifest=require_static_manifest,
+        )
+        if source.path in self.local_plugin_dirs:
+            return
+        self.local_plugin_sources.append(source)
+        self.local_plugin_dirs.append(source.path)
 
     def list_discovery_errors(self) -> Dict[str, str]:
         return dict(self._discovery_errors)
@@ -768,11 +866,211 @@ class PluginManager:
     def _same_candidate(left: PluginCandidate, right: PluginCandidate) -> bool:
         return (
             left.source == right.source
+            and left.origin == right.origin
             and left.module_name == right.module_name
             and left.entry_point_name == right.entry_point_name
             and left.entry_point_object == right.entry_point_object
             and str(left.path or "") == str(right.path or "")
             and str(left.manifest_path or "") == str(right.manifest_path or "")
+        )
+
+    def resolve_activation_order(self, plugin_id: str) -> List[str]:
+        """Return required plugins in deterministic dependency-first order.
+
+        Only required AstronomicAL plugin dependencies participate in this graph.
+        Optional plugin relationships are intentionally excluded. Bare dependency ids
+        and versioned requirements such as ``core.ml>=1.4,<2`` are both supported.
+
+        Raises PluginValidationError when a required plugin is missing, incompatible,
+        malformed, or part of a dependency cycle. No plugin code is imported and no
+        runtime state is changed.
+        """
+
+        self._require_record(plugin_id)
+
+        order: List[str] = []
+        visited: set[str] = set()
+        visiting: set[str] = set()
+        stack: List[str] = []
+
+        def visit(current_id: str) -> None:
+            if current_id in visited:
+                return
+
+            if current_id in visiting:
+                try:
+                    cycle_start = stack.index(current_id)
+                except ValueError:
+                    cycle_start = 0
+                cycle = stack[cycle_start:] + [current_id]
+                raise PluginValidationError(
+                    "Plugin dependency cycle detected: " + " -> ".join(cycle)
+                )
+
+            record = self._records.get(current_id)
+            if record is None:
+                parent = stack[-1] if stack else plugin_id
+                raise PluginValidationError(
+                    f"Missing required AstronomicAL plugin {current_id!r} "
+                    f"required by {parent!r}."
+                )
+
+            visiting.add(current_id)
+            stack.append(current_id)
+
+            for raw_requirement in record.manifest.requires_plugins:
+                requirement = self._parse_plugin_requirement(
+                    current_id,
+                    raw_requirement,
+                )
+                required_record = self._records.get(requirement.plugin_id)
+                if required_record is None:
+                    raise PluginValidationError(
+                        f"Missing required AstronomicAL plugin "
+                        f"{requirement.plugin_id!r} required by {current_id!r} "
+                        f"(declared as {str(requirement)!r})."
+                    )
+
+                self._assert_plugin_requirement_version(
+                    current_id,
+                    requirement,
+                    required_record,
+                )
+                visit(requirement.plugin_id)
+
+            stack.pop()
+            visiting.remove(current_id)
+            visited.add(current_id)
+            order.append(current_id)
+
+        visit(plugin_id)
+        return order
+
+    def _parse_plugin_requirement(
+        self,
+        owner_plugin_id: str,
+        raw_requirement: Any,
+    ) -> PluginRequirement:
+        try:
+            return parse_plugin_requirement(raw_requirement)
+        except ValueError as exc:
+            raise PluginValidationError(
+                f"Plugin {owner_plugin_id!r} declares invalid required plugin "
+                f"requirement {raw_requirement!r}: {exc}"
+            ) from exc
+
+    def _assert_plugin_requirement_version(
+        self,
+        owner_plugin_id: str,
+        requirement: PluginRequirement,
+        required_record: PluginRecord,
+    ) -> None:
+        if not requirement.specifier:
+            return
+
+        if SpecifierSet is None or Version is None:
+            raise PluginValidationError(
+                f"Cannot validate versioned plugin requirement {str(requirement)!r} "
+                f"required by {owner_plugin_id!r}: packaging is not installed."
+            )
+
+        try:
+            specifier = SpecifierSet(requirement.specifier)
+        except Exception as exc:
+            raise PluginValidationError(
+                f"Plugin {owner_plugin_id!r} declares invalid required plugin "
+                f"requirement {str(requirement)!r}: {exc}"
+            ) from exc
+
+        discovered_version = str(required_record.manifest.version or "").strip()
+        try:
+            parsed_version = Version(discovered_version)
+        except Exception as exc:
+            raise PluginValidationError(
+                f"Plugin {owner_plugin_id!r} requires {str(requirement)!r}, but "
+                f"plugin {requirement.plugin_id!r} declares version "
+                f"{discovered_version!r}, which cannot be compared as a standard "
+                "plugin version."
+            ) from exc
+
+        if parsed_version not in specifier:
+            raise PluginValidationError(
+                f"Plugin {owner_plugin_id!r} requires {str(requirement)!r}, but "
+                f"discovered plugin {requirement.plugin_id!r} has version "
+                f"{discovered_version}."
+            )
+
+    def required_by(
+        self,
+        plugin_id: str,
+        *,
+        enabled_only: bool = False,
+    ) -> List[str]:
+        """Return plugins that directly require ``plugin_id``.
+
+        Version specifiers do not change dependency identity: a requirement such as
+        ``core.ml>=1.4`` still makes the requiring plugin a dependent of ``core.ml``.
+        """
+
+        self._require_record(plugin_id)
+
+        dependents: List[str] = []
+        for candidate_id, record in self._records.items():
+            requires_plugin = False
+            for raw_requirement in record.manifest.requires_plugins:
+                requirement = self._parse_plugin_requirement(
+                    candidate_id,
+                    raw_requirement,
+                )
+                if requirement.plugin_id == plugin_id:
+                    requires_plugin = True
+                    break
+
+            if not requires_plugin:
+                continue
+            if enabled_only and record.status != PluginStatus.ENABLED:
+                continue
+            dependents.append(candidate_id)
+
+        return sorted(dependents)
+
+    def resolve_deactivation_order(self, plugin_id: str) -> List[str]:
+        """Return enabled dependents first, followed by ``plugin_id``.
+
+        This is used only for explicit cascade operations such as globally disabling
+        community plugins. Normal user-triggered disable operations refuse to remove
+        a plugin while another enabled plugin still requires it.
+        """
+
+        self._require_record(plugin_id)
+
+        order: List[str] = []
+        visited: set[str] = set()
+
+        def visit(current_id: str) -> None:
+            if current_id in visited:
+                return
+            visited.add(current_id)
+
+            for dependent_id in self.required_by(current_id, enabled_only=True):
+                visit(dependent_id)
+
+            order.append(current_id)
+
+        visit(plugin_id)
+        return order
+
+    def assert_can_disable(self, plugin_id: str) -> None:
+        """Raise if an enabled plugin currently requires ``plugin_id``."""
+
+        dependents = self.required_by(plugin_id, enabled_only=True)
+        if not dependents:
+            return
+
+        names = ", ".join(dependents)
+        raise PluginValidationError(
+            f"Cannot disable plugin {plugin_id!r} because it is required by "
+            f"enabled plugin{'s' if len(dependents) != 1 else ''}: {names}."
         )
 
     def validate(
@@ -781,9 +1079,52 @@ class PluginManager:
         *,
         astronomical_version: Optional[str] = None,
     ) -> ValidationResult:
-        record = self._require_record(plugin_id)
-        manifest = record.manifest
+        """Validate the complete required-plugin activation graph.
 
+        Required plugins no longer have to be enabled before this method succeeds.
+        Instead, discovery/missing/cycle checks are performed up front and Python /
+        AstronomicAL compatibility requirements are validated for each plugin in the
+        dependency graph. ``enable()`` then activates that graph in dependency order.
+        """
+
+        errors: List[str] = []
+        warnings: List[str] = []
+        missing: List[str] = []
+
+        try:
+            activation_order = self.resolve_activation_order(plugin_id)
+        except PluginValidationError as exc:
+            errors.append(str(exc))
+            activation_order = [plugin_id]
+
+        for current_id in activation_order:
+            record = self._records.get(current_id)
+            if record is None:
+                continue
+
+            result = self._validate_single_plugin(
+                record.manifest,
+                astronomical_version=astronomical_version,
+            )
+
+            prefix = "" if current_id == plugin_id else f"Required plugin {current_id!r}: "
+            errors.extend(f"{prefix}{message}" for message in result.errors)
+            warnings.extend(f"{prefix}{message}" for message in result.warnings)
+            missing.extend(result.missing_dependencies)
+
+        return ValidationResult(
+            ok=not errors,
+            errors=errors,
+            warnings=warnings,
+            missing_dependencies=missing,
+        )
+
+    def _validate_single_plugin(
+        self,
+        manifest: PluginManifest,
+        *,
+        astronomical_version: Optional[str] = None,
+    ) -> ValidationResult:
         errors: List[str] = []
         warnings: List[str] = []
         missing: List[str] = []
@@ -800,13 +1141,6 @@ class PluginManager:
 
         optional_result = self._validate_requirements(manifest.optional_requires, optional=True)
         warnings.extend(optional_result.warnings)
-
-        for required_plugin in manifest.requires_plugins:
-            other = self._records.get(required_plugin)
-            if other is None:
-                errors.append(f"Missing required AstronomicAL plugin: {required_plugin}")
-            elif other.status != PluginStatus.ENABLED:
-                errors.append(f"Required AstronomicAL plugin is not enabled: {required_plugin}")
 
         return ValidationResult(
             ok=not errors,
@@ -905,20 +1239,82 @@ class PluginManager:
         astronomical_version: Optional[str] = None,
         validate: bool = True,
     ) -> None:
+        """Enable ``plugin_id`` and all of its required plugins transactionally."""
+
         boot_print(f"PluginManager.enable: start plugin_id={plugin_id}")
+        root_record = self._require_record(plugin_id)
+
+        try:
+            activation_order = self.resolve_activation_order(plugin_id)
+        except PluginValidationError as exc:
+            root_record.status = PluginStatus.ERROR
+            root_record.error = str(exc)
+            raise
+
+        boot_print(
+            "PluginManager.enable: activation order "
+            f"plugin_id={plugin_id} order={activation_order}"
+        )
+
+        if validate:
+            boot_print(f"PluginManager.enable: validate graph plugin_id={plugin_id}")
+            result = self.validate(plugin_id, astronomical_version=astronomical_version)
+            if not result.ok:
+                root_record.status = PluginStatus.ERROR
+                root_record.error = "; ".join(result.errors)
+                raise PluginValidationError(root_record.error)
+            boot_print(f"PluginManager.enable: validation ok plugin_id={plugin_id}")
+
+        self._assert_dependency_activation_policy(
+            plugin_id,
+            activation_order,
+            context=context,
+        )
+
+        newly_enabled: List[str] = []
+
+        try:
+            for current_id in activation_order:
+                record = self._require_record(current_id)
+                if record.status == PluginStatus.ENABLED:
+                    continue
+
+                self._enable_single(current_id, context=context)
+                newly_enabled.append(current_id)
+
+        except Exception as exc:
+            for enabled_id in reversed(newly_enabled):
+                try:
+                    self._disable_single(
+                        enabled_id,
+                        context=context,
+                        remove_panels=True,
+                        cancel_jobs=True,
+                    )
+                except Exception:
+                    traceback.print_exc()
+
+            if root_record.status != PluginStatus.ERROR:
+                root_record.status = PluginStatus.ERROR
+                root_record.error = (
+                    f"Failed while enabling required plugin graph for {plugin_id!r}: {exc}"
+                )
+
+            if isinstance(exc, (PluginValidationError, PluginLoadError)):
+                raise
+            raise PluginLoadError(
+                f"Failed to enable plugin dependency graph for {plugin_id}: {exc}"
+            ) from exc
+
+    def _enable_single(
+        self,
+        plugin_id: str,
+        *,
+        context: Any,
+    ) -> None:
         record = self._require_record(plugin_id)
         if record.status == PluginStatus.ENABLED:
             return
-
-        if validate:
-            boot_print(f"PluginManager.enable: validate plugin_id={plugin_id}")
-            result = self.validate(plugin_id, astronomical_version=astronomical_version)
-            if not result.ok:
-                record.status = PluginStatus.ERROR
-                record.error = "; ".join(result.errors)
-                raise PluginValidationError(record.error)
-            
-            boot_print(f"PluginManager.enable: validation ok plugin_id={plugin_id}")
 
         installed_before_error = self._installed_service_keys_by_plugin.setdefault(plugin_id, set())
 
@@ -935,7 +1331,7 @@ class PluginManager:
             register = getattr(module, "register", None)
             if not callable(register):
                 raise PluginLoadError(f"Plugin {plugin_id!r} does not define register(api).")
-            
+
             boot_print(f"PluginManager.enable: calling register(api) plugin_id={plugin_id}")
             register(api)
             boot_print(
@@ -971,13 +1367,86 @@ class PluginManager:
             )
             record.status = PluginStatus.ERROR
             record.error = self._format_exception(exc)
+            if isinstance(exc, PluginLoadError):
+                raise
             raise PluginLoadError(f"Failed to enable plugin {plugin_id}: {exc}") from exc
+
+    def _assert_dependency_activation_policy(
+        self,
+        root_plugin_id: str,
+        activation_order: Sequence[str],
+        *,
+        context: Any,
+    ) -> None:
+        """Ask the host activation policy whether required plugins may run."""
+
+        activation = getattr(context, "plugin_activation", None)
+        checker = getattr(activation, "can_enable_as_dependency", None)
+        if not callable(checker):
+            return
+
+        reason_getter = getattr(activation, "dependency_blocked_reason", None)
+
+        for dependency_id in activation_order:
+            if dependency_id == root_plugin_id:
+                continue
+
+            info = self.plugin_info(dependency_id)
+            if info.status == PluginStatus.ENABLED:
+                continue
+            if checker(info):
+                continue
+
+            reason = (
+                str(reason_getter(info))
+                if callable(reason_getter)
+                else "blocked by the current host activation policy"
+            )
+            raise PluginValidationError(
+                f"Cannot enable {root_plugin_id!r}: required plugin "
+                f"{dependency_id!r} is blocked: {reason}"
+            )
 
     def disable(
         self,
         plugin_id: str,
         context: Any | None = None,
         *,
+        remove_panels: bool = True,
+        cancel_jobs: bool = True,
+        cascade: bool = False,
+    ) -> None:
+        """Disable a plugin.
+
+        Normal calls refuse to disable a plugin that is still required by another
+        enabled plugin. ``cascade=True`` is reserved for host-level operations that
+        intentionally need to tear down the whole dependent graph.
+        """
+
+        self._require_record(plugin_id)
+
+        if cascade:
+            order = self.resolve_deactivation_order(plugin_id)
+        else:
+            self.assert_can_disable(plugin_id)
+            order = [plugin_id]
+
+        for current_id in order:
+            record = self._require_record(current_id)
+            if record.status != PluginStatus.ENABLED:
+                continue
+            self._disable_single(
+                current_id,
+                context=context,
+                remove_panels=remove_panels,
+                cancel_jobs=cancel_jobs,
+            )
+
+    def _disable_single(
+        self,
+        plugin_id: str,
+        *,
+        context: Any | None = None,
         remove_panels: bool = True,
         cancel_jobs: bool = True,
     ) -> None:
@@ -1006,10 +1475,10 @@ class PluginManager:
             context.events.publish("plugin.disabled", {"plugin_id": plugin_id})
 
     def reload(self, plugin_id: str, context: Any) -> None:
-
         record = self._require_record(plugin_id)
 
-        self.disable(plugin_id, context=context)
+        self.assert_can_disable(plugin_id)
+        self._disable_single(plugin_id, context=context)
 
         try:
             if record.candidate.path is not None:
@@ -1147,6 +1616,7 @@ class PluginManager:
                 "was registered through a transitional/direct-registration path."
             ),
             source="runtime_registration",
+            origin=PluginOrigin.RUNTIME,
             path=None,
             error=None,
             capabilities=[],
@@ -1165,7 +1635,6 @@ class PluginManager:
                 if r.plugin_id == plugin_id
             ],
         )
-
 
     def list_plugins(self) -> List[PluginInfo]:
         plugin_ids = set(self._records)
@@ -1190,6 +1659,7 @@ class PluginManager:
             status=record.status,
             description=manifest.description,
             source=record.candidate.source,
+            origin=record.candidate.origin,
             path=str(record.candidate.path) if record.candidate.path else None,
             error=record.error,
             capabilities=list(manifest.capabilities),
@@ -1240,7 +1710,6 @@ class PluginManager:
 
     def get_workflow(self, workflow_id: str) -> WorkflowRegistration:
         return self._workflows[workflow_id]
-
 
     def create_panel(
         self,
@@ -1445,7 +1914,6 @@ class PluginManager:
                 return str(workspace_id) in keys
             except Exception:
                 return True
-
 
     def add_panel_to_workspace(
         self,
@@ -1701,8 +2169,6 @@ class PluginManager:
 
         return workspace_id
 
-
-
     def open_panel(
         self,
         panel_id: str,
@@ -1732,7 +2198,6 @@ class PluginManager:
             open_kwargs=open_kwargs,
         )
 
-
         return self.add_panel_to_workspace(
             panel_id,
             context,
@@ -1745,7 +2210,7 @@ class PluginManager:
             open_kwargs=open_kwargs,
             **kwargs,
         )
-    
+
     def _plugin_version(self, plugin_id: str) -> Optional[str]:
         record = self._records.get(plugin_id)
         if record is None:
@@ -2689,7 +3154,6 @@ class PluginManager:
     def _format_exception(exc: BaseException) -> str:
         return "".join(traceback.format_exception_only(type(exc), exc)).strip()
 
-
 class _LazyServiceProxy:
     """Compatibility fallback for older ServiceRegistry implementations.
 
@@ -2712,7 +3176,6 @@ class _LazyServiceProxy:
     def __getattr__(self, item: str) -> Any:
         return getattr(self._get(), item)
 
-
 def _json_safe(value: Any) -> Any:
     if isinstance(value, dict):
         return {k: _json_safe(v) for k, v in value.items()}
@@ -2721,7 +3184,6 @@ def _json_safe(value: Any) -> Any:
     if isinstance(value, (str, int, float, bool)) or value is None:
         return value
     return repr(value)
-
 
 def _is_numeric_dtype(dtype: Any) -> bool:
     try:

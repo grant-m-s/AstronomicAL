@@ -102,58 +102,87 @@ from astronomicAL.platform.workspace import WorkspaceManager
 from astronomicAL.platform.selection import SelectionManager
 from astronomicAL.platform.record_navigation import RecordNavigationManager
 from astronomicAL.platform.services import ServiceRegistry
-from astronomicAL.platform.plugins import PluginManager
+from astronomicAL.platform.plugins import (
+    InstalledPluginStore,
+    PluginActivationService,
+    PluginInstaller,
+    PluginManager,
+    PluginOrigin,
+    PluginSearchPath,
+    PluginStateStore,
+)
 from astronomicAL.platform.persistence import WorkspacePersistence
 from astronomicAL.platform.runtime_status import RuntimeStatus
 
-def _plugin_dirs() -> list[Path]:
-    """Return plugin roots scanned by PluginManager.
-
-    PluginManager expects each root directory to contain plugin folders, where
-    each plugin folder contains a plugin.py file, for example:
-
-        astronomicAL/plugins/event_monitor/plugin.py
-        astronomicAL/plugins/table_tools/plugin.py
-
-    A plain .py file directly inside one of these roots is also supported by the
-    supplied PluginManager.
-    """
+def _plugin_dirs() -> list[PluginSearchPath]:
+    """Return local plugin roots together with host-owned activation policy."""
 
     package_dir = Path(__file__).resolve().parent
     project_dir = package_dir.parent
 
-    paths = [
-        package_dir / "plugins",
-        project_dir / "plugins",
-        Path.cwd() / "plugins",
-        Path.home() / ".astronomical" / "plugins",
+    sources = [
+        PluginSearchPath(
+            package_dir / "plugins",
+            origin=PluginOrigin.BUNDLED,
+        ),
+        PluginSearchPath(
+            project_dir / "plugins",
+            origin=PluginOrigin.DEVELOPMENT,
+        ),
+        PluginSearchPath(
+            Path.cwd() / "plugins",
+            origin=PluginOrigin.DEVELOPMENT,
+        ),
+        PluginSearchPath(
+            Path.home() / ".astronomical" / "plugins",
+            origin=PluginOrigin.USER,
+            require_static_manifest=True,
+        ),
     ]
 
     extra = os.environ.get("ASTRONOMICAL_PLUGIN_PATH", "")
     for item in extra.split(os.pathsep):
         if item.strip():
-            paths.append(Path(item).expanduser())
+            sources.append(
+                PluginSearchPath(
+                    Path(item).expanduser(),
+                    origin=PluginOrigin.DEVELOPMENT,
+                )
+            )
 
-    # Preserve order while removing duplicates.
+    # Preserve order while removing duplicate roots. The first declaration owns
+    # the origin/policy for a path, so bundled roots cannot be downgraded later.
     seen: set[Path] = set()
-    unique: list[Path] = []
-    for path in paths:
-        resolved = path.expanduser()
-        if resolved not in seen:
-            seen.add(resolved)
-            unique.append(resolved)
+    unique: list[PluginSearchPath] = []
+    for source in sources:
+        path = source.path.expanduser()
+        if path in seen:
+            continue
+        seen.add(path)
+        unique.append(source)
+
     return unique
 
 def _discover_and_enable_plugins(context: AppContext) -> None:
     boot_print("main.py: plugin discovery start")
     manager = context.plugins
+    activation = context.plugin_activation
+
     if manager is None:
         print("[plugins] no PluginManager on context")
         return
+    if activation is None:
+        raise RuntimeError("AppContext is missing plugin activation policy.")
 
-    plugin_debug_print("local_plugin_dirs:")
-    for path in manager.local_plugin_dirs:
-        plugin_debug_print(f"  - {path} exists={path.exists()}")
+    plugin_debug_print("local_plugin_sources:")
+    for source in manager.local_plugin_sources:
+        plugin_debug_print(
+            "  - "
+            f"{source.path} "
+            f"origin={source.origin.value} "
+            f"static_manifest_required={source.require_static_manifest} "
+            f"exists={source.path.exists()}"
+        )
 
     try:
         discovered = manager.discover()
@@ -161,7 +190,11 @@ def _discover_and_enable_plugins(context: AppContext) -> None:
         for info in discovered:
             boot_print(
                 "main.py: discovered plugin "
-                f"id={info.id} status={info.status} source={info.source} path={info.path}"
+                f"id={info.id} "
+                f"status={info.status} "
+                f"source={info.source} "
+                f"origin={info.origin.value} "
+                f"path={info.path}"
             )
     except Exception as exc:
         print("[plugins] discovery failed:", exc)
@@ -171,7 +204,12 @@ def _discover_and_enable_plugins(context: AppContext) -> None:
     plugin_debug_print("discovered plugin infos:")
     for info in discovered:
         plugin_debug_print(
-            f"  - {info.id} status={info.status} source={info.source} path={info.path}"
+            "  - "
+            f"{info.id} "
+            f"status={info.status} "
+            f"source={info.source} "
+            f"origin={info.origin.value} "
+            f"path={info.path}"
         )
 
     errors = manager.list_discovery_errors()
@@ -181,6 +219,15 @@ def _discover_and_enable_plugins(context: AppContext) -> None:
             print(f"  - {key}: {error}")
 
     for info in discovered:
+        if not activation.should_enable(info):
+            boot_print(
+                "main.py: leaving plugin disabled "
+                f"id={info.id} "
+                f"origin={info.origin.value} "
+                f"reason={activation.blocked_reason(info)}"
+            )
+            continue
+
         try:
             boot_print(f"main.py: enabling plugin id={info.id}")
             manager.enable(info.id, context=context)
@@ -226,6 +273,14 @@ workspace = WorkspaceManager(react_template=react, grid=grid)
 selection = SelectionManager(events=events, artifacts=artifacts)
 navigation = RecordNavigationManager(datasets=datasets, selection=selection, events=events)
 services = ServiceRegistry()
+astronomical_home = Path.home() / ".astronomical"
+plugin_state = PluginStateStore(
+    astronomical_home / "plugin-state.json"
+)
+installed_plugins = InstalledPluginStore(
+    astronomical_home / "installed-plugins.json"
+)
+plugin_activation = PluginActivationService(plugin_state)
 
 # Make the status service available both directly on context and through the
 # generic service registry for plugins that want to read diagnostics.
@@ -240,6 +295,22 @@ services.set(
     owner="platform",
 )
 
+services.set(
+    "platform.plugin_state",
+    plugin_state,
+    owner="platform",
+)
+services.set(
+    "platform.plugin_activation",
+    plugin_activation,
+    owner="platform",
+)
+services.set(
+    "platform.installed_plugins",
+    installed_plugins,
+    owner="platform",
+)
+
 boot_print("main.py: platform services created")
 boot_print(f"main.py: events={type(events).__name__}")
 boot_print(f"main.py: jobs={type(jobs).__name__}")
@@ -249,17 +320,52 @@ boot_print(f"main.py: workspace={type(workspace).__name__}")
 boot_print(f"main.py: selection={type(selection).__name__}")
 boot_print(f"main.py: services={type(services).__name__}")
 boot_print(f"main.py: navigation={type(navigation).__name__}")
+boot_print(f"main.py: plugin_state={type(plugin_state).__name__}")
+boot_print(f"main.py: plugin_activation={type(plugin_activation).__name__}")
+boot_print(f"main.py: installed_plugins={type(installed_plugins).__name__}")
 boot_print(f"main.py: runtime_status={type(runtime_status).__name__}")
+
+if plugin_state.load_error:
+    print(
+        "[plugins] plugin state could not be loaded; "
+        "community plugins will remain disabled:",
+        plugin_state.load_error,
+    )
+
+if installed_plugins.load_error:
+    print(
+        "[plugins] installed plugin database could not be loaded; "
+        "install/update/uninstall operations will remain blocked:",
+        installed_plugins.load_error,
+    )
 
 plugins = PluginManager(
     local_plugin_dirs=_plugin_dirs(),
     auto_discover=False,
 )
 
+plugin_installer = PluginInstaller(
+    store=installed_plugins,
+    plugin_dir=astronomical_home / "plugins",
+    manager=plugins,
+)
+services.set(
+    "platform.plugin_installer",
+    plugin_installer,
+    owner="platform",
+)
+
 boot_print("main.py: plugin manager created")
-boot_print("main.py: plugin local dirs:")
-for path in plugins.local_plugin_dirs:
-    boot_print(f"  - {path} exists={path.exists()}")
+boot_print(f"main.py: plugin_installer={type(plugin_installer).__name__}")
+boot_print("main.py: plugin local sources:")
+for source in plugins.local_plugin_sources:
+    boot_print(
+        "  - "
+        f"{source.path} "
+        f"origin={source.origin.value} "
+        f"static_manifest_required={source.require_static_manifest} "
+        f"exists={source.path.exists()}"
+    )
 
 context = AppContext(
     events=events,
@@ -273,6 +379,10 @@ context = AppContext(
     layout_file=Path("astronomicAL/layout.json"),
     layout_directory=Path("layouts"),
     plugins=plugins,
+    plugin_state=plugin_state,
+    plugin_activation=plugin_activation,
+    installed_plugins=installed_plugins,
+    plugin_installer=plugin_installer,
     runtime_status=runtime_status,
 )
 
@@ -295,6 +405,10 @@ required = [
     "navigation",
     "services",
     "plugins",
+    "plugin_state",
+    "plugin_activation",
+    "installed_plugins",
+    "plugin_installer",
     "persistence",
     "runtime_status",
     "layout_file",
