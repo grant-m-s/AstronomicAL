@@ -643,22 +643,17 @@ class WorkspaceManager:
         width = max(1, min(int(item.get("w", 4) or 4), cols))
         height = max(1, int(item.get("h", 4) or 4))
         max_x = max(0, cols - width)
-
-        x_positions = list(range(0, max_x + 1, width))
-        if max_x not in x_positions:
-            x_positions.append(max_x)
-
         bottom = self._layout_bottom_y(existing_layout)
 
         candidate = deepcopy(item)
         candidate["w"] = width
         candidate["h"] = height
 
-        # Important: once the requested/supplied position collides, do not scan
-        # from y=0. Append at or below the existing layout bottom so existing
-        # panels are not displaced by ReactGridLayout collision resolution.
-        for y in range(bottom, bottom + 500):
-            for x in x_positions:
+        # First-fit placement: scan the grid from left to right, then top to
+        # bottom. This fills gaps before extending the workspace downward and
+        # keeps existing panels fixed because only the new item is repositioned.
+        for y in range(0, bottom + 500):
+            for x in range(0, max_x + 1):
                 candidate["x"] = x
                 candidate["y"] = y
                 candidate = self._sanitize_layout_item(
@@ -746,13 +741,15 @@ class WorkspaceManager:
 
         item = {
             "i": panel_id,
-            "x": hint.get("x", 0),
-            "y": self._layout_bottom_y(existing_layout),
+            "x": 0,
+            "y": 0,
             "w": hint.get("w", 4),
             "h": hint.get("h", 4),
         }
 
-        # Preserve constraints, but do not preserve y from plugin default_layout.
+        # Plugin default_layout is a size/constraint hint for a newly opened
+        # panel. Exact saved geometry is supplied separately through
+        # layout_items during workspace restore/reconcile.
         for key in ("minW", "minH", "maxW", "maxH", "static"):
             if key in hint:
                 item[key] = hint[key]

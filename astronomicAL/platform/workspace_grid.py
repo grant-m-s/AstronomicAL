@@ -260,17 +260,60 @@ function sanitizeLayout(layout, keys, cols) {
   return out;
 }
 
+function layoutItemsCollide(left, right) {
+  const leftX = integerOr(left?.x, 0);
+  const leftY = integerOr(left?.y, 0);
+  const leftW = Math.max(1, integerOr(left?.w, 1));
+  const leftH = Math.max(1, integerOr(left?.h, 1));
+
+  const rightX = integerOr(right?.x, 0);
+  const rightY = integerOr(right?.y, 0);
+  const rightW = Math.max(1, integerOr(right?.w, 1));
+  const rightH = Math.max(1, integerOr(right?.h, 1));
+
+  return !(
+    leftX + leftW <= rightX ||
+    rightX + rightW <= leftX ||
+    leftY + leftH <= rightY ||
+    rightY + rightH <= leftY
+  );
+}
+
 function defaultLayoutItem(key, existingLayout, cols) {
   const C = Math.max(1, integerOr(cols, 12));
   const w = Math.max(1, Math.min(4, C));
+  const h = 4;
+  const maxX = Math.max(0, C - w);
+  const bottom = bottomY(existingLayout || []);
 
-  return {
+  const candidate = {
     i: String(key),
     x: 0,
-    y: bottomY(existingLayout || []),
+    y: 0,
     w,
-    h: 4,
+    h,
     static: false,
+  };
+
+  for (let y = 0; y < bottom + 500; y += 1) {
+    for (let x = 0; x <= maxX; x += 1) {
+      candidate.x = x;
+      candidate.y = y;
+
+      const collides = (existingLayout || []).some((item) =>
+        layoutItemsCollide(candidate, item)
+      );
+
+      if (!collides) {
+        return { ...candidate };
+      }
+    }
+  }
+
+  return {
+    ...candidate,
+    x: 0,
+    y: bottom,
   };
 }
 
