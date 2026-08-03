@@ -352,7 +352,7 @@ def register(api) -> None:
             "ml.recipe_run.progress",
             "ml.recipe_run.finished",
         ],
-        default_layout={"x": 0, "y": 0, "w": 5, "h": 7},
+        default_layout={"x": 0, "y": 0, "w": 5, "h": 6},
     )
 
     api.register_panel(
@@ -370,7 +370,7 @@ def register(api) -> None:
         optional_mappings=[],
         uses_services=["core.ml.trained_model_catalog"],
         produces=["ml.predictions", "dataset"],
-        default_layout={"x": 5, "y": 7, "w": 5, "h": 5},
+        default_layout={"x": 5, "y": 7, "w": 5, "h": 7},
     )
 
     api.register_panel(
@@ -398,7 +398,7 @@ def register(api) -> None:
         icon="show_chart",
         tags=["ml", "training", "curves", "torch", "metrics"],
         produces=[],
-        default_layout={"x": 0, "y": 7, "w": 5, "h": 5},
+        default_layout={"x": 0, "y": 7, "w": 7, "h": 6},
     )
 
 def create_model_manager_panel(context, **kwargs):

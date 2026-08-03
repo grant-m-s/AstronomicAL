@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+from concurrent.futures import CancelledError
 from dataclasses import dataclass
+from functools import wraps
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+import os
+import threading
+import time
 import traceback
 import uuid
 
@@ -16,17 +21,199 @@ except Exception:
 
 from .service import DESI_DATASETS, SDSS_DATASETS, SpectraResult, SpectraRuntime
 
-
 PLUGIN_ID = "astro.spectra"
 RUNTIME_SERVICE_KEY = f"{PLUGIN_ID}.runtime"
 SETTINGS_HEIGHT = 118
-
 
 SOURCE_LABELS = {
     "DESI": "DESI",
     "SDSS": "SDSS/BOSS",
     "EuclidSpec": "Euclid",
 }
+
+
+_PANEL_TIMING_ENABLED = os.environ.get(
+    "ASTRONOMICAL_PANEL_TIMINGS",
+    "1",
+).strip().lower() not in {"0", "false", "off", "no"}
+try:
+    _PANEL_TIMING_MIN_MS = max(
+        0.0,
+        float(os.environ.get("ASTRONOMICAL_PANEL_TIMING_MIN_MS", "0")),
+    )
+except (TypeError, ValueError):
+    _PANEL_TIMING_MIN_MS = 0.0
+
+
+def _timing_repr(value: Any, *, limit: int = 180) -> str:
+    try:
+        text = repr(value)
+    except Exception:
+        text = f"<{type(value).__name__}>"
+    if len(text) > limit:
+        text = text[: limit - 3] + "..."
+    return text
+
+
+def _timing_log(
+    component: str,
+    event: str,
+    *,
+    elapsed_ms: Optional[float] = None,
+    force: bool = False,
+    **fields: Any,
+) -> None:
+    """Emit one compact structured timing line.
+
+    This diagnostic build enables timings by default. Set
+    ``ASTRONOMICAL_PANEL_TIMINGS=0`` to disable them, or set
+    ``ASTRONOMICAL_PANEL_TIMING_MIN_MS`` to suppress shorter spans.
+    """
+    if not _PANEL_TIMING_ENABLED:
+        return
+    if (
+        elapsed_ms is not None
+        and not force
+        and float(elapsed_ms) < _PANEL_TIMING_MIN_MS
+    ):
+        return
+
+    parts = [
+        f"[AL_TIMING][{component}]",
+        f"event={_timing_repr(event)}",
+        f"thread={_timing_repr(threading.current_thread().name)}",
+    ]
+    if elapsed_ms is not None:
+        parts.append(f"elapsed_ms={float(elapsed_ms):.3f}")
+    for key, value in fields.items():
+        if value is None:
+            continue
+        if isinstance(value, float):
+            parts.append(f"{key}={value:.3f}")
+        else:
+            parts.append(f"{key}={_timing_repr(value)}")
+    print(" ".join(parts))
+
+
+def _timing_context(instance: Any, kwargs: Mapping[str, Any]) -> Dict[str, Any]:
+    fields: Dict[str, Any] = {
+        "panel_id": getattr(
+            instance,
+            "panel_id",
+            getattr(instance, "instance_id", None),
+        ),
+        "source": getattr(instance, "source", None),
+    }
+
+    request = kwargs.get("request")
+    if request is not None:
+        fields["generation"] = getattr(request, "generation", None)
+        target = getattr(request, "target", None)
+        if target is not None:
+            fields["dataset_id"] = getattr(target, "dataset_id", None)
+            fields["row_id"] = getattr(target, "row_id", None)
+
+    fields.setdefault("generation", kwargs.get("generation"))
+    fields.setdefault(
+        "dataset_id",
+        kwargs.get("dataset_id", getattr(instance, "current_dataset_id", None)),
+    )
+    fields.setdefault(
+        "row_id",
+        kwargs.get("row_id", getattr(instance, "current_row_id", None)),
+    )
+    return fields
+
+
+def _timed_method(component: str, event: Optional[str] = None):
+    def _decorate(function):
+        @wraps(function)
+        def _wrapped(self, *args, **kwargs):
+            started_at = time.perf_counter()
+            error_type = None
+            try:
+                return function(self, *args, **kwargs)
+            except BaseException as exc:
+                error_type = type(exc).__name__
+                raise
+            finally:
+                _timing_log(
+                    component,
+                    event or function.__name__,
+                    elapsed_ms=(time.perf_counter() - started_at) * 1000.0,
+                    error_type=error_type,
+                    **_timing_context(self, kwargs),
+                )
+        return _wrapped
+    return _decorate
+
+
+def _timed_function(component: str, event: Optional[str] = None):
+    def _decorate(function):
+        @wraps(function)
+        def _wrapped(*args, **kwargs):
+            started_at = time.perf_counter()
+            error_type = None
+            try:
+                return function(*args, **kwargs)
+            except BaseException as exc:
+                error_type = type(exc).__name__
+                raise
+            finally:
+                _timing_log(
+                    component,
+                    event or function.__name__,
+                    elapsed_ms=(time.perf_counter() - started_at) * 1000.0,
+                    error_type=error_type,
+                )
+        return _wrapped
+    return _decorate
+
+
+def _schedule_document_probe(
+    component: str,
+    label: str,
+    **fields: Any,
+) -> None:
+    """Measure how long the owning document takes to reach its next tick."""
+    if not _PANEL_TIMING_ENABLED:
+        return
+    scheduled_at = time.perf_counter()
+    try:
+        document = pn.state.curdoc
+    except Exception:
+        document = None
+    if document is None:
+        _timing_log(
+            component,
+            "document_probe.unavailable",
+            force=True,
+            label=label,
+            **fields,
+        )
+        return
+
+    def _probe() -> None:
+        _timing_log(
+            component,
+            "document_probe.next_tick",
+            elapsed_ms=(time.perf_counter() - scheduled_at) * 1000.0,
+            force=True,
+            label=label,
+            **fields,
+        )
+
+    try:
+        document.add_next_tick_callback(_probe)
+    except Exception as exc:
+        _timing_log(
+            component,
+            "document_probe.schedule_error",
+            force=True,
+            label=label,
+            error_type=type(exc).__name__,
+            **fields,
+        )
 
 
 def _style_widget(
@@ -44,7 +231,6 @@ def _style_widget(
     except Exception:
         pass
     return widget
-
 
 def _settings_box(*controls: Any) -> pn.FlexBox:
     return pn.FlexBox(
@@ -65,7 +251,6 @@ def _settings_box(*controls: Any) -> pn.FlexBox:
         },
     )
 
-
 def _small_label(text: str, *, width: int = 76) -> pn.pane.HTML:
     return pn.pane.HTML(
         f"<div style='font-size:11px;font-weight:600;color:#555;"
@@ -75,7 +260,6 @@ def _small_label(text: str, *, width: int = 76) -> pn.pane.HTML:
         sizing_mode="fixed",
         margin=(0, 2, 0, 6),
     )
-
 
 def _safe_float(value: Any) -> Optional[float]:
     try:
@@ -89,7 +273,6 @@ def _safe_float(value: Any) -> Optional[float]:
         return out
     except Exception:
         return None
-
 
 def _as_list(value: Any) -> List[Any]:
     if value is None:
@@ -106,7 +289,6 @@ def _as_list(value: Any) -> List[Any]:
         except Exception:
             return [value]
 
-
 @dataclass
 class _ResolvedTarget:
     dataset_id: str
@@ -121,6 +303,16 @@ class _ResolvedTarget:
     target_id_column: Optional[str]
     retrieval_mode: str
 
+@dataclass(frozen=True)
+class _SpectraFetchRequest:
+    generation: int
+    target: _ResolvedTarget
+    reason: str
+    max_separation_arcsec: float
+    datasets: Tuple[str, ...]
+    smooth_kernel: str
+    smooth_window: int
+    redshift: Optional[float]
 
 class SpectraPanel:
     """Plugin-native DESI/SDSS/Euclid spectra panel."""
@@ -141,19 +333,35 @@ class SpectraPanel:
         self.panel_id = f"{PLUGIN_ID}.{source}.{uuid.uuid4().hex}"
 
         self._subscriptions: List[Any] = []
-        self._job_handle: Any = None
+        self._fetch_job_handle: Any = None
+        self._aux_job_handle: Any = None
+        self._active_fetch_request: Optional[_SpectraFetchRequest] = None
+        self._pending_fetch_request: Optional[_SpectraFetchRequest] = None
+        self._request_generation = 0
         self._disposed = False
         self._initial_load_started = False
         self._settings_built = False
         self.settings_visible = False
 
         self._current_target: Optional[_ResolvedTarget] = None
+        self._result_target: Optional[_ResolvedTarget] = None
         self._spectra_result: Optional[SpectraResult] = None
 
         self._auto_load_generation = 0
         self._auto_load_scheduled = False
         self._pending_auto_load_reason: Optional[str] = None
         self._target_status_scheduled = False
+
+        # A layout restore can construct this controller on a worker thread and
+        # start the initial archive request before Panel has mounted the
+        # HoloViews pane.  Assigning an hv.Layout at that point can make Panel
+        # materialise a Bokeh GridPlot while its design parameters are still
+        # being propagated, which raises ``unexpected attribute 'design'`` on
+        # the first render only.  Keep the result pending until the pane owns a
+        # live Bokeh model, then perform the assignment on the document thread.
+        self._pending_plot_assignment: Optional[Tuple[int, Any]] = None
+        self._plot_assignment_retry_scheduled = False
+        self._plot_assignment_retry_attempt = 0
 
         self._build_widgets()
         if state:
@@ -173,7 +381,14 @@ class SpectraPanel:
         return self.view()
 
     def dispose(self) -> None:
+        if self._disposed:
+            return
+
         self._disposed = True
+        self._request_generation += 1
+        self._pending_fetch_request = None
+        self._pending_plot_assignment = None
+        self._plot_assignment_retry_attempt = 0
         self._cancel_job()
 
         events = getattr(self.context, "events", None)
@@ -267,8 +482,20 @@ class SpectraPanel:
             },
         )
 
+        # Keep both child models stable for the lifetime of the panel. Updating
+        # only the HoloViews pane's object avoids rebuilding the surrounding
+        # Bokeh layout on every source change.
+        self.figure_message = self._empty_message("No spectrum loaded.")
+        self.spectrum_pane = pn.pane.HoloViews(
+            hv.Curve(([], [])),
+            sizing_mode="stretch_both",
+            min_height=0,
+            margin=(0, 0, 0, 0),
+            visible=False,
+        )
         self.figure = pn.Column(
-            self._empty_message("No spectrum loaded."),
+            self.figure_message,
+            self.spectrum_pane,
             sizing_mode="stretch_both",
             min_height=60,
             margin=(0, 6, 6, 6),
@@ -420,10 +647,9 @@ class SpectraPanel:
         if self.source == "EuclidSpec":
             self.plot_lines_checkbox.disabled = True
             self.plot_model_checkbox.disabled = True
-        
+
         elif self.source !=  "EuclidSpec":
             self.query_redshift_button.diabled = True
-
 
         self.load_button.on_click(lambda _event: self.load_spectra(reason="button.load"))
         self.settings_button.on_click(self._toggle_settings)
@@ -431,21 +657,19 @@ class SpectraPanel:
         self.refresh_plot_button.on_click(lambda _event: self._update_smoothing_and_render())
         self.retrieve_mode.param.watch(self._retrieve_mode_changed, "value")
         self.redshift_input.param.watch(self._update_redshift_from_input, "value")
-   
+
         for widget in [
             self.plot_lines_checkbox,
             self.plot_model_checkbox,
             self.redshift_column_selector,
         ]:
             widget.param.watch(lambda _event: self._render_existing_result(), "value")
-        
+
         for widget in [
             self.smoothing_function_input,
             self.smoothing_window_input,
             ]:
             widget.param.watch(self._update_smoothing_and_render,"value",)
-
-
 
     def _header(self) -> pn.GridBox:
         return pn.GridBox(
@@ -551,6 +775,15 @@ class SpectraPanel:
             styles={"color": "#666"},
         )
 
+    @_timed_method("Spectra")
+    def _show_figure_message(self, text: str, *, clear_plot: bool) -> None:
+        self.figure_message.object = f"### {text}"
+        if clear_plot:
+            self.spectrum_pane.visible = False
+            self.figure_message.visible = True
+        else:
+            self.figure_message.visible = not bool(self.spectrum_pane.visible)
+
     # ------------------------------------------------------------------
     # Events
     # ------------------------------------------------------------------
@@ -587,32 +820,98 @@ class SpectraPanel:
         events = getattr(self.context, "events", None)
         if events is None:
             return
+        started_at = time.perf_counter()
+        error_type = None
         try:
             events.publish(topic, payload or {})
-        except Exception:
+        except Exception as exc:
+            error_type = type(exc).__name__
             traceback.print_exc()
+        finally:
+            _timing_log(
+                "Spectra",
+                "event.publish",
+                elapsed_ms=(time.perf_counter() - started_at) * 1000.0,
+                force=True,
+                panel_id=self.panel_id,
+                source=self.source,
+                topic=topic,
+                generation=self._request_generation,
+                row_id=getattr(self._current_target, "row_id", None),
+                error_type=error_type,
+            )
 
-    def _schedule_panel_callback(self, callback, *, delay_ms: int = 0) -> None:
-        """Schedule UI work outside the EventBus subscriber call stack."""
+    def _schedule_panel_callback(
+        self,
+        callback,
+        *,
+        delay_ms: int = 0,
+        label: Optional[str] = None,
+    ) -> None:
+        """Schedule panel UI work and expose its document-queue delay."""
         if getattr(self, "_disposed", False):
             return
 
+        scheduled_at = time.perf_counter()
+        callback_label = label or getattr(callback, "__qualname__", None) or getattr(
+            callback,
+            "__name__",
+            type(callback).__name__,
+        )
+        route = "immediate"
+
         def _run() -> None:
-            if getattr(self, "_disposed", False):
-                return
-            callback()
+            queue_ms = (time.perf_counter() - scheduled_at) * 1000.0
+            callback_started_at = time.perf_counter()
+            error_type = None
+            try:
+                if not getattr(self, "_disposed", False):
+                    callback()
+            except BaseException as exc:
+                error_type = type(exc).__name__
+                raise
+            finally:
+                _timing_log(
+                    "Spectra",
+                    "ui_callback.run",
+                    elapsed_ms=(time.perf_counter() - callback_started_at) * 1000.0,
+                    force=True,
+                    panel_id=self.panel_id,
+                    source=self.source,
+                    label=callback_label,
+                    route=route,
+                    queue_ms=queue_ms,
+                    requested_delay_ms=int(delay_ms),
+                    delay_overrun_ms=max(0.0, queue_ms - float(delay_ms)),
+                    generation=self._request_generation,
+                    row_id=getattr(self._current_target, "row_id", None),
+                    error_type=error_type,
+                )
 
         try:
             doc = pn.state.curdoc
             if doc is not None:
                 if delay_ms and delay_ms > 0:
+                    route = "document.timeout"
                     doc.add_timeout_callback(_run, int(delay_ms))
                 else:
+                    route = "document.next_tick"
                     doc.add_next_tick_callback(_run)
-            else:
-                _run()
-        except Exception:
-            _run()
+                return
+        except Exception as exc:
+            _timing_log(
+                "Spectra",
+                "ui_callback.schedule_fallback",
+                force=True,
+                panel_id=self.panel_id,
+                source=self.source,
+                label=callback_label,
+                failed_route=route,
+                error_type=type(exc).__name__,
+            )
+
+        route = "immediate"
+        _run()
 
     def _schedule_target_status_refresh(self, *, delay_ms: int = 75) -> None:
         """Resolve target status later; do not block selection.focus.changed."""
@@ -633,6 +932,7 @@ class SpectraPanel:
 
         self._schedule_panel_callback(_run, delay_ms=delay_ms)
 
+    @_timed_method("Spectra")
     def _schedule_auto_load(self, *, reason: str, delay_ms: int = 175) -> None:
         """Debounce auto-loads so rapid focus changes only load the latest row."""
         self._auto_load_generation += 1
@@ -663,59 +963,95 @@ class SpectraPanel:
             except Exception:
                 traceback.print_exc()
 
-        self._schedule_panel_callback(_run, delay_ms=delay_ms)
+        self._schedule_panel_callback(
+            _run,
+            delay_ms=delay_ms,
+            label="spectra.auto_load",
+        )
 
+    @_timed_method("Spectra")
     def _selection_changed(self, topic: str, payload: Any) -> None:
-        # Keep EventBus subscriber work cheap.
+        del payload
+
+        # EventBus delivery is synchronous. Invalidate the old request and ask
+        # its cooperative token to stop, but do not mutate Bokeh models here.
         self._auto_load_generation += 1
-
-        self._cancel_job()
+        self._request_generation += 1
+        self._pending_fetch_request = None
+        self._pending_plot_assignment = None
+        self._plot_assignment_retry_attempt = 0
+        self._request_fetch_cancellation()
+        self._request_aux_cancellation()
         self._current_target = None
-        self._spectra_result = None
 
-        self.figure[:] = [self._empty_message("New focused row queued…")]
-        self.target_status.object = "New focused row queued…"
+        reason = str(topic or "selection.focus.changed")
+
+        def _update_status() -> None:
+            self.target_status.object = (
+                "New focused row queued; showing the previous spectrum until "
+                "the replacement is ready…"
+            )
+            if self._spectra_result is None:
+                self._show_figure_message("New focused row queued…", clear_plot=True)
+
+        self._schedule_panel_callback(_update_status, label="spectra.focus_status")
 
         if self.auto_reload.value:
-            self._schedule_auto_load(
-                reason=str(topic or "selection.focus.changed"),
-                delay_ms=175,
-            )
+            self._schedule_auto_load(reason=reason, delay_ms=175)
         else:
             self._schedule_target_status_refresh(delay_ms=75)
 
+    @_timed_method("Spectra")
     def _selection_cleared(self, topic: str, payload: Any) -> None:
+        del payload
+
         self._auto_load_generation += 1
-
-        self._cancel_job()
+        self._request_generation += 1
+        self._pending_fetch_request = None
+        self._pending_plot_assignment = None
+        self._plot_assignment_retry_attempt = 0
+        self._request_fetch_cancellation()
+        self._request_aux_cancellation()
         self._current_target = None
-        self._spectra_result = None
 
-        self.status.object = "No focused row selected."
-        self.target_status.object = ""
-        self.figure[:] = [self._empty_message("No focused row selected.")]
+        reason = str(topic or "selection.focus.cleared")
 
+        def _clear() -> None:
+            self._spectra_result = None
+            self._result_target = None
+            self.status.object = "No focused row selected."
+            self.target_status.object = ""
+            self._show_figure_message("No focused row selected.", clear_plot=True)
+            self._publish_running(False, target=None, reason=reason)
+
+        self._schedule_panel_callback(_clear)
+
+    @_timed_method("Spectra")
     def _dataset_changed(self, topic: str, payload: Any) -> None:
+        del payload
+
         self._auto_load_generation += 1
-
-        self._cancel_job()
+        self._request_generation += 1
+        self._pending_fetch_request = None
+        self._pending_plot_assignment = None
+        self._plot_assignment_retry_attempt = 0
+        self._request_fetch_cancellation()
+        self._request_aux_cancellation()
         self._current_target = None
-        self._spectra_result = None
 
-        self.figure[:] = [self._empty_message("Dataset changed.")]
-        self.target_status.object = "Dataset changed; resolving target…"
+        reason = str(topic or "dataset.changed")
 
-        # Dataset/mapping changes are less frequent than focus changes, so
-        # column option refresh is OK, but still schedule it outside EventBus.
+        def _update() -> None:
+            self._spectra_result = None
+            self._result_target = None
+            self._show_figure_message("Dataset changed.", clear_plot=True)
+            self.target_status.object = "Dataset changed; resolving target…"
+            self._refresh_column_options()
+
+        self._schedule_panel_callback(_update, delay_ms=50)
+
         if self.auto_reload.value:
-            self._schedule_panel_callback(
-                lambda: self._refresh_column_options(),
-                delay_ms=50,
-            )
-            self._schedule_auto_load(
-                reason=str(topic or "dataset.changed"),
-                delay_ms=225,
-            )
+            self._schedule_auto_load(reason=reason, delay_ms=225)
         else:
             self._schedule_target_status_refresh(delay_ms=100)
 
@@ -889,6 +1225,7 @@ class SpectraPanel:
             "SOURCE_ID",
         ]
 
+    @_timed_method("Spectra")
     def _refresh_column_options(self) -> None:
         dataset_id = self._active_dataset_id()
         columns = self._columns(dataset_id)
@@ -910,6 +1247,8 @@ class SpectraPanel:
         )
 
     def _current_row_id(self) -> Optional[str]:
+        if self._result_target is not None:
+            return self._result_target.row_id
         if self._current_target is not None:
             return self._current_target.row_id
 
@@ -936,6 +1275,7 @@ class SpectraPanel:
 
         return True
 
+    @_timed_method("Spectra")
     def _resolve_target(self) -> _ResolvedTarget:
         dataset_id = self._active_dataset_id()
         focus = self._focus_state()
@@ -1371,59 +1711,190 @@ class SpectraPanel:
 
         return _safe_float(self.redshift_input.value)
 
+    def _publish_running(
+        self,
+        running: bool,
+        *,
+        target: Optional[_ResolvedTarget],
+        reason: str,
+        error: Optional[BaseException] = None,
+    ) -> None:
+        payload: Dict[str, Any] = {
+            "source": self.source,
+            "running": bool(running),
+            "panel_id": self.panel_id,
+            "reason": str(reason or ""),
+        }
+        if target is not None:
+            payload.update(
+                {
+                    "dataset_id": target.dataset_id,
+                    "selected_id": target.row_id,
+                }
+            )
+        if error is not None:
+            payload["error"] = str(error)
+        self._publish("astro.spectra.running", payload)
+
+    @_timed_method("Spectra")
     def load_spectra(self, *, reason: str = "manual") -> None:
+        """Queue the latest requested spectrum without overlapping archive calls."""
+
         if self._disposed:
             return
 
         try:
             target = self._resolve_target()
-            self._current_target = target
         except Exception as exc:
             self.status.object = f"**Spectrum unavailable:** {exc}"
-            self.figure[:] = [self._empty_message("Spectrum unavailable.")]
+            if self._spectra_result is None:
+                self._show_figure_message("Spectrum unavailable.", clear_plot=True)
             return
 
-        self._cancel_job()
-        self._spectra_result = None
-        self.figure[:] = [self._empty_message("Loading spectrum…")]
-        self.status.object = "Loading spectrum…"
+        self._request_generation += 1
+        request = _SpectraFetchRequest(
+            generation=self._request_generation,
+            target=target,
+            reason=str(reason or "manual"),
+            max_separation_arcsec=float(self.max_separation_input.value),
+            datasets=tuple(self._datasets_for_source()),
+            smooth_kernel=str(self.smoothing_function_input.value),
+            smooth_window=int(self.smoothing_window_input.value),
+            redshift=self._redshift_from_row(target),
+        )
+        self._current_target = target
+        self._pending_fetch_request = request
         self.target_status.object = self._target_html(target)
 
-        self._publish(
-            "astro.spectra.running",
-            {
-                "source": self.source,
-                "running": True,
-                "panel_id": self.panel_id,
-                "dataset_id": target.dataset_id,
-                "selected_id": target.row_id,
-                "reason": reason,
-            },
+        if self._active_fetch_request is not None:
+            self._request_fetch_cancellation()
+            self.status.object = (
+                "Latest source queued; waiting for the previous archive request "
+                "to finish…"
+            )
+            if self._spectra_result is None:
+                self._show_figure_message("Latest source queued…", clear_plot=True)
+            return
+
+        self._start_pending_fetch()
+
+    @_timed_method("Spectra")
+    def _start_pending_fetch(self) -> None:
+        if self._disposed or self._active_fetch_request is not None:
+            return
+
+        request = self._pending_fetch_request
+        self._pending_fetch_request = None
+        if request is None:
+            return
+
+        if (
+            request.generation != self._request_generation
+            or not self._target_matches_current_focus(request.target)
+        ):
+            return
+
+        self._start_fetch(request)
+
+    @_timed_method("Spectra")
+    def _start_fetch(self, request: _SpectraFetchRequest) -> None:
+        self._active_fetch_request = request
+        self._fetch_job_handle = None
+        self.status.object = "Loading spectrum…"
+        self.target_status.object = self._target_html(request.target)
+        if self._spectra_result is None:
+            self._show_figure_message("Loading spectrum…", clear_plot=True)
+
+        self._publish_running(
+            True,
+            target=request.target,
+            reason=request.reason,
         )
 
+        runtime_started_at = time.perf_counter()
         runtime = self._runtime()
-        redshift = self._redshift_from_row(target)
+        _timing_log(
+            "Spectra",
+            "runtime.acquire",
+            elapsed_ms=(time.perf_counter() - runtime_started_at) * 1000.0,
+            force=True,
+            panel_id=self.panel_id,
+            source=self.source,
+            generation=request.generation,
+            row_id=request.target.row_id,
+        )
+
+        timing_state: Dict[str, float] = {
+            "queued_at": time.perf_counter(),
+        }
 
         def _worker(cancel_token: Any = None) -> SpectraResult:
-            return runtime.fetch_spectra(
-                source=self.source,
-                ra=target.ra,
-                dec=target.dec,
-                source_id=target.source_id,
-                max_separation_arcsec=float(self.max_separation_input.value),
-                datasets=self._datasets_for_source(),
-                smooth_kernel=self.smoothing_function_input.value,
-                smooth_window=int(self.smoothing_window_input.value),
-                redshift_override=redshift,
-                query_euclid_redshift=False,
-                cancel_token=cancel_token,
-            )
+            worker_started_at = time.perf_counter()
+            timing_state["worker_started_at"] = worker_started_at
+            try:
+                return runtime.fetch_spectra(
+                    source=self.source,
+                    ra=request.target.ra,
+                    dec=request.target.dec,
+                    source_id=request.target.source_id,
+                    max_separation_arcsec=request.max_separation_arcsec,
+                    datasets=list(request.datasets),
+                    smooth_kernel=request.smooth_kernel,
+                    smooth_window=request.smooth_window,
+                    redshift_override=request.redshift,
+                    query_euclid_redshift=False,
+                    cancel_token=cancel_token,
+                )
+            finally:
+                finished_at = time.perf_counter()
+                timing_state["worker_finished_at"] = finished_at
+                _timing_log(
+                    "Spectra",
+                    "job.worker",
+                    elapsed_ms=(finished_at - worker_started_at) * 1000.0,
+                    force=True,
+                    panel_id=self.panel_id,
+                    source=self.source,
+                    generation=request.generation,
+                    dataset_id=request.target.dataset_id,
+                    row_id=request.target.row_id,
+                    executor_queue_ms=(worker_started_at - timing_state["queued_at"]) * 1000.0,
+                )
 
         def _done(result: SpectraResult) -> None:
-            self._on_spectra_loaded(result, target=target, reason=reason)
+            callback_started_at = time.perf_counter()
+            worker_finished_at = timing_state.get("worker_finished_at", callback_started_at)
+            _timing_log(
+                "Spectra",
+                "job.callback_delivery",
+                elapsed_ms=(callback_started_at - worker_finished_at) * 1000.0,
+                force=True,
+                panel_id=self.panel_id,
+                source=self.source,
+                callback="done",
+                generation=request.generation,
+                dataset_id=request.target.dataset_id,
+                row_id=request.target.row_id,
+            )
+            self._on_spectra_loaded(result, request=request)
 
         def _error(exc: BaseException) -> None:
-            self._on_spectra_error(exc, target=target, reason=reason)
+            callback_started_at = time.perf_counter()
+            worker_finished_at = timing_state.get("worker_finished_at", callback_started_at)
+            _timing_log(
+                "Spectra",
+                "job.callback_delivery",
+                elapsed_ms=(callback_started_at - worker_finished_at) * 1000.0,
+                force=True,
+                panel_id=self.panel_id,
+                source=self.source,
+                callback="error",
+                generation=request.generation,
+                dataset_id=request.target.dataset_id,
+                row_id=request.target.row_id,
+                error_type=type(exc).__name__,
+            )
+            self._on_spectra_error(exc, request=request)
 
         jobs = getattr(self.context, "jobs", None)
         if jobs is None:
@@ -1434,49 +1905,140 @@ class SpectraPanel:
             return
 
         key = (
-            f"{self.panel_id}:{target.dataset_id}:{target.row_id}:"
-            f"{target.retrieval_mode}:{target.source_id}:{target.ra}:{target.dec}:"
-            f"{self.max_separation_input.value}:{self.source}"
+            f"{self.panel_id}:{request.target.dataset_id}:"
+            f"{request.target.row_id}:{request.target.retrieval_mode}:"
+            f"{request.target.source_id}:{request.target.ra}:"
+            f"{request.target.dec}:{request.max_separation_arcsec}:"
+            f"{self.source}:{request.generation}"
         )
 
-        self._job_handle = jobs.submit(
-            _worker,
-            title=f"Fetch {self.source_label} spectra",
-            key=key,
-            on_done=_done,
-            on_error=_error,
+        submit_started_at = time.perf_counter()
+        try:
+            handle = jobs.submit(
+                _worker,
+                title=f"Fetch {self.source_label} spectra",
+                key=key,
+                on_done=_done,
+                on_error=_error,
+            )
+        except BaseException as exc:
+            _timing_log(
+                "Spectra",
+                "job.submit",
+                elapsed_ms=(time.perf_counter() - submit_started_at) * 1000.0,
+                force=True,
+                panel_id=self.panel_id,
+                source=self.source,
+                generation=request.generation,
+                dataset_id=request.target.dataset_id,
+                row_id=request.target.row_id,
+                error_type=type(exc).__name__,
+            )
+            self._on_spectra_error(exc, request=request)
+            return
+
+        _timing_log(
+            "Spectra",
+            "job.submit",
+            elapsed_ms=(time.perf_counter() - submit_started_at) * 1000.0,
+            force=True,
+            panel_id=self.panel_id,
+            source=self.source,
+            generation=request.generation,
+            dataset_id=request.target.dataset_id,
+            row_id=request.target.row_id,
+            job_id=getattr(handle, "job_id", None),
         )
 
-    def _cancel_job(self) -> None:
-        handle = self._job_handle
-        self._job_handle = None
-        if handle is not None:
+        if self._active_fetch_request is request:
+            self._fetch_job_handle = handle
+        else:
             try:
                 handle.cancel()
             except Exception:
                 pass
 
+    @_timed_method("Spectra")
+    def _request_fetch_cancellation(self) -> None:
+        """Ask the active fetch to stop without forgetting its ownership."""
+
+        handle = self._fetch_job_handle
+        if handle is None:
+            return
+        try:
+            handle.cancel()
+        except Exception:
+            pass
+
+    @_timed_method("Spectra")
+    def _request_aux_cancellation(self) -> None:
+        handle = self._aux_job_handle
+        if handle is None:
+            return
+        try:
+            handle.cancel()
+        except Exception:
+            pass
+
+    def _cancel_job(self) -> None:
+        """Cancel all panel-owned jobs during disposal."""
+
+        for handle in (self._fetch_job_handle, self._aux_job_handle):
+            if handle is None:
+                continue
+            try:
+                handle.cancel()
+            except Exception:
+                pass
+
+        self._fetch_job_handle = None
+        self._aux_job_handle = None
+        self._active_fetch_request = None
+
+    def _finish_fetch(self, request: _SpectraFetchRequest) -> bool:
+        if self._active_fetch_request is not request:
+            return False
+
+        self._fetch_job_handle = None
+        self._active_fetch_request = None
+        return True
+
+    def _request_is_current(self, request: _SpectraFetchRequest) -> bool:
+        return bool(
+            not self._disposed
+            and request.generation == self._request_generation
+            and self._target_matches_current_focus(request.target)
+        )
+
+    @_timed_method("Spectra")
     def _on_spectra_loaded(
         self,
         result: SpectraResult,
         *,
-        target: _ResolvedTarget,
-        reason: str,
+        request: _SpectraFetchRequest,
     ) -> None:
-        if self._disposed:
+        was_active = self._finish_fetch(request)
+        if not was_active:
             return
 
-        if not self._target_matches_current_focus(target):
+        if not self._request_is_current(request):
+            self._publish_running(
+                False,
+                target=request.target,
+                reason="stale_result",
+            )
+            self._start_pending_fetch()
             return
 
-        self._job_handle = None
         self._spectra_result = result
+        self._result_target = request.target
+        self._current_target = request.target
         self.status.object = ""
         self._render_existing_result()
 
         spectrum_artifact_id, coords_artifact_id = self._publish_spectrum_artifacts(
             result,
-            target=target,
+            target=request.target,
         )
 
         self._publish(
@@ -1486,64 +2048,65 @@ class SpectraPanel:
                 "artifact_id": spectrum_artifact_id,
                 "coords_artifact_id": coords_artifact_id,
                 "panel_id": self.panel_id,
-                "dataset_id": target.dataset_id,
-                "selected_id": target.row_id,
-                "ra": target.ra,
-                "dec": target.dec,
-                "reason": reason,
+                "dataset_id": request.target.dataset_id,
+                "selected_id": request.target.row_id,
+                "ra": request.target.ra,
+                "dec": request.target.dec,
+                "reason": request.reason,
                 "available_spectra": result.available_spectra,
             },
         )
 
-        self._publish(
-            "astro.spectra.running",
-            {
-                "source": self.source,
-                "running": False,
-                "panel_id": self.panel_id,
-                "dataset_id": target.dataset_id,
-                "selected_id": target.row_id,
-                "reason": reason,
-            },
+        self._publish_running(
+            False,
+            target=request.target,
+            reason="completed",
         )
+        self._start_pending_fetch()
 
+    @_timed_method("Spectra")
     def _on_spectra_error(
         self,
         exc: BaseException,
         *,
-        target: _ResolvedTarget,
-        reason: str,
+        request: _SpectraFetchRequest,
     ) -> None:
-        if self._disposed:
+        was_active = self._finish_fetch(request)
+        if not was_active:
             return
 
-        if not self._target_matches_current_focus(target):
+        current = self._request_is_current(request)
+        cancelled = isinstance(exc, CancelledError) or not current
+
+        if cancelled:
+            self._publish_running(
+                False,
+                target=request.target,
+                reason="cancelled" if isinstance(exc, CancelledError) else "stale_result",
+            )
+            self._start_pending_fetch()
             return
 
-        self._job_handle = None
         self.status.object = f"**Spectrum unavailable:** {exc}"
-        self.figure[:] = [self._empty_message("Spectrum unavailable.")]
+        if self._spectra_result is None:
+            self._show_figure_message("Spectrum unavailable.", clear_plot=True)
 
-        self._publish(
-            "astro.spectra.running",
-            {
-                "source": self.source,
-                "running": False,
-                "panel_id": self.panel_id,
-                "dataset_id": target.dataset_id,
-                "selected_id": target.row_id,
-                "reason": reason,
-                "error": str(exc),
-            },
+        self._publish_running(
+            False,
+            target=request.target,
+            reason=request.reason,
+            error=exc,
         )
+        self._start_pending_fetch()
 
     # ------------------------------------------------------------------
     # Rendering / artifacts
     # ------------------------------------------------------------------
 
+    @_timed_method("Spectra")
     def _apply_redshift_controls(self) -> None:
         result = self._spectra_result
-        target = self._current_target
+        target = self._result_target
         if result is None or target is None:
             return
 
@@ -1560,8 +2123,7 @@ class SpectraPanel:
             obj._update_info_spectra("spectype", "galaxy" if redshift > 0 else "star")
         except Exception:
             pass
-    
- 
+
     def _update_smoothing_and_render(self,_event: Any = None) -> None:
         result = self._spectra_result
         if result is None:
@@ -1581,35 +2143,260 @@ class SpectraPanel:
         except Exception as exc:
             self.status.object = (f"**Could not smooth spectrum:** {exc}")
 
+    @staticmethod
+    def _is_gridplot_design_error(exc: BaseException) -> bool:
+        message = str(exc)
+        return (
+            "unexpected attribute 'design'" in message
+            and "GridPlot" in message
+        )
 
+    def _spectrum_pane_is_mounted(self) -> bool:
+        """Return whether Panel has materialised the pane for this session."""
+        models = getattr(self.spectrum_pane, "_models", None)
+        if not models:
+            return False
+        try:
+            return any(
+                model is not None
+                for model, _parent in models.values()
+            )
+        except Exception:
+            return bool(models)
+
+    def _neutralise_plot_pane_design_override(self) -> None:
+        """Prevent Panel design metadata being forwarded to a Bokeh GridPlot.
+
+        HoloViews still receives the document/theme through its renderer.  This
+        only clears the layout-level ``design`` override on the nested plot pane,
+        which Bokeh GridPlot does not define as a model property.
+        """
+        try:
+            params = getattr(self.spectrum_pane, "param", None)
+            if params is not None and "design" in params:
+                self.spectrum_pane.design = None
+        except Exception:
+            pass
+
+    def _apply_spectrum_plot_now(self, plot: Any) -> None:
+        self._neutralise_plot_pane_design_override()
+        self.spectrum_pane.object = plot
+        self.spectrum_pane.visible = True
+        self.figure_message.visible = False
+        self.status.object = ""
+
+    def _schedule_pending_plot_assignment(self) -> None:
+        if self._plot_assignment_retry_scheduled or self._disposed:
+            return
+
+        try:
+            document = pn.state.curdoc
+        except Exception:
+            document = None
+        if document is None:
+            _timing_log(
+                "Spectra",
+                "plot.assign.deferred",
+                force=True,
+                panel_id=self.panel_id,
+                source=self.source,
+                generation=self._request_generation,
+                attempt=self._plot_assignment_retry_attempt,
+                reason="no_document_for_retry",
+            )
+            return
+
+        self._plot_assignment_retry_scheduled = True
+        delay_ms = min(250, 35 + (self._plot_assignment_retry_attempt * 15))
+
+        def _retry() -> None:
+            self._plot_assignment_retry_scheduled = False
+            pending = self._pending_plot_assignment
+            if pending is None or self._disposed:
+                return
+
+            generation, plot = pending
+            if generation != self._request_generation:
+                self._pending_plot_assignment = None
+                self._plot_assignment_retry_attempt = 0
+                return
+
+            if not self._spectrum_pane_is_mounted():
+                self._plot_assignment_retry_attempt += 1
+                _timing_log(
+                    "Spectra",
+                    "plot.assign.deferred",
+                    force=True,
+                    panel_id=self.panel_id,
+                    source=self.source,
+                    generation=generation,
+                    attempt=self._plot_assignment_retry_attempt,
+                    reason="pane_not_mounted",
+                    plot_type=type(plot).__name__,
+                )
+                self._schedule_pending_plot_assignment()
+                return
+
+            started_at = time.perf_counter()
+            try:
+                self._apply_spectrum_plot_now(plot)
+            except Exception as exc:
+                if self._is_gridplot_design_error(exc):
+                    self._plot_assignment_retry_attempt += 1
+                    _timing_log(
+                        "Spectra",
+                        "plot.assign.deferred",
+                        elapsed_ms=(time.perf_counter() - started_at) * 1000.0,
+                        force=True,
+                        panel_id=self.panel_id,
+                        source=self.source,
+                        generation=generation,
+                        attempt=self._plot_assignment_retry_attempt,
+                        reason="gridplot_design_race",
+                        plot_type=type(plot).__name__,
+                    )
+                    self._schedule_pending_plot_assignment()
+                    return
+                self._pending_plot_assignment = None
+                self._plot_assignment_retry_attempt = 0
+                raise
+
+            self._pending_plot_assignment = None
+            self._plot_assignment_retry_attempt = 0
+            _timing_log(
+                "Spectra",
+                "plot.assign.retry_success",
+                elapsed_ms=(time.perf_counter() - started_at) * 1000.0,
+                force=True,
+                panel_id=self.panel_id,
+                source=self.source,
+                generation=generation,
+                plot_type=type(plot).__name__,
+            )
+            _schedule_document_probe(
+                "Spectra",
+                "after_spectrum_render",
+                panel_id=self.panel_id,
+                source=self.source,
+                generation=generation,
+                row_id=getattr(self._result_target, "row_id", None),
+            )
+
+        self._schedule_panel_callback(
+            _retry,
+            delay_ms=delay_ms,
+            label="spectra.plot_assignment_retry",
+        )
+
+    @_timed_method("Spectra")
+    def _assign_spectrum_plot(self, plot: Any) -> bool:
+        generation = int(self._request_generation)
+
+        if not self._spectrum_pane_is_mounted():
+            self._pending_plot_assignment = (generation, plot)
+            self._plot_assignment_retry_attempt = 0
+            self._schedule_pending_plot_assignment()
+            _timing_log(
+                "Spectra",
+                "plot.assign.deferred",
+                force=True,
+                panel_id=self.panel_id,
+                source=self.source,
+                generation=generation,
+                attempt=0,
+                reason="pane_not_mounted",
+                plot_type=type(plot).__name__,
+            )
+            return False
+
+        try:
+            self._apply_spectrum_plot_now(plot)
+            return True
+        except Exception as exc:
+            if not self._is_gridplot_design_error(exc):
+                raise
+
+            # The pane can become mounted during the same layout-restoration
+            # tick in which the template design is propagated.  Retry after
+            # that tick instead of exposing a transient first-render failure.
+            self._pending_plot_assignment = (generation, plot)
+            self._plot_assignment_retry_attempt = 1
+            self._schedule_pending_plot_assignment()
+            _timing_log(
+                "Spectra",
+                "plot.assign.deferred",
+                force=True,
+                panel_id=self.panel_id,
+                source=self.source,
+                generation=generation,
+                attempt=1,
+                reason="gridplot_design_race",
+                plot_type=type(plot).__name__,
+            )
+            return False
+
+    @_timed_method("Spectra")
     def _render_existing_result(self) -> None:
         result = self._spectra_result
         if result is None:
             return
 
+        total_started_at = time.perf_counter()
+        redshift_ms = 0.0
+        plot_hv_ms = 0.0
+        assign_ms = 0.0
+        error_type: Optional[str] = None
         try:
+            phase_started_at = time.perf_counter()
             self._apply_redshift_controls()
+            redshift_ms = (time.perf_counter() - phase_started_at) * 1000.0
 
             plot_lines = "class" if self.plot_lines_checkbox.value else False
+            phase_started_at = time.perf_counter()
             plot = result.plot_hv(
                 plot_model=bool(self.plot_model_checkbox.value),
                 plot_lines=plot_lines,
                 responsive=True,
             )
+            plot_hv_ms = (time.perf_counter() - phase_started_at) * 1000.0
 
-            self.figure[:] = [
-                pn.pane.HoloViews(
-                    plot,
-                    sizing_mode="stretch_both",
-                    min_height=0,
-                    margin=(0, 0, 0, 0),
+            phase_started_at = time.perf_counter()
+            assigned = self._assign_spectrum_plot(plot)
+            assign_ms = (time.perf_counter() - phase_started_at) * 1000.0
+            if assigned:
+                _schedule_document_probe(
+                    "Spectra",
+                    "after_spectrum_render",
+                    panel_id=self.panel_id,
+                    source=self.source,
+                    generation=self._request_generation,
+                    row_id=getattr(self._result_target, "row_id", None),
                 )
-            ]
-            self.status.object = ""
         except Exception as exc:
+            error_type = type(exc).__name__
             self.status.object = f"**Could not render spectrum:** {exc}"
-            self.figure[:] = [self._empty_message("Could not render spectrum.")]
+            if not self.spectrum_pane.visible:
+                self._show_figure_message(
+                    "Could not render spectrum.",
+                    clear_plot=True,
+                )
+        finally:
+            _timing_log(
+                "Spectra",
+                "render.phases",
+                elapsed_ms=(time.perf_counter() - total_started_at) * 1000.0,
+                force=True,
+                panel_id=self.panel_id,
+                source=self.source,
+                generation=self._request_generation,
+                row_id=getattr(self._result_target, "row_id", None),
+                redshift_ms=redshift_ms,
+                plot_hv_ms=plot_hv_ms,
+                assign_ms=assign_ms,
+                error_type=error_type,
+            )
 
+    @_timed_method("Spectra")
     def _publish_spectrum_artifacts(
         self,
         result: SpectraResult,
@@ -1620,13 +2407,25 @@ class SpectraPanel:
         if artifacts is None:
             return None, None
 
+        total_started_at = time.perf_counter()
         spectrum_artifact_id = None
         coords_artifact_id = None
+        payload_ms = 0.0
+        coords_payload_ms = 0.0
+        spectrum_put_ms = 0.0
+        coords_put_ms = 0.0
+        coords_publish_ms = 0.0
 
+        phase_started_at = time.perf_counter()
         spectrum_payload = result.artifact_payload()
+        payload_ms = (time.perf_counter() - phase_started_at) * 1000.0
+
+        phase_started_at = time.perf_counter()
         coords = result.coordinates_payload()
+        coords_payload_ms = (time.perf_counter() - phase_started_at) * 1000.0
         coordinate_count = min(len(coords.get("ra", [])), len(coords.get("dec", [])))
 
+        phase_started_at = time.perf_counter()
         try:
             spectrum_artifact_id = artifacts.put(
                 "astro.spectra",
@@ -1644,8 +2443,10 @@ class SpectraPanel:
             )
         except Exception:
             traceback.print_exc()
+        spectrum_put_ms = (time.perf_counter() - phase_started_at) * 1000.0
 
         if coordinate_count:
+            phase_started_at = time.perf_counter()
             try:
                 coords_artifact_id = artifacts.put(
                     "astro.coords",
@@ -1659,7 +2460,12 @@ class SpectraPanel:
                     },
                     persist=False,
                 )
+            except Exception:
+                traceback.print_exc()
+            coords_put_ms = (time.perf_counter() - phase_started_at) * 1000.0
 
+            if coords_artifact_id is not None:
+                phase_started_at = time.perf_counter()
                 self._publish(
                     "astro.coords.updated",
                     {
@@ -1675,9 +2481,25 @@ class SpectraPanel:
                         "points": coords.get("points", []),
                     },
                 )
-            except Exception:
-                traceback.print_exc()
+                coords_publish_ms = (time.perf_counter() - phase_started_at) * 1000.0
 
+        _timing_log(
+            "Spectra",
+            "artifacts.phases",
+            elapsed_ms=(time.perf_counter() - total_started_at) * 1000.0,
+            force=True,
+            panel_id=self.panel_id,
+            source=self.source,
+            dataset_id=target.dataset_id,
+            row_id=target.row_id,
+            generation=self._request_generation,
+            coordinate_count=coordinate_count,
+            payload_ms=payload_ms,
+            coords_payload_ms=coords_payload_ms,
+            spectrum_put_ms=spectrum_put_ms,
+            coords_put_ms=coords_put_ms,
+            coords_publish_ms=coords_publish_ms,
+        )
         return spectrum_artifact_id, coords_artifact_id
 
     # ------------------------------------------------------------------
@@ -1710,8 +2532,7 @@ class SpectraPanel:
         if hasattr(obj, "_update_info_spectra"):
             self.plot_lines_checkbox.disabled = False
             obj._update_info_spectra('redshift', value)
-                
-    
+
     def _query_euclid_redshift(self, _event: Any = None) -> None:
         if self.source != "EuclidSpec" or self._spectra_result is None:
             return
@@ -1720,6 +2541,8 @@ class SpectraPanel:
         if obj is None:
             return
         self.status.object = "Querying Euclid redshift table…"
+        query_generation = self._request_generation
+        query_target = self._result_target
 
         def _worker(cancel_token: Any = None) -> SpectraResult:
             if hasattr(obj, "query_specz_table"):
@@ -1736,12 +2559,26 @@ class SpectraPanel:
             return self._spectra_result
 
         def _done(result: SpectraResult) -> None:
+            self._aux_job_handle = None
+            if (
+                self._disposed
+                or query_generation != self._request_generation
+                or self._result_target is not query_target
+            ):
+                return
             self.status.object = ""
             self._render_existing_result()
-            if self._current_target is not None:
-                self._publish_spectrum_artifacts(result, target=self._current_target)
+            if self._result_target is not None:
+                self._publish_spectrum_artifacts(result, target=self._result_target)
 
         def _error(exc: BaseException) -> None:
+            self._aux_job_handle = None
+            if (
+                self._disposed
+                or query_generation != self._request_generation
+                or self._result_target is not query_target
+            ):
+                return
             self.status.object = f"**Could not query Euclid redshift:** {exc}"
 
         jobs = getattr(self.context, "jobs", None)
@@ -1752,7 +2589,7 @@ class SpectraPanel:
                 _error(exc)
             return
 
-        self._job_handle = jobs.submit(
+        self._aux_job_handle = jobs.submit(
             _worker,
             title="Query Euclid spectrum redshift",
             key=f"{self.panel_id}:euclid-redshift:{self._current_row_id()}",
@@ -1878,11 +2715,9 @@ def spectra_payload_to_hv(payload: Dict[str, Any]) -> Any:
         active_tools=[],
     )
 
-
 # ----------------------------------------------------------------------
 # Factories
 # ----------------------------------------------------------------------
-
 
 def make_spectra_panel_factory(source: str):
     def _factory(
@@ -1901,7 +2736,6 @@ def make_spectra_panel_factory(source: str):
         return panel.view(), panel
 
     return _factory
-
 
 def create_spectra_artifact_viewer(
     context: Any,

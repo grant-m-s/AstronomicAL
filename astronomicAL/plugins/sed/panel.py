@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 from pathlib import Path
+from functools import wraps
 import math
+import os
+import threading
+import time
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 
 import html
@@ -33,6 +37,191 @@ PLOT_UNIT_NUFNU = "erg/s/cm² (νFν)"
 PLOT_UNIT_OPTIONS = [PLOT_UNIT_MICROJY, PLOT_UNIT_NUFNU]
 SPEED_OF_LIGHT_CM_S = 2.99792458e10
 
+
+_PANEL_TIMING_ENABLED = os.environ.get(
+    "ASTRONOMICAL_PANEL_TIMINGS",
+    "1",
+).strip().lower() not in {"0", "false", "off", "no"}
+try:
+    _PANEL_TIMING_MIN_MS = max(
+        0.0,
+        float(os.environ.get("ASTRONOMICAL_PANEL_TIMING_MIN_MS", "0")),
+    )
+except (TypeError, ValueError):
+    _PANEL_TIMING_MIN_MS = 0.0
+
+
+def _timing_repr(value: Any, *, limit: int = 180) -> str:
+    try:
+        text = repr(value)
+    except Exception:
+        text = f"<{type(value).__name__}>"
+    if len(text) > limit:
+        text = text[: limit - 3] + "..."
+    return text
+
+
+def _timing_log(
+    component: str,
+    event: str,
+    *,
+    elapsed_ms: Optional[float] = None,
+    force: bool = False,
+    **fields: Any,
+) -> None:
+    """Emit one compact structured timing line.
+
+    This diagnostic build enables timings by default. Set
+    ``ASTRONOMICAL_PANEL_TIMINGS=0`` to disable them, or set
+    ``ASTRONOMICAL_PANEL_TIMING_MIN_MS`` to suppress shorter spans.
+    """
+    if not _PANEL_TIMING_ENABLED:
+        return
+    if (
+        elapsed_ms is not None
+        and not force
+        and float(elapsed_ms) < _PANEL_TIMING_MIN_MS
+    ):
+        return
+
+    parts = [
+        f"[AL_TIMING][{component}]",
+        f"event={_timing_repr(event)}",
+        f"thread={_timing_repr(threading.current_thread().name)}",
+    ]
+    if elapsed_ms is not None:
+        parts.append(f"elapsed_ms={float(elapsed_ms):.3f}")
+    for key, value in fields.items():
+        if value is None:
+            continue
+        if isinstance(value, float):
+            parts.append(f"{key}={value:.3f}")
+        else:
+            parts.append(f"{key}={_timing_repr(value)}")
+    print(" ".join(parts))
+
+
+def _timing_context(instance: Any, kwargs: Mapping[str, Any]) -> Dict[str, Any]:
+    fields: Dict[str, Any] = {
+        "panel_id": getattr(
+            instance,
+            "panel_id",
+            getattr(instance, "instance_id", None),
+        ),
+        "source": getattr(instance, "source", None),
+    }
+
+    request = kwargs.get("request")
+    if request is not None:
+        fields["generation"] = getattr(request, "generation", None)
+        target = getattr(request, "target", None)
+        if target is not None:
+            fields["dataset_id"] = getattr(target, "dataset_id", None)
+            fields["row_id"] = getattr(target, "row_id", None)
+
+    fields.setdefault("generation", kwargs.get("generation"))
+    fields.setdefault(
+        "dataset_id",
+        kwargs.get("dataset_id", getattr(instance, "current_dataset_id", None)),
+    )
+    fields.setdefault(
+        "row_id",
+        kwargs.get("row_id", getattr(instance, "current_row_id", None)),
+    )
+    return fields
+
+
+def _timed_method(component: str, event: Optional[str] = None):
+    def _decorate(function):
+        @wraps(function)
+        def _wrapped(self, *args, **kwargs):
+            started_at = time.perf_counter()
+            error_type = None
+            try:
+                return function(self, *args, **kwargs)
+            except BaseException as exc:
+                error_type = type(exc).__name__
+                raise
+            finally:
+                _timing_log(
+                    component,
+                    event or function.__name__,
+                    elapsed_ms=(time.perf_counter() - started_at) * 1000.0,
+                    error_type=error_type,
+                    **_timing_context(self, kwargs),
+                )
+        return _wrapped
+    return _decorate
+
+
+def _timed_function(component: str, event: Optional[str] = None):
+    def _decorate(function):
+        @wraps(function)
+        def _wrapped(*args, **kwargs):
+            started_at = time.perf_counter()
+            error_type = None
+            try:
+                return function(*args, **kwargs)
+            except BaseException as exc:
+                error_type = type(exc).__name__
+                raise
+            finally:
+                _timing_log(
+                    component,
+                    event or function.__name__,
+                    elapsed_ms=(time.perf_counter() - started_at) * 1000.0,
+                    error_type=error_type,
+                )
+        return _wrapped
+    return _decorate
+
+
+def _schedule_document_probe(
+    component: str,
+    label: str,
+    **fields: Any,
+) -> None:
+    """Measure how long the owning document takes to reach its next tick."""
+    if not _PANEL_TIMING_ENABLED:
+        return
+    scheduled_at = time.perf_counter()
+    try:
+        document = pn.state.curdoc
+    except Exception:
+        document = None
+    if document is None:
+        _timing_log(
+            component,
+            "document_probe.unavailable",
+            force=True,
+            label=label,
+            **fields,
+        )
+        return
+
+    def _probe() -> None:
+        _timing_log(
+            component,
+            "document_probe.next_tick",
+            elapsed_ms=(time.perf_counter() - scheduled_at) * 1000.0,
+            force=True,
+            label=label,
+            **fields,
+        )
+
+    try:
+        document.add_next_tick_callback(_probe)
+    except Exception as exc:
+        _timing_log(
+            component,
+            "document_probe.schedule_error",
+            force=True,
+            label=label,
+            error_type=type(exc).__name__,
+            **fields,
+        )
+
+
 def _safe_str(value: Any) -> str:
     return "" if value is None else str(value)
 
@@ -52,23 +241,36 @@ def _assign_sed_plot(
     *,
     visible: bool,
 ) -> bool:
-    """Assign a native Bokeh model after establishing its rendered visibility.
+    """Assign the replacement Bokeh model and expose each mutation cost."""
+    total_started_at = time.perf_counter()
 
-    The initial pane starts hidden. Setting ``visible`` before replacing ``object``
-    ensures Panel creates or updates the mounted Bokeh child for the real plot,
-    rather than retaining the empty model that was present during first layout
-    construction.
-    """
+    phase_started_at = time.perf_counter()
     pane.visible = bool(visible)
-    pane.object = plot
+    visible_ms = (time.perf_counter() - phase_started_at) * 1000.0
 
-    # Explicitly notify Param after a whole Bokeh model replacement. This is
-    # harmless on a live server and also covers embedded/notebook contexts.
+    phase_started_at = time.perf_counter()
+    pane.object = plot
+    object_ms = (time.perf_counter() - phase_started_at) * 1000.0
+
+    phase_started_at = time.perf_counter()
     try:
         pane.param.trigger("object")
     except Exception:
         pass
+    trigger_ms = (time.perf_counter() - phase_started_at) * 1000.0
 
+    elapsed_ms = (time.perf_counter() - total_started_at) * 1000.0
+    _timing_log(
+        "SED",
+        "plot.assign",
+        elapsed_ms=elapsed_ms,
+        force=True,
+        visible=bool(visible),
+        visible_ms=visible_ms,
+        object_ms=object_ms,
+        trigger_ms=trigger_ms,
+        plot_type=type(plot).__name__,
+    )
     return pane.object is plot and pane.visible is bool(visible)
 
 def microjy_to_abmag(flux_uJy: float) -> float:
@@ -185,6 +387,7 @@ def _add_horizontal_whiskers(fig: Any, data: pd.DataFrame, *, y_col: str) -> Non
         )
     )
 
+@_timed_function("SED", "plot.create")
 def create_sed_plot(
     records: Sequence[Mapping[str, Any]],
     *,
@@ -379,6 +582,11 @@ class BroadbandSEDPanel:
         self._disposed = False
         self._ui_loaded = False
         self._pending_refresh = False
+        self._source_update_generation = 0
+        self._source_update_scheduled = False
+        self._pending_source_action = "refresh"
+        self._pending_source_refresh_file_options = False
+        self._pending_source_sync_focus = False
         self._build_generation = 0
         self._active_job_handle: Optional[Any] = None
         self.runtime: SEDRuntime = self._get_runtime()
@@ -643,28 +851,166 @@ class BroadbandSEDPanel:
         except Exception:
             return None
 
-    def _schedule_ui_callback(self, callback: Callable[[], None]) -> None:
-        def _run() -> None:
-            if not self._disposed:
-                callback()
+    def _schedule_ui_callback(
+        self,
+        callback: Callable[[], None],
+        *,
+        delay_ms: int = 0,
+        label: Optional[str] = None,
+    ) -> None:
+        """Schedule UI work and expose document-queue delay separately."""
+        scheduled_at = time.perf_counter()
+        callback_label = label or getattr(callback, "__qualname__", None) or getattr(
+            callback,
+            "__name__",
+            type(callback).__name__,
+        )
+        route = "immediate"
 
-        execute = getattr(pn.state, "execute", None)
-        if callable(execute):
+        def _run() -> None:
+            queue_ms = (time.perf_counter() - scheduled_at) * 1000.0
+            callback_started_at = time.perf_counter()
+            error_type = None
             try:
-                execute(_run)
-                return
-            except Exception:
-                pass
+                if not self._disposed:
+                    callback()
+            except BaseException as exc:
+                error_type = type(exc).__name__
+                raise
+            finally:
+                _timing_log(
+                    "SED",
+                    "ui_callback.run",
+                    elapsed_ms=(time.perf_counter() - callback_started_at) * 1000.0,
+                    force=True,
+                    panel_id=self.instance_id,
+                    label=callback_label,
+                    route=route,
+                    queue_ms=queue_ms,
+                    requested_delay_ms=int(delay_ms),
+                    delay_overrun_ms=max(0.0, queue_ms - float(delay_ms)),
+                    dataset_id=self.current_dataset_id,
+                    row_id=self.current_row_id,
+                    error_type=error_type,
+                )
 
         document = getattr(pn.state, "curdoc", None)
         if document is not None:
             try:
-                document.add_next_tick_callback(_run)
+                if delay_ms > 0:
+                    route = "document.timeout"
+                    document.add_timeout_callback(_run, int(delay_ms))
+                else:
+                    route = "document.next_tick"
+                    document.add_next_tick_callback(_run)
                 return
-            except Exception:
-                pass
+            except Exception as exc:
+                _timing_log(
+                    "SED",
+                    "ui_callback.schedule_fallback",
+                    force=True,
+                    panel_id=self.instance_id,
+                    label=callback_label,
+                    failed_route=route,
+                    error_type=type(exc).__name__,
+                )
 
+        execute = getattr(pn.state, "execute", None)
+        if callable(execute):
+            try:
+                route = "panel.execute"
+                execute(_run)
+                return
+            except Exception as exc:
+                _timing_log(
+                    "SED",
+                    "ui_callback.schedule_fallback",
+                    force=True,
+                    panel_id=self.instance_id,
+                    label=callback_label,
+                    failed_route=route,
+                    error_type=type(exc).__name__,
+                )
+
+        route = "immediate"
         _run()
+
+    @_timed_method("SED")
+    def _schedule_source_update(
+        self,
+        *,
+        action: str = "refresh",
+        refresh_file_options: bool = False,
+        sync_focus: bool = False,
+    ) -> None:
+        """Coalesce source changes into one document-thread update.
+
+        Only identifiers are changed in EventBus subscribers. The latest action
+        wins while refresh-file and focus-sync requirements are accumulated.
+        """
+
+        self._source_update_generation += 1
+        self._pending_source_action = str(action or "refresh")
+        self._pending_source_refresh_file_options = bool(
+            self._pending_source_refresh_file_options or refresh_file_options
+        )
+        self._pending_source_sync_focus = bool(
+            self._pending_source_sync_focus or sync_focus
+        )
+
+        if self._source_update_scheduled:
+            return
+
+        self._arm_source_update()
+
+    @_timed_method("SED")
+    def _arm_source_update(self) -> None:
+        if self._disposed or self._source_update_scheduled:
+            return
+
+        self._source_update_scheduled = True
+        generation = self._source_update_generation
+
+        def _run() -> None:
+            self._source_update_scheduled = False
+            if self._disposed:
+                return
+
+            if generation != self._source_update_generation:
+                self._arm_source_update()
+                return
+
+            action = self._pending_source_action
+            refresh_file_options = self._pending_source_refresh_file_options
+            sync_focus = self._pending_source_sync_focus
+
+            self._pending_source_action = "refresh"
+            self._pending_source_refresh_file_options = False
+            self._pending_source_sync_focus = False
+
+            if action == "clear":
+                self._apply_focus_cleared()
+                return
+
+            if sync_focus:
+                focus = self._get_focus()
+                if (
+                    focus is not None
+                    and getattr(focus, "dataset_id", None)
+                    and getattr(focus, "row_id", None)
+                ):
+                    self.current_dataset_id = str(focus.dataset_id)
+                    self.current_row_id = str(focus.row_id)
+                else:
+                    self.current_dataset_id = self._active_dataset_id()
+                    self.current_row_id = None
+
+            self.refresh(
+                refresh_file_options=refresh_file_options,
+                source_change=True,
+            )
+
+        self._schedule_ui_callback(_run, label="sed.source_update")
 
     def _register_onload_callback(self) -> None:
         onload = getattr(pn.state, "onload", None)
@@ -741,6 +1087,7 @@ class BroadbandSEDPanel:
 
         raise KeyError("No `record_id` mapping is available for the active dataset.")
 
+    @_timed_method("SED")
     def _get_row(self, dataset_id: str, row_id: str):
         id_column = self._record_id_column(dataset_id)
 
@@ -779,6 +1126,7 @@ class BroadbandSEDPanel:
                 "Hide mapping controls" if visible else "Show mapping controls"
             )
 
+    @_timed_method("SED")
     def _clear_mapping_controls(self) -> None:
         self.mapping_table = None
         self.mapping_reference_select = None
@@ -793,6 +1141,7 @@ class BroadbandSEDPanel:
         self.mapping_box.objects = []
         self.mapping_box.visible = False
 
+    @_timed_method("SED")
     def _set_status(self, message: str, alert_type: str = "info") -> None:
         self.status.object = message
         self.status.alert_type = alert_type
@@ -857,10 +1206,24 @@ class BroadbandSEDPanel:
         if events is None:
             return
 
+        started_at = time.perf_counter()
+        error_type = None
         try:
             events.publish(topic, payload or {})
-        except Exception:
-            pass
+        except Exception as exc:
+            error_type = type(exc).__name__
+        finally:
+            _timing_log(
+                "SED",
+                "event.publish",
+                elapsed_ms=(time.perf_counter() - started_at) * 1000.0,
+                force=True,
+                panel_id=self.instance_id,
+                topic=topic,
+                dataset_id=self.current_dataset_id,
+                row_id=self.current_row_id,
+                error_type=error_type,
+            )
 
     def _event_identity(
         self,
@@ -988,6 +1351,7 @@ class BroadbandSEDPanel:
                     )
                 )
 
+    @_timed_method("SED")
     def _refresh_file_options(self) -> None:
         files = self.runtime.list_band_files()
         options = [""] + files
@@ -1032,6 +1396,7 @@ class BroadbandSEDPanel:
         self.mapping_ui_signature = None
         self.refresh(refresh_file_options=False)
 
+    @_timed_method("SED")
     def _enabled_filter_names(
         self,
         bands: Mapping[str, Mapping[str, Any]],
@@ -1235,12 +1600,14 @@ class BroadbandSEDPanel:
 
         self.refresh(refresh_file_options=False)
 
+    @_timed_method("SED")
     def _load_bands(self) -> Dict[str, Dict[str, Any]]:
         if not self.sed_file:
             return {}
 
         return self.runtime.load_band_file(self.sed_file)
 
+    @_timed_method("SED")
     def _unknown_tokens(self, dataset_id: str, bands: Mapping[str, Mapping[str, Any]]) -> List[str]:
         columns = set(self._dataset_columns(dataset_id))
         unknown: List[str] = []
@@ -1255,6 +1622,7 @@ class BroadbandSEDPanel:
 
         return unknown
 
+    @_timed_method("SED")
     def _build_mapping_controls(
         self,
         *,
@@ -1527,24 +1895,41 @@ class BroadbandSEDPanel:
                 sub = events.subscribe(topic, callback)
             self.subscriptions.append(sub)
 
+    @_timed_method("SED")
     def _on_focus_changed(self, topic, payload) -> None:
+        del topic
+        if not isinstance(payload, Mapping):
+            return
+
         dataset_id = payload.get("dataset_id")
         row_id = payload.get("row_id")
-
         if dataset_id is None or row_id is None:
             return
 
+        # Keep the synchronous EventBus subscriber constant-time. The actual
+        # refresh is coalesced onto the Bokeh document's next tick.
         self.current_dataset_id = str(dataset_id)
         self.current_row_id = str(row_id)
         if not self._ui_loaded:
             self._pending_refresh = True
             return
-        self.refresh()
 
+        self._schedule_source_update(action="refresh")
+
+    @_timed_method("SED")
     def _on_focus_cleared(self, topic, payload) -> None:
-        self._cancel_active_build(reason="focus_cleared")
+        del topic, payload
+
         self.current_dataset_id = None
         self.current_row_id = None
+        if not self._ui_loaded:
+            self._pending_refresh = True
+            return
+
+        self._schedule_source_update(action="clear")
+
+    def _apply_focus_cleared(self) -> None:
+        self._cancel_active_build(reason="focus_cleared")
         self.latest_payload = None
         self.latest_payload_artifact_id = None
         self._clear_mapping_controls()
@@ -1568,21 +1953,21 @@ class BroadbandSEDPanel:
         self.skipped_pane.clear()
         self._set_status("Focus a row to plot its SED.", "info")
 
+    @_timed_method("SED")
     def _on_dataset_changed(self, topic, payload) -> None:
-        self._refresh_file_options()
-        focus = self._get_focus()
-        if (
-            focus is not None
-            and getattr(focus, "dataset_id", None)
-            and getattr(focus, "row_id", None)
-        ):
-            self.current_dataset_id = str(focus.dataset_id)
-            self.current_row_id = str(focus.row_id)
-            if not self._ui_loaded:
-                self._pending_refresh = True
-                return
-            self.refresh()
+        del topic, payload
 
+        if not self._ui_loaded:
+            self._pending_refresh = True
+            return
+
+        self._schedule_source_update(
+            action="refresh",
+            refresh_file_options=True,
+            sync_focus=True,
+        )
+
+    @_timed_method("SED")
     def refresh(self, *, refresh_file_options: bool = False, source_change: bool = False) -> None:
         if not self._ui_loaded:
             self._pending_refresh = True
@@ -1685,6 +2070,7 @@ class BroadbandSEDPanel:
         except ValueError:
             pass
 
+    @_timed_method("SED")
     def _cancel_active_build(self, *, reason: str) -> None:
         self._build_generation += 1
         handle = self._active_job_handle
@@ -1708,6 +2094,7 @@ class BroadbandSEDPanel:
                 reason=reason,
             )
 
+    @_timed_method("SED")
     def _submit_build_job(self, *, dataset_id: str, row_id: str, sed_file: str) -> None:
         self._cancel_active_build(reason="superseded")
         generation = self._build_generation
@@ -1733,19 +2120,52 @@ class BroadbandSEDPanel:
         )
 
         handle_box: Dict[str, Any] = {}
+        timing_state: Dict[str, float] = {
+            "queued_at": time.perf_counter(),
+        }
 
         def _worker(cancel_token=None) -> Dict[str, Any]:
-            return self._build_sed_payload(
-                cancel_token=cancel_token,
-                dataset_id=dataset_id,
-                row_id=row_id,
-                sed_file=sed_file,
-                column_overrides=column_overrides,
-                error_column_overrides=error_column_overrides,
-                unit_overrides=unit_overrides,
-            )
+            worker_started_at = time.perf_counter()
+            timing_state["worker_started_at"] = worker_started_at
+            try:
+                return self._build_sed_payload(
+                    cancel_token=cancel_token,
+                    dataset_id=dataset_id,
+                    row_id=row_id,
+                    sed_file=sed_file,
+                    column_overrides=column_overrides,
+                    error_column_overrides=error_column_overrides,
+                    unit_overrides=unit_overrides,
+                )
+            finally:
+                finished_at = time.perf_counter()
+                timing_state["worker_finished_at"] = finished_at
+                _timing_log(
+                    "SED",
+                    "job.worker",
+                    elapsed_ms=(finished_at - worker_started_at) * 1000.0,
+                    force=True,
+                    panel_id=self.instance_id,
+                    dataset_id=dataset_id,
+                    row_id=row_id,
+                    generation=generation,
+                    executor_queue_ms=(worker_started_at - timing_state["queued_at"]) * 1000.0,
+                )
 
         def _done(payload: Dict[str, Any]) -> None:
+            callback_started_at = time.perf_counter()
+            worker_finished_at = timing_state.get("worker_finished_at", callback_started_at)
+            _timing_log(
+                "SED",
+                "job.callback_delivery",
+                elapsed_ms=(callback_started_at - worker_finished_at) * 1000.0,
+                force=True,
+                panel_id=self.instance_id,
+                callback="done",
+                dataset_id=dataset_id,
+                row_id=row_id,
+                generation=generation,
+            )
             self._forget_job_handle(handle_box.get("handle"))
             self._on_build_done(
                 payload,
@@ -1756,6 +2176,20 @@ class BroadbandSEDPanel:
             )
 
         def _error(exc: BaseException) -> None:
+            callback_started_at = time.perf_counter()
+            worker_finished_at = timing_state.get("worker_finished_at", callback_started_at)
+            _timing_log(
+                "SED",
+                "job.callback_delivery",
+                elapsed_ms=(callback_started_at - worker_finished_at) * 1000.0,
+                force=True,
+                panel_id=self.instance_id,
+                callback="error",
+                dataset_id=dataset_id,
+                row_id=row_id,
+                generation=generation,
+                error_type=type(exc).__name__,
+            )
             self._forget_job_handle(handle_box.get("handle"))
             self._on_build_error(
                 exc,
@@ -1773,6 +2207,7 @@ class BroadbandSEDPanel:
                 _error(exc)
             return
 
+        submit_started_at = time.perf_counter()
         handle = jobs.submit(
             _worker,
             title="Build broadband SED",
@@ -1782,6 +2217,17 @@ class BroadbandSEDPanel:
             ),
             on_done=_done,
             on_error=_error,
+        )
+        _timing_log(
+            "SED",
+            "job.submit",
+            elapsed_ms=(time.perf_counter() - submit_started_at) * 1000.0,
+            force=True,
+            panel_id=self.instance_id,
+            dataset_id=dataset_id,
+            row_id=row_id,
+            generation=generation,
+            job_id=getattr(handle, "job_id", None),
         )
         handle_box["handle"] = handle
         self._active_job_handle = handle
@@ -1798,41 +2244,88 @@ class BroadbandSEDPanel:
         error_column_overrides: Mapping[str, str],
         unit_overrides: Mapping[str, str],
     ) -> Dict[str, Any]:
-        if cancel_token is not None and cancel_token.cancelled():
-            return {}
+        total_started_at = time.perf_counter()
+        phases: Dict[str, float] = {
+            "load_bands_ms": 0.0,
+            "get_row_ms": 0.0,
+            "build_table_ms": 0.0,
+            "build_payload_ms": 0.0,
+        }
+        cancelled_stage: Optional[str] = None
+        error_type: Optional[str] = None
+        record_count: Optional[int] = None
 
-        bands = self.runtime.load_band_file(sed_file)
+        def _is_cancelled(stage: str) -> bool:
+            nonlocal cancelled_stage
+            if cancel_token is not None and cancel_token.cancelled():
+                cancelled_stage = stage
+                return True
+            return False
 
-        if cancel_token is not None and cancel_token.cancelled():
-            return {}
+        try:
+            if _is_cancelled("before_load_bands"):
+                return {}
 
-        row = self._get_row(dataset_id, row_id)
+            phase_started_at = time.perf_counter()
+            bands = self.runtime.load_band_file(sed_file)
+            phases["load_bands_ms"] = (time.perf_counter() - phase_started_at) * 1000.0
 
-        if cancel_token is not None and cancel_token.cancelled():
-            return {}
+            if _is_cancelled("after_load_bands"):
+                return {}
 
-        result = self.runtime.build_sed_table(
-            row=row,
-            bands=bands,
-            column_overrides=column_overrides,
-            error_column_overrides=error_column_overrides,
-            unit_overrides=unit_overrides,
-        )
+            phase_started_at = time.perf_counter()
+            row = self._get_row(dataset_id, row_id)
+            phases["get_row_ms"] = (time.perf_counter() - phase_started_at) * 1000.0
 
-        if cancel_token is not None and cancel_token.cancelled():
-            return {}
+            if _is_cancelled("after_get_row"):
+                return {}
 
-        return self.runtime.build_artifact_payload(
-            sed_df=result.dataframe,
-            dataset_id=dataset_id,
-            row_id=row_id,
-            sed_file=sed_file,
-            column_overrides=column_overrides,
-            error_column_overrides=error_column_overrides,
-            unit_overrides=unit_overrides,
-            skipped=result.skipped,
-        )
+            phase_started_at = time.perf_counter()
+            result = self.runtime.build_sed_table(
+                row=row,
+                bands=bands,
+                column_overrides=column_overrides,
+                error_column_overrides=error_column_overrides,
+                unit_overrides=unit_overrides,
+            )
+            phases["build_table_ms"] = (time.perf_counter() - phase_started_at) * 1000.0
 
+            if _is_cancelled("after_build_table"):
+                return {}
+
+            phase_started_at = time.perf_counter()
+            payload = self.runtime.build_artifact_payload(
+                sed_df=result.dataframe,
+                dataset_id=dataset_id,
+                row_id=row_id,
+                sed_file=sed_file,
+                column_overrides=column_overrides,
+                error_column_overrides=error_column_overrides,
+                unit_overrides=unit_overrides,
+                skipped=result.skipped,
+            )
+            phases["build_payload_ms"] = (time.perf_counter() - phase_started_at) * 1000.0
+            record_count = len(_payload_records(payload))
+            return payload
+        except BaseException as exc:
+            error_type = type(exc).__name__
+            raise
+        finally:
+            _timing_log(
+                "SED",
+                "worker.build_payload.phases",
+                elapsed_ms=(time.perf_counter() - total_started_at) * 1000.0,
+                force=True,
+                panel_id=self.instance_id,
+                dataset_id=dataset_id,
+                row_id=row_id,
+                cancelled_stage=cancelled_stage,
+                error_type=error_type,
+                record_count=record_count,
+                **phases,
+            )
+
+    @_timed_method("SED")
     def _on_build_done(
         self,
         payload: Dict[str, Any],
@@ -1949,8 +2442,9 @@ class BroadbandSEDPanel:
                 reason="completed",
             )
 
-        self._schedule_ui_callback(_render)
+        self._schedule_ui_callback(_render, label="sed.render_payload")
 
+    @_timed_method("SED")
     def _on_build_error(
         self,
         exc: BaseException,
@@ -1996,6 +2490,7 @@ class BroadbandSEDPanel:
             )
         )
 
+    @_timed_method("SED")
     def _render_payload(
         self,
         payload: Mapping[str, Any],
@@ -2153,6 +2648,15 @@ class BroadbandSEDPanel:
                 )
             )
 
+        _schedule_document_probe(
+            "SED",
+            "after_render_payload",
+            panel_id=self.instance_id,
+            dataset_id=self.current_dataset_id,
+            row_id=self.current_row_id,
+            record_count=len(records),
+            finite_record_count=len(finite_records),
+        )
         return render_complete
 
     # ------------------------------------------------------------------
@@ -2180,6 +2684,7 @@ class BroadbandSEDPanel:
         if self._disposed:
             return
 
+        self._source_update_generation += 1
         self._cancel_active_build(reason="panel.dispose")
         self._disposed = True
 

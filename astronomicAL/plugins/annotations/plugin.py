@@ -1,5 +1,3 @@
-# BUG: Annotation panel reloads labels but summary doesnt
-
 from __future__ import annotations
 
 import html
@@ -13,17 +11,15 @@ import panel as pn
 from astronomicAL.platform.plugins import PluginManifest
 from astronomicAL.platform.plugins.specs import ArtifactResult
 
-
 ANNOTATION_NOTE_TYPE = "annotation.note"
 REVIEW_STATUS_TYPE = "review.status"
 SUMMARY_TABLE_TYPE = "table.annotations_summary"
 SUMMARY_CSV_TYPE = "annotation.summary.csv"
 
-
 manifest = PluginManifest(
     id="core.annotations",
     name="Annotations",
-    version="0.2.0",
+    version="0.3.0",
     description=(
         "Record-level notes, review state, tags, confidence, and optional "
         "label suggestions for human-in-the-loop analysis workflows."
@@ -47,7 +43,6 @@ manifest = PluginManifest(
     ],
 )
 
-
 def register(api) -> None:
     api.register_panel(
         id="panel",
@@ -70,7 +65,7 @@ def register(api) -> None:
             REVIEW_STATUS_TYPE,
         ],
         default_layout={"x": 8, "y": 0, "w": 4, "h": 7},
-        state_version=2,
+        state_version=3,
         persist_layout=True,
         persist_state=True,
     )
@@ -95,7 +90,7 @@ def register(api) -> None:
         default_layout={"x": 8, "y": 7, "w": 4, "h": 5},
         state_version=1,
         persist_layout=True,
-        persist_state=True,
+        persist_state=False,
     )
 
     api.register_action(
@@ -113,11 +108,9 @@ def register(api) -> None:
         tags=["core", "annotations", "summary", "export"],
     )
 
-
 # ---------------------------------------------------------------------
 # Panel factories
 # ---------------------------------------------------------------------
-
 
 def create_annotations_panel(
     context,
@@ -136,7 +129,6 @@ def create_annotations_panel(
     )
     return controller.panel(), controller
 
-
 def create_annotation_summary_panel(
     context,
     *,
@@ -154,11 +146,9 @@ def create_annotation_summary_panel(
     )
     return controller.panel(), controller
 
-
 # ---------------------------------------------------------------------
 # Action handler
 # ---------------------------------------------------------------------
-
 
 def build_annotation_summary_action(
     context,
@@ -187,19 +177,15 @@ def build_annotation_summary_action(
         publish=True,
     )
 
-
 # ---------------------------------------------------------------------
 # Shared artifact/history helpers
 # ---------------------------------------------------------------------
 
-
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
-
 def _escape(value: Any) -> str:
     return html.escape(str(value), quote=True)
-
 
 def _active_dataset_id(context) -> Optional[str]:
     datasets = getattr(context, "datasets", None)
@@ -210,13 +196,11 @@ def _active_dataset_id(context) -> Optional[str]:
     except Exception:
         return None
 
-
 def _artifact_created_at(ref: Any) -> float:
     try:
         return float(getattr(ref, "created_at", 0.0) or 0.0)
     except Exception:
         return 0.0
-
 
 def _artifact_row_id(ref: Any) -> Optional[str]:
     try:
@@ -227,7 +211,6 @@ def _artifact_row_id(ref: Any) -> Optional[str]:
         return str(row_ids[0])
     return None
 
-
 def _safe_artifact_payload(context, artifact_id: str) -> Any:
     artifacts = getattr(context, "artifacts", None)
     if artifacts is None:
@@ -236,7 +219,6 @@ def _safe_artifact_payload(context, artifact_id: str) -> Any:
         return artifacts.get(artifact_id)
     except Exception:
         return None
-
 
 def _find_artifacts(
     context,
@@ -271,7 +253,6 @@ def _find_artifacts(
     except Exception:
         return []
 
-
 def _iter_artifact_payloads(
     context,
     *,
@@ -297,12 +278,10 @@ def _iter_artifact_payloads(
 
         yield ref, payload
 
-
 def _record_key(dataset_id: Optional[str], row_id: Optional[str]) -> Optional[str]:
     if dataset_id is None or row_id is None:
         return None
     return f"{dataset_id}::{row_id}"
-
 
 def _default_record_state(
     *,
@@ -321,7 +300,6 @@ def _default_record_state(
         "created_at": _now(),
         "updated_at": _now(),
     }
-
 
 def _normalise_note_payload(ref: Any, payload: Dict[str, Any]) -> Dict[str, Any]:
     artifact_id = getattr(ref, "artifact_id", None)
@@ -358,7 +336,6 @@ def _normalise_note_payload(ref: Any, payload: Dict[str, Any]) -> Dict[str, Any]
         "_sort_time": _artifact_created_at(ref),
     }
 
-
 def _normalise_review_payload(ref: Any, payload: Dict[str, Any]) -> Dict[str, Any]:
     artifact_id = getattr(ref, "artifact_id", None)
     dataset_id = payload.get("dataset_id") or getattr(ref, "dataset_id", None)
@@ -392,13 +369,11 @@ def _normalise_review_payload(ref: Any, payload: Dict[str, Any]) -> Dict[str, An
         "_sort_time": _artifact_created_at(ref),
     }
 
-
 def _safe_float(value: Any, *, default: float = 0.0) -> float:
     try:
         return float(value)
     except Exception:
         return default
-
 
 def _dedupe_items(items: Iterable[Dict[str, Any]], id_keys: Tuple[str, ...]) -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
@@ -435,7 +410,6 @@ def _dedupe_items(items: Iterable[Dict[str, Any]], id_keys: Tuple[str, ...]) -> 
     )
     return out
 
-
 def _apply_latest_state_from_history(state: Dict[str, Any]) -> Dict[str, Any]:
     reviews = state.get("reviews") or []
     notes = state.get("notes") or []
@@ -463,7 +437,6 @@ def _apply_latest_state_from_history(state: Dict[str, Any]) -> Dict[str, Any]:
         )
 
     return state
-
 
 def _merge_record_states(
     old_state: Optional[Dict[str, Any]],
@@ -493,7 +466,6 @@ def _merge_record_states(
     )
 
     return _apply_latest_state_from_history(merged)
-
 
 def build_record_state_from_artifacts(
     context,
@@ -533,7 +505,6 @@ def build_record_state_from_artifacts(
         return None
 
     return _apply_latest_state_from_history(state)
-
 
 def build_all_record_states_from_artifacts(
     context,
@@ -586,7 +557,6 @@ def build_all_record_states_from_artifacts(
         states[key] = _apply_latest_state_from_history(state)
 
     return states
-
 
 def build_annotation_summary_dataframe(
     context,
@@ -648,11 +618,9 @@ def build_annotation_summary_dataframe(
         kind="stable",
     ).reset_index(drop=True)
 
-
 # ---------------------------------------------------------------------
 # Main Annotations panel
 # ---------------------------------------------------------------------
-
 
 class AnnotationsPanel:
     REVIEW_STATUSES = [
@@ -732,11 +700,10 @@ class AnnotationsPanel:
         self._watchers.clear()
 
     def get_state(self) -> Dict[str, Any]:
+        # Persist UI state only. Annotation/review data is canonical in artifacts;
+        # _records is a transient panel cache and must not become a second data store.
         return {
-            "version": 2,
-            "records": self._records,
-            "current_dataset_id": self.dataset_id,
-            "current_row_id": self.row_id,
+            "version": 3,
             "draft": {
                 "note": self.note_input.value,
                 "tags": self.tags_input.value,
@@ -745,6 +712,7 @@ class AnnotationsPanel:
                 "confidence": self.confidence_slider.value,
             },
             "show_history": self.show_history_checkbox.value,
+            "active_tab": int(self.tabs.active or 0),
         }
 
     def snapshot_state(self) -> Dict[str, Any]:
@@ -780,19 +748,24 @@ class AnnotationsPanel:
         if "show_history" in state:
             self.show_history_checkbox.value = bool(state.get("show_history"))
 
+        active_tab = state.get("active_tab")
+        if isinstance(active_tab, int) and 0 <= active_tab < len(self.tabs.objects):
+            self.tabs.active = active_tab
+
     # ------------------------------------------------------------------
     # UI
     # ------------------------------------------------------------------
 
     def _build_widgets(self) -> None:
+        widget_margin = (0, 0, 6, 0)
+
         self.status_select = pn.widgets.Select(
             name="Review status",
             options=list(self.REVIEW_STATUSES),
             value="unreviewed",
             sizing_mode="stretch_width",
-            margin=(0, 0, 8, 0),
+            margin=widget_margin,
         )
-
         self.confidence_slider = pn.widgets.FloatSlider(
             name="Confidence",
             start=0.0,
@@ -800,64 +773,57 @@ class AnnotationsPanel:
             step=0.05,
             value=0.0,
             sizing_mode="stretch_width",
-            margin=(0, 0, 8, 0),
+            margin=widget_margin,
         )
-
         self.tags_input = pn.widgets.TextInput(
             name="Tags",
             placeholder="comma-separated tags, e.g. ambiguous, follow-up",
             sizing_mode="stretch_width",
-            margin=(0, 0, 8, 0),
+            margin=widget_margin,
         )
-
         self.label_suggestion_input = pn.widgets.TextInput(
             name="Suggested label",
             placeholder="optional label suggestion",
             sizing_mode="stretch_width",
-            margin=(0, 0, 8, 0),
+            margin=widget_margin,
         )
-
         self.note_input = pn.widgets.TextAreaInput(
             name="Note",
             placeholder="Write a note for the focused record...",
             rows=5,
             sizing_mode="stretch_width",
-            margin=(0, 0, 8, 0),
+            margin=widget_margin,
         )
 
         self.save_note_button = pn.widgets.Button(
             name="Save note",
             button_type="primary",
-            width=110,
             height=32,
-            margin=(0, 8, 8, 0),
+            sizing_mode="stretch_width",
         )
         self.save_review_button = pn.widgets.Button(
             name="Save review state",
             button_type="success",
-            width=150,
             height=32,
-            margin=(0, 8, 8, 0),
+            sizing_mode="stretch_width",
         )
         self.reload_button = pn.widgets.Button(
-            name="Reload from artifacts",
+            name="Reload artifacts",
             button_type="default",
-            width=155,
             height=32,
-            margin=(0, 8, 8, 0),
+            sizing_mode="stretch_width",
         )
         self.clear_draft_button = pn.widgets.Button(
             name="Clear draft",
             button_type="default",
-            width=110,
             height=32,
-            margin=(0, 0, 8, 0),
+            sizing_mode="stretch_width",
         )
-
         self.show_history_checkbox = pn.widgets.Checkbox(
             name="Show history",
             value=True,
-            margin=(0, 0, 8, 0),
+            sizing_mode="stretch_width",
+            margin=(0, 0, 4, 0),
         )
 
         self.save_note_button.on_click(self._on_save_note)
@@ -871,93 +837,90 @@ class AnnotationsPanel:
 
     def _build_root(self) -> None:
         self.header_pane = pn.pane.HTML(
+            "<h2>Annotations</h2>",
+            height=34,
+            min_height=34,
+            max_height=34,
+            sizing_mode="stretch_width",
+            margin=(0, 0, 6, 0),
+        )
+        self.summary_pane = pn.pane.Markdown(
             "",
             sizing_mode="stretch_width",
-            margin=(0, 0, 8, 0),
+            margin=(0, 0, 6, 0),
         )
-
         self.record_pane = pn.pane.HTML(
             "",
             sizing_mode="stretch_width",
-            margin=(0, 0, 8, 0),
+            margin=(0, 0, 0, 0),
         )
-
         self.history_pane = pn.pane.HTML(
             "",
             sizing_mode="stretch_width",
-            margin=(0, 0, 8, 0),
+            margin=(0, 0, 0, 0),
         )
-
         self.message_pane = pn.pane.Alert(
             "",
             alert_type="info",
             visible=False,
             sizing_mode="stretch_width",
-            margin=(0, 0, 8, 0),
+            margin=(0, 0, 6, 0),
+        )
+
+        action_grid = pn.GridBox(
+            self.save_note_button,
+            self.save_review_button,
+            self.reload_button,
+            self.clear_draft_button,
+            ncols=2,
+            sizing_mode="stretch_width",
+            margin=(0, 0, 6, 0),
+        )
+
+        annotate_tab = pn.Column(
+            self.status_select,
+            self.confidence_slider,
+            self.tags_input,
+            self.label_suggestion_input,
+            self.note_input,
+            action_grid,
+            sizing_mode="stretch_width",
+            margin=(0, 0, 0, 0),
+        )
+        record_tab = pn.Column(
+            self.record_pane,
+            sizing_mode="stretch_width",
+            scroll=True,
+            margin=(0, 0, 0, 0),
+        )
+        history_tab = pn.Column(
+            self.show_history_checkbox,
+            self.history_pane,
+            sizing_mode="stretch_width",
+            scroll=True,
+            margin=(0, 0, 0, 0),
+        )
+
+        self.tabs = pn.Tabs(
+            ("Annotate", annotate_tab),
+            ("Record", record_tab),
+            ("History", history_tab),
+            dynamic=True,
+            sizing_mode="stretch_both",
+            margin=(0, 0, 0, 0),
         )
 
         self.root = pn.Column(
             self.header_pane,
+            self.summary_pane,
             self.message_pane,
-            self._card("Focused record", self.record_pane),
-            self._card(
-                "Review state",
-                self.status_select,
-                self.confidence_slider,
-                self.tags_input,
-                self.label_suggestion_input,
-                pn.Row(
-                    self.save_review_button,
-                    self.reload_button,
-                    self.clear_draft_button,
-                    sizing_mode="stretch_width",
-                    margin=(0, 0, 0, 0),
-                ),
-            ),
-            self._card(
-                "Note",
-                self.note_input,
-                pn.Row(
-                    self.save_note_button,
-                    self.show_history_checkbox,
-                    sizing_mode="stretch_width",
-                    margin=(0, 0, 0, 0),
-                ),
-            ),
-            self._card("Annotation history", self.history_pane),
+            self.tabs,
             sizing_mode="stretch_both",
-            scroll=True,
             margin=(0, 0, 0, 0),
             styles={
-                "padding": "4px",
-                "box-sizing": "border-box",
-            },
-        )
-
-    def _card(self, title: str, *objects):
-        return pn.Column(
-            pn.pane.HTML(
-                f"""
-                <div style="font-weight: 700; font-size: 14px;
-                            margin-bottom: 8px;">
-                    {_escape(title)}
-                </div>
-                """,
-                sizing_mode="stretch_width",
-                margin=(0, 0, 0, 0),
-            ),
-            *objects,
-            sizing_mode="stretch_width",
-            min_width=0,
-            margin=(0, 0, 8, 0),
-            styles={
-                "border": "1px solid #d9d9d9",
-                "border-radius": "8px",
-                "background": "#ffffff",
-                "padding": "10px 12px",
-                "box-sizing": "border-box",
-                "width": "100%",
-                "overflow": "hidden",
+                "overflow-y": "auto",
+                "overflow-x": "hidden",
+                "padding": "0 8px 8px 8px",
             },
         )
 
@@ -978,10 +941,21 @@ class AnnotationsPanel:
         if events is None:
             return
         try:
-            sub = events.subscribe(topic, callback)
-            self._subscriptions.append(sub)
+            sub = events.subscribe(
+                topic,
+                callback,
+                owner_id=self.instance_id,
+                owner_label="Annotations",
+                owner_kind="plugin-panel",
+            )
+        except TypeError:
+            try:
+                sub = events.subscribe(topic, callback)
+            except Exception:
+                return
         except Exception:
-            pass
+            return
+        self._subscriptions.append(sub)
 
     def _publish(self, topic: str, payload: Dict[str, Any]) -> None:
         events = getattr(self.context, "events", None)
@@ -1007,12 +981,11 @@ class AnnotationsPanel:
         except Exception:
             return []
 
-
     def _column_exists(self, column: Optional[str]) -> bool:
         if not column:
             return False
         return str(column) in set(self._active_columns())
-    
+
     def _active_df(self) -> Optional[pd.DataFrame]:
         raise RuntimeError(
             "AnnotationsPanel must not materialise the full active dataset. "
@@ -1072,33 +1045,17 @@ class AnnotationsPanel:
 
         return None
 
-    def _resolve_label_col(self) -> Optional[str]:
-        mapped = self._get_mapping("target_label")
-        columns = set(self._active_columns())
-
-        if mapped and mapped in columns:
-            return mapped
-
-        config = getattr(self.context, "config", None)
-        settings = getattr(config, "settings", {}) if config is not None else {}
-
-        return None
-    
     def _record_preview_columns(self) -> Optional[List[str]]:
         columns = self._active_columns()
         if not columns:
             return None
 
         record_id_col = self._resolve_record_id_col()
-        label_col = self._resolve_label_col()
 
         selected: List[str] = []
 
         if record_id_col and record_id_col != "Use Index":
             selected.append(record_id_col)
-
-        if label_col:
-            selected.append(label_col)
 
         config = getattr(self.context, "config", None)
         settings = getattr(config, "settings", {}) if config is not None else {}
@@ -1442,6 +1399,9 @@ class AnnotationsPanel:
             payload=note,
             params={"annotation_id": annotation_id},
         )
+        if not artifact_id:
+            self._show_message("Could not persist the note artifact.", "danger")
+            return
         note["artifact_id"] = artifact_id
 
         record_state.setdefault("notes", []).append(note)
@@ -1470,17 +1430,16 @@ class AnnotationsPanel:
 
         self._publish("annotation.created", event_payload)
 
-        if artifact_id:
-            self._publish(
-                "artifact.created",
-                {
-                    "artifact_id": artifact_id,
-                    "type": ANNOTATION_NOTE_TYPE,
-                    "dataset_id": self.dataset_id,
-                    "row_ids": [self.row_id],
-                    "source": "core.annotations",
-                },
-            )
+        self._publish(
+            "artifact.created",
+            {
+                "artifact_id": artifact_id,
+                "type": ANNOTATION_NOTE_TYPE,
+                "dataset_id": self.dataset_id,
+                "row_ids": [self.row_id],
+                "source": "core.annotations",
+            },
+        )
 
         if note["label_suggestion"]:
             self._publish(
@@ -1531,6 +1490,9 @@ class AnnotationsPanel:
             payload=review_payload,
             params={"review_id": review_id, "status": review_payload["status"]},
         )
+        if not artifact_id:
+            self._show_message("Could not persist the review artifact.", "danger")
+            return
         review_payload["artifact_id"] = artifact_id
 
         record_state.setdefault("reviews", []).append(review_payload)
@@ -1552,17 +1514,16 @@ class AnnotationsPanel:
             },
         )
 
-        if artifact_id:
-            self._publish(
-                "artifact.created",
-                {
-                    "artifact_id": artifact_id,
-                    "type": REVIEW_STATUS_TYPE,
-                    "dataset_id": self.dataset_id,
-                    "row_ids": [self.row_id],
-                    "source": "core.annotations",
-                },
-            )
+        self._publish(
+            "artifact.created",
+            {
+                "artifact_id": artifact_id,
+                "type": REVIEW_STATUS_TYPE,
+                "dataset_id": self.dataset_id,
+                "row_ids": [self.row_id],
+                "source": "core.annotations",
+            },
+        )
 
         if review_payload["label_suggestion"]:
             self._publish(
@@ -1651,21 +1612,22 @@ class AnnotationsPanel:
         self._render_history()
 
     def _render_header(self) -> None:
-        dataset = _escape(self.dataset_id or "No active dataset")
-        row_id = _escape(self.row_id or "No focused record")
+        dataset = self.dataset_id or "No active dataset"
+        row_id = self.row_id or "No focused record"
+        state = self._get_record_state() if self.row_id is not None else None
 
-        self.header_pane.object = f"""
-        <div style="display: flex; flex-direction: column; gap: 2px;">
-            <div style="font-weight: 700; font-size: 15px;">
-                Annotations
-            </div>
-            <div style="font-size: 12px; color: #666;">
-                Dataset: <code>{dataset}</code>
-                &nbsp; | &nbsp;
-                Focus: <code>{row_id}</code>
-            </div>
-        </div>
-        """
+        status = "unreviewed"
+        notes = 0
+        reviews = 0
+        if state:
+            status = str(state.get("status", "unreviewed") or "unreviewed")
+            notes = len(state.get("notes") or [])
+            reviews = len(state.get("reviews") or [])
+
+        self.summary_pane.object = (
+            f"Dataset: `{dataset}` · Focus: `{row_id}` · "
+            f"Status: **{status}** · Notes: **{notes}** · Reviews: **{reviews}**"
+        )
 
     def _render_record(self) -> None:
         if self.dataset_id is None:
@@ -1685,22 +1647,14 @@ class AnnotationsPanel:
             )
             return
 
-        label_col = self._resolve_label_col()
-
         rows: List[Tuple[str, Any]] = [
             ("Dataset", self.dataset_id),
             ("Record ID", self.row_id),
         ]
 
-        if label_col and label_col in self.row.index:
-            rows.append(("Current label", self.row[label_col]))
-
         preview_count = 0
 
         for col in self.row.index:
-            if label_col and col == label_col:
-                continue
-
             value = self.row[col]
 
             if pd.isna(value):
@@ -1777,9 +1731,7 @@ class AnnotationsPanel:
 
             cards.append(
                 f"""
-                <div style="border: 1px solid #e1e1e1; border-radius: 6px;
-                            padding: 8px; margin-bottom: 8px;
-                            background: #fafafa;">
+                <div style="padding: 8px 2px; border-bottom: 1px solid #e5e7eb;">
                     <div style="display: flex; justify-content: space-between;
                                 gap: 8px; margin-bottom: 4px;">
                         <strong style="font-size: 13px;">{_escape(title)}</strong>
@@ -1824,7 +1776,7 @@ class AnnotationsPanel:
         self.message_pane.object = message
         self.message_pane.alert_type = alert_type
         self.message_pane.visible = True
-    
+
     def _clear_message(self) -> None:
         self.message_pane.object = ""
         self.message_pane.visible = False
@@ -1893,11 +1845,9 @@ class AnnotationsPanel:
         </table>
         """
 
-
 # ---------------------------------------------------------------------
 # Summary / export panel
 # ---------------------------------------------------------------------
-
 
 class AnnotationSummaryPanel:
     def __init__(
@@ -1919,13 +1869,6 @@ class AnnotationSummaryPanel:
 
         self.dataset_id: Optional[str] = _active_dataset_id(self.context)
         self.summary_df = pd.DataFrame()
-
-        self._build_widgets()
-        self._build_root()
-        self._subscribe_events()
-
-        self._restored_summary_from_state = False
-
         self._build_widgets()
         self._build_root()
         self._subscribe_events()
@@ -1933,14 +1876,9 @@ class AnnotationSummaryPanel:
         if restore_state:
             self.restore_state(restore_state)
 
-        if self._restored_summary_from_state:
-            self._render()
-            self._show_message(
-                f"Restored cached summary with {len(self.summary_df)} rows.",
-                "info",
-            )
-        else:
-            self.refresh()
+        # Artifacts are canonical; rebuild immediately so labels/review state cannot
+        # remain stale after workspace restore.
+        self.refresh(show_message=False)
 
     def panel(self):
         return self.root
@@ -1958,80 +1896,34 @@ class AnnotationSummaryPanel:
         self._subscriptions.clear()
 
     def get_state(self) -> Dict[str, Any]:
-        summary_records: List[Dict[str, Any]] = []
-
-        if isinstance(self.summary_df, pd.DataFrame) and not self.summary_df.empty:
-            try:
-                summary_records = self.summary_df.to_dict(orient="records")
-            except Exception:
-                summary_records = []
-
-        return {
-            "version": 2,
-            "dataset_id": self.dataset_id,
-            "summary_records": summary_records,
-            "summary_columns": (
-                list(self.summary_df.columns)
-                if isinstance(self.summary_df, pd.DataFrame)
-                else []
-            ),
-            "summary_row_count": int(len(self.summary_df))
-            if isinstance(self.summary_df, pd.DataFrame)
-            else 0,
-            "cached_at": _now(),
-        }
+        return {"version": 3}
 
     def snapshot_state(self) -> Dict[str, Any]:
         return self.get_state()
 
     def restore_state(self, state: Dict[str, Any]) -> None:
-        if not isinstance(state, dict):
-            return
-
-        if state.get("dataset_id"):
-            self.dataset_id = str(state.get("dataset_id"))
-
-        records = state.get("summary_records")
-        columns = state.get("summary_columns") or []
-
-        if isinstance(records, list):
-            try:
-                restored_df = pd.DataFrame(records)
-
-                if columns:
-                    # Preserve saved column order and include missing columns as empty.
-                    for col in columns:
-                        if col not in restored_df.columns:
-                            restored_df[col] = ""
-                    restored_df = restored_df[[col for col in columns]]
-
-                self.summary_df = restored_df
-                self._restored_summary_from_state = True
-            except Exception:
-                self.summary_df = pd.DataFrame()
-                self._restored_summary_from_state = False
+        # Version 1/2 workspaces may contain cached summary rows. Ignore them: the
+        # artifact store is canonical and refresh() rebuilds the table after restore.
+        return
 
     def _build_widgets(self) -> None:
         self.refresh_button = pn.widgets.Button(
             name="Refresh",
             button_type="primary",
-            width=90,
             height=32,
-            margin=(0, 8, 8, 0),
+            sizing_mode="stretch_width",
         )
         self.dataset_button = pn.widgets.Button(
-            name="Create summary dataset",
+            name="Create dataset",
             button_type="success",
-            width=175,
             height=32,
-            margin=(0, 8, 8, 0),
+            sizing_mode="stretch_width",
         )
         self.csv_button = pn.widgets.Button(
-            name="Create CSV artifact",
+            name="Create CSV",
             button_type="default",
-            width=150,
             height=32,
-            margin=(0, 0, 8, 0),
+            sizing_mode="stretch_width",
         )
 
         self.refresh_button.on_click(lambda _event: self.refresh())
@@ -2039,37 +1931,62 @@ class AnnotationSummaryPanel:
         self.csv_button.on_click(self._on_create_csv_artifact)
 
     def _build_root(self) -> None:
-        self.header_pane = pn.pane.HTML("", sizing_mode="stretch_width")
+        self.header_pane = pn.pane.HTML(
+            "<h2>Annotation Summary</h2>",
+            height=34,
+            min_height=34,
+            max_height=34,
+            sizing_mode="stretch_width",
+            margin=(0, 0, 6, 0),
+        )
+        self.summary_pane = pn.pane.Markdown(
+            "",
+            sizing_mode="stretch_width",
+            margin=(0, 0, 6, 0),
+        )
         self.message_pane = pn.pane.Alert(
             "",
             alert_type="info",
             visible=False,
             sizing_mode="stretch_width",
-            margin=(0, 0, 8, 0),
+            margin=(0, 0, 6, 0),
         )
-        self.table_pane = pn.pane.DataFrame(
+        self.table_pane = pn.widgets.Tabulator(
             pd.DataFrame(),
-            index=False,
+            show_index=False,
+            disabled=True,
+            pagination="local",
+            page_size=12,
             sizing_mode="stretch_both",
-            margin=(0, 0, 8, 0),
+            min_height=260,
+            margin=(0, 0, 0, 0),
+            configuration={
+                "layout": "fitDataStretch",
+                "responsiveLayout": "collapse",
+            },
+        )
+
+        action_grid = pn.GridBox(
+            self.refresh_button,
+            self.dataset_button,
+            self.csv_button,
+            ncols=2,
+            sizing_mode="stretch_width",
+            margin=(0, 0, 6, 0),
         )
 
         self.root = pn.Column(
             self.header_pane,
+            action_grid,
+            self.summary_pane,
             self.message_pane,
-            pn.Row(
-                self.refresh_button,
-                self.dataset_button,
-                self.csv_button,
-                sizing_mode="stretch_width",
-            ),
             self.table_pane,
             sizing_mode="stretch_both",
-            scroll=True,
             margin=(0, 0, 0, 0),
             styles={
-                "padding": "4px",
-                "box-sizing": "border-box",
+                "overflow-y": "auto",
+                "overflow-x": "hidden",
+                "padding": "0 8px 8px 8px",
             },
         )
 
@@ -2082,10 +1999,21 @@ class AnnotationSummaryPanel:
         if events is None:
             return
         try:
-            sub = events.subscribe(topic, callback)
-            self._subscriptions.append(sub)
+            sub = events.subscribe(
+                topic,
+                callback,
+                owner_id=self.instance_id,
+                owner_label="Annotation Summary",
+                owner_kind="plugin-panel",
+            )
+        except TypeError:
+            try:
+                sub = events.subscribe(topic, callback)
+            except Exception:
+                return
         except Exception:
-            pass
+            return
+        self._subscriptions.append(sub)
 
     def _publish(self, topic: str, payload: Dict[str, Any]) -> None:
         events = getattr(self.context, "events", None)
@@ -2111,13 +2039,12 @@ class AnnotationSummaryPanel:
                 self.refresh(show_message=False)
 
     def refresh(self, show_message: bool = True) -> None:
-        self.dataset_id = self.dataset_id or _active_dataset_id(self.context)
+        self.dataset_id = _active_dataset_id(self.context)
 
         self.summary_df = build_annotation_summary_dataframe(
             self.context,
             dataset_id=self.dataset_id,
         )
-        self._restored_summary_from_state = False
 
         self._render()
 
@@ -2128,23 +2055,29 @@ class AnnotationSummaryPanel:
             )
 
     def _render(self) -> None:
-        dataset = _escape(self.dataset_id or "No active dataset")
+        dataset = self.dataset_id or "No active dataset"
         count = len(self.summary_df)
 
-        self.header_pane.object = f"""
-        <div style="display: flex; flex-direction: column; gap: 2px;">
-            <div style="font-weight: 700; font-size: 15px;">
-                Annotation Summary
-            </div>
-            <div style="font-size: 12px; color: #666;">
-                Dataset: <code>{dataset}</code>
-                &nbsp; | &nbsp;
-                Annotated records: <strong>{count}</strong>
-            </div>
-        </div>
-        """
+        status_counts: Dict[str, int] = {}
+        if not self.summary_df.empty and "latest_status" in self.summary_df.columns:
+            try:
+                status_counts = {
+                    str(key): int(value)
+                    for key, value in self.summary_df["latest_status"].value_counts().items()
+                }
+            except Exception:
+                status_counts = {}
 
-        self.table_pane.object = self.summary_df
+        status_text = " · ".join(
+            f"{status}: **{count_}**"
+            for status, count_ in sorted(status_counts.items())
+        )
+        suffix = f" · {status_text}" if status_text else ""
+
+        self.summary_pane.object = (
+            f"Dataset: `{dataset}` · Annotated records: **{count}**{suffix}"
+        )
+        self.table_pane.value = self.summary_df
 
     def _on_create_summary_dataset(self, _event=None) -> None:
         self.refresh(show_message=False)

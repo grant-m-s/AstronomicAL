@@ -56,7 +56,7 @@ def register(api) -> None:
         tags=["resources", "system", "gpu", "nvidia", "top", "diagnostics"],
         uses_services=["core.resources.sampler"],
         produces=["resources.snapshot"],
-        default_layout={"x": 0, "y": 0, "w": 5, "h": 6},
+        default_layout={"x": 0, "y": 0, "w": 7, "h": 7},
         persist_layout=True,
         persist_state=True,
     )
