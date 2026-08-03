@@ -4,27 +4,48 @@
 
 AstronomicAL is a local, human-in-the-loop workspace that brings data exploration, domain-specific inspection, annotation, and machine learning together in a single interactive application.
 
-Rather than prescribing one fixed workflow, AstronomicAL is built around plugins. Users can combine general-purpose tools with domain-specific capabilities to create a workspace around the problem they are trying to solve — from astronomical source inspection to image classification and active learning.
+Rather than prescribing one fixed workflow, AstronomicAL is built around plugins. Users can combine general-purpose tools with domain-specific capabilities to create a workspace around the problem they are trying to solve. This can include plugins from astronomical source inspection to image classification and active learning.
 
-### See AstronomicAL in action
+<h2>See AstronomicAL in action</h2>
 
-#### Spectroscopy and Photometry
+<p>
+Four example workflows showing how AstronomicAL combines plugins for scientific exploration, domain-specific analysis, data import, and machine learning. Click any preview to open the full-quality MP4 recording.
+</p>
 
-![Spectroscopy and Photometry](assets/spec_to_phot_shorter.mp4)
-
-#### Morphology
-
-![Morphology](assets/morphology_shorter.mp4)
-
-#### Hugging Face Importer
-
-![Huggingface importer](assets/huggingface_cifar10_short.mp4)
-
-#### Machine Learning
-
-![Machine Learning](assets/machine_learning_shorter.mp4)
-
-
+<table width="100%">
+  <tr>
+    <td width="50%" align="center">
+      <a href="assets/machine_learning_shorter.mp4">
+        <img src="assets/machine_learning_shorter.gif" width="100%" alt="Machine Learning">
+      </a>
+      <br>
+      <strong>Machine Learning</strong>
+    </td>
+    <td width="50%" align="center">
+      <a href="assets/huggingface_cifar10_short.mp4">
+        <img src="assets/huggingface_cifar10_short.gif" width="100%" alt="Hugging Face Importer">
+      </a>
+      <br>
+      <strong>Hugging Face Importer</strong>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" align="center">
+      <a href="assets/spec_to_phot_shorter.mp4">
+        <img src="assets/spec_to_phot_shorter.gif" width="100%" alt="Spectroscopy and Photometry">
+      </a>
+      <br>
+      <strong>Spectroscopy and Photometry</strong>
+    </td>
+    <td width="50%" align="center">
+      <a href="assets/morphology_shorter.mp4">
+        <img src="assets/morphology_shorter.gif" width="100%" alt="Morphology">
+      </a>
+      <br>
+      <strong>Morphology</strong>
+    </td>
+  </tr>
+</table>
 
 
 AstronomicAL was originally developed for active learning with large astronomical catalogues. The same underlying challenges appear far beyond astronomy: datasets can be too large to inspect manually, reliable labels can be expensive to obtain, difficult examples require expert judgement, and useful decisions often depend on information spread across several different tools or data sources.
@@ -66,7 +87,7 @@ In practice, this means the same AstronomicAL installation can support very diff
 
 Core functionality is implemented using the same plugin model so that the extension mechanism is not reserved only for third-party code. The aim is for new features to integrate through shared platform contracts rather than through direct coupling between panels.
 
-For information on creating plugins, see [PLUGIN_README.md](PLUGIN_README.md) and [PLUGIN_CONTRACT.md](PLUGIN_CONTRACT.md).
+We are actively developing a plugin marketplace that will allow users to create and share domain-specific plugins, and discover and install plugins directly from within AstronomicAL.
 
 ---
 
@@ -86,16 +107,20 @@ The application runs locally, allowing users to keep control of their datasets w
 
 ## Installation
 
-AstronomicAL is currently under active development. For the latest development version, clone the repository and install the required dependencies inside a virtual environment.
+AstronomicAL is currently under active development. For the latest development version, clone the repository and install it inside an isolated Python environment.
+
+Clone the repository and enter the project directory:
 
 ```bash
 git clone https://github.com/grant-m-s/AstronomicAL.git
 cd AstronomicAL
+```
 
+Create and activate a virtual environment:
+
+```bash
 python -m venv venv
 source venv/bin/activate
-
-pip install -r requirements.txt
 ```
 
 Using Conda is also supported:
@@ -103,10 +128,34 @@ Using Conda is also supported:
 ```bash
 conda create -n astronomical python
 conda activate astronomical
-pip install -r requirements.txt
 ```
 
-A virtual environment is strongly recommended so that AstronomicAL and plugin dependencies remain isolated from other Python projects on the system.
+Install the core dependencies:
+
+```bash
+pip install -r requirements-core.txt
+```
+
+Additional requirement sets are available for specific functionality:
+
+* `requirements-astro.txt`
+* `requirements-huggingface.txt`
+* `requirements-ml.txt`
+* `requirements-dev.txt`
+
+Install any additional set as required:
+
+```bash
+pip install -r requirements-astro.txt
+```
+
+Or install all available dependencies at once:
+
+```bash
+pip install -r requirements-all.txt
+```
+
+Using an isolated environment is strongly recommended so that AstronomicAL and its plugin dependencies remain separate from other Python projects on the system.
 
 ### Running AstronomicAL
 
@@ -122,20 +171,6 @@ Once running, datasets can be loaded into the workspace and additional capabilit
 
 ---
 
-## Developing and extending AstronomicAL
-
-One of the main goals of the new architecture is to make it easier to add functionality without changing the platform itself.
-
-Plugins can be used for anything from a small project-specific panel to a complete domain integration or workflow. Examples include new visualisations, survey clients, archive integrations, model families, annotation tools, importers, review queues, image viewers, query strategies, or entirely new scientific workflows.
-
-When adding functionality, the general rule is simple: shared, domain-neutral runtime infrastructure belongs in the platform; scientific, workflow-specific, or optional behaviour belongs in a plugin.
-
-The plugin documentation describes the supported interfaces and lifecycle in more detail:
-
-* [Plugin development guide](PLUGIN_README.md)
-* [Plugin contract](PLUGIN_CONTRACT.md)
-
----
 
 ## Contributing to AstronomicAL
 
