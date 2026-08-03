@@ -9,6 +9,7 @@ from .errors import (
     PluginInstallError,
     PluginLoadError,
     PluginPackageError,
+    PluginPythonEnvironmentError,
     PluginRegistrationError,
     PluginValidationError,
     InstalledPluginStoreError,
@@ -19,6 +20,11 @@ from .activation import PluginActivationService
 from .installed import InstalledPluginRecord, InstalledPluginStore
 from .installer import PluginInstallResult, PluginInstaller, detect_astronomical_version
 from .package import PluginPackageInspection, inspect_plugin_package
+from .python_packages import (
+    PluginPythonEnvironment,
+    PluginPythonEnvironmentTransaction,
+    PythonRequirementCheck,
+)
 from .sources import PluginOrigin, PluginSearchPath
 from .state import PluginStateStore
 from .specs import (
@@ -48,6 +54,7 @@ __all__ = [
     "PluginInstallError",
     "PluginLoadError",
     "PluginPackageError",
+    "PluginPythonEnvironmentError",
     "PluginRegistrationError",
     "PluginValidationError",
     "InstalledPluginStoreError",
@@ -63,6 +70,9 @@ __all__ = [
     "detect_astronomical_version",
     "PluginPackageInspection",
     "inspect_plugin_package",
+    "PluginPythonEnvironment",
+    "PluginPythonEnvironmentTransaction",
+    "PythonRequirementCheck",
     "PluginOrigin",
     "PluginSearchPath",
     "PluginStateStore",

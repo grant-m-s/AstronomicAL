@@ -4,8 +4,11 @@ import html
 import json
 import math
 import traceback
+from contextlib import contextmanager
 from datetime import datetime
-from typing import Any, Callable, Mapping
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from typing import Any, Callable, Iterator, Mapping
 
 import pandas as pd
 import panel as pn
@@ -30,6 +33,8 @@ class PluginManagerPanel:
         self.context = context
         self.manager = getattr(context, "plugins", None)
         self.activation = getattr(context, "plugin_activation", None)
+        self.installer = getattr(context, "plugin_installer", None)
+        self.installed_store = getattr(context, "installed_plugins", None)
 
         self._disposed = False
         self._restoring = False
@@ -43,6 +48,9 @@ class PluginManagerPanel:
         self._visible_plugins: list[PluginSnapshot] = []
         self._selected_plugin_id: str | None = None
         self._lifecycle_message_plugin_id: str | None = None
+        self._package_message_plugin_id: str | None = None
+        self._pending_uninstall_plugin_id: str | None = None
+        self._busy = False
 
         self.search = pn.widgets.TextInput(
             name="Search plugins",
@@ -107,6 +115,44 @@ class PluginManagerPanel:
             visible=False,
         )
 
+        self.install_file = pn.widgets.FileInput(
+            name="",
+            accept=".alplugin",
+            multiple=False,
+            sizing_mode="stretch_width",
+            height=38,
+            margin=(0, 0, 12, 0),
+        )
+        self.install_button = pn.widgets.Button(
+            name="Install",
+            button_type="primary",
+            sizing_mode="stretch_width",
+            height=36,
+            margin=(4, 0, 4, 0),
+        )
+        self.update_file = pn.widgets.FileInput(
+            name="",
+            accept=".alplugin",
+            multiple=False,
+            sizing_mode="stretch_width",
+            height=38,
+            margin=(0, 0, 12, 0),
+        )
+        self.update_button = pn.widgets.Button(
+            name="Update selected plugin",
+            button_type="primary",
+            sizing_mode="stretch_width",
+            height=34,
+            margin=0,
+        )
+        self.uninstall_button = pn.widgets.Button(
+            name="Uninstall installed plugin",
+            button_type="danger",
+            sizing_mode="stretch_width",
+            height=38,
+            margin=(2, 0, 4, 0),
+        )
+
         self.plugin_table = pn.widgets.Tabulator(
             pd.DataFrame(
                 columns=["Plugin", "Status", "Version", "Open", "Provides", "plugin_id"]
@@ -154,15 +200,35 @@ class PluginManagerPanel:
         self.community_status = self._html_pane()
         self.operation_banner = self._html_pane()
         self.lifecycle_banner = self._html_pane()
+        self.install_status = self._html_pane()
+        self.install_banner = self._html_pane()
+        self.package_details = self._html_pane()
+        self.package_banner = self._html_pane()
+        self.uninstall_banner = self._html_pane()
         self.selected_details = self._html_pane()
         self.action_note = self._html_pane()
         self.discovery_issues = self._html_pane()
+
+        # Dynamic HTML panes and Bokeh file-input labels can otherwise be laid out
+        # too tightly inside nested Columns. Reserve comfortable vertical space
+        # around the always-present status banners and package feedback.
+        self.community_status.min_height = 50
+        self.community_status.margin = (0, 0, 6, 0)
+        self.install_status.min_height = 46
+        self.install_status.margin = (4, 0, 10, 0)
+        self.install_banner.margin = (8, 0, 10, 0)
+        self.package_details.margin = (4, 0, 10, 0)
+        self.package_banner.margin = (8, 0, 10, 0)
+        self.uninstall_banner.margin = (6, 0, 8, 0)
 
         self.refresh_button.on_click(self._refresh_clicked)
         self.discover_button.on_click(self._discover_clicked)
         self.enable_button.on_click(self._enable_clicked)
         self.disable_button.on_click(self._disable_clicked)
         self.reload_button.on_click(self._reload_clicked)
+        self.install_button.on_click(self._install_clicked)
+        self.update_button.on_click(self._update_clicked)
+        self.uninstall_button.on_click(self._uninstall_clicked)
 
         self._watch(self.search, self._filters_changed, "value")
         self._watch(self.search, self._filters_changed, "value_input")
@@ -170,6 +236,8 @@ class PluginManagerPanel:
         self._watch(self.community_toggle, self._community_toggle_changed, "value")
         self._watch(self.plugin_table, self._table_selection_changed, "selection")
         self._watch(self.plugin_table, self._table_page_changed, "page")
+        self._watch(self.install_file, self._package_file_changed, "value")
+        self._watch(self.update_file, self._package_file_changed, "value")
         self._subscribe_to_plugin_events()
 
         self.discovery_section = self._section(
@@ -215,21 +283,48 @@ class PluginManagerPanel:
             "</div>",
             sizing_mode="stretch_width",
             stylesheets=[PLUGIN_MANAGER_CSS],
+            min_height=44,
             margin=0,
         )
+        community_controls = pn.Row(
+            community_heading,
+            self.community_toggle,
+            sizing_mode="stretch_width",
+            min_height=50,
+            margin=(0, 0, 8, 0),
+        )
         community = pn.Column(
-            pn.Row(
-                community_heading,
-                self.community_toggle,
-                sizing_mode="stretch_width",
-                margin=0,
-            ),
+            community_controls,
+            pn.Spacer(height=4, sizing_mode="stretch_width", margin=0),
             self.community_status,
             sizing_mode="stretch_width",
             css_classes=["al-pm-card"],
             styles=self._card_styles(),
-            margin=(0, 0, 10, 0),
+            margin=(0, 0, 16, 0),
         )
+
+        install_file_label = pn.pane.HTML(
+            '<div style="font-size:12px; font-weight:600; line-height:1.35;">'
+            'Plugin package (.alplugin)</div>',
+            sizing_mode="stretch_width",
+            stylesheets=[PLUGIN_MANAGER_CSS],
+            height=22,
+            margin=(2, 0, 4, 0),
+        )
+        install_from_file = self._section(
+            "Install from file",
+            "Install a local .alplugin package. Installation never enables or executes the plugin.",
+            pn.Column(
+                self.install_status,
+                install_file_label,
+                self.install_file,
+                self.install_banner,
+                self.install_button,
+                sizing_mode="stretch_width",
+                margin=(4, 0, 4, 0),
+            ),
+        )
+        install_from_file.margin = (0, 0, 16, 0)
 
         plugin_list = self._section(
             "Plugins",
@@ -244,6 +339,50 @@ class PluginManagerPanel:
             ncols=2,
             sizing_mode="stretch_width",
             margin=(10, 0, 0, 0),
+        )
+
+        self.managed_uninstall_controls = pn.Column(
+            pn.pane.HTML(
+                '<div style="font-size:12px; font-weight:600; line-height:1.35;">'
+                'Installed plugin</div>'
+                '<div style="font-size:11px; color:#667085; line-height:1.4; margin-top:2px;">'
+                'AstronomicAL installed this plugin and can remove its managed code safely.'
+                '</div>',
+                sizing_mode="stretch_width",
+                stylesheets=[PLUGIN_MANAGER_CSS],
+                margin=(0, 0, 6, 0),
+            ),
+            self.uninstall_banner,
+            self.uninstall_button,
+            sizing_mode="stretch_width",
+            margin=(12, 0, 4, 0),
+            visible=False,
+        )
+
+        update_file_label = pn.pane.HTML(
+            '<div style="font-size:12px; font-weight:600; line-height:1.35;">'
+            'Update package (.alplugin)</div>',
+            sizing_mode="stretch_width",
+            stylesheets=[PLUGIN_MANAGER_CSS],
+            height=22,
+            margin=(4, 0, 4, 0),
+        )
+        self.package_management = pn.Column(
+            pn.pane.HTML(
+                '<div class="al-pm-section-title"><h3>Package management</h3>'
+                "<span>Update or remove plugins installed by AstronomicAL</span></div>",
+                sizing_mode="stretch_width",
+                stylesheets=[PLUGIN_MANAGER_CSS],
+                margin=(16, 0, 8, 0),
+            ),
+            self.package_details,
+            update_file_label,
+            self.update_file,
+            self.package_banner,
+            self.update_button,
+            sizing_mode="stretch_width",
+            margin=(4, 0, 4, 0),
+            visible=False,
         )
 
         selected = pn.Column(
@@ -261,6 +400,11 @@ class PluginManagerPanel:
             # refusal from appearing far above the button the user just clicked.
             self.lifecycle_banner,
             actions,
+            # Managed community plugins get an explicit destructive action directly
+            # below the lifecycle controls. This keeps Uninstall visible without
+            # forcing the user to hunt through the update-package section.
+            self.managed_uninstall_controls,
+            self.package_management,
             sizing_mode="stretch_width",
             css_classes=["al-pm-card"],
             styles=self._card_styles(),
@@ -272,6 +416,7 @@ class PluginManagerPanel:
             self.operation_banner,
             self.summary,
             community,
+            install_from_file,
             controls,
             plugin_list,
             selected,
@@ -341,12 +486,17 @@ class PluginManagerPanel:
             self.community_status.object = self._banner_html(
                 "danger", "Community plugin state is unavailable."
             )
+            self.install_status.object = self._banner_html(
+                "danger", "Plugin installation state is unavailable."
+            )
             self.selected_details.object = self._empty_html("No plugin can be selected.")
             self.discovery_issues.object = self._empty_html("No discovery information.")
             self.discovery_section.visible = False
             self._replace_table_value(pd.DataFrame())
             self._set_operation_message("danger", f"Unable to read plugin state: {exc}")
             self._update_action_state(None)
+            self._update_package_action_state(None)
+            self._update_install_action_state()
             self.community_toggle.disabled = True
             return
 
@@ -356,6 +506,7 @@ class PluginManagerPanel:
         self.discovery_issues.object = self._discovery_issues_html(snapshot)
         self.discovery_section.visible = bool(snapshot.discovery_issues)
         self._sync_community_controls(snapshot)
+        self._sync_install_controls(snapshot)
         self._apply_filters()
 
     def _apply_filters(self, *, reset_page: bool = False) -> None:
@@ -383,6 +534,22 @@ class PluginManagerPanel:
         ]
 
         current_page = 1 if reset_page else self._current_page()
+
+        # Preserve the selected plugin by identity across lifecycle refreshes. The
+        # diagnostics list is intentionally status-ranked, so enabling/disabling a
+        # plugin can move it to a different page. Previously the refresh stayed on
+        # the old page and silently selected that page's first plugin instead.
+        selected_index = None
+        if self._selected_plugin_id is not None:
+            selected_index = next(
+                (
+                    index
+                    for index, plugin in enumerate(visible)
+                    if plugin.id == self._selected_plugin_id
+                ),
+                None,
+            )
+
         self._replace_table_value(
             pd.DataFrame(
                 rows,
@@ -390,7 +557,11 @@ class PluginManagerPanel:
             )
         )
 
-        target_page = min(current_page, self._max_page(len(visible)))
+        if selected_index is not None and not reset_page:
+            target_page = (selected_index // self._page_size()) + 1
+        else:
+            target_page = min(current_page, self._max_page(len(visible)))
+
         self._set_table_page(target_page)
 
         page_plugins = self._plugins_on_page(target_page)
@@ -647,9 +818,36 @@ class PluginManagerPanel:
             "be discovered from their static manifests, but their Python code will not run.",
         )
 
+    def _sync_install_controls(self, snapshot: PluginManagerSnapshot) -> None:
+        if self.installer is None or self.installed_store is None:
+            self.install_status.object = self._banner_html(
+                "danger",
+                "PluginInstaller / InstalledPluginStore is not available on AppContext.",
+            )
+        elif snapshot.installed_store_error:
+            self.install_status.object = self._banner_html(
+                "danger",
+                "Installed plugin database could not be loaded. Package changes are "
+                f"blocked until it is repaired: {snapshot.installed_store_error}",
+            )
+        else:
+            self.install_status.object = self._banner_html(
+                "info",
+                "Choose an .alplugin file. AstronomicAL validates and installs it "
+                "without importing or enabling the plugin.",
+            )
+        self._update_install_action_state()
+
     def _render_selected_plugin(self) -> None:
         plugin = self._selected_plugin()
+        if (
+            self._pending_uninstall_plugin_id is not None
+            and (plugin is None or plugin.id != self._pending_uninstall_plugin_id)
+        ):
+            self._pending_uninstall_plugin_id = None
+
         self._update_action_state(plugin)
+        self._update_package_action_state(plugin)
 
         if (
             self._lifecycle_message_plugin_id is not None
@@ -657,16 +855,32 @@ class PluginManagerPanel:
         ):
             self._clear_lifecycle_message()
 
+        if (
+            self._package_message_plugin_id is not None
+            and (plugin is None or plugin.id != self._package_message_plugin_id)
+        ):
+            self._clear_package_message()
+
+        if (
+            self._pending_uninstall_plugin_id is None
+            or plugin is None
+            or plugin.id != self._pending_uninstall_plugin_id
+        ):
+            self.uninstall_banner.object = ""
+
         if plugin is None:
             self.selected_details.object = self._empty_html(
                 "No plugin matches the current search and filter."
             )
             self.action_note.object = ""
+            self.package_details.object = ""
+            self._pending_uninstall_plugin_id = None
             return
 
         validation = self._validation_result(plugin.id)
         self.selected_details.object = self._plugin_details_html(plugin, validation)
         self.action_note.object = self._action_note_html(plugin)
+        self.package_details.object = self._package_details_html(plugin)
 
     def _plugin_details_html(self, plugin: PluginSnapshot, validation: Any) -> str:
         description = plugin.description or "No description was provided for this plugin."
@@ -873,6 +1087,12 @@ class PluginManagerPanel:
         rows = [
             ("Plugin ID", plugin.id),
             ("Origin", plugin.origin or "unknown"),
+            (
+                "Package management",
+                "AstronomicAL-managed" if plugin.is_managed else "External / unmanaged",
+            ),
+            ("Installed package version", plugin.installed_version or "Not managed"),
+            ("Package archive", plugin.archive_name or "Not recorded"),
             ("Discovery source", plugin.source or "Unknown"),
             ("Configured enabled", configured),
             ("Path", path),
@@ -939,6 +1159,13 @@ class PluginManagerPanel:
                 f"{'s' if count != 1 else ''} and cancels its tracked jobs.",
             )
 
+        if plugin.origin == "user" and not plugin.is_managed:
+            return self._banner_html(
+                "info",
+                "This community plugin was added manually. AstronomicAL can enable "
+                "or disable it, but will not update or uninstall its files.",
+            )
+
         if plugin.is_development:
             return self._banner_html(
                 "info",
@@ -959,6 +1186,35 @@ class PluginManagerPanel:
             )
 
         return ""
+
+    def _package_details_html(self, plugin: PluginSnapshot) -> str:
+        if not plugin.is_managed or plugin.origin != "user":
+            return ""
+
+        source = plugin.installed_source or "file"
+        version = plugin.installed_version or plugin.version
+        archive = plugin.archive_name or "Not recorded"
+        details = (
+            '<div class="al-pm-mini-grid">'
+            '<div class="al-pm-mini"><div class="al-pm-mini-label">Managed</div>'
+            '<div class="al-pm-mini-value">AstronomicAL</div></div>'
+            '<div class="al-pm-mini"><div class="al-pm-mini-label">Installed version</div>'
+            f'<div class="al-pm-mini-value">{html.escape(version)}</div></div>'
+            '<div class="al-pm-mini"><div class="al-pm-mini-label">Install source</div>'
+            f'<div class="al-pm-mini-value">{html.escape(source)}</div></div>'
+            '<div class="al-pm-mini"><div class="al-pm-mini-label">Archive</div>'
+            f'<div class="al-pm-mini-value">{html.escape(archive)}</div></div>'
+            '</div>'
+        )
+
+        if plugin.status == "enabled":
+            details += self._banner_html(
+                "warning",
+                "Updating this plugin will disable it first. It will remain disabled "
+                "after the update so the new code is never executed implicitly.",
+            )
+
+        return details
 
     def _table_status(self, plugin: PluginSnapshot) -> str:
         snapshot = self._snapshot
@@ -1058,6 +1314,193 @@ class PluginManagerPanel:
         finally:
             self._set_busy(False)
             self.refresh()
+
+    def _package_file_changed(self, event: Any = None) -> None:
+        if self._disposed or self._restoring:
+            return
+
+        changed_widget = getattr(event, "obj", None)
+        if changed_widget is self.install_file:
+            # A newly selected package starts a fresh install attempt. Do not
+            # carry the previous package's success/failure message or retry-style
+            # button label into the next selection.
+            self.install_banner.object = ""
+            self.install_button.name = "Install"
+        elif changed_widget is self.update_file:
+            # Apply the same principle to updates so a previous package error is
+            # not shown against the newly selected archive.
+            self._clear_package_message()
+
+        self._update_install_action_state()
+        self._update_package_action_state(self._selected_plugin())
+
+    def _install_clicked(self, _event: Any = None) -> None:
+        if self.installer is None:
+            self.install_banner.object = self._banner_html(
+                "danger", "PluginInstaller is not available."
+            )
+            return
+
+        self._set_busy(True)
+        self.install_banner.object = self._banner_html(
+            "info", "Installing plugin package…"
+        )
+        result = None
+        try:
+            with self._uploaded_package_path(self.install_file) as archive_path:
+                result = self.installer.install(archive_path)
+            self._publish_registry_changed(result.plugin_id, "installed")
+        except Exception as exc:
+            traceback.print_exc()
+            self.install_banner.object = self._banner_html(
+                "danger", f"Installation failed: {exc}"
+            )
+            # Keep the selected archive available for an explicit retry, while
+            # making it clear that this action applies to the current selection.
+            self.install_button.name = "Install selected package"
+        else:
+            message = (
+                f"Installed {result.plugin_id} {result.version}. The plugin remains disabled."
+            )
+            warnings = list(getattr(result, "warnings", ()) or ())
+            if warnings:
+                message += " " + " ".join(str(item) for item in warnings)
+            self.install_banner.object = self._banner_html(
+                "warning" if warnings else "success", message
+            )
+            self._clear_file_input(self.install_file)
+            self.install_button.name = "Install"
+        finally:
+            self._set_busy(False)
+            self.refresh()
+
+        if result is not None:
+            self._select_plugin_after_refresh(result.plugin_id)
+
+    def _update_clicked(self, _event: Any = None) -> None:
+        plugin = self._selected_plugin()
+        if (
+            plugin is None
+            or not plugin.is_managed
+            or plugin.origin != "user"
+            or self.installer is None
+        ):
+            return
+
+        self._pending_uninstall_plugin_id = None
+        self._set_busy(True)
+        self._set_package_message(plugin.id, "info", f"Preparing update for {plugin.name}…")
+        result = None
+        disabled_for_update = False
+        try:
+            with self._uploaded_package_path(self.update_file) as archive_path:
+                inspection = self.installer.inspect(archive_path)
+                package_id = str(getattr(inspection.manifest, "id", "") or "")
+                if package_id != plugin.id:
+                    raise ValueError(
+                        f"Selected package is for plugin {package_id!r}, not {plugin.id!r}."
+                    )
+
+                if plugin.status == "enabled":
+                    if self.activation is None:
+                        raise RuntimeError(
+                            "PluginActivationService is not available to disable the "
+                            "running plugin before update."
+                        )
+                    self.activation.disable(plugin.id, context=self.context)
+                    disabled_for_update = True
+
+                result = self.installer.update(archive_path)
+
+            self._publish_registry_changed(plugin.id, "updated")
+        except Exception as exc:
+            traceback.print_exc()
+            suffix = (
+                " The plugin was disabled before the update attempt and remains disabled."
+                if disabled_for_update
+                else ""
+            )
+            self._set_package_message(
+                plugin.id, "danger", f"Update failed: {exc}{suffix}"
+            )
+        else:
+            warnings = list(getattr(result, "warnings", ()) or ())
+            message = (
+                f"Updated {plugin.name} to version {result.version}. "
+                "The updated plugin is not started automatically."
+            )
+            if warnings:
+                message += " " + " ".join(str(item) for item in warnings)
+            self._set_package_message(
+                plugin.id, "warning" if warnings else "success", message
+            )
+            self._clear_file_input(self.update_file)
+        finally:
+            self._set_busy(False)
+            self.refresh()
+
+        self._select_plugin_after_refresh(plugin.id)
+
+    def _uninstall_clicked(self, _event: Any = None) -> None:
+        plugin = self._selected_plugin()
+        if (
+            plugin is None
+            or not plugin.is_managed
+            or plugin.origin != "user"
+            or self.installer is None
+        ):
+            return
+
+        if self._pending_uninstall_plugin_id != plugin.id:
+            self._pending_uninstall_plugin_id = plugin.id
+            self.uninstall_banner.object = self._banner_html(
+                "warning",
+                "Uninstall removes the AstronomicAL-managed plugin code. If the plugin "
+                "is running it will be disabled first. Plugin data is preserved. "
+                "Click Confirm uninstall to continue.",
+            )
+            self._update_package_action_state(plugin)
+            return
+
+        plugin_name = plugin.name
+        plugin_id = plugin.id
+        self._set_busy(True)
+        self.uninstall_banner.object = self._banner_html(
+            "info", f"Uninstalling {plugin_name}…"
+        )
+        result = None
+        try:
+            result = self.installer.uninstall(plugin_id, context=self.context)
+            self._publish_registry_changed(plugin_id, "uninstalled")
+        except Exception as exc:
+            traceback.print_exc()
+            self._pending_uninstall_plugin_id = None
+            self.uninstall_banner.object = self._banner_html(
+                "danger", f"Uninstall failed: {exc}"
+            )
+        else:
+            warnings = list(getattr(result, "warnings", ()) or ())
+            message = f"Uninstalled {plugin_name}."
+            if warnings:
+                message += " " + " ".join(str(item) for item in warnings)
+            self._set_operation_message(
+                "warning" if warnings else "success", message
+            )
+            self._pending_uninstall_plugin_id = None
+            self._selected_plugin_id = None
+            self.uninstall_banner.object = ""
+            self._clear_package_message()
+        finally:
+            self._set_busy(False)
+            self.refresh()
+
+        if result is not None:
+            # refresh() normally selects the first row on the visible page. After an
+            # uninstall, deliberately leave the detail card empty instead so the UI
+            # does not make a different plugin look like the one just removed.
+            self._selected_plugin_id = None
+            self._clear_table_selection()
+            self._render_selected_plugin()
 
     def _enable_clicked(self, _event: Any = None) -> None:
         plugin = self._selected_plugin()
@@ -1171,12 +1614,16 @@ class PluginManagerPanel:
             self.refresh()
 
     def _set_busy(self, busy: bool) -> None:
+        self._busy = bool(busy)
         for button in (
             self.refresh_button,
             self.discover_button,
             self.enable_button,
             self.disable_button,
             self.reload_button,
+            self.install_button,
+            self.update_button,
+            self.uninstall_button,
         ):
             try:
                 button.loading = busy
@@ -1185,6 +1632,8 @@ class PluginManagerPanel:
 
         self.search.disabled = busy
         self.status_filter.disabled = busy
+        self.install_file.disabled = busy
+        self.update_file.disabled = busy
         self.community_toggle.disabled = busy or self.activation is None
 
         if not busy:
@@ -1193,6 +1642,8 @@ class PluginManagerPanel:
             )
             self.community_toggle.disabled = self.activation is None or state_error
             self._update_action_state(self._selected_plugin())
+            self._update_install_action_state()
+            self._update_package_action_state(self._selected_plugin())
 
     def _set_operation_message(self, tone: str, message: str) -> None:
         self.operation_banner.object = self._banner_html(tone, message) if message else ""
@@ -1211,6 +1662,77 @@ class PluginManagerPanel:
     def _clear_lifecycle_message(self) -> None:
         self._lifecycle_message_plugin_id = None
         self.lifecycle_banner.object = ""
+
+    def _set_package_message(
+        self,
+        plugin_id: str,
+        tone: str,
+        message: str,
+    ) -> None:
+        self._package_message_plugin_id = str(plugin_id or "") or None
+        self.package_banner.object = self._banner_html(tone, message) if message else ""
+
+    def _clear_package_message(self) -> None:
+        self._package_message_plugin_id = None
+        self.package_banner.object = ""
+
+    def _update_install_action_state(self) -> None:
+        snapshot = self._snapshot
+        store_error = bool(
+            snapshot is not None and snapshot.installed_store_error
+        )
+        self.install_button.disabled = (
+            self._busy
+            or self.installer is None
+            or self.installed_store is None
+            or store_error
+            or not self._file_input_has_value(self.install_file)
+        )
+
+    def _update_package_action_state(
+        self,
+        plugin: PluginSnapshot | None,
+    ) -> None:
+        managed = bool(
+            plugin is not None
+            and plugin.is_managed
+            and plugin.origin == "user"
+        )
+        self.package_management.visible = managed
+        self.managed_uninstall_controls.visible = managed
+
+        if not managed or plugin is None:
+            self.update_button.disabled = True
+            self.uninstall_button.disabled = True
+            self.uninstall_button.name = "Uninstall installed plugin"
+            self._pending_uninstall_plugin_id = None
+            self.uninstall_banner.object = ""
+            return
+
+        snapshot = self._snapshot
+        store_error = bool(
+            snapshot is not None and snapshot.installed_store_error
+        )
+        unavailable = (
+            self._busy
+            or self.installer is None
+            or self.installed_store is None
+            or store_error
+        )
+        self.update_button.disabled = (
+            unavailable or not self._file_input_has_value(self.update_file)
+        )
+        self.update_button.name = (
+            "Disable and update selected plugin"
+            if plugin.status == "enabled"
+            else "Update selected plugin"
+        )
+        self.uninstall_button.disabled = unavailable
+        self.uninstall_button.name = (
+            "Confirm uninstall"
+            if self._pending_uninstall_plugin_id == plugin.id
+            else "Uninstall installed plugin"
+        )
 
     def _update_action_state(self, plugin: PluginSnapshot | None) -> None:
         if plugin is None:
@@ -1361,6 +1883,62 @@ class PluginManagerPanel:
     # ------------------------------------------------------------------
     # Helpers and persisted state
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _file_input_has_value(widget: Any) -> bool:
+        value = getattr(widget, "value", None)
+        if isinstance(value, (bytes, bytearray, memoryview)):
+            return len(value) > 0
+        return bool(value)
+
+    @staticmethod
+    def _clear_file_input(widget: Any) -> None:
+        try:
+            widget.value = None
+        except Exception:
+            try:
+                widget.value = b""
+            except Exception:
+                pass
+
+    @contextmanager
+    def _uploaded_package_path(self, widget: Any) -> Iterator[Path]:
+        value = getattr(widget, "value", None)
+        if isinstance(value, (list, tuple)):
+            if len(value) != 1:
+                raise ValueError("Select exactly one .alplugin package.")
+            value = value[0]
+
+        if not isinstance(value, (bytes, bytearray, memoryview)) or not value:
+            raise ValueError("Select an .alplugin package first.")
+
+        filename = getattr(widget, "filename", None)
+        if isinstance(filename, (list, tuple)):
+            filename = filename[0] if filename else None
+        filename = str(filename or "plugin.alplugin").replace("\\", "/")
+        safe_name = filename.rsplit("/", 1)[-1].strip() or "plugin.alplugin"
+        if not safe_name.lower().endswith(".alplugin"):
+            raise ValueError("Plugin package filename must end with .alplugin.")
+
+        with TemporaryDirectory(prefix="astronomical-plugin-upload-") as temporary:
+            archive_path = Path(temporary) / safe_name
+            archive_path.write_bytes(bytes(value))
+            yield archive_path
+
+    def _select_plugin_after_refresh(self, plugin_id: str) -> None:
+        plugin_id = str(plugin_id or "").strip()
+        if not plugin_id:
+            return
+
+        for index, plugin in enumerate(self._visible_plugins):
+            if plugin.id != plugin_id:
+                continue
+            page = (index // self._page_size()) + 1
+            self._selected_plugin_id = plugin_id
+            self._set_table_page(page)
+            self._sync_table_selection()
+            self._render_selected_plugin()
+            return
 
     def _selected_plugin(self) -> PluginSnapshot | None:
         if self._snapshot is None or self._selected_plugin_id is None:

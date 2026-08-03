@@ -9,7 +9,12 @@ import threading
 from typing import Any, Dict, Iterable, Optional, Sequence
 import uuid
 
-from .errors import PluginInstallError, PluginPackageError, PluginValidationError
+from .errors import (
+    PluginInstallError,
+    PluginPackageError,
+    PluginPythonEnvironmentError,
+    PluginValidationError,
+)
 from .installed import InstalledPluginRecord, InstalledPluginStore
 from .manifest import PluginManifest, coerce_manifest, parse_plugin_requirement
 from .package import PluginPackageInspection, extract_plugin_package, inspect_plugin_package
@@ -20,7 +25,6 @@ try:
 except Exception:
     SpecifierSet = None  # type: ignore[assignment]
     Version = None  # type: ignore[assignment]
-
 
 @dataclass(frozen=True)
 class PluginInstallResult:
@@ -33,12 +37,23 @@ class PluginInstallResult:
     sha256: str = ""
     warnings: tuple[str, ...] = ()
 
-
 @dataclass(frozen=True)
 class _DependencyNode:
     id: str
     version: str
     requires_plugins: tuple[str, ...]
+
+class _NoopPythonEnvironmentTransaction:
+    changed = False
+
+    def commit(self) -> None:
+        pass
+
+    def rollback(self) -> None:
+        pass
+
+    def finalize(self) -> None:
+        pass
 
 
 def detect_astronomical_version() -> str | None:
@@ -62,7 +77,6 @@ def detect_astronomical_version() -> str | None:
 
     return None
 
-
 class PluginInstaller:
     """Transactional local installer for static-manifest community plugins.
 
@@ -76,6 +90,7 @@ class PluginInstaller:
         store: InstalledPluginStore,
         plugin_dir: str | Path,
         manager: Any | None = None,
+        python_environment: Any | None = None,
         staging_dir: str | Path | None = None,
         backup_dir: str | Path | None = None,
         astronomical_version: str | None = None,
@@ -90,6 +105,7 @@ class PluginInstaller:
             backup_dir or (base_dir / "plugin-backups")
         ).expanduser()
         self.manager = manager
+        self.python_environment = python_environment
         self.astronomical_version = (
             str(astronomical_version).strip()
             if astronomical_version not in (None, "")
@@ -103,6 +119,7 @@ class PluginInstaller:
         inspection = inspect_plugin_package(archive_path)
         self._validate_host_compatibility(inspection.manifest)
         self._validate_dependency_graph(inspection.manifest)
+        self._validate_python_requirement_declarations(inspection.manifest)
         return inspection
 
     def install(self, archive_path: str | Path) -> PluginInstallResult:
@@ -126,14 +143,26 @@ class PluginInstaller:
                     f"AstronomicAL-managed install: {target}"
                 )
 
+            requirements = self._managed_python_requirements(candidate=manifest)
+            python_changed = self._python_environment_needs_reconcile(requirements)
+            if python_changed:
+                self._assert_python_environment_change_safe()
+            python_tx = self._prepare_python_environment(requirements)
+
             stage = self._new_transaction_path(self.staging_dir, plugin_id, "install")
-            committed = False
+            target_created = False
+            success = False
 
             try:
                 extract_plugin_package(inspection, stage)
+                if python_tx.changed:
+                    self._purge_python_environment_modules()
+
                 self.plugin_dir.mkdir(parents=True, exist_ok=True)
                 stage.replace(target)
-                committed = True
+                target_created = True
+
+                python_tx.commit()
 
                 now = _utc_now()
                 record = InstalledPluginRecord(
@@ -148,23 +177,23 @@ class PluginInstaller:
                     archive_name=inspection.archive_path.name,
                     manifest=manifest.to_dict(),
                 )
+                self.store.set(record)
+                success = True
 
-                try:
-                    self.store.set(record)
-                except Exception:
-                    shutil.rmtree(target, ignore_errors=True)
-                    committed = False
-                    raise
-
-            except PluginInstallError:
-                raise
             except Exception as exc:
+                python_tx.rollback()
+                if target_created and target.exists():
+                    shutil.rmtree(target, ignore_errors=True)
+                if isinstance(exc, PluginInstallError):
+                    raise
                 raise PluginInstallError(
                     f"Failed to install plugin {plugin_id!r}: {exc}"
                 ) from exc
             finally:
                 if stage.exists():
                     shutil.rmtree(stage, ignore_errors=True)
+                if success:
+                    python_tx.finalize()
 
             warnings = self._refresh_manager_after_install()
             return PluginInstallResult(
@@ -184,9 +213,8 @@ class PluginInstaller:
     ) -> PluginInstallResult:
         """Replace an existing managed plugin transactionally.
 
-        The plugin must not be running. The user's configured enabled preference is
-        intentionally left untouched so the plugin can be started normally after a
-        restart/rescan.
+        The plugin must not be running. Python dependencies are reconciled as one
+        shared host-compatible overlay before the update is committed.
         """
 
         with self._lock:
@@ -205,6 +233,7 @@ class PluginInstaller:
             self._assert_not_runtime_enabled(plugin_id)
             self._validate_host_compatibility(manifest)
             self._validate_dependency_graph(manifest)
+            self._validate_python_requirement_declarations(manifest)
             self._validate_reverse_dependencies(
                 plugin_id,
                 proposed_version=manifest.version,
@@ -221,19 +250,31 @@ class PluginInstaller:
                     f"Managed plugin directory is missing: {target}"
                 )
 
+            requirements = self._managed_python_requirements(candidate=manifest)
+            python_changed = self._python_environment_needs_reconcile(requirements)
+            if python_changed:
+                self._assert_python_environment_change_safe()
+            python_tx = self._prepare_python_environment(requirements)
+
             stage = self._new_transaction_path(self.staging_dir, plugin_id, "update")
             backup = self._new_transaction_path(self.backup_dir, plugin_id, "backup")
             backup_created = False
             replacement_created = False
+            success = False
 
             try:
                 extract_plugin_package(inspection, stage)
+                if python_tx.changed:
+                    self._purge_python_environment_modules()
+
                 backup.parent.mkdir(parents=True, exist_ok=True)
                 target.replace(backup)
                 backup_created = True
 
                 stage.replace(target)
                 replacement_created = True
+
+                python_tx.commit()
 
                 record = InstalledPluginRecord(
                     id=plugin_id,
@@ -247,30 +288,28 @@ class PluginInstaller:
                     archive_name=inspection.archive_path.name,
                     manifest=manifest.to_dict(),
                 )
+                self.store.set(record)
+                success = True
 
-                try:
-                    self.store.set(record)
-                except Exception:
-                    if replacement_created and target.exists():
-                        shutil.rmtree(target, ignore_errors=True)
-                    if backup_created and backup.exists():
-                        backup.replace(target)
-                    raise
-
-            except PluginInstallError:
-                raise
             except Exception as exc:
-                if not target.exists() and backup_created and backup.exists():
+                python_tx.rollback()
+                if replacement_created and target.exists():
+                    shutil.rmtree(target, ignore_errors=True)
+                if backup_created and backup.exists() and not target.exists():
                     try:
                         backup.replace(target)
                     except Exception:
                         pass
+                if isinstance(exc, PluginInstallError):
+                    raise
                 raise PluginInstallError(
                     f"Failed to update plugin {plugin_id!r}: {exc}"
                 ) from exc
             finally:
                 if stage.exists():
                     shutil.rmtree(stage, ignore_errors=True)
+                if success:
+                    python_tx.finalize()
 
             if backup.exists():
                 shutil.rmtree(backup, ignore_errors=True)
@@ -307,8 +346,20 @@ class PluginInstaller:
 
             self._validate_reverse_dependencies(plugin_id, proposed_version=None)
 
+            requirements = self._managed_python_requirements(remove_plugin_id=plugin_id)
+            python_changed = self._python_environment_needs_reconcile(requirements)
+            if python_changed:
+                # The target may still be enabled here; uninstall() can disable it
+                # safely below. Other managed plugins must not be running while the
+                # shared dependency overlay changes underneath the process.
+                self._assert_python_environment_change_safe(
+                    exclude_plugin_ids={plugin_id}
+                )
+            python_tx = self._prepare_python_environment(requirements)
+
             if self._is_runtime_enabled(plugin_id):
                 if context is None:
+                    python_tx.rollback()
                     raise PluginInstallError(
                         f"Plugin {plugin_id!r} is currently enabled. Disable it before "
                         "uninstalling, or provide AppContext so the installer can disable it."
@@ -317,6 +368,7 @@ class PluginInstaller:
                 activation = getattr(context, "plugin_activation", None)
                 disable = getattr(activation, "disable", None)
                 if not callable(disable):
+                    python_tx.rollback()
                     raise PluginInstallError(
                         "AppContext is missing PluginActivationService; cannot safely "
                         f"disable {plugin_id!r} before uninstall."
@@ -325,6 +377,7 @@ class PluginInstaller:
 
             target = self._target_path(plugin_id)
             if not target.is_dir():
+                python_tx.rollback()
                 raise PluginInstallError(
                     f"Managed plugin directory is missing: {target}"
                 )
@@ -332,18 +385,26 @@ class PluginInstaller:
             backup = self._new_transaction_path(self.backup_dir, plugin_id, "uninstall")
             backup.parent.mkdir(parents=True, exist_ok=True)
             moved = False
+            success = False
 
             try:
+                if python_tx.changed:
+                    self._purge_python_environment_modules()
+
                 target.replace(backup)
                 moved = True
+
+                python_tx.commit()
 
                 removed = self.store.remove(plugin_id)
                 if removed is None:
                     raise PluginInstallError(
                         f"Installed plugin record disappeared during uninstall: {plugin_id}"
                     )
+                success = True
 
             except Exception as exc:
+                python_tx.rollback()
                 if moved and backup.exists() and not target.exists():
                     try:
                         backup.replace(target)
@@ -354,6 +415,9 @@ class PluginInstaller:
                 raise PluginInstallError(
                     f"Failed to uninstall plugin {plugin_id!r}: {exc}"
                 ) from exc
+            finally:
+                if success:
+                    python_tx.finalize()
 
             if backup.exists():
                 shutil.rmtree(backup, ignore_errors=True)
@@ -377,6 +441,118 @@ class PluginInstaller:
                 sha256=existing.sha256,
                 warnings=tuple(warnings),
             )
+
+    def _validate_python_requirement_declarations(
+        self,
+        manifest: PluginManifest,
+    ) -> None:
+        if not manifest.requires:
+            return
+        environment = self.python_environment
+        validator = getattr(environment, "validate_requirements", None)
+        if not callable(validator):
+            raise PluginInstallError(
+                f"Plugin {manifest.id!r} declares Python dependencies, but AstronomicAL's "
+                "managed plugin Python environment is not configured."
+            )
+        validator(manifest.id, manifest.requires)
+
+    def _managed_python_requirements(
+        self,
+        *,
+        candidate: PluginManifest | None = None,
+        remove_plugin_id: str | None = None,
+    ) -> Dict[str, tuple[str, ...]]:
+        requirements: Dict[str, tuple[str, ...]] = {}
+        remove_plugin_id = str(remove_plugin_id or "").strip()
+
+        for record in self.store.list():
+            if remove_plugin_id and record.id == remove_plugin_id:
+                continue
+            try:
+                manifest = coerce_manifest(record.manifest)
+            except Exception as exc:
+                raise PluginInstallError(
+                    f"Cannot reconcile Python dependencies because installed plugin "
+                    f"{record.id!r} has invalid stored manifest metadata: {exc}"
+                ) from exc
+            requirements[manifest.id] = tuple(str(item) for item in manifest.requires)
+
+        if candidate is not None:
+            requirements[candidate.id] = tuple(
+                str(item) for item in candidate.requires
+            )
+        return requirements
+
+    def _python_environment_needs_reconcile(
+        self,
+        requirements: Dict[str, tuple[str, ...]],
+    ) -> bool:
+        environment = self.python_environment
+        if environment is None:
+            return any(requirements.values())
+        checker = getattr(environment, "needs_reconcile", None)
+        if not callable(checker):
+            return any(requirements.values())
+        return bool(checker(requirements))
+
+    def _prepare_python_environment(
+        self,
+        requirements: Dict[str, tuple[str, ...]],
+    ) -> Any:
+        environment = self.python_environment
+        if environment is None:
+            if any(requirements.values()):
+                raise PluginInstallError(
+                    "Managed community-plugin Python dependencies are not configured."
+                )
+            return _NoopPythonEnvironmentTransaction()
+
+        prepare = getattr(environment, "prepare", None)
+        if not callable(prepare):
+            if any(requirements.values()):
+                raise PluginInstallError(
+                    "Managed community-plugin Python dependency service does not "
+                    "support reconciliation."
+                )
+            return _NoopPythonEnvironmentTransaction()
+        return prepare(requirements)
+
+    def _assert_python_environment_change_safe(
+        self,
+        *,
+        exclude_plugin_ids: set[str] | None = None,
+    ) -> None:
+        if self.manager is None:
+            return
+        excluded = set(exclude_plugin_ids or ())
+        managed_ids = {record.id for record in self.store.list()}
+        blockers: list[str] = []
+        try:
+            infos = self.manager.list_plugins()
+        except Exception:
+            infos = []
+
+        for info in infos:
+            plugin_id = str(getattr(info, "id", "") or "").strip()
+            if not plugin_id or plugin_id in excluded or plugin_id not in managed_ids:
+                continue
+            status = getattr(info, "status", None)
+            if getattr(status, "value", status) == "enabled":
+                blockers.append(plugin_id)
+
+        if blockers:
+            raise PluginInstallError(
+                "The shared community-plugin Python dependency environment must not "
+                "change while managed plugins are running. Disable these managed "
+                "plugins first: " + ", ".join(sorted(blockers))
+            )
+
+    def _purge_python_environment_modules(self) -> None:
+        environment = self.python_environment
+        purge = getattr(environment, "purge_loaded_overlay_modules", None)
+        if callable(purge):
+            purge()
 
     def _target_path(self, plugin_id: str) -> Path:
         target = self.plugin_dir / plugin_id

@@ -108,6 +108,7 @@ from astronomicAL.platform.plugins import (
     PluginInstaller,
     PluginManager,
     PluginOrigin,
+    PluginPythonEnvironment,
     PluginSearchPath,
     PluginStateStore,
 )
@@ -280,6 +281,10 @@ plugin_state = PluginStateStore(
 installed_plugins = InstalledPluginStore(
     astronomical_home / "installed-plugins.json"
 )
+plugin_python_environment = PluginPythonEnvironment(
+    astronomical_home / "python-packages"
+)
+plugin_python_environment.activate()
 plugin_activation = PluginActivationService(plugin_state)
 
 # Make the status service available both directly on context and through the
@@ -310,6 +315,11 @@ services.set(
     installed_plugins,
     owner="platform",
 )
+services.set(
+    "platform.plugin_python_environment",
+    plugin_python_environment,
+    owner="platform",
+)
 
 boot_print("main.py: platform services created")
 boot_print(f"main.py: events={type(events).__name__}")
@@ -323,6 +333,10 @@ boot_print(f"main.py: navigation={type(navigation).__name__}")
 boot_print(f"main.py: plugin_state={type(plugin_state).__name__}")
 boot_print(f"main.py: plugin_activation={type(plugin_activation).__name__}")
 boot_print(f"main.py: installed_plugins={type(installed_plugins).__name__}")
+boot_print(
+    "main.py: plugin_python_environment="
+    f"{type(plugin_python_environment).__name__}"
+)
 boot_print(f"main.py: runtime_status={type(runtime_status).__name__}")
 
 if plugin_state.load_error:
@@ -339,8 +353,15 @@ if installed_plugins.load_error:
         installed_plugins.load_error,
     )
 
+if plugin_python_environment.load_error:
+    print(
+        "[plugins] managed plugin Python dependencies are not active:",
+        plugin_python_environment.load_error,
+    )
+
 plugins = PluginManager(
     local_plugin_dirs=_plugin_dirs(),
+    python_environment=plugin_python_environment,
     auto_discover=False,
 )
 
@@ -348,6 +369,7 @@ plugin_installer = PluginInstaller(
     store=installed_plugins,
     plugin_dir=astronomical_home / "plugins",
     manager=plugins,
+    python_environment=plugin_python_environment,
 )
 services.set(
     "platform.plugin_installer",
@@ -448,4 +470,5 @@ workspace.register_existing()
 boot_print("main.py: workspace.register_existing complete")
 
 boot_print("main.py: react.servable")
+
 react.servable()

@@ -7,7 +7,6 @@ import re
 _PLUGIN_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]*$")
 _PLUGIN_SPECIFIER_START = frozenset("<>=!~")
 
-
 @dataclass(frozen=True)
 class PluginRequirement:
     """Parsed AstronomicAL-to-AstronomicAL plugin dependency.
@@ -39,7 +38,6 @@ class PluginRequirement:
     def __str__(self) -> str:
         return f"{self.plugin_id}{self.specifier}"
 
-
 def parse_plugin_requirement(value: Any) -> PluginRequirement:
     """Parse a plugin dependency such as ``core.ml>=1.4,<2``.
 
@@ -70,7 +68,6 @@ def parse_plugin_requirement(value: Any) -> PluginRequirement:
 
     return PluginRequirement(plugin_id=plugin_id, specifier=specifier)
 
-
 def _validate_plugin_requirement_list(
     field_name: str,
     values: Iterable[Any],
@@ -84,6 +81,15 @@ def _validate_plugin_requirement_list(
                 f"{value!r}: {exc}"
             ) from exc
 
+def _validate_python_requirement_list(
+    field_name: str,
+    values: Iterable[Any],
+) -> None:
+    for value in values:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(
+                f"PluginManifest.{field_name} must contain only non-empty strings."
+            )
 
 @dataclass(frozen=True)
 class PluginManifest:
@@ -132,11 +138,17 @@ class PluginManifest:
         if not self.version:
             raise ValueError("PluginManifest.version is required.")
 
+        if isinstance(self.requires, str):
+            raise ValueError("PluginManifest.requires must be a list of strings.")
+        if isinstance(self.optional_requires, str):
+            raise ValueError("PluginManifest.optional_requires must be a list of strings.")
         if isinstance(self.requires_plugins, str):
             raise ValueError("PluginManifest.requires_plugins must be a list of strings.")
         if isinstance(self.optional_plugins, str):
             raise ValueError("PluginManifest.optional_plugins must be a list of strings.")
 
+        _validate_python_requirement_list("requires", self.requires)
+        _validate_python_requirement_list("optional_requires", self.optional_requires)
         _validate_plugin_requirement_list("requires_plugins", self.requires_plugins)
         _validate_plugin_requirement_list("optional_plugins", self.optional_plugins)
 
@@ -163,7 +175,6 @@ class PluginManifest:
             "tags": list(self.tags),
             "metadata": dict(self.metadata),
         }
-
 
 def coerce_manifest(obj: Any) -> PluginManifest:
     """Convert supported manifest forms into a PluginManifest."""

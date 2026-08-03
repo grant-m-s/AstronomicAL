@@ -292,10 +292,12 @@ class PluginManager:
         entry_point_group: str = ENTRY_POINT_GROUP,
         static_manifest_entry_point_group: str = STATIC_MANIFEST_ENTRY_POINT_GROUP,
         local_plugin_dirs: Optional[Sequence[str | Path | PluginSearchPath]] = None,
+        python_environment: Any | None = None,
         auto_discover: bool = False,
     ) -> None:
         self.entry_point_group = entry_point_group
         self.static_manifest_entry_point_group = static_manifest_entry_point_group
+        self.python_environment = python_environment
         self.local_plugin_sources = [
             PluginSearchPath.from_any(source) for source in (local_plugin_dirs or [])
         ]
@@ -438,8 +440,17 @@ class PluginManager:
                     "registrations remain."
                 )
 
-        self._records.pop(plugin_id, None)
         candidate = record.candidate
+
+        # Managed USER plugin updates replace files at the same installation path.
+        # Local synthetic module names are path-derived, so simply forgetting the
+        # discovery record is not enough: Python would otherwise reuse the old
+        # package from sys.modules on the next enable. This is cache eviction for a
+        # disabled package replacement/uninstall, not development-style USER reload.
+        self._purge_modules_for_candidate(candidate)
+        importlib.invalidate_caches()
+
+        self._records.pop(plugin_id, None)
         if candidate.module_name:
             current = self._candidates_by_module.get(candidate.module_name)
             if current is candidate:
@@ -1201,6 +1212,16 @@ class PluginManager:
 
     def _check_requirement(self, requirement: str) -> Tuple[bool, str, bool]:
         """Return ``(ok, message, skipped_by_marker)``."""
+
+        environment = self.python_environment
+        checker = getattr(environment, "check_requirement", None)
+        if callable(checker):
+            result = checker(requirement)
+            return (
+                bool(getattr(result, "ok", False)),
+                str(getattr(result, "message", "") or ""),
+                bool(getattr(result, "skipped", False)),
+            )
 
         if Requirement is None:
             name = requirement.split("=")[0].split("<")[0].split(">")[0].strip()

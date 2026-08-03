@@ -4,9 +4,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping, Sequence
 
-
 _COMMUNITY_ORIGINS = {"user", "entry_point"}
-
 
 @dataclass(frozen=True)
 class Contribution:
@@ -15,7 +13,6 @@ class Contribution:
     title: str
     description: str = ""
 
-
 @dataclass(frozen=True)
 class OpenPanelInstance:
     instance_id: str
@@ -23,12 +20,10 @@ class OpenPanelInstance:
     panel_id: str
     source: str = ""
 
-
 @dataclass(frozen=True)
 class DiscoveryIssue:
     candidate: str
     error: str
-
 
 @dataclass(frozen=True)
 class PluginSnapshot:
@@ -54,6 +49,17 @@ class PluginSnapshot:
     artifact_viewers: tuple[Contribution, ...] = ()
     open_instances: tuple[OpenPanelInstance, ...] = ()
     settings: Mapping[str, Any] = field(default_factory=dict)
+    managed_install: bool = False
+    installed_version: str | None = None
+    installed_source: str | None = None
+    installed_at: str | None = None
+    updated_at: str | None = None
+    archive_name: str | None = None
+    package_sha256: str | None = None
+
+    @property
+    def is_managed(self) -> bool:
+        return self.managed_install
 
     @property
     def status_label(self) -> str:
@@ -114,7 +120,6 @@ class PluginSnapshot:
             )
         )
 
-
 @dataclass(frozen=True)
 class PluginManagerSnapshot:
     captured_at: datetime
@@ -122,6 +127,7 @@ class PluginManagerSnapshot:
     discovery_issues: tuple[DiscoveryIssue, ...]
     community_plugins_enabled: bool = False
     plugin_state_error: str | None = None
+    installed_store_error: str | None = None
 
     @property
     def enabled_count(self) -> int:
@@ -133,7 +139,11 @@ class PluginManagerSnapshot:
 
     @property
     def issue_count(self) -> int:
-        return sum(plugin.has_issue for plugin in self.plugins) + len(self.discovery_issues)
+        return (
+            sum(plugin.has_issue for plugin in self.plugins)
+            + len(self.discovery_issues)
+            + int(bool(self.installed_store_error))
+        )
 
     @property
     def open_panel_count(self) -> int:
@@ -157,7 +167,6 @@ class PluginManagerSnapshot:
             for plugin in self.plugins
         )
 
-
 def collect_snapshot(context: Any) -> PluginManagerSnapshot:
     manager = getattr(context, "plugins", None)
     if manager is None:
@@ -168,6 +177,11 @@ def collect_snapshot(context: Any) -> PluginManagerSnapshot:
         getattr(state, "community_plugins_enabled", False)
     )
     plugin_state_error = _optional_text(getattr(state, "load_error", None))
+
+    installed_store = getattr(context, "installed_plugins", None)
+    installed_store_error = _optional_text(
+        getattr(installed_store, "load_error", None)
+    )
 
     infos = _safe_sequence(manager, "list_plugins")
     open_by_plugin = _open_instances_by_plugin(context, manager)
@@ -223,6 +237,15 @@ def collect_snapshot(context: Any) -> PluginManagerSnapshot:
                 except Exception:
                     configured_enabled = None
 
+        installed_record = None
+        if installed_store is not None:
+            get_installed = getattr(installed_store, "get", None)
+            if callable(get_installed):
+                try:
+                    installed_record = get_installed(plugin_id)
+                except Exception:
+                    installed_record = None
+
         settings: Mapping[str, Any] = {}
         get_settings = getattr(manager, "get_plugin_settings", None)
         if callable(get_settings):
@@ -257,6 +280,37 @@ def collect_snapshot(context: Any) -> PluginManagerSnapshot:
                 ),
                 open_instances=tuple(open_by_plugin.get(plugin_id, ())),
                 settings=settings,
+                managed_install=installed_record is not None,
+                installed_version=(
+                    _optional_text(getattr(installed_record, "version", None))
+                    if installed_record is not None
+                    else None
+                ),
+                installed_source=(
+                    _optional_text(getattr(installed_record, "source", None))
+                    if installed_record is not None
+                    else None
+                ),
+                installed_at=(
+                    _optional_text(getattr(installed_record, "installed_at", None))
+                    if installed_record is not None
+                    else None
+                ),
+                updated_at=(
+                    _optional_text(getattr(installed_record, "updated_at", None))
+                    if installed_record is not None
+                    else None
+                ),
+                archive_name=(
+                    _optional_text(getattr(installed_record, "archive_name", None))
+                    if installed_record is not None
+                    else None
+                ),
+                package_sha256=(
+                    _optional_text(getattr(installed_record, "sha256", None))
+                    if installed_record is not None
+                    else None
+                ),
             )
         )
 
@@ -282,8 +336,8 @@ def collect_snapshot(context: Any) -> PluginManagerSnapshot:
         discovery_issues=tuple(issues),
         community_plugins_enabled=community_plugins_enabled,
         plugin_state_error=plugin_state_error,
+        installed_store_error=installed_store_error,
     )
-
 
 def filter_plugins(
     plugins: Iterable[PluginSnapshot],
@@ -312,6 +366,8 @@ def filter_plugins(
                 plugin.origin,
                 source_label(plugin.origin, plugin.source),
                 plugin.error or "",
+                plugin.installed_source or "",
+                plugin.archive_name or "",
                 *plugin.capabilities,
                 *plugin.tags,
             ]
@@ -331,7 +387,6 @@ def filter_plugins(
         filtered.append(plugin)
 
     return filtered
-
 
 def source_label(origin: str, source: str = "") -> str:
     origin_value = _origin_text(origin)
@@ -358,7 +413,6 @@ def source_label(origin: str, source: str = "") -> str:
         return source_value.replace("_", " ").title()
     return "Unknown source"
 
-
 def provides_summary(plugin: PluginSnapshot) -> str:
     parts: list[str] = []
     for count, singular in (
@@ -372,7 +426,6 @@ def provides_summary(plugin: PluginSnapshot) -> str:
             parts.append(f"{count} {singular}{'' if count == 1 else 's'}")
     return " · ".join(parts) if parts else "No registered features"
 
-
 def _plugin_state(context: Any) -> Any:
     state = getattr(context, "plugin_state", None)
     if state is not None:
@@ -380,7 +433,6 @@ def _plugin_state(context: Any) -> Any:
 
     activation = getattr(context, "plugin_activation", None)
     return getattr(activation, "state", None)
-
 
 def _safe_sequence(obj: Any, method_name: str) -> list[Any]:
     method = getattr(obj, method_name, None)
@@ -390,7 +442,6 @@ def _safe_sequence(obj: Any, method_name: str) -> list[Any]:
         return list(method() or [])
     except Exception:
         return []
-
 
 def _contributions_by_plugin(
     registrations: Sequence[Any],
@@ -431,7 +482,6 @@ def _contributions_by_plugin(
     for items in grouped.values():
         items.sort(key=lambda item: (item.title.lower(), item.id.lower()))
     return grouped
-
 
 def _open_instances_by_plugin(
     context: Any,
@@ -502,14 +552,12 @@ def _open_instances_by_plugin(
 
     return _sort_open_instances(grouped)
 
-
 def _sort_open_instances(
     grouped: dict[str, list[OpenPanelInstance]],
 ) -> dict[str, list[OpenPanelInstance]]:
     for items in grouped.values():
         items.sort(key=lambda item: (item.title.lower(), item.instance_id.lower()))
     return grouped
-
 
 def _plugin_sort_key(plugin: PluginSnapshot) -> tuple[int, str, str]:
     status_rank = {
@@ -520,23 +568,19 @@ def _plugin_sort_key(plugin: PluginSnapshot) -> tuple[int, str, str]:
     }.get(plugin.status, 4)
     return status_rank, plugin.name.lower(), plugin.id.lower()
 
-
 def _status_text(status: Any) -> str:
     value = getattr(status, "value", status)
     return str(value or "").strip().lower()
 
-
 def _origin_text(origin: Any) -> str:
     value = getattr(origin, "value", origin)
     return str(value or "unknown").strip().lower() or "unknown"
-
 
 def _optional_text(value: Any) -> str | None:
     if value is None:
         return None
     text = str(value).strip()
     return text or None
-
 
 def _strings(values: Any) -> tuple[str, ...]:
     if values is None:
