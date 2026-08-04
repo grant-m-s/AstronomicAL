@@ -1,6 +1,8 @@
 Architecture Overview
 =====================
 
+.. image:: ../../_static/images/Example_workflow.png
+
 What the Platform Does
 ----------------------
 
