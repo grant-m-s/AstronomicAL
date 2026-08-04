@@ -29,18 +29,18 @@ Funding
 
 Grant Stevens acknowledges financial support from the `UKRI`_ for an EPSRC Doctoral Prize Fellowship at the `University of Bristol`_ (EP/W524414/1), as well as funding for an `Interactive AI Centre for Doctoral Training`_ studentship.
 
-.. image:: _static/images/CDT-UOB-logo.png
+.. image:: ../../_static/images/CDT-UOB-logo.png
    :width: 38%
    :target: http://www.bristol.ac.uk/cdt/interactive-ai/
 
-.. image:: _static/images/EPSRC_logo.png
+.. image:: ../../_static/images/EPSRC_logo.png
    :width: 56%
    :target: https://gtr.ukri.org/projects?ref=studentship-2466020
 
 .. raw:: html
 
  <hr>
-.. image:: _static/images/Elsa-B&W-Transparent.png
+.. image:: ../../_static/images/Elsa-B&W-Transparent.png
    :width: 20%
    :target: http://www.bristol.ac.uk/cdt/interactive-ai/
 
