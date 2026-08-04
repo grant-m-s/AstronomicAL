@@ -45,6 +45,8 @@ for large datasets.
 Tapping a point changes focus. Box and lasso tools create selection sets, with
 the maximum number of published row IDs controlled by the panel settings.
 
+.. image:: ../../_static/images/scatterplot_example_short.gif
+
 Histogram Plot
 **************
 
@@ -64,6 +66,8 @@ density bins, axis limits and logarithmic axes.
 
 The focused row can be shown on top of the density result without turning every
 source row into an interactive point.
+
+.. image:: ../../_static/images/density_example_short.gif
 
 Linked Plot Explorer
 ********************

@@ -1,6 +1,13 @@
 Euclid Cutout
 =============
 
+.. raw:: html
+
+   <video width="100%" autoplay loop muted playsinline>
+     <source src="_static/images/euclid_cutout_example_short.mp4" type="video/mp4">
+   </video>
+
+
 Overview
 --------
 
