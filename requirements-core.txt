@@ -19,3 +19,4 @@ tornado>=6.5
 tqdm
 typer>=0.25
 virtualenv>=20.26
+psutil
