@@ -172,6 +172,17 @@ Once running, datasets can be loaded into the workspace and additional capabilit
 
 ---
 
+## Quickstart
+
+AstronomicAL includes example datasets and saved workspace layouts so you can explore the main workflows without building a workspace from scratch.
+
+- **Photometry & Spectroscopy:** load `EDFN_example_data.fits` and try `photometry_layout.json` or `spectroscopy_layout.json` to explore linked SEDs, Euclid imaging, colour/magnitude plots, and DESI/Euclid spectra. The accompanying `EDFN_photometric_bands.json` provides the SED filter definitions.
+- **Morphology & Image inspection:** load `zoobot_subset.fits` with `morphology_layout.json` to explore linked scatter plots, image galleries, Aladin Lite, annotations, and morphology predictions.
+
+Layouts store panel arrangement, settings, and mappings, but **not the dataset itself**, so load the corresponding FITS file separately before or after opening a layout.
+
+---
+
 
 ## Contributing to AstronomicAL
 
