@@ -17,7 +17,46 @@ of scientific research. Astronomy remains an important part of the project,
 but astronomy-specific tools no longer need to be installed or used by every
 researcher.
 
-.. Add image: overview of a complete AstronomicAL workspace.
+.. raw:: html
+
+   <table width="100%">
+     <tr>
+       <td width="50%" align="center">
+         <a href="_static/images/machine_learning_shorter.mp4">
+           <img src="_static/images/machine_learning_shorter.gif"
+                width="100%" alt="Machine Learning">
+         </a>
+         <br>
+         <strong>Machine Learning</strong>
+       </td>
+       <td width="50%" align="center">
+         <a href="_static/images/huggingface_cifar10_short.mp4">
+           <img src="_static/images/huggingface_cifar10_short.gif"
+                width="100%" alt="Hugging Face Importer">
+         </a>
+         <br>
+         <strong>Hugging Face Importer</strong>
+       </td>
+     </tr>
+     <tr>
+       <td width="50%" align="center">
+         <a href="_static/images/spec_to_phot_shorter.mp4">
+           <img src="_static/images/spec_to_phot_shorter.gif"
+                width="100%" alt="Spectroscopy and Photometry">
+         </a>
+         <br>
+         <strong>Spectroscopy and Photometry</strong>
+       </td>
+       <td width="50%" align="center">
+         <a href="_static/images/morphology_shorter.mp4">
+           <img src="_static/images/morphology_shorter.gif"
+                width="100%" alt="Morphology">
+         </a>
+         <br>
+         <strong>Morphology</strong>
+       </td>
+     </tr>
+   </table>
 
 Statement of Need
 -----------------
