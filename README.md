@@ -1,5 +1,6 @@
 # AstronomicAL
-
+![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)
+[![Documentation Status](https://readthedocs.org/projects/astronomical/badge/?version=latest)](https://astronomical.readthedocs.io/en/latest/?badge=latest)
 ## An interactive, plugin-based platform for exploring, labelling, integrating, and modelling scientific data
 
 AstronomicAL is a local, human-in-the-loop workspace that brings data exploration, domain-specific inspection, annotation, and machine learning together in a single interactive application.
