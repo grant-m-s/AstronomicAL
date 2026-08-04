@@ -1,0 +1,4 @@
+datasets>=4.8
+hf-xet>=1.5
+huggingface_hub>=1.17
+xxhash>=3.7

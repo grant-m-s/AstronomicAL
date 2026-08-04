@@ -1,89 +1,195 @@
-[![Build Status](https://travis-ci.com/grant-m-s/astronomicAL.svg?token=upRGxrMseZqj7kT3bSGx&branch=master)](https://travis-ci.com/grant-m-s/astronomicAL) [![codecov](https://codecov.io/gh/grant-m-s/astronomicAL/branch/master/graph/badge.svg?token=TCO9J2AD1Z)](https://codecov.io/gh/grant-m-s/astronomicAL) [![Documentation Status](https://readthedocs.org/projects/astronomical/badge/?version=latest)](https://astronomical.readthedocs.io/en/latest/?badge=latest)
-
-[![DOI](https://joss.theoj.org/papers/10.21105/joss.03635/status.svg)](https://doi.org/10.21105/joss.03635)
-
-[![python](https://img.shields.io/badge/Python-3.8-blue?style=flat&logo=python&logoColor=white)](https://www.python.org)
-
 # AstronomicAL
 
-## An interactive dashboard for visualisation, integration and classification of data using Active Learning.
+## An interactive, plugin-based platform for exploring, labelling, integrating, and modelling scientific data
 
-https://github.com/grant-m-s/AstronomicAL/assets/12834844/4724c341-2a96-446b-8cd0-fcb6ac9efef8
+AstronomicAL is a local, human-in-the-loop workspace that brings data exploration, domain-specific inspection, annotation, and machine learning together in a single interactive application.
+
+Rather than prescribing one fixed workflow, AstronomicAL is built around plugins. Users can combine general-purpose tools with domain-specific capabilities to create a workspace around the problem they are trying to solve. This can include plugins from astronomical source inspection to image classification and active learning.
+
+<h2>See AstronomicAL in action</h2>
+
+<p>
+Four example workflows showing how AstronomicAL combines plugins for scientific exploration, domain-specific analysis, data import, and machine learning. Click any preview to open the full-quality MP4 recording.
+</p>
+
+<table width="100%">
+  <tr>
+    <td width="50%" align="center">
+      <a href="assets/machine_learning_shorter.mp4">
+        <img src="assets/machine_learning_shorter.gif" width="100%" alt="Machine Learning">
+      </a>
+      <br>
+      <strong>Machine Learning</strong>
+    </td>
+    <td width="50%" align="center">
+      <a href="assets/huggingface_cifar10_short.mp4">
+        <img src="assets/huggingface_cifar10_short.gif" width="100%" alt="Hugging Face Importer">
+      </a>
+      <br>
+      <strong>Hugging Face Importer</strong>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" align="center">
+      <a href="assets/spec_to_phot_shorter.mp4">
+        <img src="assets/spec_to_phot_shorter.gif" width="100%" alt="Spectroscopy and Photometry">
+      </a>
+      <br>
+      <strong>Spectroscopy and Photometry</strong>
+    </td>
+    <td width="50%" align="center">
+      <a href="assets/morphology_shorter.mp4">
+        <img src="assets/morphology_shorter.gif" width="100%" alt="Morphology">
+      </a>
+      <br>
+      <strong>Morphology</strong>
+    </td>
+  </tr>
+</table>
+
+
+AstronomicAL was originally developed for active learning with large astronomical catalogues. The same underlying challenges appear far beyond astronomy: datasets can be too large to inspect manually, reliable labels can be expensive to obtain, difficult examples require expert judgement, and useful decisions often depend on information spread across several different tools or data sources.
+
+The current version of AstronomicAL keeps those original human-in-the-loop and active-learning goals while generalising the application into an extensible platform. Astronomy remains a first-class use case, but it is now provided through the same plugin system that can support other scientific and data-intensive domains.
 
 ---
 
-AstronomicAL is a human-in-the-loop interactive labelling and training dashboard that allows users to create reliable datasets and robust classifiers using active learning. The system enables users to visualise and integrate data from different sources and deal with incorrect or missing labels and imbalanced class sizes by using active learning to help the user focus on correcting the labels of a few key examples. Combining the use of the [Panel](https://panel.holoviz.org/), [Bokeh](https://docs.bokeh.org/en/latest/index.html), [modAL](https://github.com/modAL-python/modAL) and [SciKit Learn](https://scikit-learn.org/stable/) packages, AstronomicAL enables researchers to take full advantage of the benefits of active learning: high accuracy models using just a fraction of the total data, without the requirement of being well versed in underlying libraries.
+## What can AstronomicAL do?
 
-![Load Configuration](docs/source/images/AstronomicAL_demo.gif)
+AstronomicAL provides a shared interactive workspace in which plugins can work together around the same dataset and selection state. Depending on the plugins installed, a workflow can combine catalogue data, plots, images, spectra, annotations, external services, derived products, and machine-learning models without requiring every capability to be built into the core application.
 
-### Statement of Need
+Current functionality includes:
 
-Active learning [(Settles, 2012)](https://www.morganclaypool.com/doi/abs/10.2200/S00429ED1V01Y201207AIM018) removes the requirement for large amounts of labelled training data whilst still producing high accuracy models. This is extremely important as with ever-growing datasets; it is becoming impossible to manually inspect and verify ground truth used to train machine learning systems. The reliability of the training data limits the performance of any supervised learning model, so consistent classifications become more problematic as data sizes increase. The problem is exacerbated when a dataset does not contain any labelled data, preventing supervised learning techniques entirely. AstronomicAL has been developed to tackle these issues head-on and provide a solution for any large scientific dataset.
+* **Interactive data exploration** — browse records, inspect columns, create plots, filter data, and move between individual sources or selected subsets.
+* **Domain-specific inspection** — open specialised tools alongside generic panels. Astronomy plugins can, for example, retrieve and inspect spectra, photometry, images, SEDs, or external survey products.
+* **Annotation and review** — attach labels, notes, review states, and other expert judgements to records while retaining the context needed to make those decisions reliably.
+* **Machine learning** — configure, train, evaluate, and apply models from within the workspace, with long-running operations handled without blocking the interface.
+* **Active learning** — use model predictions and uncertainty to focus expert attention on informative examples instead of labelling an entire dataset manually.
+* **Dataset import and transformation** — work with local tabular data and extend the platform with importers for other sources, including dataset services such as Hugging Face.
+* **Reusable derived products** — allow one plugin to produce model scores, selections, spectra, cutouts, reports, or other results that can be consumed by another plugin.
+* **Persistent workspaces** — compose panels around a task and restore supported workspace and plugin state between sessions.
 
-It is common for active learning to query areas of high uncertainty; these are often in the boundaries between classes where the expert's knowledge is required. To facilitate this human-in-the-loop process, AstronomicAL provides users with the functionality to fully explore each data point chosen. This allows them to inject their domain expertise directly into the training process, ensuring that asigned labels are both accurate and reliable.
+The result is intended to feel less like a collection of disconnected scripts and more like a research workspace: selecting or updating an object in one part of AstronomicAL can immediately provide the context required by the other tools in the workflow.
 
-AstronomicAL has been extensively validated on astronomy datasets. These are highly representative of the issues that we anticipate will be found in other domains for which the tool is designed to be easily customisable. Such issues include the volume of data (millions of sources per survey), vastly imbalanced classes and ambiguous class definitions leading to inconsistent labelling. AstronomicAL has been developed to be sufficiently general for any tabular data and can be customised for any domain. For example, we provide the functionality for data fusion of catalogued data and online cutout services for astronomical datasets.
+---
 
-Using its modular and extensible design, researchers can quickly adapt AstronomicAL for their research to allow for domain-specific plots, novel query strategies, and improved models. Furthermore, there is no requirement to be well-versed in the underlying libraries that the software uses. This is due to large parts of the complexity being abstracted whilst allowing more experienced users to access full customisability.
+## A plugin-based platform
 
-As the software runs entirely locally on the user's system, AstronomicAL provides a private space to experiment whilst providing a public mechanism to share results. By sharing only the configuration file, users remain in charge of distributing their potentially sensitive data, enabling collaboration whilst respecting privacy.
+Earlier versions of AstronomicAL included most functionality directly in the main application. This worked well for the original astronomy and active-learning workflows, but it also meant that adding a new domain, service, visualisation, or workflow increased the size and complexity of the core application for every user.
 
-### Documentation
+AstronomicAL is now organised around a deliberately small platform and a collection of plugins.
 
-The documentation for AstronomicAL can be found [here](https://astronomical.readthedocs.io).
+The platform provides the common infrastructure required by interactive workflows: datasets, selections, background jobs, derived artifacts, events, services, workspace management, and persistence. Plugins provide the behaviour users interact with.
+
+A plugin can contribute panels, actions, services, artifact viewers, workflows, importers, or domain-specific integrations. This makes it possible to keep the base application generic while installing only the capabilities needed for a particular project.
+
+In practice, this means the same AstronomicAL installation can support very different tasks. An astronomer might combine catalogue browsing with spectroscopy and photometry plugins; another user might import an image dataset, inspect examples, and build a classifier; a project can also add its own local plugin without modifying the platform itself.
+
+Core functionality is implemented using the same plugin model so that the extension mechanism is not reserved only for third-party code. The aim is for new features to integrate through shared platform contracts rather than through direct coupling between panels.
+
+We are actively developing a plugin marketplace that will allow users to create and share domain-specific plugins, and discover and install plugins directly from within AstronomicAL.
+
+---
+
+## Statement of need
+
+Modern scientific datasets are increasingly large, heterogeneous, and difficult to inspect exhaustively. At the same time, supervised machine-learning systems depend heavily on the quality of the data used to train them. Missing labels, inconsistent classifications, rare classes, ambiguous examples, and incorrect ground truth can all limit model performance.
+
+Active learning provides one way to reduce this burden by asking an expert to label the examples expected to be most informative to the model. This can dramatically reduce the amount of manual labelling required, but the usefulness of the process depends on the expert having enough context to make a reliable decision.
+
+That need for context motivated AstronomicAL from the beginning. A catalogue row alone is often not enough: an astronomer may need images, spectra, colours, existing classifications, external archive information, and neighbouring sources before deciding what an object is. Equivalent problems occur in many other domains where human judgement remains essential.
+
+AstronomicAL brings those pieces into one coordinated workspace. The plugin system extends that original idea by allowing the inspection tools to change with the domain while the underlying workflow — explore, inspect, select, annotate, model, review, and repeat — remains reusable.
+
+The application runs locally, allowing users to keep control of their datasets while integrating remote services only where a workflow requires them.
+
+---
 
 ## Installation
 
-To install AstronomicAL and its dependencies, the user can clone the repository and from within the repo folder run `pip install -r requirements.txt`. . It is recommended that the user creates a virtual environment using tools such as [Virtualenv](https://packaging.python.org/guides/installing-using-pip-and-virtual-environments/#installing-virtualenv) or [Conda](https://docs.conda.io/projects/conda/en/latest/user-guide/tasks/manage-environments.html), to prevent any conflicting package versions.
+AstronomicAL is currently under active development. For the latest development version, clone the repository and install it inside an isolated Python environment.
 
+Clone the repository and enter the project directory:
+
+```bash
+git clone https://github.com/grant-m-s/AstronomicAL.git
+cd AstronomicAL
 ```
-    git clone https://github.com/grant-m-s/AstronomicAL.git
-    cd AstronomicAL
-    conda config --add channels conda-forge
-    conda create --name astronomical --file requirements.txt python=3.8
-    conda activate astronomical
+
+Create and activate a virtual environment:
+
+```bash
+python -m venv venv
+source venv/bin/activate
 ```
 
-### Quickstart Instructions
+Using Conda is also supported:
 
-To begin using the software, run `bokeh serve astronomicAL --show` and your browser should automatically open to [localhost:5006/astronomicAL](localhost:5006/astronomicAL>`)
+```bash
+conda create -n astronomical python
+conda activate astronomical
+```
 
-AstronomicAL provides both an example dataset and an example configuration file to allow you to jump right into the software and give it a test run.
+Install the core dependencies:
 
-![Load Configuration](docs/source/images/Load_config_AL.gif)
+```bash
+pip install -r requirements-core.txt
+```
 
-To begin training you simply have to select **Load Custom Configuration** checkbox and select your config file. Here we have chosen to use the `example_config.json` file.
+Additional requirement sets are available for specific functionality:
 
-The **Load Config Select** option allows use to choose the extent to which to reload the configuration.
+* `requirements-astro.txt`
+* `requirements-huggingface.txt`
+* `requirements-ml.txt`
+* `requirements-dev.txt`
+
+Install any additional set as required:
+
+```bash
+pip install -r requirements-astro.txt
+```
+
+Or install all available dependencies at once:
+
+```bash
+pip install -r requirements-all.txt
+```
+
+Using an isolated environment is strongly recommended so that AstronomicAL and its plugin dependencies remain separate from other Python projects on the system.
+
+### Running AstronomicAL
+
+Start the application with:
+
+```bash
+panel serve astronomicAL --show
+```
+
+Panel should open AstronomicAL automatically in your browser. If it does not, open the local address printed in the terminal.
+
+Once running, datasets can be loaded into the workspace and additional capabilities can be opened from the available plugins. Plugins may define their own requirements, mappings, services, or optional Python dependencies depending on the workflow they provide.
+
+---
+
 
 ## Contributing to AstronomicAL
 
-### Reporting Bugs
+Contributions, bug reports, feature ideas, documentation improvements, and new plugins are welcome.
 
-If you encounter a bug, you can directly report it in the [issues section](https://github.com/grant-m-s/AstronomicAL/issues).
+### Reporting bugs
 
-Please describe how to reproduce the bug and include as much information as possible that can be helpful for fixing it.
+If you encounter a problem, open an issue and include enough information to reproduce it. Useful details include the steps taken, expected and actual behaviour, relevant logs or tracebacks, the dataset format where appropriate, and the plugins involved in the workflow.
 
-**Are you able to fix a bug?**
+### Contributing code and plugins
 
-You can open a new pull request or include your suggested fix in the issue.
+Pull requests can improve the platform itself, migrate existing functionality into the plugin architecture, add tests and documentation, or introduce new generic, workflow, and domain plugins.
 
-### Submission of extensions
+When contributing a plugin, it should use the shared AstronomicAL platform services rather than relying on direct communication with another panel. This keeps plugins independently installable, removable, testable, and reusable in different workspace combinations.
 
-**Have you created an extension that you want to share with the community?**
+---
 
-Create a pull request describing your extension and how it can improve research for others.
+## Referencing AstronomicAL
 
-### Support and Feedback
+If AstronomicAL supports your research, please cite the project and the original software paper. Citation information is available in the project documentation and repository citation metadata.
 
-We would love to hear your thoughts on AstronomicAL.
-
-Are there any features that would improve the effectiveness and usability of AstronomicAL? Let us know!
-
-Any feedback can be submitted as an [issue](https://github.com/grant-m-s/AstronomicAL/issues).
-
-## Referencing the Package
-
-Please remember to cite our software and user guide whenever relevant.
-
-See the [Citing page](https://astronomical.readthedocs.io/en/latest/content/other/citing.html) in the documentation for instructions about referencing and citing the astronomicAL software.
+AstronomicAL was originally developed and validated using astronomical datasets, and the original publication describes the motivation and active-learning workflow that formed the basis of the project. The plugin-based platform builds on that work while making the same interactive, human-in-the-loop approach available to a broader range of workflows and domains.

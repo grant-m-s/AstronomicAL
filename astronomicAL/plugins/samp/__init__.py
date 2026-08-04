@@ -1,0 +1,1 @@
+"""SAMP interop plugin."""

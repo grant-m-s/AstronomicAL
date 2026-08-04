@@ -1,0 +1,1 @@
+"""Record Browser plugin."""

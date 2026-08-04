@@ -1,0 +1,2774 @@
+from __future__ import annotations
+
+from concurrent.futures import CancelledError
+from dataclasses import dataclass
+from functools import wraps
+from typing import Any, Dict, Iterable, List, Optional, Tuple
+import os
+import threading
+import time
+import traceback
+import uuid
+
+import numpy as np
+import panel as pn
+import holoviews as hv
+
+try:
+    hv.extension("bokeh")
+except Exception:
+    pass
+
+from .service import DESI_DATASETS, SDSS_DATASETS, SpectraResult, SpectraRuntime
+
+PLUGIN_ID = "astro.spectra"
+RUNTIME_SERVICE_KEY = f"{PLUGIN_ID}.runtime"
+SETTINGS_HEIGHT = 118
+
+SOURCE_LABELS = {
+    "DESI": "DESI",
+    "SDSS": "SDSS/BOSS",
+    "EuclidSpec": "Euclid",
+}
+
+
+_PANEL_TIMING_ENABLED = os.environ.get(
+    "ASTRONOMICAL_PANEL_TIMINGS",
+    "1",
+).strip().lower() not in {"0", "false", "off", "no"}
+try:
+    _PANEL_TIMING_MIN_MS = max(
+        0.0,
+        float(os.environ.get("ASTRONOMICAL_PANEL_TIMING_MIN_MS", "0")),
+    )
+except (TypeError, ValueError):
+    _PANEL_TIMING_MIN_MS = 0.0
+
+
+def _timing_repr(value: Any, *, limit: int = 180) -> str:
+    try:
+        text = repr(value)
+    except Exception:
+        text = f"<{type(value).__name__}>"
+    if len(text) > limit:
+        text = text[: limit - 3] + "..."
+    return text
+
+
+def _timing_log(
+    component: str,
+    event: str,
+    *,
+    elapsed_ms: Optional[float] = None,
+    force: bool = False,
+    **fields: Any,
+) -> None:
+    """Emit one compact structured timing line.
+
+    This diagnostic build enables timings by default. Set
+    ``ASTRONOMICAL_PANEL_TIMINGS=0`` to disable them, or set
+    ``ASTRONOMICAL_PANEL_TIMING_MIN_MS`` to suppress shorter spans.
+    """
+    if not _PANEL_TIMING_ENABLED:
+        return
+    if (
+        elapsed_ms is not None
+        and not force
+        and float(elapsed_ms) < _PANEL_TIMING_MIN_MS
+    ):
+        return
+
+    parts = [
+        f"[AL_TIMING][{component}]",
+        f"event={_timing_repr(event)}",
+        f"thread={_timing_repr(threading.current_thread().name)}",
+    ]
+    if elapsed_ms is not None:
+        parts.append(f"elapsed_ms={float(elapsed_ms):.3f}")
+    for key, value in fields.items():
+        if value is None:
+            continue
+        if isinstance(value, float):
+            parts.append(f"{key}={value:.3f}")
+        else:
+            parts.append(f"{key}={_timing_repr(value)}")
+    print(" ".join(parts))
+
+
+def _timing_context(instance: Any, kwargs: Mapping[str, Any]) -> Dict[str, Any]:
+    fields: Dict[str, Any] = {
+        "panel_id": getattr(
+            instance,
+            "panel_id",
+            getattr(instance, "instance_id", None),
+        ),
+        "source": getattr(instance, "source", None),
+    }
+
+    request = kwargs.get("request")
+    if request is not None:
+        fields["generation"] = getattr(request, "generation", None)
+        target = getattr(request, "target", None)
+        if target is not None:
+            fields["dataset_id"] = getattr(target, "dataset_id", None)
+            fields["row_id"] = getattr(target, "row_id", None)
+
+    fields.setdefault("generation", kwargs.get("generation"))
+    fields.setdefault(
+        "dataset_id",
+        kwargs.get("dataset_id", getattr(instance, "current_dataset_id", None)),
+    )
+    fields.setdefault(
+        "row_id",
+        kwargs.get("row_id", getattr(instance, "current_row_id", None)),
+    )
+    return fields
+
+
+def _timed_method(component: str, event: Optional[str] = None):
+    def _decorate(function):
+        @wraps(function)
+        def _wrapped(self, *args, **kwargs):
+            started_at = time.perf_counter()
+            error_type = None
+            try:
+                return function(self, *args, **kwargs)
+            except BaseException as exc:
+                error_type = type(exc).__name__
+                raise
+            finally:
+                _timing_log(
+                    component,
+                    event or function.__name__,
+                    elapsed_ms=(time.perf_counter() - started_at) * 1000.0,
+                    error_type=error_type,
+                    **_timing_context(self, kwargs),
+                )
+        return _wrapped
+    return _decorate
+
+
+def _timed_function(component: str, event: Optional[str] = None):
+    def _decorate(function):
+        @wraps(function)
+        def _wrapped(*args, **kwargs):
+            started_at = time.perf_counter()
+            error_type = None
+            try:
+                return function(*args, **kwargs)
+            except BaseException as exc:
+                error_type = type(exc).__name__
+                raise
+            finally:
+                _timing_log(
+                    component,
+                    event or function.__name__,
+                    elapsed_ms=(time.perf_counter() - started_at) * 1000.0,
+                    error_type=error_type,
+                )
+        return _wrapped
+    return _decorate
+
+
+def _schedule_document_probe(
+    component: str,
+    label: str,
+    **fields: Any,
+) -> None:
+    """Measure how long the owning document takes to reach its next tick."""
+    if not _PANEL_TIMING_ENABLED:
+        return
+    scheduled_at = time.perf_counter()
+    try:
+        document = pn.state.curdoc
+    except Exception:
+        document = None
+    if document is None:
+        _timing_log(
+            component,
+            "document_probe.unavailable",
+            force=True,
+            label=label,
+            **fields,
+        )
+        return
+
+    def _probe() -> None:
+        _timing_log(
+            component,
+            "document_probe.next_tick",
+            elapsed_ms=(time.perf_counter() - scheduled_at) * 1000.0,
+            force=True,
+            label=label,
+            **fields,
+        )
+
+    try:
+        document.add_next_tick_callback(_probe)
+    except Exception as exc:
+        _timing_log(
+            component,
+            "document_probe.schedule_error",
+            force=True,
+            label=label,
+            error_type=type(exc).__name__,
+            **fields,
+        )
+
+
+def _style_widget(
+    widget: Any,
+    *,
+    width: int = 145,
+    height: int = 40,
+    margin: Tuple[int, int, int, int] = (0, 6, 2, 6),
+) -> Any:
+    try:
+        widget.width = width
+        widget.height = height
+        widget.sizing_mode = "fixed"
+        widget.margin = margin
+    except Exception:
+        pass
+    return widget
+
+def _settings_box(*controls: Any) -> pn.FlexBox:
+    return pn.FlexBox(
+        *controls,
+        sizing_mode="stretch_width",
+        height_policy="fit",
+        margin=(0, 0, 0, 0),
+        styles={
+            "overflow": "visible",
+            "align-content": "flex-start",
+            "align-items": "flex-start",
+            "gap": "2px 6px",
+            "padding": "4px 6px 4px 6px",
+            "border-top": "1px solid #ddd",
+            "border-bottom": "1px solid #eee",
+            "background": "#fafafa",
+            "box-sizing": "border-box",
+        },
+    )
+
+def _small_label(text: str, *, width: int = 76) -> pn.pane.HTML:
+    return pn.pane.HTML(
+        f"<div style='font-size:11px;font-weight:600;color:#555;"
+        f"padding-top:11px;white-space:nowrap'>{text}</div>",
+        width=width,
+        height=34,
+        sizing_mode="fixed",
+        margin=(0, 2, 0, 6),
+    )
+
+def _safe_float(value: Any) -> Optional[float]:
+    try:
+        if value is None:
+            return None
+        if isinstance(value, str) and not value.strip():
+            return None
+        out = float(value)
+        if not np.isfinite(out):
+            return None
+        return out
+    except Exception:
+        return None
+
+def _as_list(value: Any) -> List[Any]:
+    if value is None:
+        return []
+    try:
+        arr = np.asarray(value)
+        if arr.ndim == 0:
+            return [arr.item()]
+        out = arr.tolist()
+        return out if isinstance(out, list) else [out]
+    except Exception:
+        try:
+            return list(value)
+        except Exception:
+            return [value]
+
+@dataclass
+class _ResolvedTarget:
+    dataset_id: str
+    row_id: Optional[str]
+    row: Dict[str, Any]
+    ra: Optional[float]
+    dec: Optional[float]
+    source_id: Optional[Any]
+    id_column: Optional[str]
+    ra_column: Optional[str]
+    dec_column: Optional[str]
+    target_id_column: Optional[str]
+    retrieval_mode: str
+
+@dataclass(frozen=True)
+class _SpectraFetchRequest:
+    generation: int
+    target: _ResolvedTarget
+    reason: str
+    max_separation_arcsec: float
+    datasets: Tuple[str, ...]
+    smooth_kernel: str
+    smooth_window: int
+    redshift: Optional[float]
+
+class SpectraPanel:
+    """Plugin-native DESI/SDSS/Euclid spectra panel."""
+
+    def __init__(
+        self,
+        *,
+        context: Any,
+        source: str,
+        data: Any = None,
+        state: Optional[Dict[str, Any]] = None,
+        **_: Any,
+    ) -> None:
+        self.context = context
+        self.source = source
+        self.source_label = SOURCE_LABELS.get(source, source)
+        self.data = data
+        self.panel_id = f"{PLUGIN_ID}.{source}.{uuid.uuid4().hex}"
+
+        self._subscriptions: List[Any] = []
+        self._fetch_job_handle: Any = None
+        self._aux_job_handle: Any = None
+        self._active_fetch_request: Optional[_SpectraFetchRequest] = None
+        self._pending_fetch_request: Optional[_SpectraFetchRequest] = None
+        self._request_generation = 0
+        self._disposed = False
+        self._initial_load_started = False
+        self._settings_built = False
+        self.settings_visible = False
+
+        self._current_target: Optional[_ResolvedTarget] = None
+        self._result_target: Optional[_ResolvedTarget] = None
+        self._spectra_result: Optional[SpectraResult] = None
+
+        self._auto_load_generation = 0
+        self._auto_load_scheduled = False
+        self._pending_auto_load_reason: Optional[str] = None
+        self._target_status_scheduled = False
+
+        # A layout restore can construct this controller on a worker thread and
+        # start the initial archive request before Panel has mounted the
+        # HoloViews pane.  Assigning an hv.Layout at that point can make Panel
+        # materialise a Bokeh GridPlot while its design parameters are still
+        # being propagated, which raises ``unexpected attribute 'design'`` on
+        # the first render only.  Keep the result pending until the pane owns a
+        # live Bokeh model, then perform the assignment on the document thread.
+        self._pending_plot_assignment: Optional[Tuple[int, Any]] = None
+        self._plot_assignment_retry_scheduled = False
+        self._plot_assignment_retry_attempt = 0
+
+        self._build_widgets()
+        if state:
+            self.restore_state(state)
+        self._build_layout()
+        self._bind_events()
+
+    # ------------------------------------------------------------------
+    # Plugin controller API
+    # ------------------------------------------------------------------
+
+    def view(self) -> pn.viewable.Viewable:
+        self._schedule_initial_load()
+        return self.layout
+
+    def panel(self) -> pn.viewable.Viewable:
+        return self.view()
+
+    def dispose(self) -> None:
+        if self._disposed:
+            return
+
+        self._disposed = True
+        self._request_generation += 1
+        self._pending_fetch_request = None
+        self._pending_plot_assignment = None
+        self._plot_assignment_retry_attempt = 0
+        self._cancel_job()
+
+        events = getattr(self.context, "events", None)
+        if events is not None:
+            for sub in list(self._subscriptions):
+                try:
+                    events.unsubscribe(sub)
+                except Exception:
+                    pass
+        self._subscriptions.clear()
+
+    def snapshot_state(self) -> Dict[str, Any]:
+        return {
+            "settings_visible": self.settings_visible,
+            "retrieval_mode": self.retrieve_mode.value,
+            "max_separation_arcsec": self.max_separation_input.value,
+            "target_id_column": self.target_id_column.value,
+            "plot_lines": self.plot_lines_checkbox.value,
+            "plot_model": self.plot_model_checkbox.value,
+            "smoothing_function": self.smoothing_function_input.value,
+            "smoothing_window": self.smoothing_window_input.value,
+            "redshift": self.redshift_input.value,
+            "redshift_column": self.redshift_column_selector.value,
+            "auto_reload": self.auto_reload.value,
+        }
+
+    def restore_state(self, state: Dict[str, Any]) -> None:
+        if not isinstance(state, dict):
+            return
+
+        self.settings_visible = bool(state.get("settings_visible", False))
+
+        mapping = {
+            "retrieval_mode": self.retrieve_mode,
+            "max_separation_arcsec": self.max_separation_input,
+            "target_id_column": self.target_id_column,
+            "plot_lines": self.plot_lines_checkbox,
+            "plot_model": self.plot_model_checkbox,
+            "smoothing_function": self.smoothing_function_input,
+            "smoothing_window": self.smoothing_window_input,
+            "redshift": self.redshift_input,
+            "redshift_column": self.redshift_column_selector,
+            "auto_reload": self.auto_reload,
+        }
+
+        for key, widget in mapping.items():
+            if key in state:
+                try:
+                    if key in {"target_id_column", "redshift_column"}:
+                        current_options = list(widget.options)
+                        if state[key] not in current_options:
+                            widget.options = current_options + [state[key]]
+                    widget.value = state[key]
+                except Exception:
+                    pass
+
+        try:
+            self._apply_settings_visibility()
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------
+    # UI
+    # ------------------------------------------------------------------
+
+    def _build_widgets(self) -> None:
+        self.status = pn.pane.Markdown(
+            "",
+            sizing_mode="stretch_width",
+            margin=(0, 8, 0, 8),
+            styles={
+                "font-size": "12px",
+                "line-height": "1.25",
+                "max-height": "42px",
+                "overflow": "auto",
+            },
+        )
+
+        self.target_status = pn.pane.HTML(
+            "",
+            sizing_mode="stretch_width",
+            height=34,
+            margin=(0, 8, 0, 8),
+            styles={
+                "font-size": "12px",
+                "line-height": "1.2",
+                "overflow": "hidden",
+                "white-space": "nowrap",
+                "text-overflow": "ellipsis",
+                "color": "#333",
+            },
+        )
+
+        # Keep both child models stable for the lifetime of the panel. Updating
+        # only the HoloViews pane's object avoids rebuilding the surrounding
+        # Bokeh layout on every source change.
+        self.figure_message = self._empty_message("No spectrum loaded.")
+        self.spectrum_pane = pn.pane.HoloViews(
+            hv.Curve(([], [])),
+            sizing_mode="stretch_both",
+            min_height=0,
+            margin=(0, 0, 0, 0),
+            visible=False,
+        )
+        self.figure = pn.Column(
+            self.figure_message,
+            self.spectrum_pane,
+            sizing_mode="stretch_both",
+            min_height=60,
+            margin=(0, 6, 6, 6),
+            styles={"overflow": "hidden"},
+        )
+
+        self.title_pane = pn.pane.HTML(
+            f"<div style='font-size:14px;font-weight:700;padding-top:10px'>{self.source_label} Spectra</div>",
+            width=100,
+            height=44,
+            sizing_mode="fixed",
+            margin=(0, 2, 0, 0),
+        )
+
+        self.retrieve_mode = pn.widgets.RadioButtonGroup(
+            name="Retrieval",
+            options=["Cone Search", "Use TargetId"],
+            value="Cone Search",
+            button_type="default",
+            width=210,
+            height=34,
+            sizing_mode="fixed",
+            margin=(8, 2, 0, 0),
+        )
+
+        self.max_separation_input = pn.widgets.FloatInput(
+            name="Radius [arcsec]",
+            value=1.0 if self.source != "EuclidSpec" else 0.5,
+            start=0.01,
+            step=0.5,
+            width=80,
+            height=44,
+            sizing_mode="fixed",
+            margin=(0, 2, 0, 0),
+        )
+
+        self.load_button = pn.widgets.Button(
+            name="Load",
+            button_type="primary",
+            width=74,
+            height=34,
+            sizing_mode="fixed",
+            margin=(8, 0, 0, 0),
+        )
+
+        self.settings_button = pn.widgets.Button(
+            name="⚙",
+            width=32,
+            height=32,
+            button_type="default",
+            sizing_mode="fixed",
+            margin=(8, 0, 0, 0),
+        )
+
+        self.target_id_column = _style_widget(
+            pn.widgets.Select(
+                name="Target ID column",
+                options=["Auto"],
+                value="Auto",
+            ),
+            width=180,
+        )
+
+        self.plot_lines_checkbox = _style_widget(
+            pn.widgets.Checkbox(
+                name="Line markers",
+                value=self.source != "EuclidSpec",
+            ),
+            width=110,
+            height=28,
+            margin=(10, 8, 0, 6),
+        )
+
+        self.plot_model_checkbox = _style_widget(
+            pn.widgets.Checkbox(
+                name="Model",
+                value=self.source != "EuclidSpec",
+            ),
+            width=85,
+            height=28,
+            margin=(10, 8, 0, 6),
+        )
+
+        self.auto_reload = _style_widget(
+            pn.widgets.Checkbox(name="Auto reload", value=True),
+            width=110,
+            height=28,
+            margin=(10, 8, 0, 6),
+        )
+
+        self.smoothing_function_input = _style_widget(
+            pn.widgets.Select(
+                name="Smoothing",
+                options={"Box": "Box1DKernel", "Gaussian": "Gaussian1DKernel"},
+                value="Box1DKernel",
+            ),
+            width=135,
+        )
+
+        self.smoothing_window_input = _style_widget(
+            pn.widgets.IntInput(
+                name="Window",
+                value=10 if self.source != "EuclidSpec" else 5,
+                start=1,
+                end=100,
+                step=1,
+            ),
+            width=95,
+        )
+
+        self.redshift_input = _style_widget(
+            pn.widgets.FloatInput(
+                name="Assign redshift",
+                value=None,
+                start=0.0,
+                end=15.0,
+                step=0.001,
+            ),
+            width=130,
+        )
+
+        self.redshift_column_selector = _style_widget(
+            pn.widgets.Select(
+                name="Redshift column",
+                options=["None"],
+                value="None",
+            ),
+            width=170,
+        )
+
+        self.query_redshift_button = pn.widgets.Button(
+            name="Query Euclid redshift",
+            button_type="primary",
+            width=160,
+            height=34,
+            sizing_mode="fixed",
+            margin=(6, 6, 0, 6),
+            disabled=self.source != "EuclidSpec",
+        )
+
+        self.refresh_plot_button = pn.widgets.Button(
+            name="Refresh plot",
+            width=110,
+            height=34,
+            sizing_mode="fixed",
+            margin=(6, 6, 0, 6),
+        )
+
+        if self.source == "EuclidSpec":
+            self.plot_lines_checkbox.disabled = True
+            self.plot_model_checkbox.disabled = True
+
+        elif self.source !=  "EuclidSpec":
+            self.query_redshift_button.diabled = True
+
+        self.load_button.on_click(lambda _event: self.load_spectra(reason="button.load"))
+        self.settings_button.on_click(self._toggle_settings)
+        self.query_redshift_button.on_click(self._query_euclid_redshift)
+        self.refresh_plot_button.on_click(lambda _event: self._update_smoothing_and_render())
+        self.retrieve_mode.param.watch(self._retrieve_mode_changed, "value")
+        self.redshift_input.param.watch(self._update_redshift_from_input, "value")
+
+        for widget in [
+            self.plot_lines_checkbox,
+            self.plot_model_checkbox,
+            self.redshift_column_selector,
+        ]:
+            widget.param.watch(lambda _event: self._render_existing_result(), "value")
+
+        for widget in [
+            self.smoothing_function_input,
+            self.smoothing_window_input,
+            ]:
+            widget.param.watch(self._update_smoothing_and_render,"value",)
+
+    def _header(self) -> pn.GridBox:
+        return pn.GridBox(
+            self.title_pane,
+            self.retrieve_mode,
+            self.max_separation_input,
+            self.load_button,
+            self.settings_button,
+            ncols=5,
+            sizing_mode="stretch_width",
+            height=48,
+            margin=(0, 6, 0, 6),
+            styles={
+                "display": "grid",
+                "grid-template-columns": "100px 215px 100px 75px 34px",
+                "gap": "4px",
+                "align-items": "start",
+                "box-sizing": "border-box",
+            },
+        )
+
+    def _settings_controls(self) -> pn.FlexBox:
+        return _settings_box(
+            _small_label("Request", width=58),
+            self.target_id_column,
+            self.auto_reload,
+            _small_label("Plot", width=38),
+            self.plot_lines_checkbox,
+            self.plot_model_checkbox,
+            self.refresh_plot_button,
+            _small_label("Smooth", width=54),
+            self.smoothing_function_input,
+            self.smoothing_window_input,
+            _small_label("Redshift", width=62),
+            self.redshift_input,
+            self.redshift_column_selector,
+            self.query_redshift_button,
+        )
+
+    def _ensure_settings_built(self) -> None:
+        if self._settings_built:
+            return
+        self.settings_pane[:] = [self._settings_controls()]
+        self._settings_built = True
+
+    def _apply_settings_visibility(self) -> None:
+        self._ensure_settings_built()
+        self.settings_pane.visible = self.settings_visible
+        try:
+            self.settings_button.button_type = "primary" if self.settings_visible else "default"
+        except Exception:
+            pass
+
+    def _toggle_settings(self, _event: Any = None) -> None:
+        self.settings_visible = not self.settings_visible
+        self._apply_settings_visibility()
+
+    def _build_layout(self) -> None:
+        self.settings_pane = pn.Column(
+            sizing_mode="stretch_width",
+            height=SETTINGS_HEIGHT,
+            min_height=SETTINGS_HEIGHT,
+            max_height=SETTINGS_HEIGHT,
+            height_policy="fixed",
+            visible=False,
+            margin=(0, 0, 0, 0),
+            styles={
+                "height": f"{SETTINGS_HEIGHT}px",
+                "min-height": f"{SETTINGS_HEIGHT}px",
+                "max-height": f"{SETTINGS_HEIGHT}px",
+                "overflow-y": "auto",
+                "overflow-x": "hidden",
+                "box-sizing": "border-box",
+            },
+        )
+
+        self._ensure_settings_built()
+        self._apply_settings_visibility()
+
+        self.layout = pn.Column(
+            self._header(),
+            self.settings_pane,
+            self.target_status,
+            self.status,
+            self.figure,
+            sizing_mode="stretch_both",
+            height_policy="max",
+            min_height=0,
+            margin=(0, 0, 0, 0),
+            styles={
+                "min-height": "0",
+                "overflow": "hidden",
+                "box-sizing": "border-box",
+            },
+        )
+
+    @staticmethod
+    def _empty_message(text: str) -> pn.pane.Markdown:
+        return pn.pane.Markdown(
+            f"### {text}",
+            sizing_mode="stretch_both",
+            margin=(16, 16, 16, 16),
+            styles={"color": "#666"},
+        )
+
+    @_timed_method("Spectra")
+    def _show_figure_message(self, text: str, *, clear_plot: bool) -> None:
+        self.figure_message.object = f"### {text}"
+        if clear_plot:
+            self.spectrum_pane.visible = False
+            self.figure_message.visible = True
+        else:
+            self.figure_message.visible = not bool(self.spectrum_pane.visible)
+
+    # ------------------------------------------------------------------
+    # Events
+    # ------------------------------------------------------------------
+
+    def _bind_events(self) -> None:
+        if getattr(self.context, "events", None) is None:
+            return
+
+        self._subscribe("selection.focus.changed", self._selection_changed)
+        self._subscribe("selection.focus.cleared", self._selection_cleared)
+        self._subscribe("dataset.active.changed", self._dataset_changed)
+        self._subscribe("dataset.mapping.updated", self._dataset_changed)
+        self._subscribe("astro.euclid.radius.changed", self._euclid_radius_changed)
+
+    def _subscribe(self, topic: str, callback: Any) -> None:
+        events = getattr(self.context, "events", None)
+        if events is None:
+            return
+
+        try:
+            sub = events.subscribe(
+                topic,
+                callback,
+                owner_id=self.panel_id,
+                owner_label=f"{self.source_label} Spectra",
+                owner_kind="panel",
+            )
+        except TypeError:
+            sub = events.subscribe(topic, callback)
+
+        self._subscriptions.append(sub)
+
+    def _publish(self, topic: str, payload: Optional[Dict[str, Any]] = None) -> None:
+        events = getattr(self.context, "events", None)
+        if events is None:
+            return
+        started_at = time.perf_counter()
+        error_type = None
+        try:
+            events.publish(topic, payload or {})
+        except Exception as exc:
+            error_type = type(exc).__name__
+            traceback.print_exc()
+        finally:
+            _timing_log(
+                "Spectra",
+                "event.publish",
+                elapsed_ms=(time.perf_counter() - started_at) * 1000.0,
+                force=True,
+                panel_id=self.panel_id,
+                source=self.source,
+                topic=topic,
+                generation=self._request_generation,
+                row_id=getattr(self._current_target, "row_id", None),
+                error_type=error_type,
+            )
+
+    def _schedule_panel_callback(
+        self,
+        callback,
+        *,
+        delay_ms: int = 0,
+        label: Optional[str] = None,
+    ) -> None:
+        """Schedule panel UI work and expose its document-queue delay."""
+        if getattr(self, "_disposed", False):
+            return
+
+        scheduled_at = time.perf_counter()
+        callback_label = label or getattr(callback, "__qualname__", None) or getattr(
+            callback,
+            "__name__",
+            type(callback).__name__,
+        )
+        route = "immediate"
+
+        def _run() -> None:
+            queue_ms = (time.perf_counter() - scheduled_at) * 1000.0
+            callback_started_at = time.perf_counter()
+            error_type = None
+            try:
+                if not getattr(self, "_disposed", False):
+                    callback()
+            except BaseException as exc:
+                error_type = type(exc).__name__
+                raise
+            finally:
+                _timing_log(
+                    "Spectra",
+                    "ui_callback.run",
+                    elapsed_ms=(time.perf_counter() - callback_started_at) * 1000.0,
+                    force=True,
+                    panel_id=self.panel_id,
+                    source=self.source,
+                    label=callback_label,
+                    route=route,
+                    queue_ms=queue_ms,
+                    requested_delay_ms=int(delay_ms),
+                    delay_overrun_ms=max(0.0, queue_ms - float(delay_ms)),
+                    generation=self._request_generation,
+                    row_id=getattr(self._current_target, "row_id", None),
+                    error_type=error_type,
+                )
+
+        try:
+            doc = pn.state.curdoc
+            if doc is not None:
+                if delay_ms and delay_ms > 0:
+                    route = "document.timeout"
+                    doc.add_timeout_callback(_run, int(delay_ms))
+                else:
+                    route = "document.next_tick"
+                    doc.add_next_tick_callback(_run)
+                return
+        except Exception as exc:
+            _timing_log(
+                "Spectra",
+                "ui_callback.schedule_fallback",
+                force=True,
+                panel_id=self.panel_id,
+                source=self.source,
+                label=callback_label,
+                failed_route=route,
+                error_type=type(exc).__name__,
+            )
+
+        route = "immediate"
+        _run()
+
+    def _schedule_target_status_refresh(self, *, delay_ms: int = 75) -> None:
+        """Resolve target status later; do not block selection.focus.changed."""
+        if getattr(self, "_target_status_scheduled", False):
+            return
+
+        self._target_status_scheduled = True
+
+        def _run() -> None:
+            self._target_status_scheduled = False
+            if getattr(self, "_disposed", False):
+                return
+            try:
+                self._refresh_column_options()
+                self._update_target_status()
+            except Exception:
+                traceback.print_exc()
+
+        self._schedule_panel_callback(_run, delay_ms=delay_ms)
+
+    @_timed_method("Spectra")
+    def _schedule_auto_load(self, *, reason: str, delay_ms: int = 175) -> None:
+        """Debounce auto-loads so rapid focus changes only load the latest row."""
+        self._auto_load_generation += 1
+        generation = int(self._auto_load_generation)
+        self._pending_auto_load_reason = str(reason or "auto")
+
+        if getattr(self, "_auto_load_scheduled", False):
+            return
+
+        self._auto_load_scheduled = True
+
+        def _run() -> None:
+            self._auto_load_scheduled = False
+            if getattr(self, "_disposed", False):
+                return
+            if generation != int(getattr(self, "_auto_load_generation", 0)):
+                if self._pending_auto_load_reason:
+                    self._schedule_auto_load(
+                        reason=self._pending_auto_load_reason,
+                        delay_ms=delay_ms,
+                    )
+                return
+
+            reason_to_use = self._pending_auto_load_reason or reason
+            self._pending_auto_load_reason = None
+            try:
+                self.load_spectra(reason=reason_to_use)
+            except Exception:
+                traceback.print_exc()
+
+        self._schedule_panel_callback(
+            _run,
+            delay_ms=delay_ms,
+            label="spectra.auto_load",
+        )
+
+    @_timed_method("Spectra")
+    def _selection_changed(self, topic: str, payload: Any) -> None:
+        del payload
+
+        # EventBus delivery is synchronous. Invalidate the old request and ask
+        # its cooperative token to stop, but do not mutate Bokeh models here.
+        self._auto_load_generation += 1
+        self._request_generation += 1
+        self._pending_fetch_request = None
+        self._pending_plot_assignment = None
+        self._plot_assignment_retry_attempt = 0
+        self._request_fetch_cancellation()
+        self._request_aux_cancellation()
+        self._current_target = None
+
+        reason = str(topic or "selection.focus.changed")
+
+        def _update_status() -> None:
+            self.target_status.object = (
+                "New focused row queued; showing the previous spectrum until "
+                "the replacement is ready…"
+            )
+            if self._spectra_result is None:
+                self._show_figure_message("New focused row queued…", clear_plot=True)
+
+        self._schedule_panel_callback(_update_status, label="spectra.focus_status")
+
+        if self.auto_reload.value:
+            self._schedule_auto_load(reason=reason, delay_ms=175)
+        else:
+            self._schedule_target_status_refresh(delay_ms=75)
+
+    @_timed_method("Spectra")
+    def _selection_cleared(self, topic: str, payload: Any) -> None:
+        del payload
+
+        self._auto_load_generation += 1
+        self._request_generation += 1
+        self._pending_fetch_request = None
+        self._pending_plot_assignment = None
+        self._plot_assignment_retry_attempt = 0
+        self._request_fetch_cancellation()
+        self._request_aux_cancellation()
+        self._current_target = None
+
+        reason = str(topic or "selection.focus.cleared")
+
+        def _clear() -> None:
+            self._spectra_result = None
+            self._result_target = None
+            self.status.object = "No focused row selected."
+            self.target_status.object = ""
+            self._show_figure_message("No focused row selected.", clear_plot=True)
+            self._publish_running(False, target=None, reason=reason)
+
+        self._schedule_panel_callback(_clear)
+
+    @_timed_method("Spectra")
+    def _dataset_changed(self, topic: str, payload: Any) -> None:
+        del payload
+
+        self._auto_load_generation += 1
+        self._request_generation += 1
+        self._pending_fetch_request = None
+        self._pending_plot_assignment = None
+        self._plot_assignment_retry_attempt = 0
+        self._request_fetch_cancellation()
+        self._request_aux_cancellation()
+        self._current_target = None
+
+        reason = str(topic or "dataset.changed")
+
+        def _update() -> None:
+            self._spectra_result = None
+            self._result_target = None
+            self._show_figure_message("Dataset changed.", clear_plot=True)
+            self.target_status.object = "Dataset changed; resolving target…"
+            self._refresh_column_options()
+
+        self._schedule_panel_callback(_update, delay_ms=50)
+
+        if self.auto_reload.value:
+            self._schedule_auto_load(reason=reason, delay_ms=225)
+        else:
+            self._schedule_target_status_refresh(delay_ms=100)
+
+    def _euclid_radius_changed(self, topic: str, payload: Any) -> None:
+        if not isinstance(payload, dict):
+            return
+        radius = _safe_float(payload.get("radius"))
+        if radius is None:
+            return
+        if self.source == "EuclidSpec" and self.max_separation_input.value != radius:
+            self.max_separation_input.value = radius
+
+    # ------------------------------------------------------------------
+    # Dataset / selection helpers
+    # ------------------------------------------------------------------
+
+    def _active_dataset_id(self) -> str:
+        datasets = getattr(self.context, "datasets", None)
+        if datasets is not None:
+            for name in ("active_id", "get_active_id"):
+                method = getattr(datasets, name, None)
+                if callable(method):
+                    try:
+                        active = method()
+                        if active:
+                            return str(active)
+                    except Exception:
+                        pass
+        return "default"
+
+    def _focus_state(self) -> Any:
+        selection = getattr(self.context, "selection", None)
+        if selection is None:
+            return None
+
+        method = getattr(selection, "get_focus", None)
+        if callable(method):
+            try:
+                return method()
+            except Exception:
+                return None
+
+        return None
+
+    @staticmethod
+    def _get_from_obj(obj: Any, *names: str) -> Any:
+        if obj is None:
+            return None
+
+        if isinstance(obj, dict):
+            for name in names:
+                if name in obj:
+                    return obj[name]
+            return None
+
+        for name in names:
+            if hasattr(obj, name):
+                return getattr(obj, name)
+
+        return None
+
+    def _mapping(self, dataset_id: str, *roles: str) -> Optional[str]:
+        datasets = getattr(self.context, "datasets", None)
+        if datasets is None:
+            return None
+
+        for role in roles:
+            for method_name in ("get_mapping", "mapping", "get_column_mapping"):
+                method = getattr(datasets, method_name, None)
+                if not callable(method):
+                    continue
+
+                for args in ((dataset_id, role), (role,), (dataset_id, role, None)):
+                    try:
+                        value = method(*args)
+                    except TypeError:
+                        continue
+                    except Exception:
+                        value = None
+
+                    if value:
+                        return str(value)
+
+        config = getattr(self.context, "config", None)
+        settings = getattr(config, "settings", {}) if config is not None else {}
+
+        aliases = {
+            "record_id": ["id_col", "id", "ID", "source_id", "object_id"],
+            "coords.ra": ["ra_dec", "ra", "RA", "Right Ascension"],
+            "coords.dec": ["ra_dec", "dec", "DEC", "Declination"],
+        }
+
+        for role in roles:
+            for key in aliases.get(role, [role]):
+                value = settings.get(key)
+                if isinstance(value, str):
+                    if role == "coords.ra" and "," in value:
+                        return value.split(",", 1)[0].strip()
+                    if role == "coords.dec" and "," in value:
+                        return value.split(",", 1)[1].strip()
+                    return value
+
+        return None
+
+    def _columns(self, dataset_id: str) -> List[str]:
+        datasets = getattr(self.context, "datasets", None)
+        if datasets is None:
+            return []
+
+        for method_name in ("list_columns", "columns"):
+            method = getattr(datasets, method_name, None)
+            if callable(method):
+                try:
+                    return list(method(dataset_id))
+                except TypeError:
+                    try:
+                        return list(method())
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+
+        try:
+            df = datasets.get_df(dataset_id)
+            return list(df.columns)
+        except Exception:
+            return []
+
+    def _guess_column(self, dataset_id: str, candidates: Iterable[str]) -> Optional[str]:
+        columns = self._columns(dataset_id)
+        lower_map = {str(col).lower(): str(col) for col in columns}
+
+        for candidate in candidates:
+            if candidate in columns:
+                return candidate
+            found = lower_map.get(str(candidate).lower())
+            if found:
+                return found
+
+        return None
+
+    def _target_column_candidates(self) -> List[str]:
+        if self.source == "DESI":
+            return [
+                "DESI_TargetID",
+                "DESI_targetid",
+                "DESI_specid",
+                "specid",
+                "targetid",
+                "TARGETID",
+                "TARGET_ID",
+            ]
+
+        if self.source == "SDSS":
+            return [
+                "SDSS_TargetID",
+                "SDSS_specid",
+                "specid",
+                "specObjID",
+                "specobjid",
+                "plate_mjd_fiberid",
+            ]
+
+        return [
+            "EuclidSpec_TargetID",
+            "Euclid_source_id",
+            "euclid_source_id",
+            "source_id",
+            "sourceId",
+            "object_id",
+            "SOURCE_ID",
+        ]
+
+    @_timed_method("Spectra")
+    def _refresh_column_options(self) -> None:
+        dataset_id = self._active_dataset_id()
+        columns = self._columns(dataset_id)
+
+        current_target = self.target_id_column.value
+        target_options = ["Auto"] + columns
+        if current_target not in target_options:
+            target_options.append(current_target)
+        self.target_id_column.options = target_options
+        self.target_id_column.value = current_target if current_target in target_options else "Auto"
+
+        current_redshift = self.redshift_column_selector.value
+        redshift_options = ["None"] + columns
+        if current_redshift not in redshift_options:
+            redshift_options.append(current_redshift)
+        self.redshift_column_selector.options = redshift_options
+        self.redshift_column_selector.value = (
+            current_redshift if current_redshift in redshift_options else "None"
+        )
+
+    def _current_row_id(self) -> Optional[str]:
+        if self._result_target is not None:
+            return self._result_target.row_id
+        if self._current_target is not None:
+            return self._current_target.row_id
+
+        focus = self._focus_state()
+        value = self._get_from_obj(focus, "row_id", "record_id", "id", "source_id")
+        return None if value is None else str(value)
+
+    def _target_matches_current_focus(self, target: _ResolvedTarget) -> bool:
+        focus = self._focus_state()
+        if focus is None:
+            return True
+
+        focus_dataset = self._get_from_obj(focus, "dataset_id", "dataset")
+        focus_row_id = self._get_from_obj(focus, "row_id", "record_id", "id", "source_id")
+
+        if focus_dataset is not None and str(focus_dataset) != str(target.dataset_id):
+            return False
+
+        if focus_row_id is not None:
+            if target.row_id is None:
+                return False
+            if str(focus_row_id) != str(target.row_id):
+                return False
+
+        return True
+
+    @_timed_method("Spectra")
+    def _resolve_target(self) -> _ResolvedTarget:
+        dataset_id = self._active_dataset_id()
+        focus = self._focus_state()
+
+        focus_dataset = self._get_from_obj(focus, "dataset_id", "dataset")
+        if focus_dataset:
+            dataset_id = str(focus_dataset)
+
+        metadata = self._get_from_obj(focus, "metadata")
+        if not isinstance(metadata, dict):
+            metadata = {}
+
+        id_column = self._mapping(dataset_id, "record_id", "id", "row_id")
+        ra_column = self._mapping(dataset_id, "coords.ra", "ra") or self._guess_column(
+            dataset_id,
+            ["ra", "RA", "right_ascension", "alpha", "source_ra"],
+        )
+        dec_column = self._mapping(dataset_id, "coords.dec", "dec") or self._guess_column(
+            dataset_id,
+            ["dec", "DEC", "declination", "delta", "source_dec"],
+        )
+
+        if id_column is None:
+            id_column = self._guess_column(
+                dataset_id,
+                ["id", "ID", "source_id", "object_id", "row_id"],
+            )
+
+        row_id = self._get_from_obj(focus, "row_id", "record_id", "id", "source_id")
+        row_pos = self._get_from_obj(
+            focus,
+            "row_position",
+            "row_pos",
+            "row_index",
+            "position",
+            "index",
+        )
+
+        if row_pos is None:
+            row_pos = (
+                metadata.get("row_position")
+                or metadata.get("row_pos")
+                or metadata.get("row_index")
+                or metadata.get("position")
+                or metadata.get("index")
+            )
+
+        required_columns = [col for col in [ra_column, dec_column, id_column] if col]
+        target_column = self._target_id_column(dataset_id)
+        if target_column and target_column not in required_columns:
+            required_columns.append(target_column)
+
+        redshift_column = self.redshift_column_selector.value
+        if redshift_column and redshift_column != "None" and redshift_column not in required_columns:
+            required_columns.append(redshift_column)
+
+        row = None
+
+        for key in ("row", "record", "row_data", "data"):
+            candidate = metadata.get(key)
+            if isinstance(candidate, dict):
+                if row_id is None or id_column is None:
+                    row = dict(candidate)
+                    break
+                candidate_id = candidate.get(id_column)
+                if candidate_id is not None and str(candidate_id) == str(row_id):
+                    row = dict(candidate)
+                    break
+
+        if row is None:
+            row = self._fetch_row(
+                dataset_id,
+                id_column=id_column,
+                row_id=row_id,
+                row_pos=row_pos,
+                required_columns=required_columns,
+            )
+
+        if row is None:
+            row = self._row_from_legacy_data(
+                id_column=id_column,
+                row_id=row_id,
+                allow_first_row=(row_id is None),
+            )
+
+        if row is None:
+            raise RuntimeError("No focused row is available for the spectra panel.")
+
+        if row_id is None and id_column and id_column != "Use Index" and id_column in row:
+            row_id = row.get(id_column)
+
+        row_id_str = None if row_id is None else str(row_id)
+
+        retrieval_mode = self.retrieve_mode.value
+        source_id = None
+        ra = None
+        dec = None
+
+        if retrieval_mode == "Use TargetId":
+            source_id = self._target_id_from_row(dataset_id, row, target_column)
+            if source_id is None:
+                raise RuntimeError(
+                    f"{self.source_label} target-id mode requires a target/spec ID column."
+                )
+
+        if ra_column and dec_column and ra_column in row and dec_column in row:
+            ra = _safe_float(row.get(ra_column))
+            dec = _safe_float(row.get(dec_column))
+
+        if retrieval_mode == "Cone Search":
+            if ra is None or dec is None:
+                raise RuntimeError(
+                    "Cone-search spectrum retrieval requires mapped numeric `coords.ra` and `coords.dec`."
+                )
+
+        return _ResolvedTarget(
+            dataset_id=dataset_id,
+            row_id=row_id_str,
+            row=dict(row),
+            ra=ra,
+            dec=dec,
+            source_id=source_id,
+            id_column=id_column,
+            ra_column=ra_column,
+            dec_column=dec_column,
+            target_id_column=target_column,
+            retrieval_mode=retrieval_mode,
+        )
+
+    def _target_id_column(self, dataset_id: str) -> Optional[str]:
+        selected = self.target_id_column.value
+        if selected and selected != "Auto":
+            return selected
+
+        semantic_role = {
+            "DESI": "spectra.desi_target_id",
+            "SDSS": "spectra.sdss_target_id",
+            "EuclidSpec": "spectra.euclid_source_id",
+        }.get(self.source)
+
+        if semantic_role:
+            mapped = self._mapping(dataset_id, semantic_role)
+            if mapped:
+                return mapped
+
+        return self._guess_column(dataset_id, self._target_column_candidates())
+
+    def _target_id_from_row(
+        self,
+        dataset_id: str,
+        row: Dict[str, Any],
+        target_column: Optional[str],
+    ) -> Optional[Any]:
+        if target_column and target_column in row:
+            value = row.get(target_column)
+            if value is not None and str(value).strip():
+                return value
+
+        for candidate in self._target_column_candidates():
+            if candidate in row:
+                value = row.get(candidate)
+                if value is not None and str(value).strip():
+                    return value
+
+        return None
+
+    def _row_from_legacy_data(
+        self,
+        *,
+        id_column: Optional[str],
+        row_id: Any,
+        allow_first_row: bool = False,
+    ) -> Optional[Dict[str, Any]]:
+        data = self.data
+        if data is None:
+            return None
+
+        try:
+            if hasattr(data, "iloc") and len(data) > 0:
+                if row_id is not None and id_column:
+                    if id_column == "Use Index":
+                        matches = data.loc[data.index.astype(str) == str(row_id)]
+                    elif id_column in data.columns:
+                        matches = data[data[id_column].astype(str) == str(row_id)]
+                    else:
+                        return None
+
+                    if len(matches) > 0:
+                        return matches.iloc[0].to_dict()
+                    return None
+
+                if allow_first_row:
+                    return data.iloc[0].to_dict()
+
+            if isinstance(data, dict):
+                if row_id is not None and id_column and id_column in data:
+                    if str(data[id_column]) != str(row_id):
+                        return None
+                return dict(data)
+        except Exception:
+            return None
+
+        return None
+
+    def _fetch_row(
+        self,
+        dataset_id: str,
+        *,
+        id_column: Optional[str],
+        row_id: Any,
+        row_pos: Any,
+        required_columns: Optional[List[str]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        datasets = getattr(self.context, "datasets", None)
+        if datasets is None:
+            return None
+
+        columns: List[str] = []
+        for col in required_columns or []:
+            if col and col != "Use Index" and col not in columns:
+                columns.append(col)
+
+        source = None
+        for method_name in ("get_source", "source"):
+            method = getattr(datasets, method_name, None)
+            if callable(method):
+                try:
+                    source = method(dataset_id)
+                    break
+                except Exception:
+                    pass
+
+        if source is not None:
+            row = self._fetch_row_from_source(
+                source,
+                id_column=id_column,
+                row_id=row_id,
+                row_pos=row_pos,
+                columns=columns,
+            )
+            if row is not None:
+                return row
+
+        try:
+            df = datasets.get_df(dataset_id)
+
+            if row_id is not None and id_column:
+                if id_column == "Use Index":
+                    matches = df.loc[df.index.astype(str) == str(row_id)]
+                    if len(matches) > 0:
+                        return matches.iloc[0].to_dict()
+
+                elif id_column in df.columns:
+                    matches = df[df[id_column].astype(str) == str(row_id)]
+                    if len(matches) > 0:
+                        return matches.iloc[0].to_dict()
+
+            if row_pos is not None:
+                return df.iloc[int(row_pos)].to_dict()
+
+            return None
+        except Exception:
+            traceback.print_exc()
+            return None
+
+    @staticmethod
+    def _normalise_rows(result: Any) -> Optional[Dict[str, Any]]:
+        if result is None:
+            return None
+
+        try:
+            if hasattr(result, "to_pandas"):
+                result = result.to_pandas()
+        except Exception:
+            pass
+
+        try:
+            if hasattr(result, "iloc") and len(result) > 0:
+                return result.iloc[0].to_dict()
+        except Exception:
+            pass
+
+        if isinstance(result, list) and result:
+            first = result[0]
+            if isinstance(first, dict):
+                return first
+
+        if isinstance(result, dict):
+            return result
+
+        return None
+
+    def _fetch_row_from_source(
+        self,
+        source: Any,
+        *,
+        id_column: Optional[str],
+        row_id: Any,
+        row_pos: Any,
+        columns: List[str],
+    ) -> Optional[Dict[str, Any]]:
+        if row_id is not None and id_column:
+            method = getattr(source, "get_row_by_id", None)
+            if callable(method):
+                try:
+                    row = self._normalise_rows(
+                        method(row_id, id_column=id_column, columns=columns or None)
+                    )
+                    if row is not None:
+                        return row
+                except Exception:
+                    pass
+
+            method = getattr(source, "get_rows_by_ids", None)
+            if callable(method):
+                try:
+                    row = self._normalise_rows(
+                        method([row_id], id_column=id_column, columns=columns or None)
+                    )
+                    if row is not None:
+                        return row
+                except Exception:
+                    pass
+
+            attempts = [
+                ("get_rows_by_id", {"row_ids": [row_id], "id_column": id_column, "columns": columns}),
+                ("read_rows_by_id", {"row_ids": [row_id], "id_column": id_column, "columns": columns}),
+                ("rows_by_id", {"row_ids": [row_id], "id_column": id_column, "columns": columns}),
+                ("get_rows", {"row_ids": [row_id], "id_column": id_column, "columns": columns}),
+            ]
+
+            for name, kwargs in attempts:
+                method = getattr(source, name, None)
+                if callable(method):
+                    for call_kwargs in (
+                        kwargs,
+                        {k: v for k, v in kwargs.items() if k != "columns"},
+                    ):
+                        try:
+                            row = self._normalise_rows(method(**call_kwargs))
+                            if row is not None:
+                                return row
+                        except TypeError:
+                            continue
+                        except Exception:
+                            continue
+
+        if row_pos is not None:
+            method = getattr(source, "get_row_by_position", None)
+            if callable(method):
+                try:
+                    row = self._normalise_rows(method(int(row_pos), columns=columns or None))
+                    if row is not None:
+                        return row
+                except Exception:
+                    pass
+
+            attempts = [
+                ("get_rows", {"row_positions": [row_pos], "columns": columns}),
+                ("read_rows", {"row_positions": [row_pos], "columns": columns}),
+                ("take", {"indices": [row_pos], "columns": columns}),
+            ]
+
+            for name, kwargs in attempts:
+                method = getattr(source, name, None)
+                if callable(method):
+                    for call_kwargs in (
+                        kwargs,
+                        {k: v for k, v in kwargs.items() if k != "columns"},
+                    ):
+                        try:
+                            row = self._normalise_rows(method(**call_kwargs))
+                            if row is not None:
+                                return row
+                        except TypeError:
+                            continue
+                        except Exception:
+                            continue
+
+        return None
+
+    # ------------------------------------------------------------------
+    # Loading
+    # ------------------------------------------------------------------
+
+    def _runtime(self) -> SpectraRuntime:
+        services = getattr(self.context, "services", None)
+        if services is not None:
+            try:
+                if services.has(RUNTIME_SERVICE_KEY):
+                    return services.get(RUNTIME_SERVICE_KEY)
+            except Exception:
+                pass
+
+        return SpectraRuntime(context=self.context)
+
+    def _schedule_initial_load(self) -> None:
+        if self._initial_load_started:
+            return
+
+        self._initial_load_started = True
+
+        def _run() -> None:
+            self._refresh_column_options()
+            self._update_target_status()
+            if self.auto_reload.value:
+                self.load_spectra(reason="initial")
+
+        try:
+            doc = pn.state.curdoc
+            if doc is not None:
+                doc.add_next_tick_callback(_run)
+            else:
+                _run()
+        except Exception:
+            _run()
+
+    def _datasets_for_source(self) -> List[str]:
+        if self.source == "DESI":
+            return DESI_DATASETS
+        if self.source == "SDSS":
+            return SDSS_DATASETS
+        return ["Euclid-Q1"]
+
+    def _redshift_from_row(self, target: _ResolvedTarget) -> Optional[float]:
+        column = self.redshift_column_selector.value
+        if not column or column == "None":
+            return _safe_float(self.redshift_input.value)
+
+        value = _safe_float(target.row.get(column))
+        if value is not None:
+            return value
+
+        return _safe_float(self.redshift_input.value)
+
+    def _publish_running(
+        self,
+        running: bool,
+        *,
+        target: Optional[_ResolvedTarget],
+        reason: str,
+        error: Optional[BaseException] = None,
+    ) -> None:
+        payload: Dict[str, Any] = {
+            "source": self.source,
+            "running": bool(running),
+            "panel_id": self.panel_id,
+            "reason": str(reason or ""),
+        }
+        if target is not None:
+            payload.update(
+                {
+                    "dataset_id": target.dataset_id,
+                    "selected_id": target.row_id,
+                }
+            )
+        if error is not None:
+            payload["error"] = str(error)
+        self._publish("astro.spectra.running", payload)
+
+    @_timed_method("Spectra")
+    def load_spectra(self, *, reason: str = "manual") -> None:
+        """Queue the latest requested spectrum without overlapping archive calls."""
+
+        if self._disposed:
+            return
+
+        try:
+            target = self._resolve_target()
+        except Exception as exc:
+            self.status.object = f"**Spectrum unavailable:** {exc}"
+            if self._spectra_result is None:
+                self._show_figure_message("Spectrum unavailable.", clear_plot=True)
+            return
+
+        self._request_generation += 1
+        request = _SpectraFetchRequest(
+            generation=self._request_generation,
+            target=target,
+            reason=str(reason or "manual"),
+            max_separation_arcsec=float(self.max_separation_input.value),
+            datasets=tuple(self._datasets_for_source()),
+            smooth_kernel=str(self.smoothing_function_input.value),
+            smooth_window=int(self.smoothing_window_input.value),
+            redshift=self._redshift_from_row(target),
+        )
+        self._current_target = target
+        self._pending_fetch_request = request
+        self.target_status.object = self._target_html(target)
+
+        if self._active_fetch_request is not None:
+            self._request_fetch_cancellation()
+            self.status.object = (
+                "Latest source queued; waiting for the previous archive request "
+                "to finish…"
+            )
+            if self._spectra_result is None:
+                self._show_figure_message("Latest source queued…", clear_plot=True)
+            return
+
+        self._start_pending_fetch()
+
+    @_timed_method("Spectra")
+    def _start_pending_fetch(self) -> None:
+        if self._disposed or self._active_fetch_request is not None:
+            return
+
+        request = self._pending_fetch_request
+        self._pending_fetch_request = None
+        if request is None:
+            return
+
+        if (
+            request.generation != self._request_generation
+            or not self._target_matches_current_focus(request.target)
+        ):
+            return
+
+        self._start_fetch(request)
+
+    @_timed_method("Spectra")
+    def _start_fetch(self, request: _SpectraFetchRequest) -> None:
+        self._active_fetch_request = request
+        self._fetch_job_handle = None
+        self.status.object = "Loading spectrum…"
+        self.target_status.object = self._target_html(request.target)
+        if self._spectra_result is None:
+            self._show_figure_message("Loading spectrum…", clear_plot=True)
+
+        self._publish_running(
+            True,
+            target=request.target,
+            reason=request.reason,
+        )
+
+        runtime_started_at = time.perf_counter()
+        runtime = self._runtime()
+        _timing_log(
+            "Spectra",
+            "runtime.acquire",
+            elapsed_ms=(time.perf_counter() - runtime_started_at) * 1000.0,
+            force=True,
+            panel_id=self.panel_id,
+            source=self.source,
+            generation=request.generation,
+            row_id=request.target.row_id,
+        )
+
+        timing_state: Dict[str, float] = {
+            "queued_at": time.perf_counter(),
+        }
+
+        def _worker(cancel_token: Any = None) -> SpectraResult:
+            worker_started_at = time.perf_counter()
+            timing_state["worker_started_at"] = worker_started_at
+            try:
+                return runtime.fetch_spectra(
+                    source=self.source,
+                    ra=request.target.ra,
+                    dec=request.target.dec,
+                    source_id=request.target.source_id,
+                    max_separation_arcsec=request.max_separation_arcsec,
+                    datasets=list(request.datasets),
+                    smooth_kernel=request.smooth_kernel,
+                    smooth_window=request.smooth_window,
+                    redshift_override=request.redshift,
+                    query_euclid_redshift=False,
+                    cancel_token=cancel_token,
+                )
+            finally:
+                finished_at = time.perf_counter()
+                timing_state["worker_finished_at"] = finished_at
+                _timing_log(
+                    "Spectra",
+                    "job.worker",
+                    elapsed_ms=(finished_at - worker_started_at) * 1000.0,
+                    force=True,
+                    panel_id=self.panel_id,
+                    source=self.source,
+                    generation=request.generation,
+                    dataset_id=request.target.dataset_id,
+                    row_id=request.target.row_id,
+                    executor_queue_ms=(worker_started_at - timing_state["queued_at"]) * 1000.0,
+                )
+
+        def _done(result: SpectraResult) -> None:
+            callback_started_at = time.perf_counter()
+            worker_finished_at = timing_state.get("worker_finished_at", callback_started_at)
+            _timing_log(
+                "Spectra",
+                "job.callback_delivery",
+                elapsed_ms=(callback_started_at - worker_finished_at) * 1000.0,
+                force=True,
+                panel_id=self.panel_id,
+                source=self.source,
+                callback="done",
+                generation=request.generation,
+                dataset_id=request.target.dataset_id,
+                row_id=request.target.row_id,
+            )
+            self._on_spectra_loaded(result, request=request)
+
+        def _error(exc: BaseException) -> None:
+            callback_started_at = time.perf_counter()
+            worker_finished_at = timing_state.get("worker_finished_at", callback_started_at)
+            _timing_log(
+                "Spectra",
+                "job.callback_delivery",
+                elapsed_ms=(callback_started_at - worker_finished_at) * 1000.0,
+                force=True,
+                panel_id=self.panel_id,
+                source=self.source,
+                callback="error",
+                generation=request.generation,
+                dataset_id=request.target.dataset_id,
+                row_id=request.target.row_id,
+                error_type=type(exc).__name__,
+            )
+            self._on_spectra_error(exc, request=request)
+
+        jobs = getattr(self.context, "jobs", None)
+        if jobs is None:
+            try:
+                _done(_worker(cancel_token=None))
+            except BaseException as exc:
+                _error(exc)
+            return
+
+        key = (
+            f"{self.panel_id}:{request.target.dataset_id}:"
+            f"{request.target.row_id}:{request.target.retrieval_mode}:"
+            f"{request.target.source_id}:{request.target.ra}:"
+            f"{request.target.dec}:{request.max_separation_arcsec}:"
+            f"{self.source}:{request.generation}"
+        )
+
+        submit_started_at = time.perf_counter()
+        try:
+            handle = jobs.submit(
+                _worker,
+                title=f"Fetch {self.source_label} spectra",
+                key=key,
+                on_done=_done,
+                on_error=_error,
+            )
+        except BaseException as exc:
+            _timing_log(
+                "Spectra",
+                "job.submit",
+                elapsed_ms=(time.perf_counter() - submit_started_at) * 1000.0,
+                force=True,
+                panel_id=self.panel_id,
+                source=self.source,
+                generation=request.generation,
+                dataset_id=request.target.dataset_id,
+                row_id=request.target.row_id,
+                error_type=type(exc).__name__,
+            )
+            self._on_spectra_error(exc, request=request)
+            return
+
+        _timing_log(
+            "Spectra",
+            "job.submit",
+            elapsed_ms=(time.perf_counter() - submit_started_at) * 1000.0,
+            force=True,
+            panel_id=self.panel_id,
+            source=self.source,
+            generation=request.generation,
+            dataset_id=request.target.dataset_id,
+            row_id=request.target.row_id,
+            job_id=getattr(handle, "job_id", None),
+        )
+
+        if self._active_fetch_request is request:
+            self._fetch_job_handle = handle
+        else:
+            try:
+                handle.cancel()
+            except Exception:
+                pass
+
+    @_timed_method("Spectra")
+    def _request_fetch_cancellation(self) -> None:
+        """Ask the active fetch to stop without forgetting its ownership."""
+
+        handle = self._fetch_job_handle
+        if handle is None:
+            return
+        try:
+            handle.cancel()
+        except Exception:
+            pass
+
+    @_timed_method("Spectra")
+    def _request_aux_cancellation(self) -> None:
+        handle = self._aux_job_handle
+        if handle is None:
+            return
+        try:
+            handle.cancel()
+        except Exception:
+            pass
+
+    def _cancel_job(self) -> None:
+        """Cancel all panel-owned jobs during disposal."""
+
+        for handle in (self._fetch_job_handle, self._aux_job_handle):
+            if handle is None:
+                continue
+            try:
+                handle.cancel()
+            except Exception:
+                pass
+
+        self._fetch_job_handle = None
+        self._aux_job_handle = None
+        self._active_fetch_request = None
+
+    def _finish_fetch(self, request: _SpectraFetchRequest) -> bool:
+        if self._active_fetch_request is not request:
+            return False
+
+        self._fetch_job_handle = None
+        self._active_fetch_request = None
+        return True
+
+    def _request_is_current(self, request: _SpectraFetchRequest) -> bool:
+        return bool(
+            not self._disposed
+            and request.generation == self._request_generation
+            and self._target_matches_current_focus(request.target)
+        )
+
+    @_timed_method("Spectra")
+    def _on_spectra_loaded(
+        self,
+        result: SpectraResult,
+        *,
+        request: _SpectraFetchRequest,
+    ) -> None:
+        was_active = self._finish_fetch(request)
+        if not was_active:
+            return
+
+        if not self._request_is_current(request):
+            self._publish_running(
+                False,
+                target=request.target,
+                reason="stale_result",
+            )
+            self._start_pending_fetch()
+            return
+
+        self._spectra_result = result
+        self._result_target = request.target
+        self._current_target = request.target
+        self.status.object = ""
+        self._render_existing_result()
+
+        spectrum_artifact_id, coords_artifact_id = self._publish_spectrum_artifacts(
+            result,
+            target=request.target,
+        )
+
+        self._publish(
+            "astro.spectra.updated",
+            {
+                "source": self.source,
+                "artifact_id": spectrum_artifact_id,
+                "coords_artifact_id": coords_artifact_id,
+                "panel_id": self.panel_id,
+                "dataset_id": request.target.dataset_id,
+                "selected_id": request.target.row_id,
+                "ra": request.target.ra,
+                "dec": request.target.dec,
+                "reason": request.reason,
+                "available_spectra": result.available_spectra,
+            },
+        )
+
+        self._publish_running(
+            False,
+            target=request.target,
+            reason="completed",
+        )
+        self._start_pending_fetch()
+
+    @_timed_method("Spectra")
+    def _on_spectra_error(
+        self,
+        exc: BaseException,
+        *,
+        request: _SpectraFetchRequest,
+    ) -> None:
+        was_active = self._finish_fetch(request)
+        if not was_active:
+            return
+
+        current = self._request_is_current(request)
+        cancelled = isinstance(exc, CancelledError) or not current
+
+        if cancelled:
+            self._publish_running(
+                False,
+                target=request.target,
+                reason="cancelled" if isinstance(exc, CancelledError) else "stale_result",
+            )
+            self._start_pending_fetch()
+            return
+
+        self.status.object = f"**Spectrum unavailable:** {exc}"
+        if self._spectra_result is None:
+            self._show_figure_message("Spectrum unavailable.", clear_plot=True)
+
+        self._publish_running(
+            False,
+            target=request.target,
+            reason=request.reason,
+            error=exc,
+        )
+        self._start_pending_fetch()
+
+    # ------------------------------------------------------------------
+    # Rendering / artifacts
+    # ------------------------------------------------------------------
+
+    @_timed_method("Spectra")
+    def _apply_redshift_controls(self) -> None:
+        result = self._spectra_result
+        target = self._result_target
+        if result is None or target is None:
+            return
+
+        redshift = self._redshift_from_row(target)
+        if redshift is None:
+            return
+
+        obj = result.spectra_object
+        if obj is None or not hasattr(obj, "_update_info_spectra"):
+            return
+
+        try:
+            obj._update_info_spectra("redshift", redshift)
+            obj._update_info_spectra("spectype", "galaxy" if redshift > 0 else "star")
+        except Exception:
+            pass
+
+    def _update_smoothing_and_render(self,_event: Any = None) -> None:
+        result = self._spectra_result
+        if result is None:
+            return
+        obj = result.spectra_object
+        if obj is None or not hasattr(obj, "get_smoothed_spectra"):
+            return
+        kernel = str(self.smoothing_function_input.value)
+        window = int(self.smoothing_window_input.value)
+
+        try:
+            obj.get_smoothed_spectra(kernel=kernel,window=window,)
+            result.smooth_kernel = kernel
+            result.smooth_window = window
+            self._render_existing_result()
+
+        except Exception as exc:
+            self.status.object = (f"**Could not smooth spectrum:** {exc}")
+
+    @staticmethod
+    def _is_gridplot_design_error(exc: BaseException) -> bool:
+        message = str(exc)
+        return (
+            "unexpected attribute 'design'" in message
+            and "GridPlot" in message
+        )
+
+    def _spectrum_pane_is_mounted(self) -> bool:
+        """Return whether Panel has materialised the pane for this session."""
+        models = getattr(self.spectrum_pane, "_models", None)
+        if not models:
+            return False
+        try:
+            return any(
+                model is not None
+                for model, _parent in models.values()
+            )
+        except Exception:
+            return bool(models)
+
+    def _neutralise_plot_pane_design_override(self) -> None:
+        """Prevent Panel design metadata being forwarded to a Bokeh GridPlot.
+
+        HoloViews still receives the document/theme through its renderer.  This
+        only clears the layout-level ``design`` override on the nested plot pane,
+        which Bokeh GridPlot does not define as a model property.
+        """
+        try:
+            params = getattr(self.spectrum_pane, "param", None)
+            if params is not None and "design" in params:
+                self.spectrum_pane.design = None
+        except Exception:
+            pass
+
+    def _apply_spectrum_plot_now(self, plot: Any) -> None:
+        self._neutralise_plot_pane_design_override()
+        self.spectrum_pane.object = plot
+        self.spectrum_pane.visible = True
+        self.figure_message.visible = False
+        self.status.object = ""
+
+    def _schedule_pending_plot_assignment(self) -> None:
+        if self._plot_assignment_retry_scheduled or self._disposed:
+            return
+
+        try:
+            document = pn.state.curdoc
+        except Exception:
+            document = None
+        if document is None:
+            _timing_log(
+                "Spectra",
+                "plot.assign.deferred",
+                force=True,
+                panel_id=self.panel_id,
+                source=self.source,
+                generation=self._request_generation,
+                attempt=self._plot_assignment_retry_attempt,
+                reason="no_document_for_retry",
+            )
+            return
+
+        self._plot_assignment_retry_scheduled = True
+        delay_ms = min(250, 35 + (self._plot_assignment_retry_attempt * 15))
+
+        def _retry() -> None:
+            self._plot_assignment_retry_scheduled = False
+            pending = self._pending_plot_assignment
+            if pending is None or self._disposed:
+                return
+
+            generation, plot = pending
+            if generation != self._request_generation:
+                self._pending_plot_assignment = None
+                self._plot_assignment_retry_attempt = 0
+                return
+
+            if not self._spectrum_pane_is_mounted():
+                self._plot_assignment_retry_attempt += 1
+                _timing_log(
+                    "Spectra",
+                    "plot.assign.deferred",
+                    force=True,
+                    panel_id=self.panel_id,
+                    source=self.source,
+                    generation=generation,
+                    attempt=self._plot_assignment_retry_attempt,
+                    reason="pane_not_mounted",
+                    plot_type=type(plot).__name__,
+                )
+                self._schedule_pending_plot_assignment()
+                return
+
+            started_at = time.perf_counter()
+            try:
+                self._apply_spectrum_plot_now(plot)
+            except Exception as exc:
+                if self._is_gridplot_design_error(exc):
+                    self._plot_assignment_retry_attempt += 1
+                    _timing_log(
+                        "Spectra",
+                        "plot.assign.deferred",
+                        elapsed_ms=(time.perf_counter() - started_at) * 1000.0,
+                        force=True,
+                        panel_id=self.panel_id,
+                        source=self.source,
+                        generation=generation,
+                        attempt=self._plot_assignment_retry_attempt,
+                        reason="gridplot_design_race",
+                        plot_type=type(plot).__name__,
+                    )
+                    self._schedule_pending_plot_assignment()
+                    return
+                self._pending_plot_assignment = None
+                self._plot_assignment_retry_attempt = 0
+                raise
+
+            self._pending_plot_assignment = None
+            self._plot_assignment_retry_attempt = 0
+            _timing_log(
+                "Spectra",
+                "plot.assign.retry_success",
+                elapsed_ms=(time.perf_counter() - started_at) * 1000.0,
+                force=True,
+                panel_id=self.panel_id,
+                source=self.source,
+                generation=generation,
+                plot_type=type(plot).__name__,
+            )
+            _schedule_document_probe(
+                "Spectra",
+                "after_spectrum_render",
+                panel_id=self.panel_id,
+                source=self.source,
+                generation=generation,
+                row_id=getattr(self._result_target, "row_id", None),
+            )
+
+        self._schedule_panel_callback(
+            _retry,
+            delay_ms=delay_ms,
+            label="spectra.plot_assignment_retry",
+        )
+
+    @_timed_method("Spectra")
+    def _assign_spectrum_plot(self, plot: Any) -> bool:
+        generation = int(self._request_generation)
+
+        if not self._spectrum_pane_is_mounted():
+            self._pending_plot_assignment = (generation, plot)
+            self._plot_assignment_retry_attempt = 0
+            self._schedule_pending_plot_assignment()
+            _timing_log(
+                "Spectra",
+                "plot.assign.deferred",
+                force=True,
+                panel_id=self.panel_id,
+                source=self.source,
+                generation=generation,
+                attempt=0,
+                reason="pane_not_mounted",
+                plot_type=type(plot).__name__,
+            )
+            return False
+
+        try:
+            self._apply_spectrum_plot_now(plot)
+            return True
+        except Exception as exc:
+            if not self._is_gridplot_design_error(exc):
+                raise
+
+            # The pane can become mounted during the same layout-restoration
+            # tick in which the template design is propagated.  Retry after
+            # that tick instead of exposing a transient first-render failure.
+            self._pending_plot_assignment = (generation, plot)
+            self._plot_assignment_retry_attempt = 1
+            self._schedule_pending_plot_assignment()
+            _timing_log(
+                "Spectra",
+                "plot.assign.deferred",
+                force=True,
+                panel_id=self.panel_id,
+                source=self.source,
+                generation=generation,
+                attempt=1,
+                reason="gridplot_design_race",
+                plot_type=type(plot).__name__,
+            )
+            return False
+
+    @_timed_method("Spectra")
+    def _render_existing_result(self) -> None:
+        result = self._spectra_result
+        if result is None:
+            return
+
+        total_started_at = time.perf_counter()
+        redshift_ms = 0.0
+        plot_hv_ms = 0.0
+        assign_ms = 0.0
+        error_type: Optional[str] = None
+        try:
+            phase_started_at = time.perf_counter()
+            self._apply_redshift_controls()
+            redshift_ms = (time.perf_counter() - phase_started_at) * 1000.0
+
+            plot_lines = "class" if self.plot_lines_checkbox.value else False
+            phase_started_at = time.perf_counter()
+            plot = result.plot_hv(
+                plot_model=bool(self.plot_model_checkbox.value),
+                plot_lines=plot_lines,
+                responsive=True,
+            )
+            plot_hv_ms = (time.perf_counter() - phase_started_at) * 1000.0
+
+            phase_started_at = time.perf_counter()
+            assigned = self._assign_spectrum_plot(plot)
+            assign_ms = (time.perf_counter() - phase_started_at) * 1000.0
+            if assigned:
+                _schedule_document_probe(
+                    "Spectra",
+                    "after_spectrum_render",
+                    panel_id=self.panel_id,
+                    source=self.source,
+                    generation=self._request_generation,
+                    row_id=getattr(self._result_target, "row_id", None),
+                )
+        except Exception as exc:
+            error_type = type(exc).__name__
+            self.status.object = f"**Could not render spectrum:** {exc}"
+            if not self.spectrum_pane.visible:
+                self._show_figure_message(
+                    "Could not render spectrum.",
+                    clear_plot=True,
+                )
+        finally:
+            _timing_log(
+                "Spectra",
+                "render.phases",
+                elapsed_ms=(time.perf_counter() - total_started_at) * 1000.0,
+                force=True,
+                panel_id=self.panel_id,
+                source=self.source,
+                generation=self._request_generation,
+                row_id=getattr(self._result_target, "row_id", None),
+                redshift_ms=redshift_ms,
+                plot_hv_ms=plot_hv_ms,
+                assign_ms=assign_ms,
+                error_type=error_type,
+            )
+
+    @_timed_method("Spectra")
+    def _publish_spectrum_artifacts(
+        self,
+        result: SpectraResult,
+        *,
+        target: _ResolvedTarget,
+    ) -> Tuple[Optional[str], Optional[str]]:
+        artifacts = getattr(self.context, "artifacts", None)
+        if artifacts is None:
+            return None, None
+
+        total_started_at = time.perf_counter()
+        spectrum_artifact_id = None
+        coords_artifact_id = None
+        payload_ms = 0.0
+        coords_payload_ms = 0.0
+        spectrum_put_ms = 0.0
+        coords_put_ms = 0.0
+        coords_publish_ms = 0.0
+
+        phase_started_at = time.perf_counter()
+        spectrum_payload = result.artifact_payload()
+        payload_ms = (time.perf_counter() - phase_started_at) * 1000.0
+
+        phase_started_at = time.perf_counter()
+        coords = result.coordinates_payload()
+        coords_payload_ms = (time.perf_counter() - phase_started_at) * 1000.0
+        coordinate_count = min(len(coords.get("ra", [])), len(coords.get("dec", [])))
+
+        phase_started_at = time.perf_counter()
+        try:
+            spectrum_artifact_id = artifacts.put(
+                "astro.spectra",
+                spectrum_payload,
+                dataset_id=target.dataset_id,
+                row_ids=[target.row_id] if target.row_id is not None else None,
+                params={
+                    "source": self.source,
+                    "selected_id": target.row_id,
+                    "retrieval_mode": target.retrieval_mode,
+                    "target_id_column": target.target_id_column,
+                    "source_id": target.source_id,
+                },
+                persist=False,
+            )
+        except Exception:
+            traceback.print_exc()
+        spectrum_put_ms = (time.perf_counter() - phase_started_at) * 1000.0
+
+        if coordinate_count:
+            phase_started_at = time.perf_counter()
+            try:
+                coords_artifact_id = artifacts.put(
+                    "astro.coords",
+                    coords,
+                    dataset_id=target.dataset_id,
+                    row_ids=[target.row_id] if target.row_id is not None else None,
+                    params={
+                        "source": self.source,
+                        "selected_id": target.row_id,
+                        "coordinate_count": coordinate_count,
+                    },
+                    persist=False,
+                )
+            except Exception:
+                traceback.print_exc()
+            coords_put_ms = (time.perf_counter() - phase_started_at) * 1000.0
+
+            if coords_artifact_id is not None:
+                phase_started_at = time.perf_counter()
+                self._publish(
+                    "astro.coords.updated",
+                    {
+                        "source": self.source,
+                        "artifact_id": coords_artifact_id,
+                        "spectrum_artifact_id": spectrum_artifact_id,
+                        "dataset_id": target.dataset_id,
+                        "selected_id": target.row_id,
+                        "coordinate_count": coordinate_count,
+                        "colors": coords.get("colors", []),
+                        "colours": coords.get("colours", []),
+                        "labels": coords.get("labels", []),
+                        "points": coords.get("points", []),
+                    },
+                )
+                coords_publish_ms = (time.perf_counter() - phase_started_at) * 1000.0
+
+        _timing_log(
+            "Spectra",
+            "artifacts.phases",
+            elapsed_ms=(time.perf_counter() - total_started_at) * 1000.0,
+            force=True,
+            panel_id=self.panel_id,
+            source=self.source,
+            dataset_id=target.dataset_id,
+            row_id=target.row_id,
+            generation=self._request_generation,
+            coordinate_count=coordinate_count,
+            payload_ms=payload_ms,
+            coords_payload_ms=coords_payload_ms,
+            spectrum_put_ms=spectrum_put_ms,
+            coords_put_ms=coords_put_ms,
+            coords_publish_ms=coords_publish_ms,
+        )
+        return spectrum_artifact_id, coords_artifact_id
+
+    # ------------------------------------------------------------------
+    # Actions/callbacks
+    # ------------------------------------------------------------------
+
+    def _retrieve_mode_changed(self, event: Any) -> None:
+        is_target_mode = event.new == "Use TargetId"
+        self.max_separation_input.disabled = is_target_mode
+        self.target_id_column.disabled = not is_target_mode
+
+        if self.auto_reload.value:
+            self.load_spectra(reason="spectrum.retrieve_mode.changed")
+
+    def _update_redshift_from_input(self, _event)->None:
+        value = _event.new
+        if value is None:
+            return
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            return
+        if not np.isfinite(value) or value < 0:
+            return
+        if self._spectra_result is None:
+            return
+        obj = self._spectra_result.spectra_object
+        if obj is None:
+            return
+        if hasattr(obj, "_update_info_spectra"):
+            self.plot_lines_checkbox.disabled = False
+            obj._update_info_spectra('redshift', value)
+
+    def _query_euclid_redshift(self, _event: Any = None) -> None:
+        if self.source != "EuclidSpec" or self._spectra_result is None:
+            return
+
+        obj = self._spectra_result.spectra_object
+        if obj is None:
+            return
+        self.status.object = "Querying Euclid redshift table…"
+        query_generation = self._request_generation
+        query_target = self._result_target
+
+        def _worker(cancel_token: Any = None) -> SpectraResult:
+            if hasattr(obj, "query_specz_table"):
+                obj.query_specz_table(verbose=True)
+            if hasattr(obj, "update_info_from_query"):
+                obj.update_info_from_query()
+            try:
+                obj.get_smoothed_spectra(
+                    kernel=self.smoothing_function_input.value,
+                    window=int(self.smoothing_window_input.value),
+                )
+            except Exception:
+                pass
+            return self._spectra_result
+
+        def _done(result: SpectraResult) -> None:
+            self._aux_job_handle = None
+            if (
+                self._disposed
+                or query_generation != self._request_generation
+                or self._result_target is not query_target
+            ):
+                return
+            self.status.object = ""
+            self._render_existing_result()
+            if self._result_target is not None:
+                self._publish_spectrum_artifacts(result, target=self._result_target)
+
+        def _error(exc: BaseException) -> None:
+            self._aux_job_handle = None
+            if (
+                self._disposed
+                or query_generation != self._request_generation
+                or self._result_target is not query_target
+            ):
+                return
+            self.status.object = f"**Could not query Euclid redshift:** {exc}"
+
+        jobs = getattr(self.context, "jobs", None)
+        if jobs is None:
+            try:
+                _done(_worker(cancel_token=None))
+            except BaseException as exc:
+                _error(exc)
+            return
+
+        self._aux_job_handle = jobs.submit(
+            _worker,
+            title="Query Euclid spectrum redshift",
+            key=f"{self.panel_id}:euclid-redshift:{self._current_row_id()}",
+            on_done=_done,
+            on_error=_error,
+        )
+
+    def _target_html(self, target: _ResolvedTarget) -> str:
+        pieces = [
+            f"<b>Source:</b> <code>{self.source_label}</code>",
+            f"<b>Dataset:</b> <code>{target.dataset_id}</code>",
+            f"<b>Record:</b> <code>{target.row_id or 'unmapped'}</code>",
+            f"<b>Mode:</b> <code>{target.retrieval_mode}</code>",
+        ]
+
+        if target.source_id is not None:
+            pieces.append(f"<b>Target:</b> <code>{target.source_id}</code>")
+
+        if target.ra is not None and target.dec is not None:
+            pieces.append(f"<b>RA/Dec:</b> <code>{target.ra:.6f}, {target.dec:.6f}</code>")
+
+        return "<div>" + " &nbsp; ".join(pieces) + "</div>"
+
+    def _update_target_status(self) -> None:
+        try:
+            target = self._resolve_target()
+            self._current_target = target
+            self.target_status.object = self._target_html(target)
+        except Exception as exc:
+            self.target_status.object = f"<div style='color:#8a5a00'>⚠️ {exc}</div>"
+
+    # ------------------------------------------------------------------
+    # Artifact viewer helpers
+    # ------------------------------------------------------------------
+
+def _fallback_artifact_colour(index: int) -> str:
+    colours = [
+        "#e41a1c",
+        "#377eb8",
+        "#4daf4a",
+        "#984ea3",
+        "#ff7f00",
+        "#ffff33",
+        "#a65628",
+        "#f781bf",
+        "#999999",
+    ]
+    return colours[int(index) % len(colours)]
+
+def spectra_payload_to_hv(payload: Dict[str, Any]) -> Any:
+    spectra = payload.get("spectra", []) if isinstance(payload, dict) else []
+    if not spectra:
+        return hv.Curve([]).opts(title="No spectra available")
+
+    overlays = []
+
+    for idx, spectrum in enumerate(spectra):
+        wavelength = np.asarray(spectrum.get("wavelength", []), dtype=float)
+        flux = np.asarray(spectrum.get("flux", []), dtype=float)
+        smoothed = np.asarray(spectrum.get("smoothed_flux", []), dtype=float)
+        model = np.asarray(spectrum.get("model", []), dtype=float)
+
+        if wavelength.size == 0 or flux.size == 0:
+            continue
+
+        colour = (
+            spectrum.get("plot_color")
+            or spectrum.get("plot_colour")
+            or _fallback_artifact_colour(idx)
+        )
+
+        label = str(
+            spectrum.get("data_release")
+            or spectrum.get("sourceid")
+            or f"Spectrum {idx + 1}"
+        )
+
+        overlays.append(
+            hv.Curve((wavelength, flux), label=f"{label} flux").opts(
+                color="grey",
+                line_width=0.4,
+                alpha=0.65,
+            )
+        )
+
+        if smoothed.size == wavelength.size:
+            overlays.append(
+                hv.Curve((wavelength, smoothed), label=f"{label} smoothed").opts(
+                    color=colour,
+                    line_width=1.2,
+                )
+            )
+
+        if model.size == wavelength.size and np.isfinite(model).any():
+            overlays.append(
+                hv.Curve((wavelength, model), label=f"{label} model").opts(
+                    color=colour,
+                    line_width=1.1,
+                    line_dash="dashed",
+                )
+            )
+
+    if not overlays:
+        return hv.Curve([]).opts(title="No displayable spectra available")
+
+    wavelength_arrays = [
+        np.asarray(spec.get("wavelength", []), dtype=float)
+        for spec in spectra
+        if len(spec.get("wavelength", []))
+    ]
+
+    xmin = min(np.nanmin(arr) for arr in wavelength_arrays)
+    xmax = max(np.nanmax(arr) for arr in wavelength_arrays)
+
+    return hv.Overlay(overlays).opts(
+        responsive=True,
+        xlabel="Observed wavelength [Å]",
+        ylabel="Flux",
+        logx=True,
+        xlim=(xmin, xmax),
+        show_legend=True,
+        legend_position="bottom_left",
+        active_tools=[],
+    )
+
+# ----------------------------------------------------------------------
+# Factories
+# ----------------------------------------------------------------------
+
+def make_spectra_panel_factory(source: str):
+    def _factory(
+        context: Any,
+        data: Any = None,
+        state: Optional[Dict[str, Any]] = None,
+        **kwargs: Any,
+    ) -> Tuple[pn.viewable.Viewable, SpectraPanel]:
+        panel = SpectraPanel(
+            context=context,
+            source=source,
+            data=data,
+            state=state,
+            **kwargs,
+        )
+        return panel.view(), panel
+
+    return _factory
+
+def create_spectra_artifact_viewer(
+    context: Any,
+    artifact_id: str,
+    **_: Any,
+) -> Tuple[pn.viewable.Viewable, Any]:
+    artifacts = getattr(context, "artifacts", None)
+    if artifacts is None:
+        view = pn.pane.Markdown("Artifact store is not available.")
+        return view, None
+
+    try:
+        payload = artifacts.get(artifact_id)
+    except Exception as exc:
+        view = pn.pane.Markdown(f"Could not load spectrum artifact `{artifact_id}`: {exc}")
+        return view, None
+
+    try:
+        plot = spectra_payload_to_hv(payload)
+        pane = pn.pane.HoloViews(
+            plot,
+            sizing_mode="stretch_both",
+            min_height=420,
+        )
+
+        meta = pn.pane.Markdown(
+            f"**Spectrum artifact:** `{artifact_id}`  \n"
+            f"**Source:** `{payload.get('source')}`  \n"
+            f"**Available spectra:** `{payload.get('available_spectra')}`  \n"
+            f"**Retrieval mode:** `{payload.get('retrieval_mode')}`",
+            sizing_mode="stretch_width",
+        )
+
+        return pn.Column(meta, pane, sizing_mode="stretch_both"), None
+    except Exception as exc:
+        return pn.pane.Markdown(f"Could not render spectrum artifact `{artifact_id}`: {exc}"), None

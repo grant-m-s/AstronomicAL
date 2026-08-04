@@ -1,175 +1,142 @@
-Welcome to AstronomicAL's documentation!
+.. _home:
+
+Welcome to AstronomicAL's Documentation!
 ========================================
-An interactive dashboard for visualisation, integration and classification of data using Active Learning.
---------------------------------------------------------------------
 
-.. image:: https://travis-ci.com/grant-m-s/astronomicAL.svg?token=upRGxrMseZqj7kT3bSGx&branch=master
-    :target: https://travis-ci.com/grant-m-s/astronomicAL
+A plugin-based platform for interactive visualisation, inspection, labelling,
+and classification of scientific data.
 
+AstronomicAL is a local, human-in-the-loop analysis platform for working with
+scientific datasets. It can be used to inspect records, combine contextual
+information, create reliable labels, and build model-assisted workflows such
+as active learning.
 
-.. image:: https://codecov.io/gh/grant-m-s/astronomicAL/branch/master/graph/badge.svg?token=TCO9J2AD1Z
-    :target: https://codecov.io/gh/grant-m-s/astronomicAL
+Although AstronomicAL has been heavily used for astronomy applications, the
+plugin-based system allows domain-specific tools to be created for other areas
+of scientific research. Astronomy remains an important part of the project,
+but astronomy-specific tools no longer need to be installed or used by every
+researcher.
 
-.. image:: https://readthedocs.org/projects/astronomical/badge/?version=latest
-    :target: https://astronomical.readthedocs.io
+.. raw:: html
 
-.. image:: https://joss.theoj.org/papers/10.21105/joss.03635/status.svg
-   :target: https://doi.org/10.21105/joss.03635
-   
-.. image:: https://img.shields.io/badge/Python-3.8-blue?style=flat&logo=python&logoColor=white
-   :target: https://www.python.org/
-
-AstronomicAL is a human-in-the-loop interactive labelling and training dashboard that allows users to create reliable datasets and robust classifiers using active learning. The system enables users to visualise and integrate data from different sources and deal with incorrect or missing labels and imbalanced class sizes by using active learning to help the user focus on correcting the labels of a few key examples. Combining the use of the Panel_, Bokeh_, modAL_ and `SciKit Learn`_ packages, AstronomicAL enables researchers to take full advantage of the benefits of active learning: high accuracy models using just a fraction of the total data, without the requirement of being well versed in underlying libraries.
-
-.. _Panel: https://panel.holoviz.org/
-.. _Bokeh: https://docs.bokeh.org/en/latest/index.html
-.. _modAL: https://github.com/modAL-python/modAL
-.. _`SciKit Learn`: https://scikit-learn.org/stable/
-
-.. figure:: images/AstronomicAL_demo.gif
+   <table width="100%">
+     <tr>
+       <td width="50%" align="center">
+         <a href="_static/images/machine_learning_shorter.mp4">
+           <img src="_static/images/machine_learning_shorter.gif"
+                width="100%" alt="Machine Learning">
+         </a>
+         <br>
+         <strong>Machine Learning</strong>
+       </td>
+       <td width="50%" align="center">
+         <a href="_static/images/huggingface_cifar10_short.mp4">
+           <img src="_static/images/huggingface_cifar10_short.gif"
+                width="100%" alt="Hugging Face Importer">
+         </a>
+         <br>
+         <strong>Hugging Face Importer</strong>
+       </td>
+     </tr>
+     <tr>
+       <td width="50%" align="center">
+         <a href="_static/images/spec_to_phot_shorter.mp4">
+           <img src="_static/images/spec_to_phot_shorter.gif"
+                width="100%" alt="Spectroscopy and Photometry">
+         </a>
+         <br>
+         <strong>Spectroscopy and Photometry</strong>
+       </td>
+       <td width="50%" align="center">
+         <a href="_static/images/morphology_shorter.mp4">
+           <img src="_static/images/morphology_shorter.gif"
+                width="100%" alt="Morphology">
+         </a>
+         <br>
+         <strong>Morphology</strong>
+       </td>
+     </tr>
+   </table>
 
 Statement of Need
-*****************
-With ever-growing datasets, it is becoming impossible to manually inspect and verify ground truth used to train machine learning systems. The reliability of the training data limits the performance of any supervised learning model, so consistent classifications become more problematic as data sizes increase. The problem is exacerbated when a dataset does not contain any labelled data, preventing supervised learning techniques entirely. Active learning `(Settles, 2012)`_ addresses these issues by removing the requirement for large amounts of labelled training data whilst still producing high accuracy models.
+-----------------
 
-Although initially designed for astronomers, by providing the functionality for data fusion of catalogued data and online cutout services, AstronomicAL has been developed to be sufficiently general for any tabular data. Large datasets, unreliable labels and vastly imbalanced classes make astronomy data the ideal vehicle to develop this software. Each of these issues is an examplar of more generalised problems that active learning could solve in any dataset.
+Modern datasets are often too large to inspect manually, while their labels may
+be incomplete, noisy, or expensive to create. A model can only be as reliable
+as the data used to train and test it.
 
-Using its modular and extensible design, researchers can quickly adapt AstronomicAL for their research to allow for domain-specific plots, novel query strategies, and improved models. Further, there is no requirement to be well-versed in the underlying libraries that the software uses as large parts of the complexity are abstracted whilst still allowing more experienced users to access full customisability.
+AstronomicAL brings the dataset, model, and expert into one workspace. Users
+can inspect difficult records alongside the information they need, record a
+decision, and immediately continue the workflow.
 
-As the software runs entirely locally on the user’s system, AstronomicAL provides a private space to experiment whilst providing a public mechanism to share results. By sharing only the configuration file, users remain in charge of distributing their potentially sensitive data, enabling collaboration whilst respecting privacy.
+.. note::
 
-.. _`(Settles, 2012)`: https://www.morganclaypool.com/doi/abs/10.2200/S00429ED1V01Y201207AIM018
+   Active learning remains a major use case, but it is now one workflow built
+   from plugins rather than the fixed identity of the application.
 
-Installation
-------------------
-To install AstronomicAL and its dependencies, the user can clone the repository and from within the repo folder run :code:`pip install -r requirements.txt`. It is recommended that the user creates a virtual environment using tools such as Virtualenv_ or Conda_, to prevent any conflicting package versions.
+What Has Changed?
+-----------------
 
-.. code-block:: bash
+Earlier versions of AstronomicAL used a fixed dashboard and a shared configuration object. The new application is assembled from plugins.
 
-    git clone https://github.com/grant-m-s/AstronomicAL.git
-    cd AstronomicAL
-    conda config --add channels conda-forge
-    conda create --name astronomical --file requirements.txt python=3.8
-    conda activate astronomical
+The platform provides shared infrastructure for:
 
-.. _Virtualenv: https://packaging.python.org/guides/installing-using-pip-and-virtual-environments/#installing-virtualenv
-.. _Conda: https://docs.conda.io/projects/conda/en/latest/user-guide/tasks/manage-environments.html
+* datasets and semantic column mappings;
+* focused records and selection sets;
+* background jobs;
+* reusable artifacts and services;
+* events between independent components;
+* workspace layout and persistence;
+* plugin discovery and lifecycle management.
 
-Quickstart Instructions
------------------------
-To begin using the software, run :code:`bokeh serve astronomicAL --show`, and your browser should automatically open to `localhost:5006/astronomicAL
-<localhost:5006/astronomicAL>`_.
+Plugins provide the visible panels, integrations, and research workflows.
 
-AstronomicAL provides an example dataset and an example configuration file to allow you to jump right into the software and give it a test run.
+Where Should I Start?
+---------------------
 
-.. figure:: images/Load_config_AL.gif
+If you are new to AstronomicAL, start with
+:doc:`content/getting_started/installation` and then read
+:doc:`content/getting_started/interface`.
 
-    AstronomicAL makes it easy to start training your classifier or reload a previous checkpoint.
+For some quick-start example dataset and layout, start here:
+:doc:`content/getting_started/examples`.
 
-To begin training, you simply have to select **Load Custom Configuration** checkbox and select your config file. Here we have chosen to use the :code:`example_config.json` file.
+To understand the main ideas used throughout AstronomicAL, see
+:doc:`content/concepts/index`.
 
-The **Load Config Select** option allows users to choose the extent to which to reload the configuration.
+For documentation on the plugins included with AstronomicAL, see
+:doc:`content/plugins/index`.
 
-.. raw:: html
+Plugin authors should begin with
+:doc:`content/developer/first_plugin` and then read
+:doc:`content/developer/plugin_contract`.
 
-   <hr>
+Contributors working on the shared application infrastructure should see
+:doc:`content/platform/index`.
 
-
-Contributing to AstronomicAL
--------------------------
-
-Reporting Bugs
-*****************
-
-If you encounter a bug, you can directly report it in the `issues section <https://github.com/grant-m-s/AstronomicAL/issues>`_.
-
-Please describe how to reproduce the bug and include as much information as possible that can be helpful for fixing it.
-
-**Are you able to fix a bug?**
-
-You can open a new pull request or include your suggested fix in the issue.
-
-Submission of extensions
-*****************
-
-**Have you created an extension that you want to share with the community?**
-
-Create a pull request describing your extension and how it can improve research for others.
-
-Support and Feedback
-*****************
-
-We would love to hear your thoughts on AstronomicAL.
-
-Are there any features that would improve the effectiveness and usability of AstronomicAL? Let us know!
-
-Any feedback can be submitted as an `issue <https://github.com/grant-m-s/AstronomicAL/issues>`_.
-
-.. raw:: html
-
-   <hr>
-
-Referencing the Package
--------------------------
-
-Please remember to cite our software and user guide whenever relevant.
-
-See the :ref:`citing <citing>` page for instructions about referencing and citing the AstronomicAL software.
-
-
-.. raw:: html
-
-   <hr>
+Documentation
+-------------
 
 .. toctree::
    :maxdepth: 2
-   :caption: Contents:
+
+   content/getting_started/index
+   content/concepts/index
+   content/plugins/index
 
 .. toctree::
-    :glob:
-    :maxdepth: 1
-    :caption: API reference
+   :maxdepth: 2
 
-    content/apireference/active_learning.rst
-    content/apireference/dashboard.rst
-    .. content/apireference/extensions.rst
-    content/apireference/settings.rst
-    .. content/apireference/utils.rst
+   content/developer/index
+   content/platform/index
 
 .. toctree::
-    :maxdepth: 1
-    :caption: Tutorials
+   :maxdepth: 2
 
-    content/tutorials/preparing_dataset.rst
-    content/tutorials/settings.rst
-    content/tutorials/active_learning.rst
-    content/tutorials/reload_config.rst
-    content/tutorials/labelling_test_set.rst
-    content/tutorials/plots.rst
-    content/tutorials/feature_generation.rst
-    content/tutorials/using_model.rst
+   content/reference/index
+   content/troubleshooting/index
 
 .. toctree::
-    :maxdepth: 1
-    :caption: Other
+   :maxdepth: 2
 
-    content/other/contributors.rst
-    content/other/citing.rst
-
-
-Indices and tables
-==================
-
-* :ref:`genindex`
-* :ref:`modindex`
-* :ref:`search`
-
-
-.. image:: images/CDT-UOB-logo.png
-   :width: 38%
-   :target: http://www.bristol.ac.uk/cdt/interactive-ai/
-
-
-.. image:: images/EPSRC+logo.png
-   :width: 56%
-   :target: https://gtr.ukri.org/projects?ref=studentship-2466020
+   content/project/index

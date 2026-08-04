@@ -1,0 +1,1 @@
+"""Core visualisation plugin for AstronomicAL."""

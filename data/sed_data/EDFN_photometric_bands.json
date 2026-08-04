@@ -1,0 +1,48 @@
+{
+    "u": {
+        "name": "Megacam.u",
+        "wavelength": 3747.03,
+        "FWHM": 452.67
+    },
+    "g": {
+        "name": "HSC.g",
+        "wavelength": 4758.71,
+        "FWHM": 1052.67
+    },
+    "r": {
+        "name": "Megacam.r",
+        "wavelength": 6335.65,
+        "FWHM": 1381.63
+    },
+    "i": {
+        "name": "PANSTARRS.i",
+        "wavelength": 7503.03,
+        "FWHM": 1206.62
+    },
+    "z": {
+        "name": "HSC.z",
+        "wavelength": 8906.54,
+        "FWHM": 761.28
+    },
+    
+    "VIS": {
+        "name": "Euclid.VIS",
+        "wavelength": 6869.74,
+        "FWHM": 3318.32
+    },
+    "NISP.Y": {
+        "name": "Euclid.NISP.Y",
+        "wavelength": 10688.6,
+        "FWHM": 2332.48
+    },
+    "NISP.J": {
+        "name": "Euclid.NISP.J",
+        "wavelength": 13422.62,
+        "FWHM": 3554.06
+    },
+    "NISP.H": {
+        "name": "Euclid.NISP.H",
+        "wavelength": 17410.63,
+        "FWHM": 4563.68
+    }
+}

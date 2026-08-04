@@ -1,136 +1,228 @@
-from datetime import datetime
+from __future__ import annotations
 
-import astronomicAL.config as config
-from astropy.table import Table
 import json
+import re
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
 import numpy as np
-
-save_layout_js_cb = """
-function FindReact(dom, traverseUp = 0) {
-const key = Object.keys(dom).find(key=>key.startsWith("__reactInternalInstance$"));
-const domFiber = dom[key];
-if (domFiber == null) return null;
-
-// react 16+
-const GetCompFiber = fiber=>{
-//return fiber._debugOwner; // this also works, but is __DEV__ only
-let parentFiber = fiber.return;
-while (typeof parentFiber.type == "string") {
-parentFiber = parentFiber.return;
-}
-return parentFiber;
-};
-let compFiber = GetCompFiber(domFiber);
-for (let i = 0; i < traverseUp; i++) {
-compFiber = GetCompFiber(compFiber);
-}
-return compFiber.stateNode;
-}
-var react_layout = document.getElementById("responsive-grid")
-const someElement = react_layout.children[0];
-const myComp = FindReact(someElement);
-var layout_dict = {};
-
-for(var i = 0; i < myComp["props"]["layout"].length; i++) {
-
-layout_dict[i] = {
-"x":myComp["state"]["layout"][i]["x"],
-"y":myComp["state"]["layout"][i]["y"],
-"w":myComp["state"]["layout"][i]["w"],
-"h":myComp["state"]["layout"][i]["h"],
-}
-}
-
-console.log(layout_dict)
-
-text_area_input.value = JSON.stringify(layout_dict)
-
-"""
-
+from astropy.table import Table
 
 class NumpyEncoder(json.JSONEncoder):
-    """ Special json encoder for numpy types """
+    """JSON encoder that handles common numpy values."""
 
-    def default(self, obj):
+    def default(self, obj: Any) -> Any:
         if isinstance(obj, np.integer):
             return int(obj)
-        elif isinstance(obj, np.floating):
+
+        if isinstance(obj, np.floating):
             return float(obj)
-        elif isinstance(obj, np.ndarray):
+
+        if isinstance(obj, np.ndarray):
             return obj.tolist()
-        return json.JSONEncoder.default(self, obj)
 
+        return super().default(obj)
 
-def save_config_file_cb(attr, old, new, trigger_text, autosave):
-    save_config_file(new, trigger_text=trigger_text, autosave=autosave)
+def default_layout_directory(context: Any | None = None) -> Path:
+    """
+    Canonical user layout directory.
 
+    context.layout_directory can override this, but by default layouts live
+    beside user-installed plugins under ~/.astronomical/.
+    """
 
-def save_config_file(layout_from_js, trigger_text, autosave=False, test=False):
+    if context is not None:
+        configured = getattr(context, "layout_directory", None)
+        if configured:
+            return Path(configured).expanduser()
 
-    if layout_from_js == "":
-        return
+    return Path.home() / ".astronomical" / "layouts"
 
-    layout = json.loads(layout_from_js)
-    trigger_text.value = ""
-    for i in layout:
-        curr_contents = config.dashboards[i].contents
-        layout[i]["contents"] = curr_contents
-        if curr_contents == "Basic Plot":
-            layout[i]["panel_contents"] = [
-                config.dashboards[i].panel_contents.X_variable,
-                config.dashboards[i].panel_contents.Y_variable,
-            ]
+def _default_workspace_path(context: Any | None = None) -> Path:
+    """
+    Return the context's active workspace path, or the default user path.
+    """
 
-    export_config = {}
+    if context is not None:
+        layout_file = getattr(context, "layout_file", None)
+        if layout_file:
+            return Path(layout_file).expanduser()
 
-    export_config["Author"] = ""
-    export_config["doi"] = ""
-    export_config["dataset_filepath"] = config.settings["dataset_filepath"]
-    export_config["optimise_data"] = config.settings["optimise_data"]
-    export_config["layout"] = layout
-    export_config["id_col"] = config.settings["id_col"]
-    export_config["label_col"] = config.settings["label_col"]
-    export_config["default_vars"] = config.settings["default_vars"]
-    export_config["labels"] = config.settings["labels"]
-    export_config["label_colours"] = config.settings["label_colours"]
-    export_config["labels_to_strings"] = config.settings["labels_to_strings"]
-    export_config["strings_to_labels"] = config.settings["strings_to_labels"]
-    export_config["extra_info_cols"] = config.settings["extra_info_cols"]
-    export_config["extra_image_cols"] = config.settings["extra_image_cols"]
-    export_config["labels_to_train"] = config.settings["labels_to_train"]
-    export_config["features_for_training"] = config.settings["features_for_training"]
-    export_config["exclude_labels"] = config.settings["exclude_labels"]
-    export_config["exclude_unknown_labels"] = config.settings["exclude_unknown_labels"]
-    export_config["unclassified_labels"] = config.settings["unclassified_labels"]
-    export_config["scale_data"] = config.settings["scale_data"]
-    export_config["feature_generation"] = config.settings["feature_generation"]
-    export_config["test_set_file"] = config.settings["test_set_file"]
+    return default_layout_directory(context) / "workspace.json"
 
-    if "classifiers" not in config.settings.keys():
-        config.settings["classifiers"] = {}
+def sanitize_layout_name(name: str) -> str:
+    """
+    Return a safe layout filename.
 
-    export_config["classifiers"] = config.settings["classifiers"]
+    Keeps letters, numbers, spaces, hyphens, underscores, and dots. Path
+    separators and other special characters are converted to underscores.
+    """
 
-    if autosave:
-        print("AUTOSAVING...")
-        with open("configs/autosave.json", "w") as fp:
-            json.dump(export_config, fp, cls=NumpyEncoder)
-    elif test:
-        with open(f"configs/config_export.json", "w") as fp:
-            json.dump(export_config, fp, cls=NumpyEncoder)
-    else:
-        now = datetime.now()
-        dt_string = now.strftime("%Y%m%d_%H:%M:%S")
-        with open(f"configs/config_{dt_string}.json", "w") as fp:
-            json.dump(export_config, fp, cls=NumpyEncoder)
+    raw = str(name or "").strip()
+    if not raw:
+        raise ValueError("Layout name cannot be empty.")
 
-        print(f"Final Export Config Settings: {export_config}")
-        print(f"Config File saved to: configs/config_{dt_string}.json")
+    raw = raw.replace("\\", "/").split("/")[-1]
+    raw = re.sub(r"[^A-Za-z0-9._ -]+", "_", raw).strip(" ._")
 
+    if not raw:
+        raise ValueError("Layout name does not contain any valid filename characters.")
 
-def save_dataframe_to_fits(df, filename, overwrite=True):
-    assert (
-        len(df.columns) <= 999
-    ), f"FITS Files only allow up to 999 columns, dataframe contains {len(df.columns)}"
-    t = Table.from_pandas(df)
-    t.write(filename, overwrite=overwrite)
+    if not raw.lower().endswith(".json"):
+        raw = f"{raw}.json"
+
+    return raw
+
+def list_workspace_layouts(
+    *,
+    context: Any | None = None,
+    directory: str | Path | None = None,
+) -> list[Path]:
+    """
+    Return saved layout JSON files, newest first.
+    """
+
+    root = Path(directory).expanduser() if directory is not None else default_layout_directory(context)
+    if not root.exists():
+        return []
+
+    paths = [path for path in root.glob("*.json") if path.is_file()]
+    paths.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+    return paths
+
+def save_workspace(
+    context: Any,
+    path: str | Path | None = None,
+) -> dict[str, Any]:
+    """
+    Save the current plugin workspace through context.persistence.
+    """
+
+    if context is None:
+        raise ValueError("save_workspace requires a non-null context.")
+
+    persistence = getattr(context, "persistence", None)
+    if persistence is None:
+        raise RuntimeError("context.persistence is not configured.")
+
+    workspace = getattr(context, "workspace", None)
+    if workspace is not None and hasattr(workspace, "register_existing"):
+        workspace.register_existing()
+
+    target = Path(path).expanduser() if path is not None else _default_workspace_path(context)
+    snapshot = persistence.save(target)
+    context.layout_file = target
+
+    panel_count = len(snapshot.get("workspace", {}).get("panels", []))
+    grid_keys = snapshot.get("workspace", {}).get("grid", {}).get("keys", [])
+
+    print(
+        f"[save_workspace] saved {panel_count} persistent panels "
+        f"with grid_keys={grid_keys} to {target}"
+    )
+
+    return snapshot
+
+def save_workspace_timestamped(
+    context: Any,
+    directory: str | Path | None = None,
+    prefix: str = "layout",
+) -> Path:
+    """
+    Quick-save a timestamped workspace snapshot.
+
+    This intentionally creates a new file every time.
+    """
+
+    root = Path(directory).expanduser() if directory is not None else default_layout_directory(context)
+    root.mkdir(parents=True, exist_ok=True)
+
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    path = root / f"{prefix}_{timestamp}.json"
+
+    save_workspace(context, path)
+    return path
+
+def save_workspace_as(
+    context: Any,
+    name: str,
+    directory: str | Path | None = None,
+) -> Path:
+    """
+    Save the current workspace using a user-provided layout filename.
+    """
+
+    root = Path(directory).expanduser() if directory is not None else default_layout_directory(context)
+    root.mkdir(parents=True, exist_ok=True)
+
+    filename = sanitize_layout_name(name)
+    path = root / filename
+
+    save_workspace(context, path)
+    return path
+
+def load_workspace_file(path: str | Path) -> dict[str, Any]:
+    """
+    Small helper for reading a workspace JSON file directly.
+    """
+
+    path = Path(path).expanduser()
+    with path.open("r", encoding="utf-8") as handle:
+        snapshot = json.load(handle)
+
+    if not isinstance(snapshot, dict):
+        raise TypeError("Workspace JSON must contain an object at the top level.")
+
+    return snapshot
+
+def load_workspace_path(
+    context: Any,
+    path: str | Path,
+    *,
+    reconcile: bool = True,
+    strict: bool = False,
+) -> list[dict[str, Any]]:
+    """
+    Load a workspace layout file into the running application.
+
+    By default this uses the new reconcile flow rather than destructive
+    clear-and-restore.
+    """
+
+    if context is None:
+        raise ValueError("load_workspace_path requires a non-null context.")
+
+    persistence = getattr(context, "persistence", None)
+    if persistence is None:
+        raise RuntimeError("context.persistence is not configured.")
+
+    snapshot = persistence.load(path)
+
+    if reconcile and hasattr(persistence, "reconcile"):
+        return persistence.reconcile(snapshot, strict=strict)
+
+    return persistence.restore(snapshot, strict=strict)
+
+def save_dataframe_to_fits(
+    df,
+    filename: str | Path,
+    overwrite: bool = True,
+) -> None:
+    """
+    Export a dataframe to a FITS file.
+
+    Kept here because header export still uses this helper for labelled data.
+    """
+
+    if len(df.columns) > 999:
+        raise ValueError(
+            "FITS files only allow up to 999 columns; "
+            f"dataframe contains {len(df.columns)} columns."
+        )
+
+    filename = Path(filename).expanduser()
+    filename.parent.mkdir(parents=True, exist_ok=True)
+
+    table = Table.from_pandas(df)
+    table.write(filename, overwrite=overwrite)

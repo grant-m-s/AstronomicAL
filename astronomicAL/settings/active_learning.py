@@ -1,6 +1,5 @@
 from astronomicAL.extensions import models, query_strategies, feature_generation
 
-import astronomicAL.config as config
 import pandas as pd
 import panel as pn
 import json
@@ -40,8 +39,12 @@ class ActiveLearningSettings(param.Parameterized):
 
     """
 
-    def __init__(self, close_button, mode):
+    def __init__(self, close_button, mode, context = None):
 
+        self.context = context
+
+        self.config = context.config
+        
         self.df = None
 
         self.feature_generator_selected = []
@@ -127,7 +130,7 @@ class ActiveLearningSettings(param.Parameterized):
             options=[],
             width=500,
             max_width=500,
-            sizing_mode="fixed",
+            # sizing_mode="fixed",
         )
 
         self.feature_selector._buttons[True].on_click(self._verify_valid_selection_cb)
@@ -156,10 +159,10 @@ class ActiveLearningSettings(param.Parameterized):
         )
         self._remove_feature_generator_button.on_click(self._remove_feature_selector_cb)
 
-        self._feature_generator_dataframe = pn.widgets.DataFrame(
+        self._feature_generator_dataframe = pn.pane.DataFrame(
             pd.DataFrame(self.feature_generator_selected, columns=["oper", "n"]),
             name="",
-            show_index=False,
+            index=False,
         )
 
         self.default_x_variable = pn.widgets.Select(
@@ -179,7 +182,7 @@ class ActiveLearningSettings(param.Parameterized):
         )
 
         self._exclude_labels_tooltip = pn.pane.HTML(
-            "<span data-toggle='tooltip' title='If enabled, this will remove the unused labels from train, val and test sets. All other plots remain unaffected.' style='border-radius: 15px;padding: 5px; background: #5e5e5e; ' >❔</span> ",
+            "<span data-toggle='tooltip' title='If enabled, this will remove the unused labels from train, val and test sets. All other plots remain unaffected.' styles='border-radius: 15px;padding: 5px; background: #5e5e5e; ' >❔</span> ",
             max_width=5,
         )
 
@@ -188,7 +191,7 @@ class ActiveLearningSettings(param.Parameterized):
         )
 
         self._scale_features_tooltip = pn.pane.HTML(
-            "<span data-toggle='tooltip' title='If enabled, this can improve the performance of your model, however will require you to scale all new data with the produced scaler. This scaler will be saved in your model directory.' style='border-radius: 15px;padding: 5px; background: #5e5e5e; ' >❔</span> ",
+            "<span data-toggle='tooltip' title='If enabled, this can improve the performance of your model, however will require you to scale all new data with the produced scaler. This scaler will be saved in your model directory.' styles='border-radius: 15px;padding: 5px; background: #5e5e5e; ' >❔</span> ",
             max_width=5,
         )
 
@@ -227,12 +230,12 @@ class ActiveLearningSettings(param.Parameterized):
             value=True,
         )
         self._exclude_unknown_labels_tooltip = pn.pane.HTML(
-            "<span data-toggle='tooltip' title='If enabled, this will remove the unknown labels from train, val and test sets. By not removing unknown labels you will have more data, however your accuracy metrics will be affected.' style='border-radius: 15px;padding: 5px; background: #5e5e5e; ' >❔</span> ",
+            "<span data-toggle='tooltip' title='If enabled, this will remove the unknown labels from train, val and test sets. By not removing unknown labels you will have more data, however your accuracy metrics will be affected.' styles='border-radius: 15px;padding: 5px; background: #5e5e5e; ' >❔</span> ",
             max_width=5,
         )
 
         self._memory_opt_tooltip = pn.pane.HTML(
-            "<span data-toggle='tooltip' title='These are the axes that will be displayed in the Active Learning panel. This does not restrict the axes in any of the other plots.' style='border-radius: 15px;padding: 5px; background: #5e5e5e; ' >❔</span> ",
+            "<span data-toggle='tooltip' title='These are the axes that will be displayed in the Active Learning panel. This does not restrict the axes in any of the other plots.' styles='border-radius: 15px;padding: 5px; background: #5e5e5e; ' >❔</span> ",
             max_width=5,
         )
 
@@ -285,21 +288,25 @@ class ActiveLearningSettings(param.Parameterized):
         """
         if dataframe is not None:
             self.df = dataframe
+            #if self.df.columns.duplicated().any():     
+            #    duplicates = self.df.columns[self.df.columns.duplicated()].tolist()
+            #    self.df = self.df.loc[:, ~self.df.columns.duplicated()]
+            #    print(f"Removed columns with duplicate column names: {duplicates}")
 
         if self.df is not None:
 
-            labels = config.settings["labels"]
+            labels = self.config.settings["labels"]
             if -1 in labels:
                 labels.remove(-1)
             options = []
             for label in labels:
-                options.append(config.settings["labels_to_strings"][f"{label}"])
+                options.append(self.config.settings["labels_to_strings"][f"{label}"])
             self.label_selector.options = options
 
             features = list(self.df.columns)
 
-            features.remove(config.settings["id_col"])
-            features.remove(config.settings["label_col"])
+            features.remove(self.config.settings["id_col"])
+            features.remove(self.config.settings["label_col"])
 
             self.feature_selector.options = features
 
@@ -314,22 +321,22 @@ class ActiveLearningSettings(param.Parameterized):
             self.feature_generator_selected.append(
                 [self.feature_generator.value, self.feature_generator_number.value]
             )
-            self._feature_generator_dataframe.value = pd.DataFrame(
+            self._feature_generator_dataframe.object = pd.DataFrame(
                 self.feature_generator_selected, columns=["oper", "n"]
             )
 
         self._update_default_var_lists()
 
+
     def _update_default_var_lists(self):
 
         selected_features = self.feature_selector.value
 
-        config.settings["features_for_training"] = selected_features
+        self.config.settings["features_for_training"] = selected_features
 
         if selected_features == []:
             return
         else:
-
             oper_dict = feature_generation.get_oper_dict()
 
             for generator in self.feature_generator_selected:
@@ -338,41 +345,55 @@ class ActiveLearningSettings(param.Parameterized):
                 n = generator[1]
 
                 _, generated_features = oper_dict[oper](
-                    pd.DataFrame(columns=selected_features), n
+                    pd.DataFrame(columns=selected_features), 
+                    n,
+                    context = self.context
                 )
                 selected_features = selected_features + generated_features
-
+            #selected_features = list(dict.fromkeys(selected_features)) # Removes duplicates (currently the same operation can be performed more than once)
+            
+        
         self.default_x_variable.options = selected_features
         self.default_y_variable.options = selected_features
 
     def _remove_feature_selector_cb(self, event):
         self.feature_generator_selected = self.feature_generator_selected[:-1]
-        self._feature_generator_dataframe.value = pd.DataFrame(
+        self._feature_generator_dataframe.object = pd.DataFrame(
             self.feature_generator_selected, columns=["oper", "n"]
         )
 
         self._update_default_var_lists()
 
     def get_default_variables(self):
+        x_var = self.default_x_variable.value
+        y_var = self.default_y_variable.value
+        if x_var == y_var:
+            print("X and Y variables cannot be the same, using the next available option")   #TODO Print on the dashboard rather than in terminal
+            if len(self.default_x_variable.options) > 1:
+                for option in self.default_x_variable.options:
+                    if option != x_var:
+                        y_var = option
+                        break
+    
+        return (x_var, y_var)
 
-        return (
-            self.default_x_variable.value,
-            self.default_y_variable.value,
-        )
+
+
+      
 
     def _confirm_settings_cb(self, event):
         print("Saving settings...")
 
-        config.settings["default_vars"] = self.get_default_variables()
-        config.settings["labels_to_train"] = self.label_selector.value
-        config.settings["features_for_training"] = self.feature_selector.value
+        self.config.settings["default_vars"] = self.get_default_variables()
+        self.config.settings["labels_to_train"] = self.label_selector.value
+        self.config.settings["features_for_training"] = self.feature_selector.value
 
         if not self.exclude_labels_checkbox.disabled:
-            config.settings["exclude_labels"] = self.exclude_labels_checkbox.value
+            self.config.settings["exclude_labels"] = self.exclude_labels_checkbox.value
         else:
-            config.settings["exclude_labels"] = False
+            self.config.settings["exclude_labels"] = False
 
-        config.settings[
+        self.config.settings[
             "exclude_unknown_labels"
         ] = self.exclude_unknown_labels_checkbox.value
 
@@ -381,13 +402,13 @@ class ActiveLearningSettings(param.Parameterized):
             if label not in self.label_selector.value:
                 unclassified_labels.append(label)
 
-        config.settings["unclassified_labels"] = unclassified_labels
-        config.settings["scale_data"] = self.scale_features_checkbox.value
-        config.settings["feature_generation"] = self.feature_generator_selected
-        config.settings["test_set_file"] = self.test_set_checkbox.value
-        config.settings["confirmed"] = True
-        if "save_button" in config.settings.keys():
-            config.settings["save_button"].disabled = False
+        self.config.settings["unclassified_labels"] = unclassified_labels
+        self.config.settings["scale_data"] = self.scale_features_checkbox.value
+        self.config.settings["feature_generation"] = self.feature_generator_selected
+        self.config.settings["test_set_file"] = self.test_set_checkbox.value
+        self.config.settings["confirmed"] = True
+        if "save_button" in self.config.settings.keys():
+            self.config.settings["save_button"].disabled = False
 
         self.completed = True
 
@@ -428,6 +449,7 @@ class ActiveLearningSettings(param.Parameterized):
             settings Dashboard.
 
         """
+        
         if self.completed:
             self.column[0] = pn.pane.Str("Settings Saved.")
 
@@ -470,7 +492,7 @@ class ActiveLearningSettings(param.Parameterized):
                         self._remove_feature_generator_button,
                     ),
                     self._feature_generator_dataframe,
-                    sizing_mode="stretch_width",
+                   sizing_mode="stretch_width",
                 ),
                 pn.Row(
                     self.default_x_variable,
