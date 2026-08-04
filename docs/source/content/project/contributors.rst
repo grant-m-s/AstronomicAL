@@ -42,7 +42,7 @@ Grant Stevens acknowledges financial support from the `UKRI`_ for an EPSRC Docto
  <hr>
 .. image:: ../../_static/images/Elsa-B&W-Transparent.png
    :width: 20%
-   :target: http://www.bristol.ac.uk/cdt/interactive-ai/
+   :target: https://elsa-euclid.github.io/
 
 
 The Euclid-specific plugins were developed within the `ELSA`_ project with grant agreement number 101135203 funded by the European Union. Views and opinions expressed are, however,
