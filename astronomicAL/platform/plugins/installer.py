@@ -38,6 +38,53 @@ class PluginInstallResult:
     warnings: tuple[str, ...] = ()
 
 @dataclass(frozen=True)
+class PluginBatchInstallRequest:
+    archive_path: Path | str
+    operation: str
+    source: str = "file"
+    source_id: Optional[str] = None
+    release_url: Optional[str] = None
+    expected_existing_version: Optional[str] = None
+    expected_existing_source: Optional[str] = None
+    expected_existing_source_id: Optional[str] = None
+    expected_existing_sha256: Optional[str] = None
+    verify_existing_provenance: bool = False
+    allow_downgrade: bool = False
+
+@dataclass(frozen=True)
+class PluginBatchPreflightRequest:
+    """Manifest-only request used to validate a planned batch before download."""
+
+    manifest: PluginManifest
+    operation: str
+    expected_existing_version: Optional[str] = None
+    expected_existing_source: Optional[str] = None
+    expected_existing_source_id: Optional[str] = None
+    expected_existing_sha256: Optional[str] = None
+    verify_existing_provenance: bool = False
+    allow_downgrade: bool = False
+
+@dataclass(frozen=True)
+class PluginBatchPreflightResult:
+    """Remediable runtime blockers for an otherwise valid batch plan."""
+
+    python_environment_change: bool
+    blockers: tuple[str, ...] = ()
+
+    @property
+    def ok(self) -> bool:
+        return not self.blockers
+
+@dataclass(frozen=True)
+class _PreparedBatchInstall:
+    request: PluginBatchInstallRequest
+    inspection: PluginPackageInspection
+    existing: Optional[InstalledPluginRecord]
+    target: Path
+    stage: Path
+    backup: Optional[Path]
+
+@dataclass(frozen=True)
 class _DependencyNode:
     id: str
     version: str
@@ -54,7 +101,6 @@ class _NoopPythonEnvironmentTransaction:
 
     def finalize(self) -> None:
         pass
-
 
 def detect_astronomical_version() -> str | None:
     """Best-effort version lookup without hard-coding a distribution name.
@@ -324,6 +370,311 @@ class PluginInstaller:
                 warnings=tuple(warnings),
             )
 
+    def preflight_batch(
+        self,
+        requests: Sequence[PluginBatchPreflightRequest],
+    ) -> PluginBatchPreflightResult:
+        """Validate a manifest-only batch and report remediable runtime blockers.
+
+        This is intentionally read-only. It lets marketplace/UI code ask the
+        installer whether an already-resolved plan can run without duplicating
+        installer policy or downloading archives first. Final execution still
+        revalidates every invariant in ``apply_batch()`` while holding the same
+        installer lock.
+        """
+
+        requests = tuple(requests)
+        if not requests:
+            return PluginBatchPreflightResult(python_environment_change=False)
+
+        with self._lock:
+            self.store.require_healthy()
+            manifests: Dict[str, PluginManifest] = {}
+            update_ids: set[str] = set()
+            seen: set[str] = set()
+
+            for request in requests:
+                if not isinstance(request, PluginBatchPreflightRequest):
+                    raise TypeError(
+                        "requests must contain PluginBatchPreflightRequest values."
+                    )
+
+                manifest = request.manifest
+                if not isinstance(manifest, PluginManifest):
+                    raise TypeError("preflight request manifest must be PluginManifest.")
+
+                operation = str(request.operation or "").strip().lower()
+                if operation not in {"install", "update"}:
+                    raise PluginInstallError(
+                        f"Unsupported batch plugin operation {request.operation!r}."
+                    )
+
+                plugin_id = manifest.id
+                if plugin_id in seen:
+                    raise PluginInstallError(
+                        f"Batch contains duplicate plugin id {plugin_id!r}."
+                    )
+                seen.add(plugin_id)
+
+                self._validate_host_compatibility(manifest)
+                self._validate_python_requirement_declarations(manifest)
+
+                existing = self.store.get(plugin_id)
+                target = self._target_path(plugin_id)
+                if operation == "install":
+                    if existing is not None:
+                        raise PluginInstallError(
+                            f"Plugin {plugin_id!r} is already managed by AstronomicAL. "
+                            "Use an update batch operation to replace it."
+                        )
+                    if target.exists():
+                        raise PluginInstallError(
+                            "Plugin destination already exists but is not registered as an "
+                            f"AstronomicAL-managed install: {target}"
+                        )
+                else:
+                    if existing is None:
+                        raise PluginInstallError(
+                            f"Plugin {plugin_id!r} is not an AstronomicAL-managed install. "
+                            "Use an install batch operation for a new plugin."
+                        )
+                    self._validate_expected_existing_record(request, existing)
+                    self._validate_update_version(
+                        existing.version,
+                        manifest.version,
+                        allow_downgrade=bool(request.allow_downgrade),
+                    )
+                    if not target.is_dir():
+                        raise PluginInstallError(
+                            f"Managed plugin directory is missing: {target}"
+                        )
+                    update_ids.add(plugin_id)
+
+                manifests[plugin_id] = manifest
+
+            self._validate_batch_dependency_graph(manifests)
+            requirements = self._managed_python_requirements_batch(manifests)
+            python_changed = self._python_environment_needs_reconcile(requirements)
+
+            blockers = set(self._enabled_plugin_ids(update_ids))
+            if python_changed:
+                blockers.update(self._python_environment_change_blockers())
+
+            return PluginBatchPreflightResult(
+                python_environment_change=python_changed,
+                blockers=tuple(sorted(blockers)),
+            )
+
+    def apply_batch(
+        self,
+        requests: Sequence[PluginBatchInstallRequest],
+    ) -> tuple[PluginInstallResult, ...]:
+        """Apply multiple install/update operations as one filesystem/store transaction."""
+
+        requests = tuple(requests)
+        if not requests:
+            return ()
+
+        with self._lock:
+            self.store.require_healthy()
+            prepared: list[_PreparedBatchInstall] = []
+            manifests: Dict[str, PluginManifest] = {}
+            seen: set[str] = set()
+
+            for request in requests:
+                if not isinstance(request, PluginBatchInstallRequest):
+                    raise TypeError(
+                        "requests must contain PluginBatchInstallRequest values."
+                    )
+                operation = str(request.operation or "").strip().lower()
+                if operation not in {"install", "update"}:
+                    raise PluginInstallError(
+                        f"Unsupported batch plugin operation {request.operation!r}."
+                    )
+
+                inspection = inspect_plugin_package(request.archive_path)
+                manifest = inspection.manifest
+                plugin_id = manifest.id
+                if plugin_id in seen:
+                    raise PluginInstallError(
+                        f"Batch contains duplicate plugin id {plugin_id!r}."
+                    )
+                seen.add(plugin_id)
+
+                self._validate_host_compatibility(manifest)
+                self._validate_python_requirement_declarations(manifest)
+                self._validate_batch_provenance(request, plugin_id=plugin_id)
+
+                existing = self.store.get(plugin_id)
+                target = self._target_path(plugin_id)
+
+                if operation == "install":
+                    if existing is not None:
+                        raise PluginInstallError(
+                            f"Plugin {plugin_id!r} is already managed by AstronomicAL. "
+                            "Use an update batch operation to replace it."
+                        )
+                    if target.exists():
+                        raise PluginInstallError(
+                            "Plugin destination already exists but is not registered as an "
+                            f"AstronomicAL-managed install: {target}"
+                        )
+                else:
+                    if existing is None:
+                        raise PluginInstallError(
+                            f"Plugin {plugin_id!r} is not an AstronomicAL-managed install. "
+                            "Use an install batch operation for a new plugin."
+                        )
+                    self._validate_expected_existing_record(request, existing)
+                    self._assert_not_runtime_enabled(plugin_id)
+                    self._validate_update_version(
+                        existing.version,
+                        manifest.version,
+                        allow_downgrade=bool(request.allow_downgrade),
+                    )
+                    if not target.is_dir():
+                        raise PluginInstallError(
+                            f"Managed plugin directory is missing: {target}"
+                        )
+
+                stage = self._new_transaction_path(
+                    self.staging_dir,
+                    plugin_id,
+                    f"batch-{operation}",
+                )
+                backup = (
+                    self._new_transaction_path(
+                        self.backup_dir,
+                        plugin_id,
+                        "batch-backup",
+                    )
+                    if operation == "update"
+                    else None
+                )
+                prepared.append(
+                    _PreparedBatchInstall(
+                        request=request,
+                        inspection=inspection,
+                        existing=existing,
+                        target=target,
+                        stage=stage,
+                        backup=backup,
+                    )
+                )
+                manifests[plugin_id] = manifest
+
+            self._validate_batch_dependency_graph(manifests)
+            requirements = self._managed_python_requirements_batch(manifests)
+            python_changed = self._python_environment_needs_reconcile(requirements)
+            if python_changed:
+                self._assert_python_environment_change_safe()
+            python_tx = self._prepare_python_environment(requirements)
+
+            moved_targets: set[str] = set()
+            created_backups: set[str] = set()
+            success = False
+            now = _utc_now()
+            records: list[InstalledPluginRecord] = []
+
+            try:
+                for item in prepared:
+                    extract_plugin_package(item.inspection, item.stage)
+
+                for item in prepared:
+                    plugin_id = item.inspection.manifest.id
+                    operation = str(item.request.operation).strip().lower()
+                    if operation == "update":
+                        assert item.backup is not None
+                        item.backup.parent.mkdir(parents=True, exist_ok=True)
+                        item.target.replace(item.backup)
+                        created_backups.add(plugin_id)
+
+                    self.plugin_dir.mkdir(parents=True, exist_ok=True)
+                    item.stage.replace(item.target)
+                    moved_targets.add(plugin_id)
+
+                if python_tx.changed:
+                    self._purge_python_environment_modules()
+                python_tx.commit()
+
+                for item in prepared:
+                    manifest = item.inspection.manifest
+                    operation = str(item.request.operation).strip().lower()
+                    records.append(
+                        InstalledPluginRecord(
+                            id=manifest.id,
+                            name=manifest.name,
+                            version=manifest.version,
+                            source=str(item.request.source or "file"),
+                            source_id=item.request.source_id,
+                            release_url=item.request.release_url,
+                            sha256=item.inspection.sha256,
+                            installed_at=(
+                                item.existing.installed_at
+                                if item.existing is not None
+                                else now
+                            ),
+                            updated_at=(now if operation == "update" else None),
+                            directory=manifest.id,
+                            archive_name=item.inspection.archive_path.name,
+                            manifest=manifest.to_dict(),
+                        )
+                    )
+
+                set_many = getattr(self.store, "set_many", None)
+                if not callable(set_many):
+                    raise PluginInstallError(
+                        "InstalledPluginStore does not support atomic batch writes."
+                    )
+                set_many(records)
+                success = True
+
+            except Exception as exc:
+                python_tx.rollback()
+                for item in reversed(prepared):
+                    plugin_id = item.inspection.manifest.id
+                    if plugin_id in moved_targets and item.target.exists():
+                        shutil.rmtree(item.target, ignore_errors=True)
+                    if (
+                        plugin_id in created_backups
+                        and item.backup is not None
+                        and item.backup.exists()
+                        and not item.target.exists()
+                    ):
+                        try:
+                            item.backup.replace(item.target)
+                        except Exception:
+                            pass
+                if isinstance(exc, PluginInstallError):
+                    raise
+                raise PluginInstallError(
+                    f"Failed to apply plugin batch transaction: {exc}"
+                ) from exc
+            finally:
+                for item in prepared:
+                    if item.stage.exists():
+                        shutil.rmtree(item.stage, ignore_errors=True)
+                if success:
+                    python_tx.finalize()
+
+            for item in prepared:
+                if item.backup is not None and item.backup.exists():
+                    shutil.rmtree(item.backup, ignore_errors=True)
+
+            warnings = self._refresh_manager_after_batch(prepared)
+            warnings_tuple = tuple(warnings)
+            return tuple(
+                PluginInstallResult(
+                    operation=str(item.request.operation).strip().lower(),
+                    plugin_id=item.inspection.manifest.id,
+                    version=item.inspection.manifest.version,
+                    path=item.target,
+                    sha256=item.inspection.sha256,
+                    warnings=warnings_tuple,
+                )
+                for item in prepared
+            )
+
     def uninstall(
         self,
         plugin_id: str,
@@ -457,6 +808,49 @@ class PluginInstaller:
             )
         validator(manifest.id, manifest.requires)
 
+    @staticmethod
+    def _validate_batch_provenance(
+        request: PluginBatchInstallRequest,
+        *,
+        plugin_id: str,
+    ) -> None:
+        source = str(request.source or "file").strip()
+        if source != "marketplace":
+            return
+        if not str(request.source_id or "").strip():
+            raise PluginInstallError(
+                f"Marketplace plugin {plugin_id!r} is missing source_id provenance."
+            )
+        if not str(request.release_url or "").strip():
+            raise PluginInstallError(
+                f"Marketplace plugin {plugin_id!r} is missing release_url provenance."
+            )
+
+    def _managed_python_requirements_batch(
+        self,
+        candidates: Dict[str, PluginManifest],
+    ) -> Dict[str, tuple[str, ...]]:
+        requirements: Dict[str, tuple[str, ...]] = {}
+        for record in self.store.list():
+            if record.id in candidates:
+                continue
+            try:
+                manifest = coerce_manifest(record.manifest)
+            except Exception as exc:
+                raise PluginInstallError(
+                    "Cannot reconcile Python dependencies because installed plugin "
+                    f"{record.id!r} has invalid stored manifest metadata: {exc}"
+                ) from exc
+            requirements[manifest.id] = tuple(
+                str(item) for item in manifest.requires
+            )
+
+        for manifest in candidates.values():
+            requirements[manifest.id] = tuple(
+                str(item) for item in manifest.requires
+            )
+        return requirements
+
     def _managed_python_requirements(
         self,
         *,
@@ -523,30 +917,53 @@ class PluginInstaller:
         *,
         exclude_plugin_ids: set[str] | None = None,
     ) -> None:
-        if self.manager is None:
-            return
-        excluded = set(exclude_plugin_ids or ())
-        managed_ids = {record.id for record in self.store.list()}
-        blockers: list[str] = []
-        try:
-            infos = self.manager.list_plugins()
-        except Exception:
-            infos = []
-
-        for info in infos:
-            plugin_id = str(getattr(info, "id", "") or "").strip()
-            if not plugin_id or plugin_id in excluded or plugin_id not in managed_ids:
-                continue
-            status = getattr(info, "status", None)
-            if getattr(status, "value", status) == "enabled":
-                blockers.append(plugin_id)
-
+        blockers = self._python_environment_change_blockers(
+            exclude_plugin_ids=exclude_plugin_ids,
+        )
         if blockers:
             raise PluginInstallError(
                 "The shared community-plugin Python dependency environment must not "
                 "change while managed plugins are running. Disable these managed "
-                "plugins first: " + ", ".join(sorted(blockers))
+                "plugins first: " + ", ".join(blockers)
             )
+
+    def _python_environment_change_blockers(
+        self,
+        *,
+        exclude_plugin_ids: set[str] | None = None,
+    ) -> tuple[str, ...]:
+        if self.manager is None:
+            return ()
+        managed_ids = {record.id for record in self.store.list()}
+        excluded = set(exclude_plugin_ids or ())
+        return tuple(
+            plugin_id
+            for plugin_id in self._enabled_plugin_ids(managed_ids)
+            if plugin_id not in excluded
+        )
+
+    def _enabled_plugin_ids(self, plugin_ids: Iterable[str]) -> tuple[str, ...]:
+        if self.manager is None:
+            return ()
+
+        wanted = {str(plugin_id) for plugin_id in plugin_ids}
+        if not wanted:
+            return ()
+
+        try:
+            infos = self.manager.list_plugins()
+        except Exception:
+            return ()
+
+        enabled: set[str] = set()
+        for info in infos:
+            plugin_id = str(getattr(info, "id", "") or "").strip()
+            if not plugin_id or plugin_id not in wanted:
+                continue
+            status = getattr(info, "status", None)
+            if getattr(status, "value", status) == "enabled":
+                enabled.add(plugin_id)
+        return tuple(sorted(enabled))
 
     def _purge_python_environment_modules(self) -> None:
         environment = self.python_environment
@@ -614,6 +1031,12 @@ class PluginInstaller:
         self,
         candidate: PluginManifest,
     ) -> Dict[str, _DependencyNode]:
+        return self._dependency_inventory_many({candidate.id: candidate})
+
+    def _dependency_inventory_many(
+        self,
+        candidates: Dict[str, PluginManifest],
+    ) -> Dict[str, _DependencyNode]:
         nodes: Dict[str, _DependencyNode] = {}
 
         for record in self.store.list():
@@ -647,12 +1070,87 @@ class PluginInstaller:
                     ),
                 )
 
-        nodes[candidate.id] = _DependencyNode(
-            id=candidate.id,
-            version=candidate.version,
-            requires_plugins=tuple(candidate.requires_plugins),
-        )
+        for manifest in candidates.values():
+            nodes[manifest.id] = _DependencyNode(
+                id=manifest.id,
+                version=manifest.version,
+                requires_plugins=tuple(manifest.requires_plugins),
+            )
         return nodes
+
+    def _validate_batch_dependency_graph(
+        self,
+        candidates: Dict[str, PluginManifest],
+    ) -> None:
+        nodes = self._dependency_inventory_many(candidates)
+        impacted = set(candidates)
+
+        changed = True
+        while changed:
+            changed = False
+            for owner_id, node in nodes.items():
+                if owner_id in impacted:
+                    continue
+                for raw_requirement in node.requires_plugins:
+                    try:
+                        requirement = parse_plugin_requirement(raw_requirement)
+                    except ValueError:
+                        continue
+                    if requirement.plugin_id in impacted:
+                        impacted.add(owner_id)
+                        changed = True
+                        break
+
+        visiting: list[str] = []
+        visited: set[str] = set()
+
+        def visit(plugin_id: str) -> None:
+            if plugin_id in visited:
+                return
+            if plugin_id in visiting:
+                start = visiting.index(plugin_id)
+                cycle = visiting[start:] + [plugin_id]
+                raise PluginInstallError(
+                    "Plugin dependency cycle detected: " + " -> ".join(cycle)
+                )
+
+            node = nodes.get(plugin_id)
+            if node is None:
+                raise PluginInstallError(
+                    f"Missing required AstronomicAL plugin: {plugin_id}"
+                )
+
+            visiting.append(plugin_id)
+            try:
+                for raw_requirement in node.requires_plugins:
+                    try:
+                        requirement = parse_plugin_requirement(raw_requirement)
+                    except ValueError as exc:
+                        raise PluginInstallError(
+                            f"Plugin {plugin_id!r} declares invalid required plugin "
+                            f"requirement {raw_requirement!r}: {exc}"
+                        ) from exc
+                    required = nodes.get(requirement.plugin_id)
+                    if required is None:
+                        raise PluginInstallError(
+                            f"Plugin {plugin_id!r} requires {str(requirement)!r}, "
+                            f"but {requirement.plugin_id!r} is not installed/discovered "
+                            "or included in the batch."
+                        )
+                    self._assert_version_satisfies(
+                        owner_plugin_id=plugin_id,
+                        requirement_text=str(requirement),
+                        required_plugin_id=requirement.plugin_id,
+                        discovered_version=required.version,
+                        specifier=requirement.specifier,
+                    )
+                    visit(requirement.plugin_id)
+            finally:
+                visiting.pop()
+            visited.add(plugin_id)
+
+        for plugin_id in sorted(impacted):
+            visit(plugin_id)
 
     def _validate_dependency_graph(self, candidate: PluginManifest) -> None:
         nodes = self._dependency_inventory(candidate)
@@ -818,6 +1316,39 @@ class PluginInstaller:
         return parsed_version in parsed_specifier
 
     @staticmethod
+    def _validate_expected_existing_record(
+        request: Any,
+        existing: InstalledPluginRecord,
+    ) -> None:
+        plugin_id = existing.id
+        expected_version = getattr(request, "expected_existing_version", None)
+        if expected_version is not None and existing.version != expected_version:
+            raise PluginInstallError(
+                f"Plugin {plugin_id!r} changed since the install plan was created: "
+                f"expected version {expected_version!r}, found {existing.version!r}."
+            )
+
+        if not bool(getattr(request, "verify_existing_provenance", False)):
+            return
+
+        expected_source = getattr(request, "expected_existing_source", None)
+        expected_source_id = getattr(request, "expected_existing_source_id", None)
+        expected_sha256 = str(
+            getattr(request, "expected_existing_sha256", "") or ""
+        ).strip().lower()
+        actual_sha256 = str(existing.sha256 or "").strip().lower()
+
+        if (
+            existing.source != expected_source
+            or existing.source_id != expected_source_id
+            or actual_sha256 != expected_sha256
+        ):
+            raise PluginInstallError(
+                f"Plugin {plugin_id!r} changed since the install plan was created: "
+                "installed provenance no longer matches the approved plan."
+            )
+
+    @staticmethod
     def _validate_update_version(
         current_version: str,
         new_version: str,
@@ -868,6 +1399,39 @@ class PluginInstaller:
             raise PluginInstallError(
                 f"Plugin {plugin_id!r} is currently enabled. Disable it before updating."
             )
+
+    def _refresh_manager_after_batch(
+        self,
+        prepared: Sequence[_PreparedBatchInstall],
+    ) -> list[str]:
+        if self.manager is None:
+            return []
+
+        warnings: list[str] = []
+        forget = getattr(self.manager, "forget_user_plugin", None)
+        if callable(forget):
+            for item in prepared:
+                if str(item.request.operation).strip().lower() != "update":
+                    continue
+                plugin_id = item.inspection.manifest.id
+                try:
+                    forget(plugin_id)
+                except KeyError:
+                    pass
+                except Exception as exc:
+                    warnings.append(
+                        f"Could not clear previous live plugin record for "
+                        f"{plugin_id!r}: {exc}"
+                    )
+
+        try:
+            self.manager.discover()
+        except Exception as exc:
+            warnings.append(
+                "Plugin batch transaction succeeded, but live discovery refresh "
+                f"failed. Restart AstronomicAL to reconcile plugin discovery: {exc}"
+            )
+        return warnings
 
     def _refresh_manager_after_install(self) -> list[str]:
         if self.manager is None:

@@ -20,6 +20,38 @@ from .activation import PluginActivationService
 from .installed import InstalledPluginRecord, InstalledPluginStore
 from .installer import PluginInstallResult, PluginInstaller, detect_astronomical_version
 from .package import PluginPackageInspection, inspect_plugin_package
+from .marketplace import (
+    MarketplaceCatalogue,
+    MarketplaceCatalogueError,
+    MarketplaceInfo,
+    MarketplacePlugin,
+    MarketplaceRelease,
+)
+from .marketplace_client import (
+    MarketplaceCache,
+    MarketplaceClient,
+    MarketplaceClientError,
+    MarketplaceRefreshResult,
+    MarketplaceSource,
+)
+from .marketplace_download import MarketplacePackageDownloader
+from .marketplace_installer import (
+    MarketplaceInstallExecution,
+    MarketplaceInstallOrchestrator,
+)
+from .marketplace_planner import InstallPlan, InstallPlanItem, PluginInstallPlanner
+from .marketplace_runtime import (
+    MarketplacePlanningService,
+    MarketplaceService,
+    MarketplaceServiceError,
+    MarketplaceSourceState,
+    MarketplaceUpdatesFacade,
+)
+from .marketplace_updates import (
+    MarketplaceUpdateInfo,
+    MarketplaceUpdateService,
+    MarketplaceUpdateStatus,
+)
 from .python_packages import (
     PluginPythonEnvironment,
     PluginPythonEnvironmentTransaction,
@@ -70,6 +102,30 @@ __all__ = [
     "detect_astronomical_version",
     "PluginPackageInspection",
     "inspect_plugin_package",
+    "MarketplaceCatalogue",
+    "MarketplaceCatalogueError",
+    "MarketplaceInfo",
+    "MarketplacePlugin",
+    "MarketplaceRelease",
+    "MarketplaceCache",
+    "MarketplaceClient",
+    "MarketplaceClientError",
+    "MarketplaceRefreshResult",
+    "MarketplaceSource",
+    "MarketplacePackageDownloader",
+    "MarketplaceInstallExecution",
+    "MarketplaceInstallOrchestrator",
+    "InstallPlan",
+    "InstallPlanItem",
+    "PluginInstallPlanner",
+    "MarketplacePlanningService",
+    "MarketplaceService",
+    "MarketplaceServiceError",
+    "MarketplaceSourceState",
+    "MarketplaceUpdatesFacade",
+    "MarketplaceUpdateInfo",
+    "MarketplaceUpdateService",
+    "MarketplaceUpdateStatus",
     "PluginPythonEnvironment",
     "PluginPythonEnvironmentTransaction",
     "PythonRequirementCheck",

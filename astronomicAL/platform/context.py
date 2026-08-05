@@ -41,5 +41,9 @@ class AppContext:
     plugin_activation: Optional[Any] = None
     installed_plugins: Optional[Any] = None
     plugin_installer: Optional[Any] = None
+    marketplace: Optional[Any] = None
+    marketplace_planner: Optional[Any] = None
+    marketplace_updates: Optional[Any] = None
+    marketplace_installer: Optional[Any] = None
     persistence: Optional[Any] = None
     runtime_status: Optional[RuntimeStatus] = None

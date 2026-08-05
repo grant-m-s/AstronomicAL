@@ -23,6 +23,12 @@ class InstalledPluginRecord:
     archive_name: str
     manifest: Dict[str, Any]
     updated_at: Optional[str] = None
+    source_id: Optional[str] = None
+    release_url: Optional[str] = None
+
+    @property
+    def marketplace_managed(self) -> bool:
+        return self.source == "marketplace"
 
     @classmethod
     def from_dict(
@@ -44,11 +50,21 @@ class InstalledPluginRecord:
                 f"Installed plugin manifest for {plugin_id!r} must be a JSON object."
             )
 
+        source = str(data.get("source", "") or "file")
+        source_id = cls._optional_string(data.get("source_id"))
+        release_url = cls._optional_string(data.get("release_url"))
+        cls._validate_provenance(
+            plugin_id=plugin_id,
+            source=source,
+            source_id=source_id,
+            release_url=release_url,
+        )
+
         return cls(
             id=plugin_id,
             name=str(data.get("name", "") or plugin_id),
             version=str(data.get("version", "") or ""),
-            source=str(data.get("source", "") or "file"),
+            source=source,
             sha256=str(data.get("sha256", "") or ""),
             installed_at=str(data.get("installed_at", "") or ""),
             directory=str(data.get("directory", "") or plugin_id),
@@ -59,10 +75,12 @@ class InstalledPluginRecord:
                 if data.get("updated_at") not in (None, "")
                 else None
             ),
+            source_id=source_id,
+            release_url=release_url,
         )
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        data = {
             "name": self.name,
             "version": self.version,
             "source": self.source,
@@ -73,6 +91,37 @@ class InstalledPluginRecord:
             "archive_name": self.archive_name,
             "manifest": dict(self.manifest),
         }
+        if self.source_id is not None:
+            data["source_id"] = self.source_id
+        if self.release_url is not None:
+            data["release_url"] = self.release_url
+        return data
+
+    @staticmethod
+    def _optional_string(value: Any) -> Optional[str]:
+        if value in (None, ""):
+            return None
+        value = str(value).strip()
+        return value or None
+
+    @staticmethod
+    def _validate_provenance(
+        *,
+        plugin_id: str,
+        source: str,
+        source_id: Optional[str],
+        release_url: Optional[str],
+    ) -> None:
+        if source != "marketplace":
+            return
+        if source_id is None:
+            raise InstalledPluginStoreError(
+                f"Marketplace plugin {plugin_id!r} is missing source_id."
+            )
+        if release_url is None:
+            raise InstalledPluginStoreError(
+                f"Marketplace plugin {plugin_id!r} is missing release_url."
+            )
 
 
 class InstalledPluginStore:
@@ -82,7 +131,8 @@ class InstalledPluginStore:
     configured or allowed to run belongs to PluginStateStore.
     """
 
-    SCHEMA_VERSION = 1
+    SCHEMA_VERSION = 2
+    LEGACY_SCHEMA_VERSION = 1
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path).expanduser()
@@ -137,11 +187,51 @@ class InstalledPluginStore:
             raise TypeError("record must be an InstalledPluginRecord.")
 
         plugin_id = self._normalise_plugin_id(record.id)
+        InstalledPluginRecord._validate_provenance(
+            plugin_id=plugin_id,
+            source=record.source,
+            source_id=record.source_id,
+            release_url=record.release_url,
+        )
         with self._lock:
             self._require_healthy_locked()
             plugins = self._data.setdefault("plugins", {})
             plugins[plugin_id] = record.to_dict()
             self._save_locked()
+
+    def set_many(self, records: Iterable[InstalledPluginRecord]) -> None:
+        records = list(records)
+        normalised: list[tuple[str, InstalledPluginRecord]] = []
+        seen: set[str] = set()
+        for record in records:
+            if not isinstance(record, InstalledPluginRecord):
+                raise TypeError("records must contain InstalledPluginRecord values.")
+            plugin_id = self._normalise_plugin_id(record.id)
+            if plugin_id in seen:
+                raise ValueError(f"Duplicate installed plugin id {plugin_id!r}.")
+            seen.add(plugin_id)
+            InstalledPluginRecord._validate_provenance(
+                plugin_id=plugin_id,
+                source=record.source,
+                source_id=record.source_id,
+                release_url=record.release_url,
+            )
+            normalised.append((plugin_id, record))
+
+        if not normalised:
+            return
+
+        with self._lock:
+            self._require_healthy_locked()
+            previous = json.loads(json.dumps(self._data))
+            try:
+                plugins = self._data.setdefault("plugins", {})
+                for plugin_id, record in normalised:
+                    plugins[plugin_id] = record.to_dict()
+                self._save_locked()
+            except Exception:
+                self._data = previous
+                raise
 
     def remove(self, plugin_id: str) -> InstalledPluginRecord | None:
         plugin_id = self._normalise_plugin_id(plugin_id)
@@ -174,10 +264,14 @@ class InstalledPluginStore:
                     raise ValueError("Installed plugin database root must be a JSON object.")
 
                 version = int(data.get("schema_version", 0))
-                if version != self.SCHEMA_VERSION:
+                supported_versions = {
+                    self.LEGACY_SCHEMA_VERSION,
+                    self.SCHEMA_VERSION,
+                }
+                if version not in supported_versions:
                     raise ValueError(
                         f"Unsupported installed plugin schema version {version}; "
-                        f"expected {self.SCHEMA_VERSION}."
+                        f"expected one of {sorted(supported_versions)}."
                     )
 
                 plugins = data.get("plugins", {})

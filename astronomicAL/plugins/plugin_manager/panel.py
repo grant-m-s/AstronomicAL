@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import html
 import json
-import math
 import traceback
 from contextlib import contextmanager
 from datetime import datetime
@@ -10,7 +9,6 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, Callable, Iterator, Mapping
 
-import pandas as pd
 import panel as pn
 
 from .diagnostics import (
@@ -21,12 +19,14 @@ from .diagnostics import (
     provides_summary,
     source_label,
 )
+from .marketplace_panel import PluginMarketplacePanel
 from .styles import PLUGIN_MANAGER_CSS
+
 
 class PluginManagerPanel:
     """User-facing management surface for AstronomicAL plugins."""
 
-    state_version = 1
+    state_version = 2
     SELF_PLUGIN_ID = "core.plugin_manager"
 
     def __init__(self, context: Any):
@@ -39,21 +39,23 @@ class PluginManagerPanel:
         self._disposed = False
         self._restoring = False
         self._refresh_scheduled = False
-        self._syncing_selection = False
-        self._syncing_page = False
         self._syncing_community_toggle = False
         self._subscriptions: list[Any] = []
         self._watchers: list[tuple[Any, Any]] = []
+        self._row_buttons: list[pn.widgets.Button] = []
+        self._row_uninstall_buttons: dict[str, pn.widgets.Button] = {}
         self._snapshot: PluginManagerSnapshot | None = None
         self._visible_plugins: list[PluginSnapshot] = []
         self._selected_plugin_id: str | None = None
+        self._expanded_plugin_id: str | None = None
+        self._focus_plugin_id: str | None = None
         self._lifecycle_message_plugin_id: str | None = None
         self._package_message_plugin_id: str | None = None
         self._pending_uninstall_plugin_id: str | None = None
         self._busy = False
 
         self.search = pn.widgets.TextInput(
-            name="Search plugins",
+            name="Search installed plugins",
             placeholder="Name, feature, capability, or plugin ID…",
             sizing_mode="stretch_width",
             margin=0,
@@ -84,7 +86,6 @@ class PluginManagerPanel:
             height=32,
             margin=0,
         )
-
         self.community_toggle = pn.widgets.Switch(
             name="",
             value=False,
@@ -98,100 +99,64 @@ class PluginManagerPanel:
             sizing_mode="stretch_width",
             height=34,
             margin=0,
+            css_classes=["al-pm-detail-action", "al-pm-detail-action-primary"],
+            stylesheets=[PLUGIN_MANAGER_CSS],
         )
         self.disable_button = pn.widgets.Button(
             name="Disable plugin",
-            button_type="warning",
-            sizing_mode="stretch_width",
-            height=34,
-            margin=0,
-        )
-        self.reload_button = pn.widgets.Button(
-            name="Reload development plugin",
             button_type="default",
             sizing_mode="stretch_width",
             height=34,
             margin=0,
-            visible=False,
+            css_classes=["al-pm-detail-action", "al-pm-detail-action-secondary"],
+            stylesheets=[PLUGIN_MANAGER_CSS],
+        )
+        self.reload_button = pn.widgets.Button(
+            name="Reload development plugin", button_type="default",
+            sizing_mode="stretch_width", height=34, margin=0, visible=False,
         )
 
         self.install_file = pn.widgets.FileInput(
-            name="",
-            accept=".alplugin",
-            multiple=False,
-            sizing_mode="stretch_width",
-            height=38,
-            margin=(0, 0, 12, 0),
+            name="", accept=".alplugin", multiple=False,
+            sizing_mode="stretch_width", height=38, margin=(0, 0, 12, 0),
         )
         self.install_button = pn.widgets.Button(
-            name="Install",
-            button_type="primary",
-            sizing_mode="stretch_width",
-            height=36,
-            margin=(4, 0, 4, 0),
+            name="Install", button_type="primary",
+            sizing_mode="stretch_width", height=34, margin=(4, 0, 4, 0),
+        )
+        self.install_file_toggle = pn.widgets.Button(
+            name="＋ Install from file",
+            button_type="default",
+            width=150,
+            height=30,
+            margin=0,
+            css_classes=["al-pm-inline-action"],
+            stylesheets=[PLUGIN_MANAGER_CSS],
+        )
+        self.details_back_button = pn.widgets.Button(
+            name="← Back to plugins",
+            button_type="default",
+            width=132,
+            height=30,
+            margin=(0, 0, 8, 0),
+            css_classes=["al-pm-inline-action", "al-pm-back-action"],
+            stylesheets=[PLUGIN_MANAGER_CSS],
         )
         self.update_file = pn.widgets.FileInput(
-            name="",
-            accept=".alplugin",
-            multiple=False,
-            sizing_mode="stretch_width",
-            height=38,
-            margin=(0, 0, 12, 0),
+            name="", accept=".alplugin", multiple=False,
+            sizing_mode="stretch_width", height=38, margin=(0, 0, 12, 0),
         )
         self.update_button = pn.widgets.Button(
-            name="Update selected plugin",
-            button_type="primary",
-            sizing_mode="stretch_width",
-            height=34,
-            margin=0,
+            name="Update selected plugin", button_type="primary",
+            sizing_mode="stretch_width", height=34, margin=0,
         )
         self.uninstall_button = pn.widgets.Button(
-            name="Uninstall installed plugin",
-            button_type="danger",
+            name="Uninstall plugin",
+            button_type="default",
             sizing_mode="stretch_width",
-            height=38,
+            height=34,
             margin=(2, 0, 4, 0),
-        )
-
-        self.plugin_table = pn.widgets.Tabulator(
-            pd.DataFrame(
-                columns=["Plugin", "Status", "Version", "Open", "Provides", "plugin_id"]
-            ),
-            show_index=False,
-            selectable=1,
-            pagination="local",
-            # Keep a complete page inside the fixed table viewport. With
-            # responsiveLayout="collapse", each plugin can occupy a normal row
-            # plus a collapsed "Provides" row. A 12-row page therefore created
-            # a second vertical scroller inside the already-scrollable Plugin
-            # Manager panel. Tabulator restores that internal scroll during page
-            # changes, which causes the visible jump/snap ("rubber band"). Five
-            # plugins fit in this viewport without an internal vertical scroll.
-            page_size=5,
-            sizing_mode="stretch_width",
-            height=400,
-            min_height=400,
-            margin=0,
-            hidden_columns=["plugin_id"],
-            widths={
-                "Plugin": 180,
-                "Status": 115,
-                "Version": 80,
-                "Open": 60,
-            },
-            configuration={
-                "layout": "fitColumns",
-                "responsiveLayout": "collapse",
-                "placeholder": "No plugins match this view.",
-                # Tabulator otherwise preserves selection across pagination. A
-                # selected row on another page can be restored while the page DOM
-                # is being rebuilt, which is what caused the surrounding plugin
-                # manager scroller to jump and then snap back when returning to a
-                # previous page.
-                "selectableRowsPersistence": False,
-            },
-            css_classes=["al-pm-table"],
-            styles={"overflow-anchor": "none"},
+            css_classes=["al-pm-detail-action", "al-pm-detail-action-danger"],
             stylesheets=[PLUGIN_MANAGER_CSS],
         )
 
@@ -205,15 +170,12 @@ class PluginManagerPanel:
         self.package_details = self._html_pane()
         self.package_banner = self._html_pane()
         self.uninstall_banner = self._html_pane()
+        self.uninstall_note = self._html_pane()
         self.selected_details = self._html_pane()
         self.action_note = self._html_pane()
         self.discovery_issues = self._html_pane()
 
-        # Dynamic HTML panes and Bokeh file-input labels can otherwise be laid out
-        # too tightly inside nested Columns. Reserve comfortable vertical space
-        # around the always-present status banners and package feedback.
-        self.community_status.min_height = 50
-        self.community_status.margin = (0, 0, 6, 0)
+        self.community_status.margin = (4, 0, 0, 0)
         self.install_status.min_height = 46
         self.install_status.margin = (4, 0, 10, 0)
         self.install_banner.margin = (8, 0, 10, 0)
@@ -221,12 +183,27 @@ class PluginManagerPanel:
         self.package_banner.margin = (8, 0, 10, 0)
         self.uninstall_banner.margin = (6, 0, 8, 0)
 
+        self.core_list = pn.Column(
+            sizing_mode="stretch_width", margin=0,
+            css_classes=["al-pm-plugin-list"], stylesheets=[PLUGIN_MANAGER_CSS],
+        )
+        self.community_list = pn.Column(
+            sizing_mode="stretch_width", margin=0,
+            css_classes=["al-pm-plugin-list"], stylesheets=[PLUGIN_MANAGER_CSS],
+        )
+        self.other_list = pn.Column(
+            sizing_mode="stretch_width", margin=0,
+            css_classes=["al-pm-plugin-list"], stylesheets=[PLUGIN_MANAGER_CSS],
+        )
+
         self.refresh_button.on_click(self._refresh_clicked)
         self.discover_button.on_click(self._discover_clicked)
         self.enable_button.on_click(self._enable_clicked)
         self.disable_button.on_click(self._disable_clicked)
         self.reload_button.on_click(self._reload_clicked)
         self.install_button.on_click(self._install_clicked)
+        self.install_file_toggle.on_click(self._toggle_install_from_file)
+        self.details_back_button.on_click(self._close_plugin_details)
         self.update_button.on_click(self._update_clicked)
         self.uninstall_button.on_click(self._uninstall_clicked)
 
@@ -234,8 +211,6 @@ class PluginManagerPanel:
         self._watch(self.search, self._filters_changed, "value_input")
         self._watch(self.status_filter, self._filters_changed, "value")
         self._watch(self.community_toggle, self._community_toggle_changed, "value")
-        self._watch(self.plugin_table, self._table_selection_changed, "selection")
-        self._watch(self.plugin_table, self._table_page_changed, "page")
         self._watch(self.install_file, self._package_file_changed, "value")
         self._watch(self.update_file, self._package_file_changed, "value")
         self._subscribe_to_plugin_events()
@@ -247,20 +222,24 @@ class PluginManagerPanel:
         )
         self.discovery_section.visible = False
 
+        self.marketplace_panel = PluginMarketplacePanel(
+            context,
+            on_changed=self.refresh,
+            on_manage=self._marketplace_manage_plugin,
+        )
+
         self.view = self._build_view()
         self.refresh()
 
     @staticmethod
     def _html_pane() -> pn.pane.HTML:
         return pn.pane.HTML(
-            "",
-            sizing_mode="stretch_width",
-            stylesheets=[PLUGIN_MANAGER_CSS],
-            margin=0,
+            "", sizing_mode="stretch_width",
+            stylesheets=[PLUGIN_MANAGER_CSS], margin=0,
         )
 
     def _build_view(self) -> pn.Column:
-        controls = pn.Column(
+        installed_controls = pn.Column(
             self.search,
             self.status_filter,
             pn.GridBox(
@@ -277,30 +256,29 @@ class PluginManagerPanel:
         )
 
         community_heading = pn.pane.HTML(
-            '<div class="al-pm-section-title">'
-            "<h3>Community plugins</h3>"
-            "<span>Allow third-party plugins to execute in AstronomicAL</span>"
-            "</div>",
+            '<div class="al-pm-section-title al-pm-inline-heading">'
+            '<div><h3>Community plugins</h3>'
+            '<span>Allow installed third-party plugins to execute in AstronomicAL</span></div>'
+            '</div>',
             sizing_mode="stretch_width",
             stylesheets=[PLUGIN_MANAGER_CSS],
-            min_height=44,
             margin=0,
         )
-        community_controls = pn.Row(
-            community_heading,
-            self.community_toggle,
-            sizing_mode="stretch_width",
-            min_height=50,
-            margin=(0, 0, 8, 0),
-        )
-        community = pn.Column(
-            community_controls,
-            pn.Spacer(height=4, sizing_mode="stretch_width", margin=0),
+        community_gate = pn.Column(
+            pn.Row(
+                community_heading,
+                self.community_toggle,
+                sizing_mode="stretch_width",
+                height=48,
+                margin=0,
+                styles={"align-items": "center"},
+            ),
             self.community_status,
             sizing_mode="stretch_width",
-            css_classes=["al-pm-card"],
-            styles=self._card_styles(),
-            margin=(0, 0, 16, 0),
+            css_classes=["al-pm-community-gate"],
+            styles={"flex": "0 0 auto", "height": "auto"},
+            stylesheets=[PLUGIN_MANAGER_CSS],
+            margin=(0, 0, 12, 0),
         )
 
         install_file_label = pn.pane.HTML(
@@ -311,54 +289,60 @@ class PluginManagerPanel:
             height=22,
             margin=(2, 0, 4, 0),
         )
-        install_from_file = self._section(
-            "Install from file",
-            "Install a local .alplugin package. Installation never enables or executes the plugin.",
-            pn.Column(
-                self.install_status,
-                install_file_label,
-                self.install_file,
-                self.install_banner,
-                self.install_button,
-                sizing_mode="stretch_width",
-                margin=(4, 0, 4, 0),
-            ),
-        )
-        install_from_file.margin = (0, 0, 16, 0)
-
-        plugin_list = self._section(
-            "Plugins",
-            "Select a plugin to see what it adds and manage its availability",
-            self.plugin_table,
-        )
-
-        actions = pn.GridBox(
-            self.enable_button,
-            self.disable_button,
-            self.reload_button,
-            ncols=2,
-            sizing_mode="stretch_width",
-            margin=(10, 0, 0, 0),
-        )
-
-        self.managed_uninstall_controls = pn.Column(
+        self.install_file_panel = pn.Column(
             pn.pane.HTML(
-                '<div style="font-size:12px; font-weight:600; line-height:1.35;">'
-                'Installed plugin</div>'
-                '<div style="font-size:11px; color:#667085; line-height:1.4; margin-top:2px;">'
-                'AstronomicAL installed this plugin and can remove its managed code safely.'
-                '</div>',
+                '<div class="al-pm-file-install-title">Install a local plugin package</div>'
+                '<div class="al-pm-file-install-copy">Use this for development or a '
+                'downloaded <code>.alplugin</code> file. Marketplace installation is recommended '
+                'for normal use.</div>',
                 sizing_mode="stretch_width",
                 stylesheets=[PLUGIN_MANAGER_CSS],
-                margin=(0, 0, 6, 0),
+                margin=(0, 0, 8, 0),
             ),
+            self.install_status,
+            install_file_label,
+            self.install_file,
+            self.install_banner,
+            self.install_button,
+            sizing_mode="stretch_width",
+            css_classes=["al-pm-file-install-panel"],
+            stylesheets=[PLUGIN_MANAGER_CSS],
+            margin=(6, 0, 0, 0),
+            visible=False,
+        )
+        self.install_file_controls = pn.Column(
+            self.install_file_toggle,
+            self.install_file_panel,
+            sizing_mode="stretch_width",
+            css_classes=["al-pm-file-install-controls"],
+            stylesheets=[PLUGIN_MANAGER_CSS],
+            margin=(4, 0, 10, 0),
+            styles={"flex": "0 0 auto", "height": "auto", "min-height": "0"},
+        )
+
+        details_actions = pn.Column(
+            pn.Row(
+                self.enable_button,
+                self.disable_button,
+                sizing_mode="stretch_width",
+                css_classes=["al-pm-detail-lifecycle-actions"],
+                stylesheets=[PLUGIN_MANAGER_CSS],
+                margin=0,
+            ),
+            self.reload_button,
+            sizing_mode="stretch_width",
+            margin=(8, 0, 0, 0),
+        )
+        self.managed_uninstall_controls = pn.Column(
+            self.uninstall_note,
             self.uninstall_banner,
             self.uninstall_button,
             sizing_mode="stretch_width",
+            css_classes=["al-pm-uninstall-controls"],
+            stylesheets=[PLUGIN_MANAGER_CSS],
             margin=(12, 0, 4, 0),
             visible=False,
         )
-
         update_file_label = pn.pane.HTML(
             '<div style="font-size:12px; font-weight:600; line-height:1.35;">'
             'Update package (.alplugin)</div>',
@@ -370,7 +354,7 @@ class PluginManagerPanel:
         self.package_management = pn.Column(
             pn.pane.HTML(
                 '<div class="al-pm-section-title"><h3>Package management</h3>'
-                "<span>Update or remove plugins installed by AstronomicAL</span></div>",
+                '<span>Update or remove plugins installed by AstronomicAL</span></div>',
                 sizing_mode="stretch_width",
                 stylesheets=[PLUGIN_MANAGER_CSS],
                 margin=(16, 0, 8, 0),
@@ -384,43 +368,78 @@ class PluginManagerPanel:
             margin=(4, 0, 4, 0),
             visible=False,
         )
-
-        selected = pn.Column(
-            pn.pane.HTML(
-                '<div class="al-pm-section-title"><h3>Selected plugin</h3>'
-                "<span>Health, useful features, open panels, and lifecycle controls</span></div>",
-                sizing_mode="stretch_width",
-                stylesheets=[PLUGIN_MANAGER_CSS],
-                margin=0,
-            ),
+        self.installed_details_view = pn.Column(
+            self.details_back_button,
             self.selected_details,
             self.action_note,
-            # Plugin lifecycle feedback belongs next to the lifecycle controls.
-            # Keeping enable/disable/reload failures here prevents an important
-            # refusal from appearing far above the button the user just clicked.
             self.lifecycle_banner,
-            actions,
-            # Managed community plugins get an explicit destructive action directly
-            # below the lifecycle controls. This keeps Uninstall visible without
-            # forcing the user to hunt through the update-package section.
+            details_actions,
             self.managed_uninstall_controls,
             self.package_management,
             sizing_mode="stretch_width",
-            css_classes=["al-pm-card"],
-            styles=self._card_styles(),
-            margin=(0, 0, 10, 0),
+            css_classes=["al-pm-detail-view"],
+            stylesheets=[PLUGIN_MANAGER_CSS],
+            styles={"flex": "0 0 auto", "height": "auto", "min-height": "0"},
+            margin=(8, 0, 0, 0),
+            visible=False,
+        )
+
+        self.other_heading = self._list_heading(
+            "Development and local plugins",
+            "Development and runtime registrations",
+            css_class="al-pm-other-heading",
+        )
+
+        core_tab = pn.Column(
+            self._list_heading("Core plugins", "Plugins bundled with AstronomicAL"),
+            self.core_list,
+            sizing_mode="stretch_width",
+            margin=(8, 0, 0, 0),
+        )
+        community_tab = pn.Column(
+            community_gate,
+            self.install_file_controls,
+            self._list_heading("Installed community plugins", "Marketplace, package, and manually installed third-party plugins"),
+            self.community_list,
+            self.other_heading,
+            self.other_list,
+            sizing_mode="stretch_width",
+            styles={"height": "auto", "min-height": "0", "flex": "0 0 auto"},
+            margin=(8, 0, 0, 0),
+        )
+
+        self.installed_tabs = pn.Tabs(
+            ("Core plugins", core_tab),
+            ("Community plugins", community_tab),
+            active=0,
+            dynamic=True,
+            sizing_mode="stretch_width",
+            styles={"height": "auto", "min-height": "0", "flex": "0 0 auto"},
+            margin=0,
+        )
+        installed_view = pn.Column(
+            installed_controls,
+            self.installed_tabs,
+            self.installed_details_view,
+            self.discovery_section,
+            sizing_mode="stretch_width",
+            margin=0,
+        )
+        self.main_tabs = pn.Tabs(
+            ("Installed", installed_view),
+            ("Marketplace", self.marketplace_panel.view),
+            active=0,
+            dynamic=True,
+            sizing_mode="stretch_width",
+            styles={"height": "auto", "min-height": "0", "flex": "0 0 auto"},
+            margin=0,
         )
 
         return pn.Column(
             self.header,
             self.operation_banner,
             self.summary,
-            community,
-            install_from_file,
-            controls,
-            plugin_list,
-            selected,
-            self.discovery_section,
+            self.main_tabs,
             sizing_mode="stretch_both",
             min_width=220,
             scroll=True,
@@ -430,13 +449,22 @@ class PluginManagerPanel:
                 "box-sizing": "border-box",
                 "overflow-x": "hidden",
                 "overflow-y": "auto",
-                # Prevent browser scroll anchoring from reacting to Tabulator's
-                # paginated row DOM replacement inside this nested scroller.
                 "overflow-anchor": "none",
                 "padding": "8px",
             },
             stylesheets=[PLUGIN_MANAGER_CSS],
             margin=0,
+        )
+
+    @staticmethod
+    def _list_heading(title: str, detail: str, *, css_class: str = "") -> pn.pane.HTML:
+        extra = f" {css_class}" if css_class else ""
+        return pn.pane.HTML(
+            f'<div class="al-pm-list-heading{extra}"><h3>{html.escape(title)}</h3>'
+            f'<span>{html.escape(detail)}</span></div>',
+            sizing_mode="stretch_width",
+            stylesheets=[PLUGIN_MANAGER_CSS],
+            margin=(4, 0, 6, 0),
         )
 
     @staticmethod
@@ -470,7 +498,7 @@ class PluginManagerPanel:
         )
 
     # ------------------------------------------------------------------
-    # Snapshot and filtering
+    # Snapshot, filtering, and compact plugin rows
     # ------------------------------------------------------------------
 
     def refresh(self) -> None:
@@ -492,7 +520,9 @@ class PluginManagerPanel:
             self.selected_details.object = self._empty_html("No plugin can be selected.")
             self.discovery_issues.object = self._empty_html("No discovery information.")
             self.discovery_section.visible = False
-            self._replace_table_value(pd.DataFrame())
+            self.core_list.objects = [self._empty_pane("Core plugins are unavailable.")]
+            self.community_list.objects = [self._empty_pane("Community plugins are unavailable.")]
+            self.other_list.objects = []
             self._set_operation_message("danger", f"Unable to read plugin state: {exc}")
             self._update_action_state(None)
             self._update_package_action_state(None)
@@ -508,153 +538,392 @@ class PluginManagerPanel:
         self._sync_community_controls(snapshot)
         self._sync_install_controls(snapshot)
         self._apply_filters()
+        self.marketplace_panel.refresh()
 
     def _apply_filters(self, *, reset_page: bool = False) -> None:
         snapshot = self._snapshot
         if snapshot is None:
             return
 
-        visible = filter_plugins(
+        self._visible_plugins = filter_plugins(
             snapshot.plugins,
             query=self._search_value(),
             status_filter=str(self.status_filter.value or "all"),
         )
-        self._visible_plugins = visible
 
-        rows = [
-            {
-                "Plugin": plugin.name,
-                "Status": self._table_status(plugin),
-                "Version": plugin.version,
-                "Open": len(plugin.open_instances),
-                "Provides": provides_summary(plugin),
-                "plugin_id": plugin.id,
-            }
-            for plugin in visible
+        visible_ids = {plugin.id for plugin in self._visible_plugins}
+        if self._selected_plugin_id not in visible_ids:
+            self._selected_plugin_id = None
+            self._expanded_plugin_id = None
+        if self._focus_plugin_id not in visible_ids:
+            self._focus_plugin_id = None
+
+        self._render_plugin_lists()
+        self._render_selected_plugin()
+        self._sync_installed_detail_visibility()
+
+    def _render_plugin_lists(self) -> None:
+        if self._snapshot is None:
+            return
+
+        # Dynamic detail panels contain live widgets. Detach the old row tree before
+        # constructing the replacement so one widget model is never temporarily
+        # mounted in two plugin rows during a refresh.
+        self.core_list.objects = []
+        self.community_list.objects = []
+        self.other_list.objects = []
+
+        core = [plugin for plugin in self._visible_plugins if plugin.is_bundled]
+        community = [plugin for plugin in self._visible_plugins if plugin.is_community]
+        other = [
+            plugin for plugin in self._visible_plugins
+            if not plugin.is_bundled and not plugin.is_community
         ]
 
-        current_page = 1 if reset_page else self._current_page()
+        core = self._promote_focus(core)
+        community = self._promote_focus(community)
+        other = self._promote_focus(other)
 
-        # Preserve the selected plugin by identity across lifecycle refreshes. The
-        # diagnostics list is intentionally status-ranked, so enabling/disabling a
-        # plugin can move it to a different page. Previously the refresh stayed on
-        # the old page and silently selected that page's first plugin instead.
-        selected_index = None
-        if self._selected_plugin_id is not None:
-            selected_index = next(
-                (
-                    index
-                    for index, plugin in enumerate(visible)
-                    if plugin.id == self._selected_plugin_id
-                ),
-                None,
-            )
+        self._row_buttons = []
+        self._row_uninstall_buttons = {}
+        self.core_list.objects = self._plugin_group_objects(
+            core, empty_message="No core plugins match this view."
+        )
+        self.community_list.objects = self._plugin_group_objects(
+            community, empty_message="No installed community plugins match this view."
+        )
+        self.other_list.objects = self._plugin_group_objects(other, empty_message="")
 
-        self._replace_table_value(
-            pd.DataFrame(
-                rows,
-                columns=["Plugin", "Status", "Version", "Open", "Provides", "plugin_id"],
+        self.other_heading.visible = bool(other)
+        self.other_list.visible = bool(other)
+
+    def _promote_focus(self, plugins: list[PluginSnapshot]) -> list[PluginSnapshot]:
+        focus = self._focus_plugin_id
+        if not focus:
+            return plugins
+        return sorted(plugins, key=lambda plugin: (plugin.id != focus, plugin.name.lower(), plugin.id.lower()))
+
+    def _plugin_group_objects(
+        self,
+        plugins: list[PluginSnapshot],
+        *,
+        empty_message: str,
+    ) -> list[Any]:
+        if not plugins:
+            return [self._empty_pane(empty_message)] if empty_message else []
+
+        objects: list[Any] = []
+        for plugin in plugins:
+            objects.append(
+                pn.Column(
+                    self._plugin_row(plugin),
+                    sizing_mode="stretch_width",
+                    css_classes=["al-pm-plugin-item"],
+                    stylesheets=[PLUGIN_MANAGER_CSS],
+                    styles={
+                        "flex": "0 0 auto",
+                        "position": "relative",
+                        "height": "auto",
+                        "min-height": "0",
+                    },
+                    margin=(0, 0, 7, 0),
+                )
             )
+        return objects
+
+    def _plugin_row(self, plugin: PluginSnapshot) -> pn.Row:
+        status_label, status_tone = self._display_status(plugin)
+        update_version = self._marketplace_update_version(plugin.id)
+        source = source_label(plugin.origin, plugin.source)
+        if plugin.installed_source == "marketplace":
+            source = "Marketplace"
+        update_html = (
+            f'<span class="al-pm-row-update">Update {html.escape(update_version)}</span>'
+            if update_version else ""
+        )
+        description = plugin.description or "No description was provided."
+        info_html = (
+            '<div class="al-pm-row-info">'
+            '<div class="al-pm-row-title-line">'
+            f'<strong class="al-pm-row-name">{html.escape(plugin.name)}</strong>'
+            f'<span class="al-pm-status-pill {html.escape(status_tone)}">{html.escape(status_label)}</span>'
+            '</div>'
+            f'<div class="al-pm-row-meta">Version {html.escape(plugin.version)} · {html.escape(source)} {update_html}</div>'
+            f'<div class="al-pm-row-description">{html.escape(description)}</div>'
+            f'<div class="al-pm-row-provides">{html.escape(provides_summary(plugin))}</div>'
+            '</div>'
+        )
+        info = pn.pane.HTML(
+            info_html,
+            sizing_mode="stretch_width",
+            stylesheets=[PLUGIN_MANAGER_CSS],
+            margin=0,
         )
 
-        if selected_index is not None and not reset_page:
-            target_page = (selected_index // self._page_size()) + 1
+        details_button = pn.widgets.Button(
+            name="Details",
+            button_type="default",
+            width=74,
+            height=30,
+            margin=0,
+            css_classes=["al-pm-row-action", "al-pm-row-action-quiet"],
+            stylesheets=[PLUGIN_MANAGER_CSS],
+        )
+        details_button.on_click(lambda _event, plugin_id=plugin.id: self._toggle_plugin_details(plugin_id))
+        self._row_buttons.append(details_button)
+
+        lifecycle = self._row_lifecycle_button(plugin)
+        buttons = [lifecycle, details_button] if lifecycle is not None else [details_button]
+        primary_actions = pn.Row(
+            *buttons,
+            width=156 if len(buttons) > 1 else 76,
+            height=30,
+            margin=0,
+            css_classes=["al-pm-row-actions"],
+            stylesheets=[PLUGIN_MANAGER_CSS],
+        )
+
+        if plugin.is_community:
+            uninstall_button = self._row_uninstall_button(plugin)
+            actions = pn.Column(
+                primary_actions,
+                uninstall_button,
+                width=156,
+                margin=0,
+                css_classes=["al-pm-row-actions-stack"],
+                stylesheets=[PLUGIN_MANAGER_CSS],
+                styles={"flex": "0 0 auto", "height": "auto", "min-height": "0"},
+            )
         else:
-            target_page = min(current_page, self._max_page(len(visible)))
+            actions = primary_actions
 
-        self._set_table_page(target_page)
+        return pn.Row(
+            info,
+            actions,
+            sizing_mode="stretch_width",
+            css_classes=["al-pm-list-row"],
+            stylesheets=[PLUGIN_MANAGER_CSS],
+            styles={
+                "flex": "0 0 auto",
+                "position": "relative",
+                "height": "auto",
+                "min-height": "0",
+                "align-items": "flex-start",
+            },
+            margin=0,
+        )
 
-        page_plugins = self._plugins_on_page(target_page)
-        page_ids = {plugin.id for plugin in page_plugins}
-        if self._selected_plugin_id not in page_ids:
-            self._selected_plugin_id = page_plugins[0].id if page_plugins else None
+    def _row_lifecycle_button(self, plugin: PluginSnapshot) -> pn.widgets.Button | None:
+        if plugin.is_runtime or plugin.origin == "unknown":
+            return None
 
-        self._sync_table_selection()
-        self._render_selected_plugin()
+        is_self = plugin.id == self.SELF_PLUGIN_ID
+        if plugin.status == "enabled":
+            button = pn.widgets.Button(
+                name="Disable",
+                button_type="default",
+                width=74,
+                height=30,
+                margin=0,
+                css_classes=["al-pm-row-action", "al-pm-row-action-secondary"],
+                stylesheets=[PLUGIN_MANAGER_CSS],
+            )
+            button.disabled = self._busy or self.activation is None or is_self
+            if not is_self:
+                button.on_click(lambda _event, plugin_id=plugin.id: self._row_disable(plugin_id))
+        else:
+            button = pn.widgets.Button(
+                name="Enable",
+                button_type="primary",
+                width=74,
+                height=30,
+                margin=0,
+                css_classes=["al-pm-row-action", "al-pm-row-action-primary"],
+                stylesheets=[PLUGIN_MANAGER_CSS],
+            )
+            community_allowed = bool(
+                self._snapshot is not None and self._snapshot.community_plugins_enabled
+            )
+            button.disabled = (
+                self._busy
+                or self.activation is None
+                or (plugin.is_community and not community_allowed)
+            )
+            button.on_click(lambda _event, plugin_id=plugin.id: self._row_enable(plugin_id))
+        self._row_buttons.append(button)
+        return button
 
-    def _replace_table_value(self, value: pd.DataFrame) -> None:
-        # Clearing the selection before replacing the data prevents the frontend
-        # from trying to restore a selected row while Tabulator is rebuilding a
-        # paginated page. Suppress page callbacks too because replacing the value
-        # may reset Tabulator's current page before we restore the intended page.
-        self._syncing_selection = True
-        self._syncing_page = True
-        try:
-            self.plugin_table.selection = []
-            self.plugin_table.value = value
-        finally:
-            self._syncing_page = False
-            self._syncing_selection = False
+    def _row_uninstall_button(self, plugin: PluginSnapshot) -> pn.widgets.Button:
+        managed = bool(plugin.is_managed and plugin.origin == "user")
+        snapshot = self._snapshot
+        store_error = bool(snapshot is not None and snapshot.installed_store_error)
+        unavailable = (
+            self._busy
+            or self.installer is None
+            or self.installed_store is None
+            or store_error
+        )
+        confirming = self._pending_uninstall_plugin_id == plugin.id
+        button = pn.widgets.Button(
+            name="Confirm uninstall" if confirming else "Uninstall",
+            button_type="default",
+            width=156,
+            height=28,
+            margin=(5, 0, 0, 0),
+            disabled=(not managed) or unavailable,
+            css_classes=["al-pm-row-action", "al-pm-row-action-danger", "al-pm-row-uninstall"],
+            stylesheets=[PLUGIN_MANAGER_CSS],
+        )
+        if managed:
+            button.on_click(
+                lambda _event, plugin_id=plugin.id: self._row_uninstall(plugin_id)
+            )
+        self._row_buttons.append(button)
+        self._row_uninstall_buttons[plugin.id] = button
+        return button
 
-    def _sync_table_selection(self) -> None:
-        self._syncing_selection = True
-        try:
-            if self._selected_plugin_id is None:
-                self.plugin_table.selection = []
-                return
-
-            page = self._current_page()
-            start, end = self._page_bounds(page)
-            for index in range(start, min(end, len(self._visible_plugins))):
-                if self._visible_plugins[index].id == self._selected_plugin_id:
-                    self.plugin_table.selection = [index]
-                    return
-
-            self.plugin_table.selection = []
-        finally:
-            self._syncing_selection = False
-
-    def _table_selection_changed(self, event: Any) -> None:
-        if self._disposed or self._syncing_selection or self._restoring:
+    def _row_uninstall(self, plugin_id: str) -> None:
+        if self._disposed or self._busy:
             return
 
-        selection = list(getattr(event, "new", None) or [])
-        if not selection:
-            return
-
-        try:
-            index = int(selection[0])
-            plugin = self._visible_plugins[index]
-        except Exception:
+        plugin = next(
+            (
+                item
+                for item in (self._snapshot.plugins if self._snapshot else ())
+                if item.id == plugin_id
+            ),
+            None,
+        )
+        if plugin is None:
             return
 
         self._selected_plugin_id = plugin.id
-        self._render_selected_plugin()
-
-    def _table_page_changed(self, event: Any) -> None:
-        if self._disposed or self._restoring or self._syncing_page:
+        if not plugin.is_managed or plugin.origin != "user":
+            self._set_operation_message(
+                "info",
+                f"{plugin.name} was not installed by AstronomicAL, so its files cannot "
+                "be uninstalled safely here.",
+            )
             return
 
-        try:
-            page = max(1, int(getattr(event, "new", None) or 1))
-        except Exception:
-            page = 1
+        was_pending = self._pending_uninstall_plugin_id == plugin.id
+        self._uninstall_clicked(message_target="row")
 
-        page_plugins = self._plugins_on_page(page)
-        if not page_plugins:
-            self._selected_plugin_id = None
-        elif self._selected_plugin_id not in {plugin.id for plugin in page_plugins}:
-            # Update the details pane to the new page, but deliberately do not
-            # programmatically select the row in Tabulator. Setting selection
-            # while a page is being rebuilt makes Tabulator scroll the selected
-            # row into view, which is the second source of the page-change jump.
-            self._selected_plugin_id = page_plugins[0].id
+        # First click is confirmation-only. Update the existing button model in
+        # place instead of rebuilding the plugin list; rebuilding here destroys
+        # and recreates the row DOM and makes the scroll container jump.
+        if not was_pending and self._pending_uninstall_plugin_id == plugin.id:
+            button = self._row_uninstall_buttons.get(plugin.id)
+            if button is not None:
+                button.name = "Confirm uninstall"
 
-        self._clear_table_selection()
+    def _toggle_plugin_details(self, plugin_id: str) -> None:
+        """Open a dedicated installed-plugin detail view.
+
+        Details deliberately live outside the plugin list. Moving a shared tree of
+        live Panel widgets in and out of dynamically rebuilt rows caused stale
+        browser layout heights and overlapping models. A dedicated detail route is
+        both simpler and closer to the narrow-panel equivalent of Obsidian's detail
+        page.
+        """
+
+        if self._disposed or self._busy:
+            return
+
+        plugin_id = str(plugin_id or "").strip()
+        if not plugin_id:
+            return
+
+        plugin = next(
+            (item for item in (self._snapshot.plugins if self._snapshot else ()) if item.id == plugin_id),
+            None,
+        )
+        if plugin is None:
+            return
+
+        self._selected_plugin_id = plugin_id
+        self._expanded_plugin_id = plugin_id
+        self._focus_plugin_id = None
+        self.installed_tabs.active = 1 if plugin.is_community else 0
         self._render_selected_plugin()
+        self._sync_installed_detail_visibility()
 
-    def _clear_table_selection(self) -> None:
-        self._syncing_selection = True
+    def _close_plugin_details(self, _event: Any = None) -> None:
+        if self._disposed:
+            return
+        self._expanded_plugin_id = None
+        self._sync_installed_detail_visibility()
+
+    def _sync_installed_detail_visibility(self) -> None:
+        detail_plugin = self._selected_plugin()
+        show_details = bool(
+            self._expanded_plugin_id
+            and detail_plugin is not None
+            and detail_plugin.id == self._expanded_plugin_id
+        )
+        self.installed_details_view.visible = show_details
+        self.installed_tabs.visible = not show_details
+
+    def _row_enable(self, plugin_id: str) -> None:
+        self._selected_plugin_id = plugin_id
+        self._enable_clicked(message_target="global")
+
+    def _row_disable(self, plugin_id: str) -> None:
+        self._selected_plugin_id = plugin_id
+        self._disable_clicked(message_target="global")
+
+    def _toggle_install_from_file(self, _event: Any = None) -> None:
+        if self._disposed or self._busy:
+            return
+        visible = not bool(self.install_file_panel.visible)
+        self.install_file_panel.visible = visible
+        self.install_file_toggle.name = (
+            "− Hide file installer" if visible else "＋ Install from file"
+        )
+
+    def _marketplace_manage_plugin(self, plugin_id: str) -> None:
+        if self._disposed:
+            return
+
+        plugin_id = str(plugin_id or "").strip()
+        if not plugin_id:
+            return
+
+        self.main_tabs.active = 0
+        self.installed_tabs.active = 1
+        self.search.value = ""
         try:
-            if self.plugin_table.selection:
-                self.plugin_table.selection = []
-        finally:
-            self._syncing_selection = False
+            self.search.value_input = ""
+        except Exception:
+            pass
+        self.status_filter.value = "all"
+        self._selected_plugin_id = plugin_id
+        self._expanded_plugin_id = plugin_id
+        self._focus_plugin_id = plugin_id
+        self.refresh()
+        self._sync_installed_detail_visibility()
+
+    def _marketplace_update_version(self, plugin_id: str) -> str | None:
+        updates = getattr(self.context, "marketplace_updates", None)
+        list_updates = getattr(updates, "list_updates", None)
+        if not callable(list_updates):
+            return None
+        try:
+            infos = list(list_updates() or [])
+        except Exception:
+            return None
+        for info in infos:
+            if str(getattr(info, "plugin_id", "") or "") != plugin_id:
+                continue
+            target = str(getattr(info, "target_version", "") or "").strip()
+            return target or None
+        return None
 
     def _filters_changed(self, _event: Any = None) -> None:
         if self._disposed or self._restoring:
             return
-        self._apply_filters(reset_page=True)
+        self._focus_plugin_id = None
+        self._apply_filters()
 
     def _search_value(self) -> str:
         value_input = getattr(self.search, "value_input", None)
@@ -662,41 +931,14 @@ class PluginManagerPanel:
             return str(value_input or "")
         return str(self.search.value or "")
 
-    def _current_page(self) -> int:
-        try:
-            return max(1, int(getattr(self.plugin_table, "page", 1) or 1))
-        except Exception:
-            return 1
-
-    def _page_size(self) -> int:
-        try:
-            return max(1, int(getattr(self.plugin_table, "page_size", 5) or 5))
-        except Exception:
-            return 5
-
-    def _max_page(self, row_count: int) -> int:
-        return max(1, math.ceil(max(0, int(row_count)) / self._page_size()))
-
-    def _page_bounds(self, page: int) -> tuple[int, int]:
-        page_size = self._page_size()
-        start = (max(1, int(page)) - 1) * page_size
-        return start, start + page_size
-
-    def _plugins_on_page(self, page: int) -> list[PluginSnapshot]:
-        start, end = self._page_bounds(page)
-        return self._visible_plugins[start:end]
-
-    def _set_table_page(self, page: int) -> None:
-        self._syncing_page = True
-        try:
-            if getattr(self.plugin_table, "page", 1) != page:
-                self.plugin_table.page = page
-        finally:
-            self._syncing_page = False
-
-    # ------------------------------------------------------------------
-    # Rendering
-    # ------------------------------------------------------------------
+    @staticmethod
+    def _empty_pane(message: str) -> pn.pane.HTML:
+        return pn.pane.HTML(
+            f'<div class="al-pm-empty">{html.escape(message)}</div>',
+            sizing_mode="stretch_width",
+            stylesheets=[PLUGIN_MANAGER_CSS],
+            margin=0,
+        )
 
     def _header_html(self, snapshot: PluginManagerSnapshot | None) -> str:
         if snapshot is None:
@@ -722,7 +964,7 @@ class PluginManagerPanel:
           <div class="al-pm-header-main">
             <div class="al-pm-eyebrow">Platform management</div>
             <h2 class="al-pm-title">Plugin Manager</h2>
-            <div class="al-pm-subtitle">Choose which features are available, understand what each plugin adds, and surface problems without navigating technical registry tables.</div>
+            <div class="al-pm-subtitle">Manage bundled and community plugins, install from the marketplace, and control what is allowed to run.</div>
           </div>
           <div class="al-pm-header-meta">
             <div class="al-pm-health {health_tone}"><span class="al-pm-health-dot"></span>{html.escape(health_label)}</div>
@@ -732,43 +974,17 @@ class PluginManagerPanel:
         """
 
     def _summary_html(self, snapshot: PluginManagerSnapshot) -> str:
+        community_installed = sum(plugin.is_community for plugin in snapshot.plugins)
         return (
-            '<div class="al-pm-summary-grid">'
-            + self._metric_html(
-                "Enabled",
-                str(snapshot.enabled_count),
-                "Currently available in menus and workflows",
-                "success",
-            )
-            + self._metric_html(
-                "Available",
-                str(snapshot.available_count),
-                "Discovered but not currently enabled",
-            )
-            + self._metric_html(
-                "Open panels",
-                str(snapshot.open_panel_count),
-                "Live plugin panel instances",
-            )
-            + self._metric_html(
-                "Needs attention",
-                str(snapshot.issue_count),
-                "Plugin or discovery problems",
-                "danger" if snapshot.issue_count else "success",
-            )
-            + "</div>"
+            '<div class="al-pm-compact-summary">'
+            f'<span><strong>{snapshot.enabled_count}</strong> enabled</span>'
+            f'<span><strong>{snapshot.available_count}</strong> available</span>'
+            f'<span><strong>{community_installed}</strong> community</span>'
+            f'<span class="{"danger" if snapshot.issue_count else "success"}">'
+            f'<strong>{snapshot.issue_count}</strong> issue'
+            f'{"s" if snapshot.issue_count != 1 else ""}</span>'
+            '</div>'
         )
-
-    @staticmethod
-    def _metric_html(label: str, value: str, detail: str, tone: str = "") -> str:
-        tone_class = f" {tone}" if tone else ""
-        return f"""
-        <div class="al-pm-metric">
-          <div class="al-pm-metric-label">{html.escape(label)}</div>
-          <div class="al-pm-metric-value{tone_class}">{html.escape(value)}</div>
-          <div class="al-pm-metric-detail">{html.escape(detail)}</div>
-        </div>
-        """
 
     def _sync_community_controls(self, snapshot: PluginManagerSnapshot) -> None:
         self._syncing_community_toggle = True
@@ -1441,7 +1657,12 @@ class PluginManagerPanel:
 
         self._select_plugin_after_refresh(plugin.id)
 
-    def _uninstall_clicked(self, _event: Any = None) -> None:
+    def _uninstall_clicked(
+        self,
+        _event: Any = None,
+        *,
+        message_target: str = "detail",
+    ) -> None:
         plugin = self._selected_plugin()
         if (
             plugin is None
@@ -1453,21 +1674,30 @@ class PluginManagerPanel:
 
         if self._pending_uninstall_plugin_id != plugin.id:
             self._pending_uninstall_plugin_id = plugin.id
-            self.uninstall_banner.object = self._banner_html(
-                "warning",
+            message = (
                 "Uninstall removes the AstronomicAL-managed plugin code. If the plugin "
                 "is running it will be disabled first. Plugin data is preserved. "
-                "Click Confirm uninstall to continue.",
+                "Click Confirm uninstall to continue."
             )
+            if message_target == "global":
+                self._set_operation_message("warning", message)
+            elif message_target == "detail":
+                self.uninstall_banner.object = self._banner_html("warning", message)
+            # For compact-row confirmation the button text itself is the prompt.
+            # Do not add a banner above the list, because changing content above
+            # the current viewport shifts the user's scroll position.
             self._update_package_action_state(plugin)
             return
 
         plugin_name = plugin.name
         plugin_id = plugin.id
         self._set_busy(True)
-        self.uninstall_banner.object = self._banner_html(
-            "info", f"Uninstalling {plugin_name}…"
-        )
+        if message_target in {"global", "row"}:
+            self._set_operation_message("info", f"Uninstalling {plugin_name}…")
+        else:
+            self.uninstall_banner.object = self._banner_html(
+                "info", f"Uninstalling {plugin_name}…"
+            )
         result = None
         try:
             result = self.installer.uninstall(plugin_id, context=self.context)
@@ -1475,9 +1705,12 @@ class PluginManagerPanel:
         except Exception as exc:
             traceback.print_exc()
             self._pending_uninstall_plugin_id = None
-            self.uninstall_banner.object = self._banner_html(
-                "danger", f"Uninstall failed: {exc}"
-            )
+            if message_target in {"global", "row"}:
+                self._set_operation_message("danger", f"Uninstall failed: {exc}")
+            else:
+                self.uninstall_banner.object = self._banner_html(
+                    "danger", f"Uninstall failed: {exc}"
+                )
         else:
             warnings = list(getattr(result, "warnings", ()) or ())
             message = f"Uninstalled {plugin_name}."
@@ -1495,14 +1728,14 @@ class PluginManagerPanel:
             self.refresh()
 
         if result is not None:
-            # refresh() normally selects the first row on the visible page. After an
-            # uninstall, deliberately leave the detail card empty instead so the UI
-            # does not make a different plugin look like the one just removed.
             self._selected_plugin_id = None
-            self._clear_table_selection()
+            self._expanded_plugin_id = None
+            self._focus_plugin_id = None
+            self._render_plugin_lists()
             self._render_selected_plugin()
+            self._sync_installed_detail_visibility()
 
-    def _enable_clicked(self, _event: Any = None) -> None:
+    def _enable_clicked(self, _event: Any = None, *, message_target: str = "plugin") -> None:
         plugin = self._selected_plugin()
         if plugin is None:
             return
@@ -1538,9 +1771,10 @@ class PluginManagerPanel:
             success_message=f"Enabled {plugin.name}.",
             plugin_id=plugin.id,
             registry_operation="enabled",
+            message_target=message_target,
         )
 
-    def _disable_clicked(self, _event: Any = None) -> None:
+    def _disable_clicked(self, _event: Any = None, *, message_target: str = "plugin") -> None:
         plugin = self._selected_plugin()
         if plugin is None or plugin.id == self.SELF_PLUGIN_ID:
             return
@@ -1563,6 +1797,7 @@ class PluginManagerPanel:
             success_message=f"Disabled {plugin.name}.",
             plugin_id=plugin.id,
             registry_operation="disabled",
+            message_target=message_target,
         )
 
     def _reload_clicked(self, _event: Any = None) -> None:
@@ -1624,6 +1859,7 @@ class PluginManagerPanel:
             self.install_button,
             self.update_button,
             self.uninstall_button,
+            self.install_file_toggle,
         ):
             try:
                 button.loading = busy
@@ -1632,6 +1868,11 @@ class PluginManagerPanel:
 
         self.search.disabled = busy
         self.status_filter.disabled = busy
+        for button in list(self._row_buttons):
+            try:
+                button.disabled = busy
+            except Exception:
+                pass
         self.install_file.disabled = busy
         self.update_file.disabled = busy
         self.community_toggle.disabled = busy or self.activation is None
@@ -1644,6 +1885,7 @@ class PluginManagerPanel:
             self._update_action_state(self._selected_plugin())
             self._update_install_action_state()
             self._update_package_action_state(self._selected_plugin())
+            self._render_plugin_lists()
 
     def _set_operation_message(self, tone: str, message: str) -> None:
         self.operation_banner.object = self._banner_html(tone, message) if message else ""
@@ -1693,18 +1935,42 @@ class PluginManagerPanel:
         self,
         plugin: PluginSnapshot | None,
     ) -> None:
+        is_community = bool(plugin is not None and plugin.is_community)
         managed = bool(
             plugin is not None
+            and plugin.is_community
             and plugin.is_managed
             and plugin.origin == "user"
         )
-        self.package_management.visible = managed
-        self.managed_uninstall_controls.visible = managed
 
-        if not managed or plugin is None:
+        self.package_management.visible = managed
+        self.managed_uninstall_controls.visible = is_community
+
+        if plugin is None or not is_community:
+            self.uninstall_note.object = ""
             self.update_button.disabled = True
             self.uninstall_button.disabled = True
-            self.uninstall_button.name = "Uninstall installed plugin"
+            self.uninstall_button.name = "Uninstall plugin"
+            self._pending_uninstall_plugin_id = None
+            self.uninstall_banner.object = ""
+            return
+
+        if managed:
+            self.uninstall_note.object = (
+                '<div class="al-pm-uninstall-title">Installed plugin</div>'
+                '<div class="al-pm-uninstall-copy">AstronomicAL installed this plugin '
+                'and can remove its managed code safely.</div>'
+            )
+        else:
+            self.uninstall_note.object = (
+                '<div class="al-pm-uninstall-title">Uninstall</div>'
+                '<div class="al-pm-uninstall-copy">This community plugin was not '
+                'installed by AstronomicAL, so its files cannot be removed safely '
+                'from Plugin Manager.</div>'
+            )
+            self.update_button.disabled = True
+            self.uninstall_button.disabled = True
+            self.uninstall_button.name = "Uninstall plugin"
             self._pending_uninstall_plugin_id = None
             self.uninstall_banner.object = ""
             return
@@ -1731,7 +1997,7 @@ class PluginManagerPanel:
         self.uninstall_button.name = (
             "Confirm uninstall"
             if self._pending_uninstall_plugin_id == plugin.id
-            else "Uninstall installed plugin"
+            else "Uninstall plugin"
         )
 
     def _update_action_state(self, plugin: PluginSnapshot | None) -> None:
@@ -1929,16 +2195,19 @@ class PluginManagerPanel:
         plugin_id = str(plugin_id or "").strip()
         if not plugin_id:
             return
-
-        for index, plugin in enumerate(self._visible_plugins):
-            if plugin.id != plugin_id:
-                continue
-            page = (index // self._page_size()) + 1
-            self._selected_plugin_id = plugin_id
-            self._set_table_page(page)
-            self._sync_table_selection()
-            self._render_selected_plugin()
+        plugin = next(
+            (item for item in (self._snapshot.plugins if self._snapshot else ()) if item.id == plugin_id),
+            None,
+        )
+        if plugin is None:
             return
+        self._selected_plugin_id = plugin_id
+        self._expanded_plugin_id = plugin_id
+        self._focus_plugin_id = plugin_id
+        self.main_tabs.active = 0
+        self.installed_tabs.active = 1 if plugin.is_community else 0
+        self._apply_filters()
+        self._sync_installed_detail_visibility()
 
     def _selected_plugin(self) -> PluginSnapshot | None:
         if self._snapshot is None or self._selected_plugin_id is None:
@@ -1972,6 +2241,10 @@ class PluginManagerPanel:
             "search": self._search_value(),
             "status_filter": str(self.status_filter.value or "all"),
             "selected_plugin_id": self._selected_plugin_id,
+            "expanded_plugin_id": self._expanded_plugin_id,
+            "main_tab": int(getattr(self.main_tabs, "active", 0) or 0),
+            "installed_tab": int(getattr(self.installed_tabs, "active", 0) or 0),
+            "marketplace": self.marketplace_panel.get_state(),
         }
 
     def restore_state(self, state: Mapping[str, Any] | None) -> None:
@@ -1979,20 +2252,41 @@ class PluginManagerPanel:
             return
         self._restoring = True
         try:
-            self.search.value = str(state.get("search", "") or "")
+            search_value = str(state.get("search", "") or "")
+            self.search.value = search_value
+            # Panel keeps the live TextInput text in value_input. The
+            # search helpers intentionally prefer it so filtering responds
+            # while the user types. Keep both parameters aligned when
+            # restoring state programmatically.
+            try:
+                self.search.value_input = search_value
+            except Exception:
+                pass
             status_filter = str(state.get("status_filter", "all") or "all")
             if status_filter in {"all", "enabled", "available", "issues"}:
                 self.status_filter.value = status_filter
             selected = state.get("selected_plugin_id")
             self._selected_plugin_id = str(selected) if selected else None
+            expanded = state.get("expanded_plugin_id", selected)
+            self._expanded_plugin_id = str(expanded) if expanded else None
+            try:
+                self.main_tabs.active = max(0, min(1, int(state.get("main_tab", 0) or 0)))
+            except Exception:
+                self.main_tabs.active = 0
+            try:
+                self.installed_tabs.active = max(0, min(1, int(state.get("installed_tab", 0) or 0)))
+            except Exception:
+                self.installed_tabs.active = 0
         finally:
             self._restoring = False
-        self._apply_filters(reset_page=True)
+        self.marketplace_panel.restore_state(state.get("marketplace"))
+        self._apply_filters()
 
     def dispose(self) -> None:
         if self._disposed:
             return
         self._disposed = True
+        self.marketplace_panel.dispose()
 
         events = getattr(self.context, "events", None)
         if events is not None:
@@ -2009,3 +2303,4 @@ class PluginManagerPanel:
             except Exception:
                 pass
         self._watchers.clear()
+        self._row_buttons.clear()

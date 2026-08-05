@@ -111,9 +111,23 @@ from astronomicAL.platform.plugins import (
     PluginPythonEnvironment,
     PluginSearchPath,
     PluginStateStore,
+    MarketplaceInstallOrchestrator,
+    MarketplacePackageDownloader,
+    MarketplacePlanningService,
+    MarketplaceService,
+    MarketplaceSource,
+    MarketplaceUpdatesFacade,
+    inspect_plugin_package,
 )
 from astronomicAL.platform.persistence import WorkspacePersistence
 from astronomicAL.platform.runtime_status import RuntimeStatus
+
+
+OFFICIAL_MARKETPLACE_ID = "astronomical-official"
+OFFICIAL_MARKETPLACE_URL = (
+    "https://raw.githubusercontent.com/"
+    "grant-m-s/AstronomicAL-Marketplace/master/catalogue.json"
+)
 
 def _plugin_dirs() -> list[PluginSearchPath]:
     """Return local plugin roots together with host-owned activation policy."""
@@ -163,6 +177,21 @@ def _plugin_dirs() -> list[PluginSearchPath]:
         unique.append(source)
 
     return unique
+
+def _marketplace_sources() -> list[MarketplaceSource]:
+    """Return the built-in official AstronomicAL marketplace source."""
+
+    return [
+        MarketplaceSource(
+            id=OFFICIAL_MARKETPLACE_ID,
+            url=OFFICIAL_MARKETPLACE_URL,
+        )
+    ]
+
+def _inspect_marketplace_manifest(archive_path: str | Path):
+    """Inspect a downloaded package statically without runtime plugin import."""
+
+    return inspect_plugin_package(archive_path).manifest
 
 def _discover_and_enable_plugins(context: AppContext) -> None:
     boot_print("main.py: plugin discovery start")
@@ -377,8 +406,67 @@ services.set(
     owner="platform",
 )
 
+marketplace = MarketplaceService(
+    sources=_marketplace_sources(),
+    cache_root=astronomical_home / "marketplace-cache",
+)
+marketplace.load_cached()
+
+marketplace_planner = MarketplacePlanningService(
+    marketplace=marketplace,
+    installed_store=installed_plugins,
+    manager=plugins,
+    astronomical_version=plugin_installer.astronomical_version,
+)
+marketplace_updates = MarketplaceUpdatesFacade(
+    marketplace=marketplace,
+    installed_store=installed_plugins,
+    manager=plugins,
+    astronomical_version=plugin_installer.astronomical_version,
+)
+marketplace_downloader = MarketplacePackageDownloader(
+    staging_dir=astronomical_home / "marketplace-downloads",
+    inspect_package=_inspect_marketplace_manifest,
+)
+marketplace_installer = MarketplaceInstallOrchestrator(
+    downloader=marketplace_downloader,
+    installer=plugin_installer,
+)
+
+services.set(
+    "platform.marketplace",
+    marketplace,
+    owner="platform",
+)
+services.set(
+    "platform.marketplace_planner",
+    marketplace_planner,
+    owner="platform",
+)
+services.set(
+    "platform.marketplace_updates",
+    marketplace_updates,
+    owner="platform",
+)
+services.set(
+    "platform.marketplace_installer",
+    marketplace_installer,
+    owner="platform",
+)
+
 boot_print("main.py: plugin manager created")
 boot_print(f"main.py: plugin_installer={type(plugin_installer).__name__}")
+boot_print(f"main.py: marketplace={type(marketplace).__name__}")
+boot_print(
+    "main.py: marketplace sources="
+    f"{[source.id for source in marketplace.sources()]}"
+)
+for marketplace_state in marketplace.states():
+    if marketplace_state.error:
+        print(
+            f"[marketplace] cached catalogue unavailable for "
+            f"{marketplace_state.source_id}: {marketplace_state.error}"
+        )
 boot_print("main.py: plugin local sources:")
 for source in plugins.local_plugin_sources:
     boot_print(
@@ -405,6 +493,10 @@ context = AppContext(
     plugin_activation=plugin_activation,
     installed_plugins=installed_plugins,
     plugin_installer=plugin_installer,
+    marketplace=marketplace,
+    marketplace_planner=marketplace_planner,
+    marketplace_updates=marketplace_updates,
+    marketplace_installer=marketplace_installer,
     runtime_status=runtime_status,
 )
 
@@ -431,6 +523,10 @@ required = [
     "plugin_activation",
     "installed_plugins",
     "plugin_installer",
+    "marketplace",
+    "marketplace_planner",
+    "marketplace_updates",
+    "marketplace_installer",
     "persistence",
     "runtime_status",
     "layout_file",
