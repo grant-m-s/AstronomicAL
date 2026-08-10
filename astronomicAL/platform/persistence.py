@@ -231,20 +231,73 @@ class WorkspacePersistence:
             )
 
     def _snapshot_plugins(self) -> dict[str, Any]:
+        """
+        Snapshot only the plugins represented by persisted workspace panels.
+
+        A workspace/layout file describes the dashboard being saved, not the
+        complete plugin inventory of the AstronomicAL installation that created
+        it.  Derive the saved plugin set from ``workspace.snapshot_panels()`` so
+        unrelated installed/enabled development, tutorial, or dependency-only
+        plugins do not leak into portable example layouts.
+
+        ``required`` remains the authoritative panel dependency description.
+        ``enabled`` mirrors the unique plugin ids represented by those panels so
+        the existing schema and restore path remain backwards compatible.
+        ``info`` is retained only for those same plugin ids, preserving useful
+        version/origin provenance without serializing the entire registry.
+
+        Older layout files that contain a broad ``plugins.enabled`` list remain
+        loadable because restore semantics are intentionally unchanged.
+        """
+
         plugins = getattr(self.context, "plugins", None)
         workspace = getattr(self.context, "workspace", None)
 
-        enabled = []
-        plugin_info = {}
+        required: dict[str, dict[str, Any]] = {}
 
-        if plugins is not None and hasattr(plugins, "list_plugins"):
-            for info in plugins.list_plugins():
-                status = getattr(info, "status", None)
-                status_value = getattr(status, "value", status)
-                plugin_id = getattr(info, "id", None)
+        if workspace is not None:
+            for panel in workspace.snapshot_panels():
+                if not isinstance(panel, dict):
+                    continue
 
+                plugin_id = panel.get("plugin_id")
                 if not plugin_id:
                     continue
+
+                plugin_id = str(plugin_id)
+
+                required.setdefault(
+                    plugin_id,
+                    {
+                        "id": plugin_id,
+                        "version": panel.get("plugin_version"),
+                        "panels": [],
+                    },
+                )
+
+                registration_id = panel.get("registration_id")
+                if registration_id:
+                    required[plugin_id]["panels"].append(str(registration_id))
+
+        workspace_plugin_ids = set(required)
+        plugin_info: dict[str, dict[str, Any]] = {}
+
+        if (
+            workspace_plugin_ids
+            and plugins is not None
+            and hasattr(plugins, "list_plugins")
+        ):
+            for info in plugins.list_plugins():
+                plugin_id = getattr(info, "id", None)
+                if not plugin_id:
+                    continue
+
+                plugin_id = str(plugin_id)
+                if plugin_id not in workspace_plugin_ids:
+                    continue
+
+                status = getattr(info, "status", None)
+                status_value = getattr(status, "value", status)
 
                 origin = getattr(info, "origin", None)
                 origin_value = getattr(origin, "value", origin)
@@ -258,35 +311,11 @@ class WorkspacePersistence:
                     "origin": origin_value,
                 }
 
-                if status_value == "enabled":
-                    enabled.append(plugin_id)
-
-        required = {}
-        if workspace is not None:
-            for panel in workspace.snapshot_panels():
-                plugin_id = panel.get("plugin_id")
-                if not plugin_id:
-                    continue
-
-                required.setdefault(
-                    plugin_id,
-                    {
-                        "id": plugin_id,
-                        "version": panel.get("plugin_version"),
-                        "panels": [],
-                    },
-                )
-
-                registration_id = panel.get("registration_id")
-                if registration_id:
-                    required[plugin_id]["panels"].append(registration_id)
-
         return {
-            "enabled": sorted(set(enabled)),
+            "enabled": sorted(workspace_plugin_ids),
             "required": list(required.values()),
             "info": plugin_info,
         }
-
     def _snapshot_datasets(self) -> dict[str, Any]:
         datasets = getattr(self.context, "datasets", None)
         if datasets is None:
@@ -955,3 +984,4 @@ class WorkspacePersistence:
                 break
 
         return layout_items
+
