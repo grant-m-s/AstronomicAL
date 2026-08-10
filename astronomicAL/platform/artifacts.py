@@ -3,10 +3,15 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import hashlib
 import json
+import logging
 import os
+import threading
 import time
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 import uuid
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -116,14 +121,34 @@ class ArtifactStore:
     to ``cache_dir``. Large domain outputs should persist themselves and place
     their external references in the payload, while ``row_ids_ref`` identifies
     the complete represented row set independently from any inline preview.
+
+    When bound to the host EventBus, successful writes publish the lightweight
+    ``artifact.store.created`` lifecycle event. The event is emitted after the
+    artifact is fully committed and never transports the artifact payload.
     """
 
-    def __init__(self, cache_dir: Optional[str] = None) -> None:
+    def __init__(self, cache_dir: Optional[str] = None, *, events: Any = None) -> None:
         self._payloads: Dict[str, Any] = {}
         self._meta: Dict[str, ArtifactRef] = {}
         self._cache_dir = cache_dir
+        self._events = events
+        self._lock = threading.RLock()
         if cache_dir:
             os.makedirs(cache_dir, exist_ok=True)
+
+    def bind_events(self, events: Any) -> None:
+        """Bind the store to the shared host EventBus.
+
+        Rebinding to a different bus is rejected because one ArtifactStore should
+        belong to one application context. Rebinding the same instance is a no-op.
+        """
+
+        if events is None:
+            raise ValueError("ArtifactStore requires a non-null EventBus")
+        with self._lock:
+            if self._events is not None and self._events is not events:
+                raise RuntimeError("ArtifactStore is already bound to another EventBus")
+            self._events = events
 
     @staticmethod
     def _hash_params(params: Dict[str, Any]) -> str:
@@ -165,8 +190,9 @@ class ArtifactStore:
 
         uri = None
         has_payload = True
-        if persist and self._cache_dir:
-            uri = os.path.join(self._cache_dir, f"{artifact_id}.json")
+        persisted = bool(persist and self._cache_dir)
+        if persisted:
+            uri = os.path.join(str(self._cache_dir), f"{artifact_id}.json")
             temp_uri = f"{uri}.tmp"
             try:
                 with open(temp_uri, "w", encoding="utf-8") as handle:
@@ -179,8 +205,6 @@ class ArtifactStore:
                     pass
                 raise
             has_payload = False
-        else:
-            self._payloads[artifact_id] = payload
 
         ref = ArtifactRef(
             artifact_id=artifact_id,
@@ -194,8 +218,40 @@ class ArtifactStore:
             has_payload=has_payload,
             uri=uri,
         )
-        self._meta[artifact_id] = ref
+
+        with self._lock:
+            if not persisted:
+                self._payloads[artifact_id] = payload
+            self._meta[artifact_id] = ref
+
+        self._publish_created(ref)
         return artifact_id
+
+    def _publish_created(self, ref: ArtifactRef) -> None:
+        with self._lock:
+            events = self._events
+        publish = getattr(events, "publish", None)
+        if not callable(publish):
+            return
+
+        try:
+            publish(
+                "artifact.store.created",
+                {
+                    "artifact_id": ref.artifact_id,
+                    "type": ref.type,
+                    "dataset_id": ref.dataset_id,
+                    "row_count": ref.row_count,
+                    "created_at": ref.created_at,
+                },
+            )
+        except Exception:
+            # Artifact persistence is authoritative. A notification failure must
+            # not make a successfully committed artifact appear to have failed.
+            logger.exception(
+                "Failed to publish artifact.store.created for %s",
+                ref.artifact_id,
+            )
 
     @staticmethod
     def _resolve_row_count(
@@ -207,7 +263,6 @@ class ArtifactStore:
         resolved = None if row_count is None else int(row_count)
         if resolved is not None and resolved < 0:
             raise ValueError("row_count must be zero or greater")
-
         if row_ids_ref is not None:
             ref_count = int(row_ids_ref.row_count)
             if resolved is None:
@@ -217,7 +272,6 @@ class ArtifactStore:
                     "row_count does not match row_ids_ref.row_count: "
                     f"{resolved} != {ref_count}"
                 )
-
         if row_ids is not None:
             inline_count = len(row_ids)
             if resolved is None:
@@ -230,20 +284,24 @@ class ArtifactStore:
         return resolved
 
     def get(self, artifact_id: str) -> Any:
-        ref = self._meta.get(artifact_id)
-        if not ref:
-            raise KeyError(f"Unknown artifact_id: {artifact_id}")
-        if ref.has_payload:
-            return self._payloads[artifact_id]
-        if ref.uri and os.path.exists(ref.uri):
-            with open(ref.uri, "r", encoding="utf-8") as handle:
+        with self._lock:
+            ref = self._meta.get(artifact_id)
+            if not ref:
+                raise KeyError(f"Unknown artifact_id: {artifact_id}")
+            if ref.has_payload:
+                return self._payloads[artifact_id]
+            uri = ref.uri
+
+        if uri and os.path.exists(uri):
+            with open(uri, "r", encoding="utf-8") as handle:
                 return json.load(handle)
         raise FileNotFoundError(
-            f"Artifact payload missing for {artifact_id} (uri={ref.uri})"
+            f"Artifact payload missing for {artifact_id} (uri={uri})"
         )
 
     def ref(self, artifact_id: str) -> ArtifactRef:
-        ref = self._meta.get(artifact_id)
+        with self._lock:
+            ref = self._meta.get(artifact_id)
         if not ref:
             raise KeyError(f"Unknown artifact_id: {artifact_id}")
         return ref
@@ -256,9 +314,12 @@ class ArtifactStore:
         row_id: Optional[str] = None,
         params_subset: Optional[Dict[str, Any]] = None,
     ) -> List[ArtifactRef]:
-        out: List[ArtifactRef] = []
         requested_row_id = None if row_id is None else str(row_id)
-        for ref in self._meta.values():
+        with self._lock:
+            refs = list(self._meta.values())
+
+        out: List[ArtifactRef] = []
+        for ref in refs:
             if type is not None and ref.type != type:
                 continue
             if dataset_id is not None and ref.dataset_id != dataset_id:
@@ -267,7 +328,10 @@ class ArtifactStore:
                 if not ref.row_ids or requested_row_id not in ref.row_ids:
                     continue
             if params_subset:
-                if any(ref.params.get(key) != value for key, value in params_subset.items()):
+                if any(
+                    ref.params.get(key) != value
+                    for key, value in params_subset.items()
+                ):
                     continue
             out.append(ref)
         out.sort(key=lambda value: value.created_at, reverse=True)

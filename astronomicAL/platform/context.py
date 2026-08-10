@@ -14,10 +14,10 @@ from astronomicAL.platform.selection import SelectionManager
 from astronomicAL.platform.services import ServiceRegistry
 from astronomicAL.platform.workspace import WorkspaceManager
 
+
 @dataclass
 class AppContext:
-    """
-    Runtime dependency object for platform services and application paths.
+    """Runtime dependency object for platform services and application paths.
 
     Runtime state lives in the explicit platform services below. Application
     paths are carried directly rather than through a process-global config
@@ -31,10 +31,8 @@ class AppContext:
     workspace: WorkspaceManager
     selection: SelectionManager
     services: ServiceRegistry
-
     layout_file: Path = Path("astronomicAL/layout.json")
     layout_directory: Path = Path("layouts")
-
     navigation: Optional[RecordNavigationManager] = None
     plugins: Optional[Any] = None
     plugin_state: Optional[Any] = None
@@ -47,3 +45,12 @@ class AppContext:
     marketplace_installer: Optional[Any] = None
     persistence: Optional[Any] = None
     runtime_status: Optional[RuntimeStatus] = None
+
+    def __post_init__(self) -> None:
+        # ArtifactStore lifecycle notifications must use the same EventBus as the
+        # rest of this application context. Keeping the binding here preserves a
+        # single explicit host bus without requiring plugins to wire platform
+        # services together themselves.
+        bind_events = getattr(self.artifacts, "bind_events", None)
+        if callable(bind_events):
+            bind_events(self.events)
