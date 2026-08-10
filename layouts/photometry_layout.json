@@ -1,5 +1,5 @@
 {
-  "created_at": "2026-07-28T12:52:29.041598+00:00",
+  "created_at": "2026-08-10T17:28:42.115367+00:00",
   "datasets": {
     "active_id": "edfn_example_data",
     "items": [
@@ -49,6 +49,7 @@
         "meta": {
           "backend": "duckdb_parquet",
           "cache_path": "data/.astronomical_cache/EDFN_example_data.parquet",
+          "cache_schema_version": 2,
           "column_count": 34,
           "column_metadata": [
             {
@@ -394,15 +395,26 @@
             "g_ext_hsc-z_ext_hsc",
             "vis-h"
           ],
+          "conversion_elapsed_seconds": 0.05290512298233807,
+          "created_at_ns": 1786378760277530722,
+          "loader_id": "platform.dataset_loader",
+          "optimise_data": false,
           "parquet_compression": "zstd",
           "parquet_compression_level": 1,
           "parquet_path": "data/.astronomical_cache/EDFN_example_data.parquet",
           "parquet_use_dictionary": false,
           "row_count": 15002,
           "skipped_columns": [],
+          "source_fingerprint": {
+            "digest": "4a3b1974764fa264d4540c6eab644cecf3933dbf3e64e8bee4000525ab9db97c",
+            "digest_mode": "sha256-full",
+            "mtime_ns": 1785845948411242400,
+            "size_bytes": 4063680
+          },
           "source_format": "fits",
           "source_hdu": 1,
           "source_path": "data/EDFN_example_data.fits",
+          "source_subresource": "1",
           "table_meta": {
             "BITPIX": 8,
             "GCOUNT": 1,
@@ -489,132 +501,40 @@
   },
   "plugins": {
     "enabled": [
-      "astro.aladin",
       "astro.euclid_cutout",
-      "astro.samp",
       "astro.sed",
-      "astro.spectra",
-      "core.active_learning",
-      "core.annotations",
-      "core.event_monitor",
-      "core.image",
-      "core.ml",
-      "core.plugin_manager",
       "core.record_browser",
-      "core.resources",
-      "core.selection_tools",
-      "core.table_tools",
       "core.visualisation"
     ],
     "info": {
-      "astro.aladin": {
-        "id": "astro.aladin",
-        "name": "Aladin Lite",
-        "source": "local_dir",
-        "status": "enabled",
-        "version": "0.1.0"
-      },
       "astro.euclid_cutout": {
         "id": "astro.euclid_cutout",
         "name": "Euclid Cutout",
+        "origin": "bundled",
         "source": "local_dir",
         "status": "enabled",
         "version": "0.2.14"
       },
-      "astro.samp": {
-        "id": "astro.samp",
-        "name": "SAMP",
-        "source": "local_dir",
-        "status": "enabled",
-        "version": "0.2.5"
-      },
       "astro.sed": {
         "id": "astro.sed",
         "name": "Broadband SED",
+        "origin": "bundled",
         "source": "local_dir",
         "status": "enabled",
-        "version": "0.1.0"
-      },
-      "astro.spectra": {
-        "id": "astro.spectra",
-        "name": "Astronomy Spectra",
-        "source": "local_dir",
-        "status": "enabled",
-        "version": "0.1.0"
-      },
-      "core.active_learning": {
-        "id": "core.active_learning",
-        "name": "Active Learning",
-        "source": "local_dir",
-        "status": "enabled",
-        "version": "0.7.0"
-      },
-      "core.annotations": {
-        "id": "core.annotations",
-        "name": "Annotations",
-        "source": "local_dir",
-        "status": "enabled",
-        "version": "0.2.0"
-      },
-      "core.event_monitor": {
-        "id": "core.event_monitor",
-        "name": "Event Monitor",
-        "source": "local_dir",
-        "status": "enabled",
-        "version": "0.2.0"
-      },
-      "core.image": {
-        "id": "core.image",
-        "name": "Image Assets",
-        "source": "local_dir",
-        "status": "enabled",
-        "version": "0.2.4"
-      },
-      "core.ml": {
-        "id": "core.ml",
-        "name": "ML Core",
-        "source": "local_dir",
-        "status": "enabled",
-        "version": "0.7.6"
-      },
-      "core.plugin_manager": {
-        "id": "core.plugin_manager",
-        "name": "Plugin Manager",
-        "source": "local_dir",
-        "status": "enabled",
-        "version": "0.2.0"
+        "version": "0.1.1"
       },
       "core.record_browser": {
         "id": "core.record_browser",
         "name": "Record Browser",
+        "origin": "bundled",
         "source": "local_dir",
         "status": "enabled",
         "version": "0.1.0"
-      },
-      "core.resources": {
-        "id": "core.resources",
-        "name": "Resource Monitor",
-        "source": "local_dir",
-        "status": "enabled",
-        "version": "0.1.0"
-      },
-      "core.selection_tools": {
-        "id": "core.selection_tools",
-        "name": "Selection Tools",
-        "source": "local_dir",
-        "status": "enabled",
-        "version": "0.1.0"
-      },
-      "core.table_tools": {
-        "id": "core.table_tools",
-        "name": "Table Tools",
-        "source": "local_dir",
-        "status": "enabled",
-        "version": "0.2.0"
       },
       "core.visualisation": {
         "id": "core.visualisation",
         "name": "Visualisation",
+        "origin": "bundled",
         "source": "local_dir",
         "status": "enabled",
         "version": "0.3.2"
@@ -633,7 +553,7 @@
         "panels": [
           "astro.sed.panel"
         ],
-        "version": "0.1.0"
+        "version": "0.1.1"
       },
       {
         "id": "core.visualisation",
@@ -685,7 +605,7 @@
       "origin": "record_browser.index",
       "panel_id": "f14e2ce8-ec87-4c9c-8b95-96930e19de62",
       "row_id": "2728549872661986358",
-      "timestamp": 1785243103.10414
+      "timestamp": 1786382901.2224696
     },
     "selection_set": null
   },
@@ -969,7 +889,7 @@
         },
         "open_kwargs": {},
         "plugin_id": "astro.sed",
-        "plugin_version": "0.1.0",
+        "plugin_version": "0.1.1",
         "registration_id": "astro.sed.panel",
         "state": {
           "assign_all_unit_value": "ABmag",
@@ -993,7 +913,7 @@
             "u": "magerr_u_ext_megacam_templfit_euclid",
             "z": "magerr_z_ext_hsc_templfit_euclid"
           },
-          "latest_artifact_id": "74674df374c7479d8da991f2c0c769df",
+          "latest_artifact_id": "df280ddc55e148a7833de5e2b58bd8f9",
           "mapping_applied_once": true,
           "mapping_controls_expanded": false,
           "plot_unit": "erg/s/cm\u00b2 (\u03bdF\u03bd)",

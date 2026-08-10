@@ -1,5 +1,5 @@
 {
-  "created_at": "2026-07-28T11:37:03.443809+00:00",
+  "created_at": "2026-08-10T17:23:05.476392+00:00",
   "datasets": {
     "active_id": "zoobot_subset",
     "items": [
@@ -26,39 +26,39 @@
           "nir_y_loc",
           "jpg_loc_generic",
           "id_str",
-          "smooth-or-featured_smooth_fraction",
-          "smooth-or-featured_featured-or-disk_fraction",
-          "smooth-or-featured_problem_fraction",
-          "disk-edge-on_yes_fraction",
-          "disk-edge-on_no_fraction",
-          "has-spiral-arms_yes_fraction",
-          "has-spiral-arms_no_fraction",
+          "smooth_or_featured_smooth_fraction",
+          "smooth_or_featured_featured_or_disk_fraction",
+          "smooth_or_featured_problem_fraction",
+          "disk_edge_on_yes_fraction",
+          "disk_edge_on_no_fraction",
+          "has_spiral_arms_yes_fraction",
+          "has_spiral_arms_no_fraction",
           "bar_strong_fraction",
           "bar_weak_fraction",
           "bar_no_fraction",
-          "bulge-size_dominant_fraction",
-          "bulge-size_large_fraction",
-          "bulge-size_moderate_fraction",
-          "bulge-size_small_fraction",
-          "bulge-size_none_fraction",
-          "how-rounded_round_fraction",
-          "how-rounded_in-between_fraction",
-          "how-rounded_cigar-shaped_fraction",
-          "edge-on-bulge_boxy_fraction",
-          "edge-on-bulge_none_fraction",
-          "edge-on-bulge_rounded_fraction",
-          "spiral-winding_tight_fraction",
-          "spiral-winding_medium_fraction",
-          "spiral-winding_loose_fraction",
-          "spiral-arm-count_1_fraction",
-          "spiral-arm-count_2_fraction",
-          "spiral-arm-count_3_fraction",
-          "spiral-arm-count_4_fraction",
-          "spiral-arm-count_more-than-4_fraction",
-          "spiral-arm-count_cant-tell_fraction",
+          "bulge_size_dominant_fraction",
+          "bulge_size_large_fraction",
+          "bulge_size_moderate_fraction",
+          "bulge_size_small_fraction",
+          "bulge_size_none_fraction",
+          "how_rounded_round_fraction",
+          "how_rounded_in_between_fraction",
+          "how_rounded_cigar_shaped_fraction",
+          "edge_on_bulge_boxy_fraction",
+          "edge_on_bulge_none_fraction",
+          "edge_on_bulge_rounded_fraction",
+          "spiral_winding_tight_fraction",
+          "spiral_winding_medium_fraction",
+          "spiral_winding_loose_fraction",
+          "spiral_arm_count_1_fraction",
+          "spiral_arm_count_2_fraction",
+          "spiral_arm_count_3_fraction",
+          "spiral_arm_count_4_fraction",
+          "spiral_arm_count_more_than_4_fraction",
+          "spiral_arm_count_cant_tell_fraction",
           "merging_none_fraction",
-          "merging_minor-disturbance_fraction",
-          "merging_major-disturbance_fraction",
+          "merging_minor_disturbance_fraction",
+          "merging_major_disturbance_fraction",
           "merging_merger_fraction",
           "clumps_yes_fraction",
           "clumps_no_fraction",
@@ -80,42 +80,42 @@
           "jpg_loc_gz_arcsinh_vis_only",
           "jpg_loc_gz_arcsinh_vis_lsb",
           "new_image_col",
-          "smooth-or-featured_label_raw",
-          "smooth-or-featured_confidence",
-          "smooth-or-featured_margin",
-          "smooth-or-featured_is_certain_raw",
-          "disk-edge-on_label_raw",
-          "disk-edge-on_confidence",
-          "disk-edge-on_margin",
-          "disk-edge-on_is_certain_raw",
-          "has-spiral-arms_label_raw",
-          "has-spiral-arms_confidence",
-          "has-spiral-arms_margin",
-          "has-spiral-arms_is_certain_raw",
+          "smooth_or_featured_label_raw",
+          "smooth_or_featured_confidence",
+          "smooth_or_featured_margin",
+          "smooth_or_featured_is_certain_raw",
+          "disk_edge_on_label_raw",
+          "disk_edge_on_confidence",
+          "disk_edge_on_margin",
+          "disk_edge_on_is_certain_raw",
+          "has_spiral_arms_label_raw",
+          "has_spiral_arms_confidence",
+          "has_spiral_arms_margin",
+          "has_spiral_arms_is_certain_raw",
           "bar_label_raw",
           "bar_confidence",
           "bar_margin",
           "bar_is_certain_raw",
-          "bulge-size_label_raw",
-          "bulge-size_confidence",
-          "bulge-size_margin",
-          "bulge-size_is_certain_raw",
-          "how-rounded_label_raw",
-          "how-rounded_confidence",
-          "how-rounded_margin",
-          "how-rounded_is_certain_raw",
-          "edge-on-bulge_label_raw",
-          "edge-on-bulge_confidence",
-          "edge-on-bulge_margin",
-          "edge-on-bulge_is_certain_raw",
-          "spiral-winding_label_raw",
-          "spiral-winding_confidence",
-          "spiral-winding_margin",
-          "spiral-winding_is_certain_raw",
-          "spiral-arm-count_label_raw",
-          "spiral-arm-count_confidence",
-          "spiral-arm-count_margin",
-          "spiral-arm-count_is_certain_raw",
+          "bulge_size_label_raw",
+          "bulge_size_confidence",
+          "bulge_size_margin",
+          "bulge_size_is_certain_raw",
+          "how_rounded_label_raw",
+          "how_rounded_confidence",
+          "how_rounded_margin",
+          "how_rounded_is_certain_raw",
+          "edge_on_bulge_label_raw",
+          "edge_on_bulge_confidence",
+          "edge_on_bulge_margin",
+          "edge_on_bulge_is_certain_raw",
+          "spiral_winding_label_raw",
+          "spiral_winding_confidence",
+          "spiral_winding_margin",
+          "spiral_winding_is_certain_raw",
+          "spiral_arm_count_label_raw",
+          "spiral_arm_count_confidence",
+          "spiral_arm_count_margin",
+          "spiral_arm_count_is_certain_raw",
           "merging_label_raw",
           "merging_confidence",
           "merging_margin",
@@ -132,63 +132,63 @@
           "artifact_confidence",
           "artifact_margin",
           "artifact_is_certain_raw",
-          "smooth-or-featured_is_reachable",
-          "smooth-or-featured_is_certain",
-          "smooth-or-featured_class",
-          "smooth-or-featured_is_smooth",
-          "smooth-or-featured_is_featured_or_disk",
-          "smooth-or-featured_is_problem",
-          "disk-edge-on_is_reachable",
-          "disk-edge-on_is_certain",
-          "disk-edge-on_class",
-          "disk-edge-on_is_yes",
-          "disk-edge-on_is_no",
-          "has-spiral-arms_is_reachable",
-          "has-spiral-arms_is_certain",
-          "has-spiral-arms_class",
-          "has-spiral-arms_is_yes",
-          "has-spiral-arms_is_no",
+          "smooth_or_featured_is_reachable",
+          "smooth_or_featured_is_certain",
+          "smooth_or_featured_class",
+          "smooth_or_featured_is_smooth",
+          "smooth_or_featured_is_featured_or_disk",
+          "smooth_or_featured_is_problem",
+          "disk_edge_on_is_reachable",
+          "disk_edge_on_is_certain",
+          "disk_edge_on_class",
+          "disk_edge_on_is_yes",
+          "disk_edge_on_is_no",
+          "has_spiral_arms_is_reachable",
+          "has_spiral_arms_is_certain",
+          "has_spiral_arms_class",
+          "has_spiral_arms_is_yes",
+          "has_spiral_arms_is_no",
           "bar_is_reachable",
           "bar_is_certain",
           "bar_class",
           "bar_is_strong",
           "bar_is_weak",
           "bar_is_no",
-          "bulge-size_is_reachable",
-          "bulge-size_is_certain",
-          "bulge-size_class",
-          "bulge-size_is_dominant",
-          "bulge-size_is_large",
-          "bulge-size_is_moderate",
-          "bulge-size_is_small",
-          "bulge-size_is_none",
-          "how-rounded_is_reachable",
-          "how-rounded_is_certain",
-          "how-rounded_class",
-          "how-rounded_is_round",
-          "how-rounded_is_in_between",
-          "how-rounded_is_cigar_shaped",
-          "edge-on-bulge_is_reachable",
-          "edge-on-bulge_is_certain",
-          "edge-on-bulge_class",
-          "edge-on-bulge_is_boxy",
-          "edge-on-bulge_is_none",
-          "edge-on-bulge_is_rounded",
-          "spiral-winding_is_reachable",
-          "spiral-winding_is_certain",
-          "spiral-winding_class",
-          "spiral-winding_is_tight",
-          "spiral-winding_is_medium",
-          "spiral-winding_is_loose",
-          "spiral-arm-count_is_reachable",
-          "spiral-arm-count_is_certain",
-          "spiral-arm-count_class",
-          "spiral-arm-count_is__1",
-          "spiral-arm-count_is__2",
-          "spiral-arm-count_is__3",
-          "spiral-arm-count_is__4",
-          "spiral-arm-count_is_more_than_4",
-          "spiral-arm-count_is_cant_tell",
+          "bulge_size_is_reachable",
+          "bulge_size_is_certain",
+          "bulge_size_class",
+          "bulge_size_is_dominant",
+          "bulge_size_is_large",
+          "bulge_size_is_moderate",
+          "bulge_size_is_small",
+          "bulge_size_is_none",
+          "how_rounded_is_reachable",
+          "how_rounded_is_certain",
+          "how_rounded_class",
+          "how_rounded_is_round",
+          "how_rounded_is_in_between",
+          "how_rounded_is_cigar_shaped",
+          "edge_on_bulge_is_reachable",
+          "edge_on_bulge_is_certain",
+          "edge_on_bulge_class",
+          "edge_on_bulge_is_boxy",
+          "edge_on_bulge_is_none",
+          "edge_on_bulge_is_rounded",
+          "spiral_winding_is_reachable",
+          "spiral_winding_is_certain",
+          "spiral_winding_class",
+          "spiral_winding_is_tight",
+          "spiral_winding_is_medium",
+          "spiral_winding_is_loose",
+          "spiral_arm_count_is_reachable",
+          "spiral_arm_count_is_certain",
+          "spiral_arm_count_class",
+          "spiral_arm_count_is__1",
+          "spiral_arm_count_is__2",
+          "spiral_arm_count_is__3",
+          "spiral_arm_count_is__4",
+          "spiral_arm_count_is_more_than_4",
+          "spiral_arm_count_is_cant_tell",
           "merging_is_reachable",
           "merging_is_certain",
           "merging_class",
@@ -245,6 +245,7 @@
         "meta": {
           "backend": "duckdb_parquet",
           "cache_path": "/media/gs15096/Shared/Uni-Stuff/Fellowship/AstronomicAL_upgrade/data/.astronomical_cache/zoobot_subset.parquet",
+          "cache_schema_version": 2,
           "column_count": 229,
           "column_metadata": [
             {
@@ -2540,15 +2541,26 @@
             "is_star_problem",
             "is_artifact_problem"
           ],
+          "conversion_elapsed_seconds": 0.10817956400569528,
+          "created_at_ns": 1786379933123209986,
+          "loader_id": "platform.dataset_loader",
+          "optimise_data": false,
           "parquet_compression": "zstd",
           "parquet_compression_level": 1,
           "parquet_path": "/media/gs15096/Shared/Uni-Stuff/Fellowship/AstronomicAL_upgrade/data/.astronomical_cache/zoobot_subset.parquet",
           "parquet_use_dictionary": false,
           "row_count": 67,
           "skipped_columns": [],
+          "source_fingerprint": {
+            "digest": "3773be39deacbf3b3d2c29a8fd3c2174f1331af8c86888db8417930fc1b9269c",
+            "digest_mode": "sha256-full",
+            "mtime_ns": 1785845948655581300,
+            "size_bytes": 207360
+          },
           "source_format": "fits",
           "source_hdu": 1,
           "source_path": "data/zoobot_subset.fits",
+          "source_subresource": "1",
           "table_meta": {
             "BITPIX": 8,
             "DATE-HDU": "2026-07-28T08:41:30",
@@ -3030,173 +3042,42 @@
   "plugins": {
     "enabled": [
       "astro.aladin",
-      "astro.euclid_cutout",
-      "astro.samp",
-      "astro.sed",
-      "astro.spec_analyser",
-      "astro.spectra",
-      "core.active_learning",
       "core.annotations",
-      "core.event_monitor",
       "core.image",
-      "core.ml",
-      "core.plugin_manager",
-      "core.record_browser",
-      "core.resources",
-      "core.selection_tools",
-      "core.table_tools",
-      "core.visualisation",
-      "debug.mapping_test",
-      "example.tutorial",
-      "integrations.huggingface"
+      "core.visualisation"
     ],
     "info": {
       "astro.aladin": {
         "id": "astro.aladin",
         "name": "Aladin Lite",
+        "origin": "bundled",
         "source": "local_dir",
         "status": "enabled",
         "version": "0.1.0"
-      },
-      "astro.euclid_cutout": {
-        "id": "astro.euclid_cutout",
-        "name": "Euclid Cutout",
-        "source": "local_dir",
-        "status": "enabled",
-        "version": "0.2.14"
-      },
-      "astro.hyrax": {
-        "id": "astro.hyrax",
-        "name": "Hyrax Integration",
-        "source": "local_dir",
-        "status": "error",
-        "version": "0.4.0"
-      },
-      "astro.samp": {
-        "id": "astro.samp",
-        "name": "SAMP",
-        "source": "local_dir",
-        "status": "enabled",
-        "version": "0.2.5"
-      },
-      "astro.sed": {
-        "id": "astro.sed",
-        "name": "Broadband SED",
-        "source": "local_dir",
-        "status": "enabled",
-        "version": "0.1.0"
-      },
-      "astro.spec_analyser": {
-        "id": "astro.spec_analyser",
-        "name": "Spectrum Analyser",
-        "source": "local_dir",
-        "status": "enabled",
-        "version": "0.1.0"
-      },
-      "astro.spectra": {
-        "id": "astro.spectra",
-        "name": "Astronomy Spectra",
-        "source": "local_dir",
-        "status": "enabled",
-        "version": "0.1.0"
-      },
-      "core.active_learning": {
-        "id": "core.active_learning",
-        "name": "Active Learning",
-        "source": "local_dir",
-        "status": "enabled",
-        "version": "0.7.0"
       },
       "core.annotations": {
         "id": "core.annotations",
         "name": "Annotations",
+        "origin": "bundled",
         "source": "local_dir",
         "status": "enabled",
-        "version": "0.2.0"
-      },
-      "core.event_monitor": {
-        "id": "core.event_monitor",
-        "name": "Event Monitor",
-        "source": "local_dir",
-        "status": "enabled",
-        "version": "0.2.0"
+        "version": "0.3.0"
       },
       "core.image": {
         "id": "core.image",
         "name": "Image Assets",
+        "origin": "bundled",
         "source": "local_dir",
         "status": "enabled",
         "version": "0.2.4"
       },
-      "core.ml": {
-        "id": "core.ml",
-        "name": "ML Core",
-        "source": "local_dir",
-        "status": "enabled",
-        "version": "0.7.6"
-      },
-      "core.plugin_manager": {
-        "id": "core.plugin_manager",
-        "name": "Plugin Manager",
-        "source": "local_dir",
-        "status": "enabled",
-        "version": "0.2.0"
-      },
-      "core.record_browser": {
-        "id": "core.record_browser",
-        "name": "Record Browser",
-        "source": "local_dir",
-        "status": "enabled",
-        "version": "0.1.0"
-      },
-      "core.resources": {
-        "id": "core.resources",
-        "name": "Resource Monitor",
-        "source": "local_dir",
-        "status": "enabled",
-        "version": "0.1.0"
-      },
-      "core.selection_tools": {
-        "id": "core.selection_tools",
-        "name": "Selection Tools",
-        "source": "local_dir",
-        "status": "enabled",
-        "version": "0.1.0"
-      },
-      "core.table_tools": {
-        "id": "core.table_tools",
-        "name": "Table Tools",
-        "source": "local_dir",
-        "status": "enabled",
-        "version": "0.2.0"
-      },
       "core.visualisation": {
         "id": "core.visualisation",
         "name": "Visualisation",
+        "origin": "bundled",
         "source": "local_dir",
         "status": "enabled",
         "version": "0.3.2"
-      },
-      "debug.mapping_test": {
-        "id": "debug.mapping_test",
-        "name": "Mapping Test",
-        "source": "local_dir",
-        "status": "enabled",
-        "version": "0.1.0"
-      },
-      "example.tutorial": {
-        "id": "example.tutorial",
-        "name": "Tutorial Plugin",
-        "source": "local_dir",
-        "status": "enabled",
-        "version": "0.1.0"
-      },
-      "integrations.huggingface": {
-        "id": "integrations.huggingface",
-        "name": "Hugging Face Datasets",
-        "source": "local_dir",
-        "status": "enabled",
-        "version": "0.1.0"
       }
     },
     "required": [
@@ -3228,7 +3109,7 @@
           "core.annotations.panel",
           "core.annotations.summary"
         ],
-        "version": "0.2.0"
+        "version": "0.3.0"
       }
     ]
   },
@@ -3237,177 +3118,250 @@
   "selection": {
     "focus": {
       "dataset_id": "zoobot_subset",
-      "metadata": {
-        "id_column": "object_id",
-        "index": null,
-        "navigation_position": 12,
-        "navigation_revision": 2,
-        "navigation_scope": "selection"
-      },
-      "origin": "application_toolbar",
-      "panel_id": null,
-      "row_id": "-611319075479758962",
-      "timestamp": 1785238550.815452
+      "metadata": {},
+      "origin": "core.visualisation.scatter.selection",
+      "panel_id": "7ddbd86a-ed80-45e5-b35e-4c366819a61a",
+      "row_id": "-594244863489083553",
+      "timestamp": 1786382561.355153
     },
     "selection_set": {
-      "artifact_id": "41bb01ac574941e48fcaa5f3a6cfc0ab",
+      "artifact_id": "145129d2628c436d8378e0af1d20c204",
       "dataset_id": "zoobot_subset",
       "metadata": {
-        "geometry": {
-          "bounds": [
-            0.82236328125,
-            0.89345703125,
-            14.409910984039307,
-            16.505836658477783
-          ],
-          "kind": "box",
-          "x_variable": "smooth-or-featured_featured-or-disk_fraction",
-          "y_variable": "mag_segmentation"
-        },
         "panel_type": "scatter",
-        "published_ids": 20,
-        "total_matches": 20,
+        "published_ids": 35,
+        "total_matches": 35,
         "truncated": false,
         "visualisation.scatter.overlay_points": {
           "panel_type": "scatter",
           "points": [
             {
-              "__row_id__": "-5.7550252150287936e+17",
-              "__x__": 0.85058594,
-              "__y__": 15.783348051077397
+              "__row_id__": "-5.869701904991456e+17",
+              "__x__": 90227.0,
+              "__y__": 0.98193359375
             },
             {
-              "__row_id__": "-6.178075594903675e+17",
-              "__x__": 0.8808594,
-              "__y__": 16.04554239172487
+              "__row_id__": "-5.961438094917953e+17",
+              "__x__": 184316.0,
+              "__y__": 0.970703125
+            },
+            {
+              "__row_id__": "-5.942448634890835e+17",
+              "__x__": 787104.0,
+              "__y__": 0.89697265625
+            },
+            {
+              "__row_id__": "-6.010975074892426e+17",
+              "__x__": 114172.0,
+              "__y__": 0.97900390625
+            },
+            {
+              "__row_id__": "-6.404113494923066e+17",
+              "__x__": 146592.0,
+              "__y__": 0.9716796875
+            },
+            {
+              "__row_id__": "-5.683593294854845e+17",
+              "__x__": 109007.0,
+              "__y__": 0.9794921875
+            },
+            {
+              "__row_id__": "-6.304435604841583e+17",
+              "__x__": 109581.0,
+              "__y__": 0.95947265625
             },
             {
               "__row_id__": "-6.11319075479759e+17",
-              "__x__": 0.8647461,
-              "__y__": 14.876486194899122
+              "__x__": 276941.0,
+              "__y__": 0.93017578125
             },
             {
-              "__row_id__": "-6.324574294794746e+17",
-              "__x__": 0.87939453,
-              "__y__": 15.983750815137997
+              "__row_id__": "-5.819819204747594e+17",
+              "__x__": 514572.0,
+              "__y__": 0.912109375
             },
             {
-              "__row_id__": "-6.114355414757883e+17",
-              "__x__": 0.8691406,
-              "__y__": 14.472413064404163
+              "__row_id__": "-6.608780514752627e+17",
+              "__x__": 1039921.0,
+              "__y__": 0.712890625
             },
             {
-              "__row_id__": "-6.186052564739776e+17",
-              "__x__": 0.88916016,
-              "__y__": 15.69471530531576
+              "__row_id__": "-6.63529565467947e+17",
+              "__x__": 109896.0,
+              "__y__": 0.95654296875
             },
             {
-              "__row_id__": "-6.133419254758732e+17",
-              "__x__": 0.8378906,
-              "__y__": 14.45021771796586
+              "__row_id__": "-5.2486996028774957e+17",
+              "__x__": 221928.0,
+              "__y__": 0.98583984375
             },
             {
-              "__row_id__": "-5.324459532987609e+17",
-              "__x__": 0.89208984,
-              "__y__": 15.531903960682923
+              "__row_id__": "-5.248208732876777e+17",
+              "__x__": 380835.0,
+              "__y__": 0.9677734375
             },
             {
               "__row_id__": "-5.2482455428312403e+17",
-              "__x__": 0.8881836,
-              "__y__": 14.540301768887511
+              "__x__": 142872.0,
+              "__y__": 0.98583984375
             },
             {
-              "__row_id__": "-5.231796692765607e+17",
-              "__x__": 0.8486328,
-              "__y__": 14.532061482080994
+              "__row_id__": "-5.233791352813319e+17",
+              "__x__": 146956.0,
+              "__y__": 0.97314453125
             },
             {
-              "__row_id__": "2.68491111864141e+18",
-              "__x__": 0.88183594,
-              "__y__": 14.731674460958493
+              "__row_id__": "2.6688718986402755e+18",
+              "__x__": 273247.0,
+              "__y__": 0.96484375
             },
             {
-              "__row_id__": "2.758509230651137e+18",
-              "__x__": 0.8310547,
-              "__y__": 16.4655299948385
+              "__row_id__": "2.670632417641513e+18",
+              "__x__": 116928.0,
+              "__y__": 0.9833984375
+            },
+            {
+              "__row_id__": "2.683865315641732e+18",
+              "__x__": 164815.0,
+              "__y__": 0.98486328125
+            },
+            {
+              "__row_id__": "2.685804442642245e+18",
+              "__x__": 174517.0,
+              "__y__": 0.98388671875
             },
             {
               "__row_id__": "2.6889464636525947e+18",
-              "__x__": 0.82373047,
-              "__y__": 14.473271337601927
+              "__x__": 145857.0,
+              "__y__": 0.95654296875
             },
             {
-              "__row_id__": "2.7031656526526735e+18",
-              "__x__": 0.8652344,
-              "__y__": 15.494773319670788
+              "__row_id__": "2.6702819166581396e+18",
+              "__x__": 138550.0,
+              "__y__": 0.9833984375
             },
             {
-              "__row_id__": "2.7418912026556585e+18",
-              "__x__": 0.8486328,
-              "__y__": 15.532517324856272
+              "__row_id__": "2.6874409166589993e+18",
+              "__x__": 181546.0,
+              "__y__": 0.97412109375
             },
             {
-              "__row_id__": "2.750309745657249e+18",
-              "__x__": 0.859375,
-              "__y__": 16.03065817471238
+              "__row_id__": "2.652903051666793e+18",
+              "__x__": 258527.0,
+              "__y__": 0.9853515625
             },
             {
-              "__row_id__": "2.662646612665417e+18",
-              "__x__": 0.8305664,
-              "__y__": 14.54544065812786
+              "__row_id__": "2.6617298126650424e+18",
+              "__x__": 108923.0,
+              "__y__": 0.96337890625
             },
             {
-              "__row_id__": "2.6449921716713754e+18",
-              "__x__": 0.8540039,
-              "__y__": 15.37706757612056
+              "__row_id__": "2.670376155664782e+18",
+              "__x__": 178839.0,
+              "__y__": 0.97607421875
             },
             {
-              "__row_id__": "2.7364758596801116e+18",
-              "__x__": 0.8383789,
-              "__y__": 15.345474418394664
+              "__row_id__": "2.6882275006654044e+18",
+              "__x__": 268355.0,
+              "__y__": 0.9833984375
             },
             {
-              "__row_id__": "2.68841027568313e+18",
-              "__x__": 0.8852539,
-              "__y__": 15.3700432931004
+              "__row_id__": "2.6410357556753254e+18",
+              "__x__": 162209.0,
+              "__y__": 0.98193359375
+            },
+            {
+              "__row_id__": "2.6555655636748426e+18",
+              "__x__": 165467.0,
+              "__y__": 0.97998046875
+            },
+            {
+              "__row_id__": "2.692408083674969e+18",
+              "__x__": 182031.0,
+              "__y__": 0.94384765625
+            },
+            {
+              "__row_id__": "2.6571461986780815e+18",
+              "__x__": 97049.0,
+              "__y__": 0.958984375
+            },
+            {
+              "__row_id__": "2.6845139986805197e+18",
+              "__x__": 90651.0,
+              "__y__": 0.9677734375
+            },
+            {
+              "__row_id__": "2.7061939466789545e+18",
+              "__x__": 122536.0,
+              "__y__": 0.98779296875
+            },
+            {
+              "__row_id__": "2.737070327679606e+18",
+              "__x__": 251460.0,
+              "__y__": 0.982421875
+            },
+            {
+              "__row_id__": "2.72147802668564e+18",
+              "__x__": 130605.0,
+              "__y__": 0.97412109375
+            },
+            {
+              "__row_id__": "2.728878501687003e+18",
+              "__x__": 226591.0,
+              "__y__": 0.98583984375
             }
           ],
-          "points_count": 20,
-          "total_matches": 20,
+          "points_count": 35,
+          "total_matches": 35,
           "truncated": false,
-          "x_variable": "smooth-or-featured_featured-or-disk_fraction",
-          "y_variable": "mag_segmentation"
+          "x_variable": "segmentation_area",
+          "y_variable": "has_spiral_arms_yes_fraction"
         },
-        "x_variable": "smooth-or-featured_featured-or-disk_fraction",
-        "y_variable": "mag_segmentation"
+        "x_variable": "segmentation_area",
+        "y_variable": "has_spiral_arms_yes_fraction"
       },
       "mode": "replace",
       "origin": "core.visualisation.scatter.selection",
-      "panel_id": "2409eeaa-0d0e-4b29-bd9d-60f5ff2468b3",
+      "panel_id": "7ddbd86a-ed80-45e5-b35e-4c366819a61a",
       "row_ids": [
-        "-575502521502879328",
-        "-617807559490367534",
+        "-586970190499145595",
+        "-596143809491795296",
+        "-594244863489083553",
+        "-601097507489242563",
+        "-640411349492306576",
+        "-568359329485484482",
+        "-630443560484158380",
         "-611319075479758962",
-        "-632457429479474586",
-        "-611435541475788303",
-        "-618605256473977569",
-        "-613341925475873206",
-        "-532445953298760907",
+        "-581981920474759470",
+        "-660878051475262694",
+        "-663529565467947006",
+        "-524869960287749561",
+        "-524820873287677710",
         "-524824554283124036",
-        "-523179669276560719",
-        "2684911118641409952",
-        "2758509230651136824",
+        "-523379135281331900",
+        "2668871898640275391",
+        "2670632417641512929",
+        "2683865315641732076",
+        "2685804442642244958",
         "2688946463652594708",
-        "2703165652652673539",
-        "2741891202655658707",
-        "2750309745657248802",
-        "2662646612665417351",
-        "2644992171671375344",
-        "2736475859680111636",
-        "2688410275683129723"
+        "2670281916658139578",
+        "2687440916658999409",
+        "2652903051666792722",
+        "2661729812665042385",
+        "2670376155664781604",
+        "2688227500665404614",
+        "2641035755675325294",
+        "2655565563674842596",
+        "2692408083674969038",
+        "2657146198678081320",
+        "2684513998680519854",
+        "2706193946678954621",
+        "2737070327679605939",
+        "2721478026685640117",
+        "2728878501687003110"
       ],
-      "selection_set_id": "selset:eabd0f26",
-      "timestamp": 1785238550.815306
+      "selection_set_id": "selset:8ee2a679",
+      "timestamp": 1786382561.3523896
     }
   },
   "workspace": {
@@ -3675,31 +3629,46 @@
           "batch_size": 24,
           "dataset_id": "zoobot_subset",
           "fit_mode": "Crop",
-          "focused_row_id": "-611319075479758962",
+          "focused_row_id": "-594244863489083553",
           "max_in_flight": 4,
           "max_items": 240,
           "render_interval_ms": 180,
           "row_ids": [
-            "-575502521502879328",
-            "-617807559490367534",
+            "-586970190499145595",
+            "-596143809491795296",
+            "-594244863489083553",
+            "-601097507489242563",
+            "-640411349492306576",
+            "-568359329485484482",
+            "-630443560484158380",
             "-611319075479758962",
-            "-632457429479474586",
-            "-611435541475788303",
-            "-618605256473977569",
-            "-613341925475873206",
-            "-532445953298760907",
+            "-581981920474759470",
+            "-660878051475262694",
+            "-663529565467947006",
+            "-524869960287749561",
+            "-524820873287677710",
             "-524824554283124036",
-            "-523179669276560719",
-            "2684911118641409952",
-            "2758509230651136824",
+            "-523379135281331900",
+            "2668871898640275391",
+            "2670632417641512929",
+            "2683865315641732076",
+            "2685804442642244958",
             "2688946463652594708",
-            "2703165652652673539",
-            "2741891202655658707",
-            "2750309745657248802",
-            "2662646612665417351",
-            "2644992171671375344",
-            "2736475859680111636",
-            "2688410275683129723"
+            "2670281916658139578",
+            "2687440916658999409",
+            "2652903051666792722",
+            "2661729812665042385",
+            "2670376155664781604",
+            "2688227500665404614",
+            "2641035755675325294",
+            "2655565563674842596",
+            "2692408083674969038",
+            "2657146198678081320",
+            "2684513998680519854",
+            "2706193946678954621",
+            "2737070327679605939",
+            "2721478026685640117",
+            "2728878501687003110"
           ],
           "show_badges": false,
           "state_version": 6,
@@ -3741,10 +3710,10 @@
           "point_size": 5,
           "render_mode": "interactive",
           "settings_visible": false,
-          "x": "smooth-or-featured_featured-or-disk_fraction",
+          "x": "segmentation_area",
           "x_max": null,
           "x_min": null,
-          "y": "mag_segmentation",
+          "y": "has_spiral_arms_yes_fraction",
           "y_max": null,
           "y_min": null
         },
@@ -3786,11 +3755,10 @@
         },
         "open_kwargs": {},
         "plugin_id": "core.annotations",
-        "plugin_version": "0.2.0",
+        "plugin_version": "0.3.0",
         "registration_id": "core.annotations.panel",
         "state": {
-          "current_dataset_id": "zoobot_subset",
-          "current_row_id": "-611319075479758962",
+          "active_tab": 0,
           "draft": {
             "confidence": 0.0,
             "label_suggestion": "",
@@ -3798,190 +3766,8 @@
             "status": "unreviewed",
             "tags": ""
           },
-          "records": {
-            "zoobot_subset::-568359329485484482": {
-              "confidence": 0.0,
-              "created_at": "2026-07-28T11:11:49.520704+00:00",
-              "dataset_id": "zoobot_subset",
-              "label_suggestion": "",
-              "notes": [],
-              "reviews": [],
-              "row_id": "-568359329485484482",
-              "status": "unreviewed",
-              "tags": [],
-              "updated_at": "2026-07-28T11:11:49.520705+00:00"
-            },
-            "zoobot_subset::-575502521502879328": {
-              "confidence": 0.0,
-              "created_at": "2026-07-28T11:11:03.514670+00:00",
-              "dataset_id": "zoobot_subset",
-              "label_suggestion": "",
-              "notes": [],
-              "reviews": [],
-              "row_id": "-575502521502879328",
-              "status": "unreviewed",
-              "tags": [],
-              "updated_at": "2026-07-28T11:11:03.514673+00:00"
-            },
-            "zoobot_subset::-581981920474759470": {
-              "confidence": 0.0,
-              "created_at": "2026-07-28T11:11:55.740575+00:00",
-              "dataset_id": "zoobot_subset",
-              "label_suggestion": "",
-              "notes": [],
-              "reviews": [],
-              "row_id": "-581981920474759470",
-              "status": "unreviewed",
-              "tags": [],
-              "updated_at": "2026-07-28T11:11:55.740577+00:00"
-            },
-            "zoobot_subset::-586970190499145595": {
-              "confidence": 0.0,
-              "created_at": "2026-07-28T10:38:55.332945+00:00",
-              "dataset_id": "zoobot_subset",
-              "label_suggestion": "",
-              "notes": [],
-              "reviews": [],
-              "row_id": "-586970190499145595",
-              "status": "unreviewed",
-              "tags": [],
-              "updated_at": "2026-07-28T10:38:55.332946+00:00"
-            },
-            "zoobot_subset::-596143809491795296": {
-              "confidence": 0.0,
-              "created_at": "2026-07-28T11:11:48.404749+00:00",
-              "dataset_id": "zoobot_subset",
-              "label_suggestion": "",
-              "notes": [],
-              "reviews": [],
-              "row_id": "-596143809491795296",
-              "status": "unreviewed",
-              "tags": [],
-              "updated_at": "2026-07-28T11:11:48.404757+00:00"
-            },
-            "zoobot_subset::-601097507489242563": {
-              "confidence": 0.0,
-              "created_at": "2026-07-28T11:11:48.819996+00:00",
-              "dataset_id": "zoobot_subset",
-              "label_suggestion": "",
-              "notes": [],
-              "reviews": [],
-              "row_id": "-601097507489242563",
-              "status": "unreviewed",
-              "tags": [],
-              "updated_at": "2026-07-28T11:11:48.819998+00:00"
-            },
-            "zoobot_subset::-609588968500856324": {
-              "confidence": 0.0,
-              "created_at": "2026-07-28T11:11:47.559675+00:00",
-              "dataset_id": "zoobot_subset",
-              "label_suggestion": "",
-              "notes": [],
-              "reviews": [],
-              "row_id": "-609588968500856324",
-              "status": "unreviewed",
-              "tags": [],
-              "updated_at": "2026-07-28T11:11:47.559677+00:00"
-            },
-            "zoobot_subset::-611319075479758962": {
-              "confidence": 0.0,
-              "created_at": "2026-07-28T11:11:50.964614+00:00",
-              "dataset_id": "zoobot_subset",
-              "label_suggestion": "",
-              "notes": [],
-              "reviews": [],
-              "row_id": "-611319075479758962",
-              "status": "unreviewed",
-              "tags": [],
-              "updated_at": "2026-07-28T11:11:50.964617+00:00"
-            },
-            "zoobot_subset::-611435541475788303": {
-              "confidence": 0.0,
-              "created_at": "2026-07-28T11:12:36.986895+00:00",
-              "dataset_id": "zoobot_subset",
-              "label_suggestion": "",
-              "notes": [],
-              "reviews": [],
-              "row_id": "-611435541475788303",
-              "status": "unreviewed",
-              "tags": [],
-              "updated_at": "2026-07-28T11:12:36.986900+00:00"
-            },
-            "zoobot_subset::-617807559490367534": {
-              "confidence": 0.0,
-              "created_at": "2026-07-28T11:11:49.025697+00:00",
-              "dataset_id": "zoobot_subset",
-              "label_suggestion": "",
-              "notes": [],
-              "reviews": [],
-              "row_id": "-617807559490367534",
-              "status": "unreviewed",
-              "tags": [],
-              "updated_at": "2026-07-28T11:11:49.025699+00:00"
-            },
-            "zoobot_subset::-622494400487269989": {
-              "confidence": 0.0,
-              "created_at": "2026-07-28T11:11:49.705241+00:00",
-              "dataset_id": "zoobot_subset",
-              "label_suggestion": "",
-              "notes": [],
-              "reviews": [],
-              "row_id": "-622494400487269989",
-              "status": "unreviewed",
-              "tags": [],
-              "updated_at": "2026-07-28T11:11:49.705245+00:00"
-            },
-            "zoobot_subset::-630443560484158380": {
-              "confidence": 0.0,
-              "created_at": "2026-07-28T11:11:49.881442+00:00",
-              "dataset_id": "zoobot_subset",
-              "label_suggestion": "",
-              "notes": [],
-              "reviews": [],
-              "row_id": "-630443560484158380",
-              "status": "unreviewed",
-              "tags": [],
-              "updated_at": "2026-07-28T11:11:49.881446+00:00"
-            },
-            "zoobot_subset::-632457429479474586": {
-              "confidence": 0.0,
-              "created_at": "2026-07-28T11:11:51.142601+00:00",
-              "dataset_id": "zoobot_subset",
-              "label_suggestion": "",
-              "notes": [],
-              "reviews": [],
-              "row_id": "-632457429479474586",
-              "status": "unreviewed",
-              "tags": [],
-              "updated_at": "2026-07-28T11:11:51.142603+00:00"
-            },
-            "zoobot_subset::-640411349492306576": {
-              "confidence": 0.0,
-              "created_at": "2026-07-28T11:11:49.311770+00:00",
-              "dataset_id": "zoobot_subset",
-              "label_suggestion": "",
-              "notes": [],
-              "reviews": [],
-              "row_id": "-640411349492306576",
-              "status": "unreviewed",
-              "tags": [],
-              "updated_at": "2026-07-28T11:11:49.311771+00:00"
-            },
-            "zoobot_subset::-650684927485689467": {
-              "confidence": 0.0,
-              "created_at": "2026-07-28T11:11:50.784764+00:00",
-              "dataset_id": "zoobot_subset",
-              "label_suggestion": "",
-              "notes": [],
-              "reviews": [],
-              "row_id": "-650684927485689467",
-              "status": "unreviewed",
-              "tags": [],
-              "updated_at": "2026-07-28T11:11:50.784766+00:00"
-            }
-          },
           "show_history": true,
-          "version": 2
+          "version": 3
         },
         "state_version": 1,
         "title": "Annotations"
@@ -3996,29 +3782,10 @@
         },
         "open_kwargs": {},
         "plugin_id": "core.annotations",
-        "plugin_version": "0.2.0",
+        "plugin_version": "0.3.0",
         "registration_id": "core.annotations.summary",
         "state": {
-          "cached_at": "2026-07-28T11:37:03.444908+00:00",
-          "dataset_id": "zoobot_subset",
-          "summary_columns": [
-            "dataset_id",
-            "row_id",
-            "latest_status",
-            "latest_confidence",
-            "tags",
-            "label_suggestion",
-            "note_count",
-            "review_count",
-            "latest_note",
-            "latest_note_at",
-            "latest_review_at",
-            "first_annotated_at",
-            "updated_at"
-          ],
-          "summary_records": [],
-          "summary_row_count": 0,
-          "version": 2
+          "version": 3
         },
         "state_version": 1,
         "title": "Annotation Summary"
@@ -4040,7 +3807,7 @@
           "fit_mode": "Fill and crop",
           "image_height": 360,
           "max_size": 2048,
-          "row_id": "-611319075479758962",
+          "row_id": "-594244863489083553",
           "state_version": 3
         },
         "state_version": 1,
