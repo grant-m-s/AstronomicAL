@@ -1,19 +1,23 @@
 from __future__ import annotations
 
-DATASET_LOADER_CSS = r"""
-/* Give only the dataset loader more of the viewport. The shared modal helper
- * keeps its conservative 64px top offset for every other modal. Modern browser
- * :has() support lets this stylesheet lift only the wrapper that contains the
- * loader, without changing modal_utils.py or other modal call sites. */
-.al-template-modal-card:has(.al-dataset-loader-card) {
-  top: 2px !important;
-  max-height: calc(100vh - 4px) !important;
-}
 
+DATASET_LOADER_CSS = r"""
+/*
+ * Dataset-loader sizing deliberately respects the shared modal host geometry.
+ *
+ * modal_utils.py keeps overlay cards below the application chrome and reserves
+ * space at the bottom of the viewport. Do not move the shared wrapper, and do
+ * not rely on :has() to alter wrapper positioning for this one modal.
+ *
+ * Instead, keep this loader intrinsically compact and contract only its
+ * scrollable body on shorter displays. The title and footer therefore remain
+ * continuously accessible.
+ */
 .al-dataset-loader-card {
   box-sizing: border-box;
   width: 1060px;
-  height: min(1072px, calc(100vh - 4px));
+  height: min(760px, calc(100vh - 88px)) !important;
+  max-height: calc(100vh - 88px);
   padding: 12px 16px !important;
   overflow: hidden;
 }
@@ -21,9 +25,9 @@ DATASET_LOADER_CSS = r"""
 .al-dataset-loader-body {
   box-sizing: border-box;
   width: 100%;
-  height: min(918px, calc(100vh - 158px));
+  height: min(626px, calc(100vh - 222px)) !important;
   min-height: 0;
-  padding: 14px 18px 12px;
+  padding: 10px 14px 8px;
   overflow-x: hidden;
   overflow-y: auto;
   background: var(--al-chrome-page, #f3f5f8);
@@ -39,35 +43,38 @@ DATASET_LOADER_CSS = r"""
 .al-dataset-loader-section {
   box-sizing: border-box;
   min-width: 0;
-  padding: 14px;
+  padding: 12px;
   border: 1px solid var(--al-chrome-border, #d8dee8);
   border-radius: var(--al-chrome-radius, 11px);
   background: var(--al-chrome-card, #ffffff);
-  box-shadow: var(--al-chrome-shadow, 0 1px 2px rgba(15, 23, 42, 0.05));
-  margin-bottom: 12px;
+  box-shadow: var(
+    --al-chrome-shadow,
+    0 1px 2px rgba(15, 23, 42, 0.05)
+  );
+  margin-bottom: 8px;
 }
 
 .al-dataset-loader-section-title {
-  margin: 0 0 3px;
+  margin: 0 0 2px;
   color: var(--al-chrome-text, #263244);
   font-size: 14px;
   font-weight: 700;
-  line-height: 1.3;
+  line-height: 1.25;
 }
 
 .al-dataset-loader-section-copy {
   margin: 0;
   color: var(--al-chrome-muted, #687386);
-  font-size: 12px;
-  line-height: 1.45;
+  font-size: 11.5px;
+  line-height: 1.35;
 }
 
 .al-dataset-loader-field-label {
-  margin: 0 0 5px;
+  margin: 0 0 4px;
   color: var(--al-chrome-text, #263244);
   font-size: 12px;
   font-weight: 650;
-  line-height: 1.3;
+  line-height: 1.25;
 }
 
 .al-dataset-loader-source-summary,
@@ -78,13 +85,13 @@ DATASET_LOADER_CSS = r"""
   min-width: 0;
   color: var(--al-chrome-text, #263244);
   font-size: 12px;
-  line-height: 1.45;
+  line-height: 1.35;
 }
 
 .al-dataset-loader-kv {
   display: grid;
   grid-template-columns: minmax(104px, 0.34fr) minmax(0, 1fr);
-  gap: 6px 12px;
+  gap: 4px 10px;
   width: 100%;
   margin: 0;
 }
@@ -103,7 +110,13 @@ DATASET_LOADER_CSS = r"""
 }
 
 .al-dataset-loader-code {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-family:
+    ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    Monaco,
+    Consolas,
+    monospace;
   font-size: 11px;
 }
 
@@ -111,10 +124,10 @@ DATASET_LOADER_CSS = r"""
   box-sizing: border-box;
   display: flex;
   align-items: flex-start;
-  gap: 10px;
+  gap: 9px;
   width: 100%;
-  min-height: 58px;
-  padding: 11px 12px;
+  min-height: 50px;
+  padding: 9px 10px;
   border: 1px solid var(--al-chrome-border, #d8dee8);
   border-radius: 8px;
   background: #fbfcfe;
@@ -153,16 +166,15 @@ DATASET_LOADER_CSS = r"""
   color: var(--al-chrome-text, #263244);
   font-size: 12px;
   font-weight: 700;
-  line-height: 1.35;
+  line-height: 1.3;
 }
 
 .al-dataset-loader-status-copy {
-  margin-top: 2px;
+  margin-top: 1px;
   color: var(--al-chrome-muted, #687386);
   font-size: 11.5px;
-  line-height: 1.42;
+  line-height: 1.35;
 }
-
 
 .al-dataset-loader-conversion-summary-host {
   box-sizing: border-box;
@@ -174,7 +186,7 @@ DATASET_LOADER_CSS = r"""
   box-sizing: border-box;
   width: 100%;
   min-width: 0;
-  padding: 10px 11px;
+  padding: 8px 10px;
   border: 1px solid #d8dee8;
   border-radius: 8px;
   background: #f8fafc;
@@ -208,11 +220,11 @@ DATASET_LOADER_CSS = r"""
 }
 
 .al-dataset-loader-conversion-label {
-  margin-top: 2px;
+  margin-top: 1px;
   color: var(--al-chrome-text, #263244);
   font-size: 12px;
   font-weight: 700;
-  line-height: 1.35;
+  line-height: 1.3;
 }
 
 .al-dataset-loader-conversion-percent {
@@ -228,7 +240,7 @@ DATASET_LOADER_CSS = r"""
   position: relative;
   width: 100%;
   height: 7px;
-  margin: 8px 0 9px;
+  margin: 6px 0 7px;
   border-radius: 999px;
   background: #e6ebf1;
   overflow: hidden;
@@ -241,11 +253,13 @@ DATASET_LOADER_CSS = r"""
   transition: width 160ms linear;
 }
 
-.al-dataset-loader-conversion-summary.complete .al-dataset-loader-progress-fill {
+.al-dataset-loader-conversion-summary.complete
+  .al-dataset-loader-progress-fill {
   background: var(--al-chrome-success, #1f7a4d);
 }
 
-.al-dataset-loader-conversion-summary.error .al-dataset-loader-progress-fill {
+.al-dataset-loader-conversion-summary.error
+  .al-dataset-loader-progress-fill {
   background: var(--al-chrome-danger, #b42318);
 }
 
@@ -256,19 +270,31 @@ DATASET_LOADER_CSS = r"""
 }
 
 @keyframes al-dataset-loader-progress-slide {
-  0% { left: -34%; }
-  50% { left: 52%; }
-  100% { left: 102%; }
+  0% {
+    left: -34%;
+  }
+
+  50% {
+    left: 52%;
+  }
+
+  100% {
+    left: 102%;
+  }
 }
 
 .al-dataset-loader-progress-kv {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto minmax(0, 1fr);
-  gap: 4px 8px;
+  grid-template-columns:
+    auto
+    minmax(0, 1fr)
+    auto
+    minmax(0, 1fr);
+  gap: 3px 8px;
   width: 100%;
   margin: 0;
   font-size: 10.5px;
-  line-height: 1.35;
+  line-height: 1.3;
 }
 
 .al-dataset-loader-progress-kv dt {
@@ -289,32 +315,24 @@ DATASET_LOADER_CSS = r"""
 .al-dataset-loader-footer {
   box-sizing: border-box;
   width: 100%;
-  height: 54px;
-  padding: 8px 18px;
+  height: 50px;
+  padding: 6px 18px;
   border-top: 1px solid var(--al-chrome-divider, #e2e7ee);
   background: var(--al-chrome-card, #ffffff);
   overflow: hidden;
 }
 
 /*
- * The shared overlay modal remains untouched. The dataset loader uses almost
- * the full viewport when available and contracts only its own scrollable body
- * on shorter displays, keeping the title and footer continuously accessible.
+ * At narrower widths retain the existing two-column loader design and simply
+ * contract the modal horizontally to the available viewport.
  */
-.al-dataset-loader-card {
-  height: min(1072px, calc(100vh - 4px)) !important;
-}
-
-.al-dataset-loader-body {
-  height: min(918px, calc(100vh - 158px)) !important;
-}
-
 @media (max-width: 1120px) {
   .al-dataset-loader-card {
     width: min(1060px, calc(100vw - 24px));
   }
 }
 """
+
 
 DATASET_LOADER_INPUT_STYLESHEET = r"""
 :host {
@@ -346,9 +364,11 @@ select,
 
 select,
 select.bk-input {
-  /* Panel/Bokeh's normal select affordance can disappear once the loader's
+  /*
+   * Panel/Bokeh's normal select affordance can disappear once the loader's
    * custom input background is applied. Use an explicit chevron so file and
-   * subresource selectors remain visually identifiable as dropdowns. */
+   * subresource selectors remain visually identifiable as dropdowns.
+   */
   -webkit-appearance: none !important;
   appearance: none !important;
   padding-right: 38px !important;
@@ -401,6 +421,7 @@ option {
 }
 """
 
+
 DATASET_LOADER_LOG_STYLESHEET = r"""
 :host {
   box-sizing: border-box;
@@ -417,7 +438,7 @@ DATASET_LOADER_LOG_STYLESHEET = r"""
   height: 100%;
   min-width: 0;
   min-height: 0;
-  padding: 9px 10px;
+  padding: 8px 10px;
   border: 1px solid #d8dee8;
   border-radius: 7px;
   background: #111827;
@@ -441,18 +462,24 @@ DATASET_LOADER_LOG_STYLESHEET = r"""
   padding: 0;
   color: inherit;
   background: transparent;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-family:
+    ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    Monaco,
+    Consolas,
+    monospace;
   font-size: 10.5px;
-  line-height: 1.45;
+  line-height: 1.4;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   user-select: text;
 }
 """
 
+
 __all__ = [
     "DATASET_LOADER_CSS",
     "DATASET_LOADER_INPUT_STYLESHEET",
     "DATASET_LOADER_LOG_STYLESHEET",
 ]
-

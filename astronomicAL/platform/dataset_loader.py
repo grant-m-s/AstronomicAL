@@ -535,7 +535,6 @@ class DatasetLoaderController:
             "Generated Parquet location. Change this for large datasets or other storage volumes."
         )
 
-
         self.source_summary = pn.pane.HTML("", sizing_mode="stretch_width")
         self.behaviour_summary = pn.pane.HTML("", sizing_mode="stretch_width")
         self.cache_summary = pn.pane.HTML("", sizing_mode="stretch_width")
@@ -546,14 +545,14 @@ class DatasetLoaderController:
             alert_type="warning",
             visible=False,
             sizing_mode="stretch_width",
-            margin=(10, 0, 0, 0),
+            margin=(8, 0, 0, 0),
         )
         self.cache_alert = pn.pane.Alert(
             "",
             alert_type="warning",
             visible=False,
             sizing_mode="stretch_width",
-            margin=(10, 0, 0, 0),
+            margin=(8, 0, 0, 0),
         )
 
         self.status_pane = pn.pane.HTML(
@@ -578,9 +577,14 @@ class DatasetLoaderController:
             margin=(0, 0, 0, 0),
             css_classes=["al-dataset-loader-conversion-summary-host"],
         )
+
+        # The log is independently scrollable, so it does not need to reserve
+        # 220px of vertical space in the loader before an import has started.
+        # 120px still shows several progress lines while substantially reducing
+        # the loader's baseline height.
         self.progress_log = DatasetProgressLog(
             value="",
-            height=220,
+            height=120,
             sizing_mode="stretch_width",
             margin=(0, 0, 0, 0),
         )
@@ -628,34 +632,34 @@ class DatasetLoaderController:
 <div class="al-modal-titlebar">
   <div class="al-modal-heading">Add dataset</div>
   <div class="al-modal-subtitle">
-    Load server-visible tabular data. Non-Parquet sources are converted once to
-    a lazy Parquet-backed DatasetSource; conversion, cache validation, and file
-    location remain platform responsibilities.
+    Load server-visible tabular data; non-Parquet sources are cached as lazy
+    Parquet-backed DatasetSources.
   </div>
 </div>
 """,
             sizing_mode="stretch_width",
-            height=74,
+            height=60,
             margin=(0, 0, 0, 0),
         )
 
         self.subresource_label = self._field_label("Sheet / table")
+
         source_section = pn.Column(
             self._section_heading(
                 "1. Choose source",
-                "Set a server-visible folder and choose a supported file. Leave Path blank to use AstronomicAL's data/ folder.",
+                "Choose a server-visible folder and supported file. Leave Path blank to use AstronomicAL's data/ folder.",
             ),
             pn.Row(
                 self.directory_path_input,
                 self.refresh_button,
                 sizing_mode="stretch_width",
-                margin=(10, 0, 0, 0),
+                margin=(8, 0, 0, 0),
             ),
             self.source_select,
-            pn.Spacer(height=3),
+            pn.Spacer(height=2),
             self._field_label("Dataset name"),
             self.dataset_name_input,
-            pn.Spacer(height=3),
+            pn.Spacer(height=2),
             self._field_label("Dataset ID"),
             self.dataset_id_input,
             self.subresource_label,
@@ -669,26 +673,33 @@ class DatasetLoaderController:
         cache_section = pn.Column(
             self._section_heading(
                 "2. Parquet cache",
-                "Every convertible source shows its output location, freshness checks, and disk-space estimate.",
+                "Review the output location, cache freshness, and disk-space estimate.",
             ),
-            pn.Spacer(height=6),
+            pn.Spacer(height=4),
             self._field_label("Parquet location"),
             self.parquet_path_input,
-            pn.Spacer(height=6),
+            pn.Spacer(height=4),
             self.cache_summary,
             self.cache_alert,
-            pn.Spacer(height=4),
+            pn.Spacer(height=2),
             self.disk_summary,
-            pn.Row(self.regen_button, sizing_mode="stretch_width", margin=(10, 0, 0, 0)),
+            pn.Row(
+                self.regen_button,
+                sizing_mode="stretch_width",
+                margin=(8, 0, 0, 0),
+            ),
             sizing_mode="stretch_width",
             css_classes=["al-dataset-loader-section"],
         )
 
         details_section = pn.Column(
-            self._section_heading("3. Source details", "Detected before registration."),
-            pn.Spacer(height=10),
+            self._section_heading(
+                "3. Source details",
+                "Detected before registration.",
+            ),
+            pn.Spacer(height=6),
             self.source_summary,
-            pn.Spacer(height=12),
+            pn.Spacer(height=8),
             self.behaviour_summary,
             sizing_mode="stretch_width",
             css_classes=["al-dataset-loader-section"],
@@ -697,50 +708,80 @@ class DatasetLoaderController:
         status_section = pn.Column(
             self._section_heading(
                 "4. Status and conversion progress",
-                "Progress is mirrored here and in the terminal; background jobs also appear in Runtime Status.",
+                "Progress is mirrored here, in the terminal, and in Runtime Status.",
             ),
-            pn.Spacer(height=10),
+            pn.Spacer(height=6),
             self.status_pane,
-            pn.Spacer(height=10),
+            pn.Spacer(height=6),
             self.conversion_summary,
-            pn.Spacer(height=10),
+            pn.Spacer(height=6),
             self.progress_log,
-            pn.Spacer(height=10),
+            pn.Spacer(height=6),
             self.result_pane,
-            pn.Row(self.activate_existing_button, sizing_mode="stretch_width", margin=(10, 0, 0, 0)),
+            pn.Row(
+                self.activate_existing_button,
+                sizing_mode="stretch_width",
+                margin=(8, 0, 0, 0),
+            ),
             sizing_mode="stretch_width",
             css_classes=["al-dataset-loader-section"],
         )
 
-        left = pn.Column(source_section, cache_section, sizing_mode="fixed", width=500, margin=(0, 7, 0, 0))
-        right = pn.Column(details_section, status_section, sizing_mode="fixed", width=520, margin=(0, 0, 0, 7))
+        left = pn.Column(
+            source_section,
+            cache_section,
+            sizing_mode="fixed",
+            width=500,
+            margin=(0, 7, 0, 0),
+        )
+        right = pn.Column(
+            details_section,
+            status_section,
+            sizing_mode="fixed",
+            width=520,
+            margin=(0, 0, 0, 7),
+        )
+
+        # Intrinsic body height for normal desktop displays. CSS contracts this
+        # further when the available viewport is shorter, while retaining
+        # overflow-y on the body so the footer never disappears below the screen.
         body = pn.Row(
             left,
             right,
             sizing_mode="fixed",
             width=1060,
-            height=918,
+            height=626,
             margin=(0, 0, 0, 0),
             css_classes=["al-dataset-loader-body", "al-dataset-loader-grid"],
         )
+
         footer = pn.Row(
             pn.layout.HSpacer(),
             self.close_button,
             self.import_button,
             sizing_mode="fixed",
             width=1060,
-            height=54,
+            height=50,
             align="center",
             margin=(0, 0, 0, 0),
             css_classes=["al-dataset-loader-footer", "al-modal-footer"],
         )
+
+        # 760px comprises:
+        #   24px card vertical padding
+        #   60px heading
+        #   626px scrollable body
+        #   50px footer
+        #
+        # This is also the concrete Bokeh layout height passed through
+        # mount_template_modal(), avoiding the previous 1072px wrapper model.
         self.view = pn.Column(
             heading,
             body,
             footer,
             sizing_mode="fixed",
             width=1060,
-            height=1072,
+            height=760,
             margin=(0, 0, 0, 0),
             css_classes=["al-modal-card", "al-dataset-loader-card"],
             styles={"box-sizing": "border-box", "overflow": "hidden"},
