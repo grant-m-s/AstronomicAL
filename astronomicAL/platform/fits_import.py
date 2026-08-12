@@ -12,12 +12,17 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from astropy.io import fits
 
+try:
+    import fitsio
+except ImportError:  # pragma: no cover - exercised only when optional dependency is absent.
+    fitsio = None
+
 from astronomicAL.utils.optimise import rss_gib
 
 ProgressCallback = Callable[[str], None]
 ProgressStateCallback = Callable[[dict[str, Any]], None]
 
-DEFAULT_FITS_TARGET_CHUNK_BYTES = 512 * 1024**2
+DEFAULT_FITS_TARGET_CHUNK_BYTES = 1024 * 1024**2
 
 
 def _log_loader(
@@ -78,6 +83,18 @@ def _load_existing_metadata(metadata_path: Path) -> dict[str, Any]:
     except Exception:
         return {}
     return dict(value) if isinstance(value, dict) else {}
+
+
+def _normalise_hdu_selector(hdu: int | str) -> int | str:
+    """Treat numeric strings from the loader as numerical HDU indices."""
+    if isinstance(hdu, str):
+        text = hdu.strip()
+        if text and text.lstrip("+-").isdigit():
+            try:
+                return int(text)
+            except ValueError:
+                pass
+    return hdu
 
 
 def _native_endian(arr: np.ndarray) -> np.ndarray:
@@ -209,11 +226,21 @@ def import_fits_table_to_parquet(
 ) -> dict[str, Any]:
     """Stream a FITS binary table to Parquet without full-table materialisation.
 
-    ``parquet_path`` is the preferred modern API because the dataset loader lets
-    users choose the generated Parquet location. ``cache_dir`` remains supported
-    for existing callers.
+    Astropy is retained for lightweight FITS header/column metadata because that
+    path is mature and preserves the existing metadata contract.  Row data are
+    read with fitsio/CFITSIO when available so conversion can request contiguous
+    row slices without first constructing Astropy's full ``FITS_rec`` object.
+
+    If fitsio is unavailable, or cannot initialise the selected HDU before row
+    conversion begins, the previous Astropy memmap reader is used as a safe
+    compatibility fallback.
+
+    Total operation time and row-conversion time are tracked separately so FITS
+    preparation does not distort conversion throughput or ETA.
     """
     source = Path(fits_path).expanduser().resolve()
+    hdu_selector = _normalise_hdu_selector(hdu)
+
     if dataset_id is None:
         dataset_id = source.stem
 
@@ -241,7 +268,10 @@ def import_fits_table_to_parquet(
         metadata.setdefault("source_path", str(source))
         metadata.setdefault("source_hdu", hdu)
         metadata.setdefault("parquet_path", str(parquet))
-        _log_loader(f"Reusing existing FITS Parquet cache: {parquet}", progress_callback)
+        _log_loader(
+            f"Reusing existing FITS Parquet cache: {parquet}",
+            progress_callback,
+        )
         return {
             "dataset_id": dataset_id,
             "parquet_path": str(parquet),
@@ -254,57 +284,166 @@ def import_fits_table_to_parquet(
         tmp_parquet.unlink()
 
     _raise_if_cancelled(cancel_token)
-    _log_loader(f"Preparing streamed FITS import: {source}", progress_callback)
+    _log_loader(
+        f"Preparing streamed FITS import: {source}",
+        progress_callback,
+    )
     _log_loader(f"Dataset id: {dataset_id}", progress_callback)
     _log_loader(f"Parquet cache path: {parquet}", progress_callback)
 
-    conversion_started = time.perf_counter()
+    operation_started = time.perf_counter()
+    row_conversion_started: Optional[float] = None
+    row_conversion_elapsed_seconds: Optional[float] = None
+    preparation_elapsed_seconds: Optional[float] = None
+
+    # Existing diagnostics retained for compatibility.
+    fits_open_elapsed_seconds: Optional[float] = None
+    fits_hdu_resolution_elapsed_seconds: Optional[float] = None
+    fits_data_mapping_elapsed_seconds: Optional[float] = None
+    fits_column_setup_elapsed_seconds: Optional[float] = None
+    fits_metadata_capture_elapsed_seconds: Optional[float] = None
+
+    # New reader diagnostics.
+    fits_reader_backend = "fitsio" if fitsio is not None else "astropy"
+    fits_reader_fallback_reason: Optional[str] = None
+    fitsio_open_elapsed_seconds: Optional[float] = None
+    fitsio_hdu_resolution_elapsed_seconds: Optional[float] = None
+    fitsio_schema_validation_elapsed_seconds: Optional[float] = None
+    fits_chunk_read_elapsed_seconds = 0.0
+
     writer: Optional[pq.ParquetWriter] = None
     schema: Optional[pa.Schema] = None
     n_rows: Optional[int] = None
+    row_bytes: Optional[int] = None
     chunk_count: Optional[int] = None
+    rows_per_chunk: Optional[int] = None
     last_chunk_no = 0
     total_rows = 0
     skipped_columns: set[str] = set()
+    column_names: list[str] = []
+    null_sentinels: dict[str, object] = {}
     column_metadata: list[dict[str, Any]] = []
     header_metadata: dict[str, Any] = {}
 
-    try:
-        with fits.open(source, memmap=True, lazy_load_hdus=True) as hdul:
-            table_hdu = hdul[hdu]
-            data = table_hdu.data
-            if data is None:
-                raise ValueError(f"HDU {hdu!r} does not contain table data")
+    fitsio_file: Any = None
+    fitsio_hdu: Any = None
+    astropy_reader_hdul: Any = None
+    astropy_data: Any = None
 
-            n_rows = int(table_hdu.header["NAXIS2"])
-            row_bytes = int(table_hdu.header.get("NAXIS1", data.dtype.itemsize))
-            column_names = list(data.names)
+    try:
+        # --------------------------------------------------------------
+        # Phase 1: lightweight Astropy metadata only.  Never access
+        # table_hdu.data here; EDFF demonstrated that this can itself be
+        # an extremely expensive whole-table setup operation.
+        # --------------------------------------------------------------
+        _emit_progress_state(
+            progress_state_callback,
+            phase="preparing",
+            label="Reading FITS metadata",
+            rows_completed=0,
+            rows_total=None,
+            chunk_index=0,
+            chunk_count=None,
+            elapsed_seconds=time.perf_counter() - operation_started,
+            eta_seconds=None,
+            rows_per_second=None,
+            average_rows_per_second=None,
+            tmp_size_bytes=0,
+            rss_gib=rss_gib(),
+        )
+        _log_loader("Opening FITS metadata container...", progress_callback)
+        open_started = time.perf_counter()
+
+        with fits.open(
+            source,
+            memmap=False,
+            lazy_load_hdus=True,
+        ) as metadata_hdul:
+            fits_open_elapsed_seconds = time.perf_counter() - open_started
+            _log_loader(
+                "Opened FITS metadata container in "
+                f"{fits_open_elapsed_seconds:.2f}s; RSS≈{rss_gib():.2f} GiB",
+                progress_callback,
+            )
+
+            _raise_if_cancelled(cancel_token)
+
+            hdu_started = time.perf_counter()
+            table_hdu = metadata_hdul[hdu_selector]
+            fits_hdu_resolution_elapsed_seconds = time.perf_counter() - hdu_started
+            _log_loader(
+                f"Resolved FITS HDU {hdu_selector!r} in "
+                f"{fits_hdu_resolution_elapsed_seconds:.2f}s; "
+                f"RSS≈{rss_gib():.2f} GiB",
+                progress_callback,
+            )
+
+            if not isinstance(table_hdu, fits.BinTableHDU):
+                raise ValueError(
+                    f"HDU {hdu_selector!r} is {type(table_hdu).__name__}, "
+                    "not a FITS binary table."
+                )
+
+            header = table_hdu.header
+            n_rows = int(header.get("NAXIS2", 0) or 0)
+            row_bytes = int(header.get("NAXIS1", 0) or 0)
+
+            column_setup_started = time.perf_counter()
+            columns = table_hdu.columns
+            column_names = [str(col.name) for col in columns]
             null_sentinels = {
-                col.name: getattr(col, "null", None)
-                for col in table_hdu.columns
+                str(col.name): getattr(col, "null", None)
+                for col in columns
                 if getattr(col, "null", None) is not None
             }
+            fits_column_setup_elapsed_seconds = (
+                time.perf_counter() - column_setup_started
+            )
 
-            rows_per_chunk = max(1, target_chunk_bytes // max(row_bytes, 1))
+            if row_bytes <= 0:
+                raise ValueError(
+                    f"HDU {hdu_selector!r} has invalid FITS row width NAXIS1={row_bytes}."
+                )
+
+            if not column_names:
+                raise ValueError(
+                    f"HDU {hdu_selector!r} does not contain any table columns."
+                )
+
+            rows_per_chunk = max(
+                1,
+                target_chunk_bytes // max(row_bytes, 1),
+            )
             if max_rows_per_chunk is not None:
                 rows_per_chunk = min(rows_per_chunk, max_rows_per_chunk)
             rows_per_chunk = min(rows_per_chunk, max(n_rows, 1))
+            chunk_count = max(
+                1,
+                (n_rows + rows_per_chunk - 1) // rows_per_chunk,
+            )
 
             _log_loader(
-                f"FITS table: {n_rows:,} rows × {len(column_names):,} columns; "
+                f"FITS header: {n_rows:,} rows × {len(column_names):,} columns; "
                 f"row≈{row_bytes:,} bytes; chunk≈{rows_per_chunk:,} rows.",
                 progress_callback,
             )
-            chunk_count = max(1, (n_rows + rows_per_chunk - 1) // rows_per_chunk)
+            _log_loader(
+                f"Resolved {len(column_names):,} FITS columns and "
+                f"{len(null_sentinels):,} integer null sentinels in "
+                f"{fits_column_setup_elapsed_seconds:.2f}s; "
+                f"RSS≈{rss_gib():.2f} GiB",
+                progress_callback,
+            )
+
             _emit_progress_state(
                 progress_state_callback,
                 phase="preparing",
-                label="Preparing FITS chunks",
+                label="Preparing FITS metadata",
                 rows_completed=0,
                 rows_total=n_rows,
                 chunk_index=0,
                 chunk_count=chunk_count,
-                elapsed_seconds=time.perf_counter() - conversion_started,
+                elapsed_seconds=time.perf_counter() - operation_started,
                 eta_seconds=None,
                 rows_per_second=None,
                 average_rows_per_second=None,
@@ -312,109 +451,398 @@ def import_fits_table_to_parquet(
                 rss_gib=rss_gib(),
             )
 
+            metadata_started = time.perf_counter()
             column_metadata = _fits_hdu_column_metadata(table_hdu)
-            header_metadata = _json_safe(dict(table_hdu.header))
+            header_metadata = _json_safe(dict(header))
+            fits_metadata_capture_elapsed_seconds = (
+                time.perf_counter() - metadata_started
+            )
+            _log_loader(
+                "Captured FITS metadata in "
+                f"{fits_metadata_capture_elapsed_seconds:.2f}s; "
+                f"RSS≈{rss_gib():.2f} GiB",
+                progress_callback,
+            )
 
-            for chunk_no, start in enumerate(range(0, n_rows, rows_per_chunk), start=1):
-                _raise_if_cancelled(cancel_token)
-                stop = min(start + rows_per_chunk, n_rows)
-                chunk_started = time.perf_counter()
+        _raise_if_cancelled(cancel_token)
 
-                _log_loader(
-                    f"Chunk {chunk_no}: starting rows {start:,}–{stop:,} "
-                    f"({stop - start:,} rows); RSS≈{rss_gib():.2f} GiB",
-                    progress_callback,
+        # --------------------------------------------------------------
+        # Phase 2: initialise the row reader.  fitsio/CFITSIO is preferred
+        # because it can read contiguous row slices directly and avoids the
+        # expensive Astropy FITS_rec construction entirely.
+        # --------------------------------------------------------------
+        if fitsio is not None:
+            _emit_progress_state(
+                progress_state_callback,
+                phase="preparing",
+                label="Opening fast FITS row reader",
+                rows_completed=0,
+                rows_total=n_rows,
+                chunk_index=0,
+                chunk_count=chunk_count,
+                elapsed_seconds=time.perf_counter() - operation_started,
+                eta_seconds=None,
+                rows_per_second=None,
+                average_rows_per_second=None,
+                tmp_size_bytes=0,
+                rss_gib=rss_gib(),
+            )
+            _log_loader("Opening fitsio/CFITSIO row reader...", progress_callback)
+
+            try:
+                fitsio_open_started = time.perf_counter()
+                fitsio_file = fitsio.FITS(str(source))
+                fitsio_open_elapsed_seconds = (
+                    time.perf_counter() - fitsio_open_started
                 )
-
-                copy_started = time.perf_counter()
-                rec = np.array(data[start:stop], copy=True)
                 _log_loader(
-                    f"Chunk {chunk_no}: copied FITS rows in "
-                    f"{time.perf_counter() - copy_started:.1f}s; RSS≈{rss_gib():.2f} GiB",
-                    progress_callback,
-                )
-
-                convert_started = time.perf_counter()
-                arrow_table, skipped = _fits_rec_chunk_to_arrow_table(
-                    rec,
-                    column_names,
-                    null_sentinels,
-                    strip_strings=strip_strings,
-                    progress_prefix=f"Chunk {chunk_no}:",
-                    progress_callback=progress_callback,
-                    cancel_token=cancel_token,
-                )
-                skipped_columns.update(skipped)
-                _log_loader(
-                    f"Chunk {chunk_no}: built Arrow table "
-                    f"{arrow_table.num_rows:,} rows × {arrow_table.num_columns:,} cols "
-                    f"in {time.perf_counter() - convert_started:.1f}s; "
-                    f"table≈{arrow_table.nbytes / 1024**3:.2f} GiB; "
+                    "Opened fitsio/CFITSIO reader in "
+                    f"{fitsio_open_elapsed_seconds:.3f}s; "
                     f"RSS≈{rss_gib():.2f} GiB",
                     progress_callback,
                 )
 
-                if writer is None:
-                    schema = arrow_table.schema
-                    writer = pq.ParquetWriter(
-                        tmp_parquet,
-                        schema,
-                        compression=compression,
-                        compression_level=compression_level,
-                        use_dictionary=use_dictionary,
-                        write_statistics=True,
-                    )
-                elif schema is not None and not arrow_table.schema.equals(
-                    schema, check_metadata=False
-                ):
-                    arrow_table = arrow_table.cast(schema)
+                _raise_if_cancelled(cancel_token)
 
-                writer.write_table(arrow_table, row_group_size=arrow_table.num_rows)
-                total_rows += int(arrow_table.num_rows)
-                elapsed = time.perf_counter() - chunk_started
-                rows_per_second = arrow_table.num_rows / elapsed if elapsed else 0.0
-                tmp_size = tmp_parquet.stat().st_size if tmp_parquet.exists() else 0
-                elapsed_total = time.perf_counter() - conversion_started
-                average_rows_per_second = total_rows / elapsed_total if elapsed_total else 0.0
-                remaining_rows = max(0, n_rows - total_rows)
-                eta_seconds = (
-                    remaining_rows / average_rows_per_second
-                    if average_rows_per_second > 0 and remaining_rows > 0
-                    else 0.0 if remaining_rows == 0 else None
+                fitsio_hdu_started = time.perf_counter()
+                fitsio_hdu = fitsio_file[hdu_selector]
+                fitsio_hdu_resolution_elapsed_seconds = (
+                    time.perf_counter() - fitsio_hdu_started
                 )
-                current_rss_gib = rss_gib()
-
                 _log_loader(
-                    f"Chunk {chunk_no}: wrote rows {start:,}–{stop:,} in {elapsed:.1f}s "
-                    f"({rows_per_second:,.0f} rows/s); total={total_rows:,}/{n_rows:,}; "
-                    f"tmp_size≈{tmp_size / 1024**3:.2f} GiB; RSS≈{current_rss_gib:.2f} GiB",
+                    f"Resolved fitsio HDU {hdu_selector!r} in "
+                    f"{fitsio_hdu_resolution_elapsed_seconds:.3f}s; "
+                    f"RSS≈{rss_gib():.2f} GiB",
                     progress_callback,
                 )
-                last_chunk_no = chunk_no
-                _emit_progress_state(
-                    progress_state_callback,
-                    phase="writing",
-                    label=f"Writing FITS chunk {chunk_no}/{chunk_count}",
-                    rows_completed=total_rows,
-                    rows_total=n_rows,
-                    chunk_index=chunk_no,
-                    chunk_count=chunk_count,
-                    elapsed_seconds=elapsed_total,
-                    eta_seconds=eta_seconds,
-                    rows_per_second=rows_per_second,
-                    average_rows_per_second=average_rows_per_second,
-                    tmp_size_bytes=tmp_size,
-                    rss_gib=current_rss_gib,
+
+                schema_validation_started = time.perf_counter()
+                fitsio_rows = int(fitsio_hdu.get_nrows())
+                fitsio_columns = [str(name) for name in fitsio_hdu.get_colnames()]
+
+                if fitsio_rows != n_rows:
+                    raise ValueError(
+                        "fitsio row count does not match FITS header: "
+                        f"{fitsio_rows:,} != {n_rows:,}."
+                    )
+                if fitsio_columns != column_names:
+                    raise ValueError(
+                        "fitsio column names/order do not match the Astropy "
+                        "metadata view of the selected FITS HDU."
+                    )
+
+                fitsio_schema_validation_elapsed_seconds = (
+                    time.perf_counter() - schema_validation_started
+                )
+                fits_reader_backend = "fitsio"
+                _log_loader(
+                    "Validated fitsio table schema in "
+                    f"{fitsio_schema_validation_elapsed_seconds:.3f}s; "
+                    f"reader ready for {n_rows:,} rows × "
+                    f"{len(column_names):,} columns.",
+                    progress_callback,
+                )
+            except Exception as exc:
+                fits_reader_fallback_reason = str(exc).strip() or type(exc).__name__
+                _log_loader(
+                    "fitsio reader could not be initialised; falling back to "
+                    f"Astropy memmap reader: {fits_reader_fallback_reason}",
+                    progress_callback,
+                )
+                if fitsio_file is not None:
+                    try:
+                        fitsio_file.close()
+                    except Exception:
+                        pass
+                fitsio_file = None
+                fitsio_hdu = None
+                fits_reader_backend = "astropy"
+        else:
+            fits_reader_fallback_reason = "fitsio is not installed"
+            fits_reader_backend = "astropy"
+            _log_loader(
+                "fitsio is not installed; using the Astropy compatibility "
+                "reader for FITS row data.",
+                progress_callback,
+            )
+
+        if fits_reader_backend == "astropy":
+            _emit_progress_state(
+                progress_state_callback,
+                phase="preparing",
+                label="Mapping FITS table (Astropy fallback)",
+                rows_completed=0,
+                rows_total=n_rows,
+                chunk_index=0,
+                chunk_count=chunk_count,
+                elapsed_seconds=time.perf_counter() - operation_started,
+                eta_seconds=None,
+                rows_per_second=None,
+                average_rows_per_second=None,
+                tmp_size_bytes=0,
+                rss_gib=rss_gib(),
+            )
+            _log_loader(
+                "Opening Astropy memmap compatibility reader...",
+                progress_callback,
+            )
+            astropy_reader_hdul = fits.open(
+                source,
+                memmap=True,
+                lazy_load_hdus=True,
+            )
+            astropy_table_hdu = astropy_reader_hdul[hdu_selector]
+
+            data_started = time.perf_counter()
+            _log_loader(
+                "Mapping FITS table data with Astropy fallback...",
+                progress_callback,
+            )
+            astropy_data = astropy_table_hdu.data
+            fits_data_mapping_elapsed_seconds = (
+                time.perf_counter() - data_started
+            )
+            _log_loader(
+                "Mapped FITS table data with Astropy fallback in "
+                f"{fits_data_mapping_elapsed_seconds:.2f}s; "
+                f"RSS≈{rss_gib():.2f} GiB",
+                progress_callback,
+            )
+            if astropy_data is None:
+                raise ValueError(
+                    f"HDU {hdu_selector!r} does not contain table data"
                 )
 
-                del rec, arrow_table
-                if chunk_no % 4 == 0:
-                    gc.collect()
+        _raise_if_cancelled(cancel_token)
+
+        preparation_elapsed_seconds = time.perf_counter() - operation_started
+        row_conversion_started = time.perf_counter()
+
+        _emit_progress_state(
+            progress_state_callback,
+            phase="preparing",
+            label=(
+                "Preparing FITS chunks (fitsio)"
+                if fits_reader_backend == "fitsio"
+                else "Preparing FITS chunks (Astropy fallback)"
+            ),
+            rows_completed=0,
+            rows_total=n_rows,
+            chunk_index=0,
+            chunk_count=chunk_count,
+            elapsed_seconds=time.perf_counter() - operation_started,
+            eta_seconds=None,
+            rows_per_second=None,
+            average_rows_per_second=None,
+            tmp_size_bytes=0,
+            rss_gib=rss_gib(),
+        )
+        _log_loader(
+            f"FITS row reader backend: {fits_reader_backend}",
+            progress_callback,
+        )
+
+        if n_rows is None or rows_per_chunk is None:
+            raise RuntimeError("FITS conversion plan was not initialised.")
+
+        # --------------------------------------------------------------
+        # Phase 3: existing bounded chunk -> Arrow -> Parquet pipeline.
+        # Only the row-reading step differs between backends.
+        # --------------------------------------------------------------
+        for chunk_no, start in enumerate(
+            range(0, n_rows, rows_per_chunk),
+            start=1,
+        ):
+            _raise_if_cancelled(cancel_token)
+
+            stop = min(start + rows_per_chunk, n_rows)
+            chunk_started = time.perf_counter()
+
+            _log_loader(
+                f"Chunk {chunk_no}: starting rows {start:,}–{stop:,} "
+                f"({stop - start:,} rows); reader={fits_reader_backend}; "
+                f"RSS≈{rss_gib():.2f} GiB",
+                progress_callback,
+            )
+
+            read_started = time.perf_counter()
+            if fits_reader_backend == "fitsio":
+                # TableHDU slice notation reads only the requested contiguous
+                # row range.  No whole-table FITS_rec is constructed.
+                rec = fitsio_hdu[start:stop]
+            else:
+                # Known-good compatibility path retained unchanged.
+                rec = np.array(
+                    astropy_data[start:stop],
+                    copy=True,
+                )
+
+            read_elapsed = time.perf_counter() - read_started
+            fits_chunk_read_elapsed_seconds += read_elapsed
+
+            expected_rows = stop - start
+            if len(rec) != expected_rows:
+                raise RuntimeError(
+                    f"Chunk {chunk_no} returned {len(rec):,} rows; "
+                    f"expected {expected_rows:,}."
+                )
+
+            rec_names = list(rec.dtype.names or ())
+            if rec_names != column_names:
+                raise RuntimeError(
+                    f"Chunk {chunk_no} schema changed while reading FITS data."
+                )
+
+            _log_loader(
+                f"Chunk {chunk_no}: read FITS rows via {fits_reader_backend} "
+                f"in {read_elapsed:.2f}s; "
+                f"array≈{rec.nbytes / 1024**3:.2f} GiB; "
+                f"RSS≈{rss_gib():.2f} GiB",
+                progress_callback,
+            )
+
+            convert_started = time.perf_counter()
+            arrow_table, skipped = _fits_rec_chunk_to_arrow_table(
+                rec,
+                column_names,
+                null_sentinels,
+                strip_strings=strip_strings,
+                progress_prefix=f"Chunk {chunk_no}:",
+                progress_callback=progress_callback,
+                cancel_token=cancel_token,
+            )
+            skipped_columns.update(skipped)
+
+            _log_loader(
+                f"Chunk {chunk_no}: built Arrow table "
+                f"{arrow_table.num_rows:,} rows × "
+                f"{arrow_table.num_columns:,} cols in "
+                f"{time.perf_counter() - convert_started:.1f}s; "
+                f"table≈{arrow_table.nbytes / 1024**3:.2f} GiB; "
+                f"RSS≈{rss_gib():.2f} GiB",
+                progress_callback,
+            )
+
+            if writer is None:
+                schema = arrow_table.schema
+                writer = pq.ParquetWriter(
+                    tmp_parquet,
+                    schema,
+                    compression=compression,
+                    compression_level=compression_level,
+                    use_dictionary=use_dictionary,
+                    write_statistics=True,
+                )
+            elif schema is not None and not arrow_table.schema.equals(
+                schema,
+                check_metadata=False,
+            ):
+                arrow_table = arrow_table.cast(schema)
+
+            writer.write_table(
+                arrow_table,
+                row_group_size=arrow_table.num_rows,
+            )
+
+            total_rows += int(arrow_table.num_rows)
+            chunk_elapsed = time.perf_counter() - chunk_started
+            rows_per_second = (
+                arrow_table.num_rows / chunk_elapsed
+                if chunk_elapsed
+                else 0.0
+            )
+
+            tmp_size = (
+                tmp_parquet.stat().st_size
+                if tmp_parquet.exists()
+                else 0
+            )
+            operation_elapsed = time.perf_counter() - operation_started
+            row_conversion_elapsed = (
+                time.perf_counter() - row_conversion_started
+                if row_conversion_started is not None
+                else 0.0
+            )
+            average_rows_per_second = (
+                total_rows / row_conversion_elapsed
+                if row_conversion_elapsed > 0
+                else 0.0
+            )
+            remaining_rows = max(0, n_rows - total_rows)
+            eta_seconds = (
+                remaining_rows / average_rows_per_second
+                if average_rows_per_second > 0 and remaining_rows > 0
+                else 0.0 if remaining_rows == 0 else None
+            )
+            current_rss_gib = rss_gib()
+
+            _log_loader(
+                f"Chunk {chunk_no}: wrote rows {start:,}–{stop:,} in "
+                f"{chunk_elapsed:.1f}s ({rows_per_second:,.0f} rows/s); "
+                f"total={total_rows:,}/{n_rows:,}; "
+                f"tmp_size≈{tmp_size / 1024**3:.2f} GiB; "
+                f"RSS≈{current_rss_gib:.2f} GiB",
+                progress_callback,
+            )
+
+            last_chunk_no = chunk_no
+            _emit_progress_state(
+                progress_state_callback,
+                phase="writing",
+                label=f"Writing FITS chunk {chunk_no}/{chunk_count}",
+                rows_completed=total_rows,
+                rows_total=n_rows,
+                chunk_index=chunk_no,
+                chunk_count=chunk_count,
+                elapsed_seconds=operation_elapsed,
+                eta_seconds=eta_seconds,
+                rows_per_second=rows_per_second,
+                average_rows_per_second=average_rows_per_second,
+                tmp_size_bytes=tmp_size,
+                rss_gib=current_rss_gib,
+            )
+
+            del rec, arrow_table
+
+            if chunk_no % 4 == 0:
+                gc.collect()
+
+        if row_conversion_started is not None:
+            row_conversion_elapsed_seconds = (
+                time.perf_counter() - row_conversion_started
+            )
 
     finally:
+        if fitsio_file is not None:
+            try:
+                fitsio_file.close()
+            except Exception:
+                pass
+
+        if astropy_reader_hdul is not None:
+            try:
+                astropy_reader_hdul.close()
+            except Exception:
+                pass
+
         if writer is not None:
-            tmp_size = tmp_parquet.stat().st_size if tmp_parquet.exists() else 0
-            elapsed_total = time.perf_counter() - conversion_started
+            tmp_size = (
+                tmp_parquet.stat().st_size
+                if tmp_parquet.exists()
+                else 0
+            )
+            operation_elapsed = time.perf_counter() - operation_started
+            row_conversion_elapsed = row_conversion_elapsed_seconds
+            if row_conversion_elapsed is None and row_conversion_started is not None:
+                row_conversion_elapsed = (
+                    time.perf_counter() - row_conversion_started
+                )
+            average_conversion_rate = (
+                total_rows / row_conversion_elapsed
+                if row_conversion_elapsed is not None and row_conversion_elapsed > 0
+                else None
+            )
+
             _emit_progress_state(
                 progress_state_callback,
                 phase="finalizing",
@@ -423,39 +851,72 @@ def import_fits_table_to_parquet(
                 rows_total=n_rows,
                 chunk_index=last_chunk_no,
                 chunk_count=chunk_count,
-                elapsed_seconds=elapsed_total,
+                elapsed_seconds=operation_elapsed,
                 eta_seconds=None,
                 rows_per_second=None,
-                average_rows_per_second=(total_rows / elapsed_total if elapsed_total else None),
+                average_rows_per_second=average_conversion_rate,
                 tmp_size_bytes=tmp_size,
                 rss_gib=rss_gib(),
             )
+
             _log_loader(
-                f"Closing Parquet writer... tmp_size≈{tmp_size / 1024**3:.2f} GiB; "
+                "Closing Parquet writer... "
+                f"tmp_size≈{tmp_size / 1024**3:.2f} GiB; "
                 f"RSS≈{rss_gib():.2f} GiB",
                 progress_callback,
             )
+
             close_started = time.perf_counter()
             writer.close()
             writer = None
-            tmp_size = tmp_parquet.stat().st_size if tmp_parquet.exists() else 0
+
+            tmp_size = (
+                tmp_parquet.stat().st_size
+                if tmp_parquet.exists()
+                else 0
+            )
             _log_loader(
-                f"Closed Parquet writer in {time.perf_counter() - close_started:.1f}s; "
-                f"tmp_size≈{tmp_size / 1024**3:.2f} GiB; RSS≈{rss_gib():.2f} GiB",
+                f"Closed Parquet writer in "
+                f"{time.perf_counter() - close_started:.1f}s; "
+                f"tmp_size≈{tmp_size / 1024**3:.2f} GiB; "
+                f"RSS≈{rss_gib():.2f} GiB",
                 progress_callback,
             )
-        _log_loader("Releasing FITS mmap handle...", progress_callback)
+
+        _log_loader(
+            f"Released FITS row reader ({fits_reader_backend}).",
+            progress_callback,
+        )
 
     _raise_if_cancelled(cancel_token)
-    _log_loader("Replacing tmp Parquet with final Parquet path...", progress_callback)
+
+    _log_loader(
+        "Replacing tmp Parquet with final Parquet path...",
+        progress_callback,
+    )
     replace_started = time.perf_counter()
     os.replace(tmp_parquet, parquet)
     _log_loader(
-        f"Rename complete in {time.perf_counter() - replace_started:.1f}s: {parquet}",
+        f"Rename complete in {time.perf_counter() - replace_started:.1f}s: "
+        f"{parquet}",
         progress_callback,
     )
 
     columns = list(schema.names) if schema is not None else []
+    operation_elapsed_seconds = time.perf_counter() - operation_started
+
+    if row_conversion_elapsed_seconds is None and row_conversion_started is not None:
+        row_conversion_elapsed_seconds = (
+            time.perf_counter() - row_conversion_started
+        )
+
+    average_conversion_rows_per_second = (
+        total_rows / row_conversion_elapsed_seconds
+        if row_conversion_elapsed_seconds is not None
+        and row_conversion_elapsed_seconds > 0
+        else None
+    )
+
     metadata = {
         "cache_schema_version": 2,
         "dataset_id": dataset_id,
@@ -474,7 +935,37 @@ def import_fits_table_to_parquet(
         "parquet_compression_level": compression_level,
         "parquet_use_dictionary": use_dictionary,
         "target_chunk_bytes": target_chunk_bytes,
-        "conversion_elapsed_seconds": time.perf_counter() - conversion_started,
+        "conversion_elapsed_seconds": operation_elapsed_seconds,
+        "preparation_elapsed_seconds": preparation_elapsed_seconds,
+        "row_conversion_elapsed_seconds": row_conversion_elapsed_seconds,
+        "average_conversion_rows_per_second": (
+            average_conversion_rows_per_second
+        ),
+        "fits_reader_backend": fits_reader_backend,
+        "fits_reader_fallback_reason": fits_reader_fallback_reason,
+        "fits_open_elapsed_seconds": fits_open_elapsed_seconds,
+        "fits_hdu_resolution_elapsed_seconds": (
+            fits_hdu_resolution_elapsed_seconds
+        ),
+        "fits_data_mapping_elapsed_seconds": (
+            fits_data_mapping_elapsed_seconds
+        ),
+        "fits_column_setup_elapsed_seconds": (
+            fits_column_setup_elapsed_seconds
+        ),
+        "fits_metadata_capture_elapsed_seconds": (
+            fits_metadata_capture_elapsed_seconds
+        ),
+        "fitsio_open_elapsed_seconds": fitsio_open_elapsed_seconds,
+        "fitsio_hdu_resolution_elapsed_seconds": (
+            fitsio_hdu_resolution_elapsed_seconds
+        ),
+        "fitsio_schema_validation_elapsed_seconds": (
+            fitsio_schema_validation_elapsed_seconds
+        ),
+        "fits_chunk_read_elapsed_seconds": (
+            fits_chunk_read_elapsed_seconds
+        ),
         "created_at_ns": time.time_ns(),
     }
 
@@ -484,16 +975,24 @@ def import_fits_table_to_parquet(
     _log_loader("Writing JSON metadata...", progress_callback)
     metadata_started = time.perf_counter()
     metadata_file.write_text(
-        json.dumps(metadata, indent=2, sort_keys=True, default=str),
+        json.dumps(
+            metadata,
+            indent=2,
+            sort_keys=True,
+            default=str,
+        ),
         encoding="utf-8",
     )
     _log_loader(
-        f"Metadata written in {time.perf_counter() - metadata_started:.1f}s: {metadata_file}",
+        f"Metadata written in {time.perf_counter() - metadata_started:.1f}s: "
+        f"{metadata_file}",
         progress_callback,
     )
     _log_loader(f"Parquet cache written: {parquet}", progress_callback)
-    completed_elapsed = time.perf_counter() - conversion_started
+
+    completed_elapsed = time.perf_counter() - operation_started
     final_size = parquet.stat().st_size if parquet.exists() else 0
+
     _emit_progress_state(
         progress_state_callback,
         phase="complete",
@@ -505,7 +1004,7 @@ def import_fits_table_to_parquet(
         elapsed_seconds=completed_elapsed,
         eta_seconds=0.0,
         rows_per_second=None,
-        average_rows_per_second=(total_rows / completed_elapsed if completed_elapsed else None),
+        average_rows_per_second=average_conversion_rows_per_second,
         tmp_size_bytes=final_size,
         rss_gib=rss_gib(),
     )
@@ -539,7 +1038,10 @@ def register_fits_table(
     New loader code separates conversion from registration, but existing callers
     may continue using this helper.
     """
-    _log_loader(f"Starting FITS registration -id: {dataset_id}", progress_callback)
+    _log_loader(
+        f"Starting FITS registration -id: {dataset_id}",
+        progress_callback,
+    )
     result = import_fits_table_to_parquet(
         fits_path,
         cache_dir=cache_dir,
@@ -569,15 +1071,24 @@ def register_fits_table(
     registration_meta.pop("dataset_id", None)
     registration_meta.pop("name", None)
 
-    _log_loader(f"Registering lazy Parquet-backed dataset: {ds_id}", progress_callback)
-    _log_loader(f"Backend cache: {result['parquet_path']}", progress_callback)
+    _log_loader(
+        f"Registering lazy Parquet-backed dataset: {ds_id}",
+        progress_callback,
+    )
+    _log_loader(
+        f"Backend cache: {result['parquet_path']}",
+        progress_callback,
+    )
     datasets.register_parquet(
         ds_id,
         result["parquet_path"],
         name=name or ds_id,
         **registration_meta,
     )
-    _log_loader(f"Dataset registered successfully: {ds_id}", progress_callback)
+    _log_loader(
+        f"Dataset registered successfully: {ds_id}",
+        progress_callback,
+    )
     return result
 
 
@@ -587,4 +1098,3 @@ __all__ = [
     "import_fits_table_to_parquet",
     "register_fits_table",
 ]
-

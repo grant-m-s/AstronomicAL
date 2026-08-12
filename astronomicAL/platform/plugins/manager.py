@@ -2739,27 +2739,75 @@ class PluginManager:
 
         return ValidationResult(ok=not errors, errors=errors)
 
-    def _validate_numeric_columns(self, context: Any, request: ActionRequest) -> List[str]:
+    def _validate_numeric_columns(
+        self,
+        context: Any,
+        request: ActionRequest,
+    ) -> List[str]:
+        """Validate numeric action columns from dataset schema only.
+
+        Validation must never materialise source rows. DatasetManager.dtypes()
+        and list_columns() are the authoritative schema-level APIs for this
+        purpose.
+        """
+
         if not request.dataset_id or not request.columns:
             return []
 
+        datasets = getattr(context, "datasets", None)
+        if datasets is None:
+            return [
+                "Numeric-column validation requires context.datasets."
+            ]
+
         try:
-            df = context.datasets.get_df(request.dataset_id)
-        except Exception:
-            return []
+            available_columns = {
+                str(column)
+                for column in datasets.list_columns(request.dataset_id)
+            }
+        except Exception as exc:
+            return [
+                "Could not inspect columns for dataset "
+                f"{request.dataset_id!r}: {exc}"
+            ]
+
+        try:
+            dtypes = {
+                str(column): dtype
+                for column, dtype in datasets.dtypes(
+                    request.dataset_id
+                ).items()
+            }
+        except Exception as exc:
+            return [
+                "Could not inspect dtypes for dataset "
+                f"{request.dataset_id!r}: {exc}"
+            ]
 
         errors: List[str] = []
+
         for column in request.columns:
-            if column not in getattr(df, "columns", []):
-                errors.append(f"Column {column!r} does not exist in dataset {request.dataset_id!r}.")
+            column = str(column)
+
+            if column not in available_columns:
+                errors.append(
+                    f"Column {column!r} does not exist in dataset "
+                    f"{request.dataset_id!r}."
+                )
                 continue
 
-            try:
-                dtype = df[column].dtype
-                if not _is_numeric_dtype(dtype):
-                    errors.append(f"Column {column!r} is not numeric.")
-            except Exception:
-                pass
+            if column not in dtypes:
+                errors.append(
+                    f"Could not determine the dtype of column "
+                    f"{column!r} in dataset {request.dataset_id!r}."
+                )
+                continue
+
+            if not _is_numeric_dtype(dtypes[column]):
+                errors.append(
+                    f"Column {column!r} is not numeric."
+                )
+
         return errors
 
     def _artifact_type(self, context: Any, artifact_id: str) -> Optional[str]:
@@ -2965,37 +3013,102 @@ class PluginManager:
                     value=raw,
                 )
             else:
-                return ProcessedActionResult(raw=raw, value=raw)
+                return ProcessedActionResult(
+                    raw=raw,
+                    value=raw,
+                )
 
         artifact_ids: List[str] = []
         dataset_ids: List[str] = []
         published_events: List[EventResult] = []
 
+        datasets = getattr(context, "datasets", None)
+        if result.datasets and datasets is None:
+            raise PluginExecutionError(
+                f"Action {registration.id!r} returned dataset results "
+                "but context.datasets is unavailable."
+            )
+
         for dataset_result in result.datasets:
-            metadata = dict(dataset_result.metadata)
-            try:
-                context.datasets.register(
-                    dataset_result.id,
-                    dataset_result.dataframe,
-                    name=dataset_result.name or dataset_result.id,
-                    **metadata,
+            metadata = dict(dataset_result.metadata or {})
+            dataset_name = (
+                dataset_result.name
+                or dataset_result.id
+            )
+
+            if dataset_result.source is not None:
+                register_source = getattr(
+                    datasets,
+                    "register_source",
+                    None,
                 )
-            except TypeError:
-                context.datasets.register(dataset_result.id, dataset_result.dataframe)
+
+                if not callable(register_source):
+                    raise PluginExecutionError(
+                        f"Action {registration.id!r} returned a "
+                        "source-backed DatasetResult, but the active "
+                        "DatasetManager does not support register_source()."
+                    )
+
+                try:
+                    register_source(
+                        dataset_result.id,
+                        dataset_result.source,
+                        name=dataset_name,
+                        **metadata,
+                    )
+                except Exception as exc:
+                    raise PluginExecutionError(
+                        f"Action {registration.id!r} failed to register "
+                        f"source-backed dataset {dataset_result.id!r}: "
+                        f"{exc}"
+                    ) from exc
+
+            else:
+                try:
+                    datasets.register(
+                        dataset_result.id,
+                        dataset_result.dataframe,
+                        name=dataset_name,
+                        **metadata,
+                    )
+                except Exception as exc:
+                    raise PluginExecutionError(
+                        f"Action {registration.id!r} failed to register "
+                        f"dataframe-backed dataset "
+                        f"{dataset_result.id!r}: {exc}"
+                    ) from exc
 
             dataset_ids.append(dataset_result.id)
 
-            if dataset_result.set_active and hasattr(context.datasets, "set_active"):
-                context.datasets.set_active(dataset_result.id)
+            if (
+                dataset_result.set_active
+                and hasattr(datasets, "set_active")
+            ):
+                datasets.set_active(
+                    dataset_result.id,
+                    origin=registration.id,
+                )
 
         for artifact_result in result.artifacts:
-            dataset_id = artifact_result.dataset_id or request.dataset_id
+            dataset_id = (
+                artifact_result.dataset_id
+                or request.dataset_id
+            )
             artifact_id = artifact_result.artifact_id
 
             params = dict(artifact_result.params)
-            provenance = dict(params.get("provenance", {}))
-            provenance.setdefault("plugin_id", registration.plugin_id)
-            provenance.setdefault("action_id", registration.id)
+            provenance = dict(
+                params.get("provenance", {})
+            )
+            provenance.setdefault(
+                "plugin_id",
+                registration.plugin_id,
+            )
+            provenance.setdefault(
+                "action_id",
+                registration.id,
+            )
             params["provenance"] = provenance
 
             if artifact_id is None:
@@ -3003,14 +3116,20 @@ class PluginManager:
                     artifact_result.type,
                     artifact_result.payload,
                     dataset_id=dataset_id,
-                    row_ids=artifact_result.row_ids or request.row_ids,
+                    row_ids=(
+                        artifact_result.row_ids
+                        or request.row_ids
+                    ),
                     params=params,
                 )
                 artifact_result.artifact_id = artifact_id
 
             artifact_ids.append(artifact_id)
 
-            if artifact_result.publish and hasattr(context, "events"):
+            if (
+                artifact_result.publish
+                and hasattr(context, "events")
+            ):
                 event = EventResult(
                     "artifact.created",
                     {
@@ -3021,12 +3140,18 @@ class PluginManager:
                         "plugin_id": registration.plugin_id,
                     },
                 )
-                context.events.publish(event.topic, event.payload)
+                context.events.publish(
+                    event.topic,
+                    event.payload,
+                )
                 published_events.append(event)
 
         for event in result.events:
             if hasattr(context, "events"):
-                context.events.publish(event.topic, event.payload)
+                context.events.publish(
+                    event.topic,
+                    event.payload,
+                )
             published_events.append(event)
 
         return ProcessedActionResult(
@@ -3207,10 +3332,43 @@ def _json_safe(value: Any) -> Any:
     return repr(value)
 
 def _is_numeric_dtype(dtype: Any) -> bool:
+    """Return whether a pandas/numpy/backend dtype represents numeric data."""
+
     try:
         import pandas as pd
 
-        return bool(pd.api.types.is_numeric_dtype(dtype))
+        if pd.api.types.is_numeric_dtype(dtype):
+            return True
     except Exception:
-        text = str(dtype).lower()
-        return any(token in text for token in ("int", "float", "double", "decimal", "number"))
+        pass
+
+    text = str(dtype or "").strip().lower()
+
+    if not text:
+        return False
+
+    if re.fullmatch(r"u?int\d*", text):
+        return True
+
+    if re.fullmatch(r"float\d*", text):
+        return True
+
+    return any(
+        marker in text
+        for marker in (
+            "tinyint",
+            "smallint",
+            "integer",
+            "bigint",
+            "hugeint",
+            "utinyint",
+            "usmallint",
+            "uinteger",
+            "ubigint",
+            "float",
+            "double",
+            "real",
+            "decimal",
+            "numeric",
+        )
+    )

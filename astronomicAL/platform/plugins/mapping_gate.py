@@ -452,18 +452,48 @@ class MappingGatedPanel:
 
         dataset_id = self._dataset_id()
 
-        datasets = getattr(self.context, "datasets", None)
+        datasets = getattr(
+            self.context,
+            "datasets",
+            None,
+        )
         dataset_loaded = False
 
         if datasets is not None:
             try:
-                if hasattr(datasets, "has_dataset"):
-                    dataset_loaded = bool(datasets.has_dataset(dataset_id))
-                elif hasattr(datasets, "_datasets"):
-                    dataset_loaded = dataset_id in datasets._datasets
-                else:
-                    datasets.get_df(dataset_id)
+                has_dataset = getattr(datasets,"has_dataset",None,)
+                list_ids = getattr(datasets,"list_ids",None,)
+                get_dataset = getattr(datasets,"get",None,)
+                get_source = getattr(datasets,"get_source",None,)
+
+                if callable(has_dataset):
+                    dataset_loaded = bool(
+                        has_dataset(dataset_id)
+                    )
+
+                elif callable(list_ids):
+                    dataset_loaded = (
+                        str(dataset_id)
+                        in {
+                            str(value)
+                            for value in list_ids()
+                        }
+                    )
+
+                elif callable(get_dataset):
+                    get_dataset(dataset_id)
                     dataset_loaded = True
+
+                elif callable(get_source):
+                    get_source(dataset_id)
+                    dataset_loaded = True
+
+            except (
+                KeyError,
+                RuntimeError,
+            ):
+                dataset_loaded = False
+
             except Exception:
                 dataset_loaded = False
 
@@ -480,7 +510,10 @@ class MappingGatedPanel:
             dataset_id=state.dataset_id,
             source=source,
             panel_id=panel_id,
-            requirements=[*state.missing_required, *state.missing_optional],
+            requirements=[
+                *state.missing_required,
+                *state.missing_optional,
+            ],
             sent_keys=self._mapping_requests_sent,
         )
 

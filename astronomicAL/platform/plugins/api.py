@@ -146,26 +146,120 @@ class PluginAPI:
         requires: Optional[Sequence[str]] = None,
         optional_requires: Optional[Sequence[str]] = None,
     ) -> None:
-        """Register a dataframe-oriented action with low authoring friction.
-
-        The platform resolves the dataframe, selected rows, columns, params, and
-        cancellation token, then calls the handler with only the arguments it accepts.
-        """
 
         outputs = [output_type] if output_type else []
+        canonical_action_id = self._canonical_id(id)
+        materialization_origin = (
+            f"plugin.dataframe_action:{canonical_action_id}"
+        )
 
         def _adapter(context, request, cancel_token=None):
-            dataset_id = request.dataset_id
-            df = context.datasets.get_df(dataset_id) if dataset_id else context.datasets.get_df()
+            datasets = getattr(context, "datasets", None)
+            if datasets is None:
+                raise RuntimeError(
+                    f"Dataframe action {canonical_action_id!r} requires "
+                    "context.datasets."
+                )
 
-            if request.row_ids:
-                id_column = _resolve_id_column(context, dataset_id, df)
-                if id_column is not None:
-                    work_df = df[df[id_column].isin(request.row_ids)]
-                else:
-                    work_df = df.loc[request.row_ids]
+            dataset_id = request.dataset_id
+            if dataset_id is None:
+                try:
+                    dataset_id = datasets.active_id()
+                except Exception as exc:
+                    raise RuntimeError(
+                        f"Dataframe action {canonical_action_id!r} requires "
+                        "an active dataset."
+                    ) from exc
+
+            requested_columns = list(
+                dict.fromkeys(
+                    str(column)
+                    for column in (request.columns or [])
+                )
+            )
+            columns_arg = requested_columns or None
+
+            row_ids = list(request.row_ids or [])
+
+            try:
+                source = datasets.get_source(dataset_id)
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Dataframe action {canonical_action_id!r} could not "
+                    f"resolve dataset {dataset_id!r}."
+                ) from exc
+
+            backend = str(
+                getattr(source, "backend_name", "unknown") or "unknown"
+            ).lower()
+            is_pandas_source = backend == "pandas"
+
+            if row_ids:
+                try:
+                    available_columns = datasets.list_columns(dataset_id)
+                except Exception as exc:
+                    raise RuntimeError(
+                        f"Dataframe action {canonical_action_id!r} could not "
+                        f"inspect columns for dataset {dataset_id!r}."
+                    ) from exc
+
+                id_column = _resolve_id_column(
+                    context,
+                    dataset_id,
+                    available_columns,
+                )
+
+                if id_column is None:
+                    raise RuntimeError(
+                        f"Dataframe action {canonical_action_id!r} received "
+                        "selected row IDs but could not resolve a record-ID "
+                        f"column for dataset {dataset_id!r}. Map the semantic "
+                        "`record_id` column before running this action."
+                    )
+
+                if id_column == "Use Index" and not is_pandas_source:
+                    raise RuntimeError(
+                        f"Dataframe action {canonical_action_id!r} cannot use "
+                        "`Use Index` to resolve selected rows from lazy dataset "
+                        f"{dataset_id!r} (backend={backend!r}). Map a stable "
+                        "`record_id` column instead."
+                    )
+
+                try:
+                    work_df = datasets.get_rows_by_ids(
+                        dataset_id,
+                        row_ids,
+                        id_column=id_column,
+                        columns=columns_arg,
+                    )
+                except Exception as exc:
+                    raise RuntimeError(
+                        f"Dataframe action {canonical_action_id!r} could not "
+                        f"resolve the selected rows from dataset {dataset_id!r}."
+                    ) from exc
+
             else:
-                work_df = df
+                if not is_pandas_source:
+                    raise RuntimeError(
+                        f"Dataframe action {canonical_action_id!r} would "
+                        "implicitly materialise every row of lazy dataset "
+                        f"{dataset_id!r} (backend={backend!r}). "
+                        "Use register_action() with DatasetSource/manager APIs "
+                        "for whole-dataset work, or provide an explicit row "
+                        "selection."
+                    )
+
+                try:
+                    work_df = datasets.get_df(
+                        dataset_id,
+                        columns=columns_arg,
+                        origin=materialization_origin,
+                    )
+                except Exception as exc:
+                    raise RuntimeError(
+                        f"Dataframe action {canonical_action_id!r} could not "
+                        f"materialise pandas dataset {dataset_id!r}."
+                    ) from exc
 
             result = self.manager._call_with_supported_args(
                 handler,
@@ -179,7 +273,11 @@ class PluginAPI:
                 cancel_token=cancel_token,
             )
 
-            if output_type and result is not None and not self.manager._is_action_result_like(result):
+            if (
+                output_type
+                and result is not None
+                and not self.manager._is_action_result_like(result)
+            ):
                 from .specs import ArtifactResult
 
                 return ArtifactResult(
@@ -193,7 +291,7 @@ class PluginAPI:
             return result
 
         self.register_action(
-            id=id,
+            id=canonical_action_id,
             title=title,
             handler=_adapter,
             inputs=InputSpec(
@@ -431,23 +529,60 @@ class PluginAPI:
             )
 
 
-def _resolve_id_column(context: Any, dataset_id: Optional[str], df: Any) -> Optional[str]:
+def _resolve_id_column(
+    context: Any,
+    dataset_id: Optional[str],
+    available_columns: Sequence[Any],
+) -> Optional[str]:
+    """Resolve the stable record-identity column without reading row data."""
+
+    available = {
+        str(column)
+        for column in (available_columns or [])
+    }
+
     if context is not None and dataset_id is not None:
         datasets = getattr(context, "datasets", None)
-        if datasets is not None:
-            for method_name in ("get_mapping", "mapping", "get_column_mapping"):
-                method = getattr(datasets, method_name, None)
-                if callable(method):
-                    for mapping_name in ("id", "row_id"):
-                        try:
-                            value = method(dataset_id, mapping_name)
-                        except Exception:
-                            value = None
-                        if value and hasattr(df, "columns") and value in df.columns:
-                            return value
 
-    for candidate in ("id", "ID", "source_id", "object_id", "row_id"):
-        if hasattr(df, "columns") and candidate in df.columns:
+        if datasets is not None:
+            for method_name in (
+                "get_mapping",
+                "mapping",
+                "get_column_mapping",
+            ):
+                method = getattr(datasets, method_name, None)
+                if not callable(method):
+                    continue
+
+                for semantic_name in (
+                    "record_id",
+                    "id",
+                    "row_id",
+                ):
+                    try:
+                        value = method(dataset_id, semantic_name)
+                    except Exception:
+                        value = None
+
+                    if not value:
+                        continue
+
+                    value = str(value)
+
+                    if value == "Use Index":
+                        return value
+
+                    if value in available:
+                        return value
+
+    for candidate in (
+        "id",
+        "ID",
+        "source_id",
+        "object_id",
+        "row_id",
+    ):
+        if candidate in available:
             return candidate
 
     return None

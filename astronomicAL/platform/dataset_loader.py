@@ -7,6 +7,7 @@ from html import escape
 from pathlib import Path
 from typing import Any, Iterable, Optional
 import re
+import time
 
 import panel as pn
 import param
@@ -36,7 +37,6 @@ from astronomicAL.platform.tabular_import import (
 )
 
 _LOADER_ID = "platform.dataset_loader"
-
 
 class DatasetProgressLog(ReactiveHTML):
     """Read-only progress log that tails output until the user scrolls away.
@@ -100,7 +100,6 @@ if (state.on_scroll) {
 """,
     }
 
-
 @dataclass(frozen=True)
 class DatasetSourceInfo:
     path: Path
@@ -112,7 +111,6 @@ class DatasetSourceInfo:
     def label(self) -> str:
         return self.path.name
 
-
 @dataclass(frozen=True)
 class DatasetImportRequest:
     source_path: str
@@ -123,7 +121,6 @@ class DatasetImportRequest:
     source_subresource: Optional[str] = None
     regenerate: bool = False
     replace_dataset_id: Optional[str] = None
-
 
 @dataclass(frozen=True)
 class DatasetImportResult:
@@ -158,7 +155,6 @@ class DatasetImportResult:
             "origin": _LOADER_ID,
             "change": "source.regenerated" if self.updated_existing else "dataset.loaded",
         }
-
 
 class DatasetImportService:
     """Platform-owned conversion and DatasetManager registration service.
@@ -370,7 +366,6 @@ class DatasetImportService:
             if value:
                 raise RuntimeError("Dataset import was cancelled.")
 
-
 class DatasetLoaderController:
     """Dataset modal for server-side discovery, conversion and registration."""
 
@@ -420,6 +415,8 @@ class DatasetLoaderController:
         self._subresource_error: Optional[str] = None
         self._progress_lines: deque[str] = deque(maxlen=5000)
         self._conversion_progress: dict[str, Any] = {}
+        self._progress_started_at: Optional[float] = None
+        self._progress_timer: Any = None
         self._cache_assessment_memo: dict[tuple[Any, ...], CacheAssessment] = {}
 
         self._install_css()
@@ -441,6 +438,7 @@ class DatasetLoaderController:
         if self._disposed:
             return
         self._disposed = True
+        self._stop_progress_timer()
         for watcher in list(self._watchers):
             try:
                 watcher.inst.param.unwatch(watcher)
@@ -1299,6 +1297,7 @@ class DatasetLoaderController:
         )
         self._set_busy(True)
         self._job_document = self._current_document()
+        self._start_progress_timer()
         self.status_pane.object = self._status_html(
             "Regenerating Parquet" if regenerate else "Import in progress",
             (
@@ -1406,6 +1405,7 @@ class DatasetLoaderController:
         self._finish_error(_extract_job_error(args, kwargs))
 
     def _finish_success(self, result: DatasetImportResult) -> None:
+        self._stop_progress_timer()
         self._job_handle = None
         self._last_result = result
         self._cache_assessment_memo.clear()
@@ -1428,6 +1428,7 @@ class DatasetLoaderController:
                 "rows_completed": result.rows if result.rows is not None else final_progress.get("rows_completed"),
                 "rows_total": result.rows if result.rows is not None else final_progress.get("rows_total"),
                 "eta_seconds": 0.0,
+                "rows_per_second": None,
             }
         )
         self._set_conversion_progress(final_progress)
@@ -1449,6 +1450,7 @@ class DatasetLoaderController:
         self.result_pane.visible = True
 
     def _finish_error(self, exc: BaseException) -> None:
+        self._stop_progress_timer()
         self._job_handle = None
         self._set_busy(False)
         message = str(exc).strip() or type(exc).__name__
@@ -1500,6 +1502,63 @@ class DatasetLoaderController:
     # ------------------------------------------------------------------
     # Progress
     # ------------------------------------------------------------------
+
+    def _start_progress_timer(self) -> None:
+        """Keep elapsed wall time moving during quiet worker phases.
+
+        Some source readers can spend a long time inside a single blocking
+        library call before they emit another structured progress update. The
+        timer is presentation-only: it never performs import work and never
+        changes worker-derived row, chunk, rate, ETA, size, or RSS values.
+        """
+        self._stop_progress_timer()
+        self._progress_started_at = time.perf_counter()
+
+        try:
+            self._progress_timer = pn.state.add_periodic_callback(
+                self._tick_progress_elapsed,
+                period=1000,
+            )
+        except Exception:
+            # UI timing is best-effort and must never affect import execution.
+            self._progress_timer = None
+
+    def _stop_progress_timer(self) -> None:
+        callback = self._progress_timer
+        self._progress_timer = None
+
+        if callback is not None:
+            try:
+                callback.stop()
+            except Exception:
+                pass
+
+        self._progress_started_at = None
+
+    def _tick_progress_elapsed(self) -> None:
+        if (
+            self._disposed
+            or not self._busy
+            or self._progress_started_at is None
+        ):
+            return
+
+        phase = str(self._conversion_progress.get("phase") or "")
+        if phase in {"complete", "error"}:
+            return
+
+        wall_elapsed = time.perf_counter() - self._progress_started_at
+        current_elapsed = _optional_float(
+            self._conversion_progress.get("elapsed_seconds")
+        )
+        elapsed = max(
+            wall_elapsed,
+            current_elapsed if current_elapsed is not None else 0.0,
+        )
+
+        state = dict(self._conversion_progress)
+        state["elapsed_seconds"] = elapsed
+        self._set_conversion_progress(state)
 
     def _clear_progress(self) -> None:
         self._progress_lines.clear()
@@ -1680,21 +1739,46 @@ class DatasetLoaderController:
             else f"{chunk_index:,}" if chunk_index is not None
             else "—"
         )
-        rate_value = current_rate if current_rate is not None else average_rate
-        rate_text = f"{rate_value:,.0f} rows/s" if rate_value is not None else "Calculating…"
-        average_text = f"{average_rate:,.0f} rows/s" if average_rate is not None else "Calculating…"
+
+        # Current throughput and average throughput are different measurements.
+        # Never substitute the average when there is no meaningful instantaneous
+        # rate, such as during preparation, finalisation, or after completion.
+        rate_text = (
+            f"{current_rate:,.0f} rows/s"
+            if current_rate is not None
+            else "—"
+        )
+        average_text = (
+            f"{average_rate:,.0f} rows/s"
+            if average_rate is not None
+            else "—"
+        )
+
         eta_text = (
             "Complete"
             if phase == "complete"
-            else _format_duration(eta) if eta is not None
-            else "Calculating…" if total is not None and completed not in (None, 0)
+            else _format_duration(eta)
+            if eta is not None
+            else "Calculating…"
+            if phase == "writing" and total is not None and completed not in (None, 0)
             else "—"
         )
         elapsed_text = _format_duration(elapsed) if elapsed is not None else "—"
         percent_text = f"{percent:.1f}%" if percent is not None else "—"
         fill_style = f' style="width:{percent:.3f}%;"' if percent is not None else ""
-        fill_class = "al-dataset-loader-progress-fill" + (" is-indeterminate" if percent is None and phase not in {"complete", "error"} else "")
-        state_class = "error" if phase == "error" else "complete" if phase == "complete" else "active"
+        fill_class = "al-dataset-loader-progress-fill" + (
+            " is-indeterminate"
+            if percent is None and phase not in {"complete", "error"}
+            else ""
+        )
+        state_class = (
+            "error"
+            if phase == "error"
+            else "complete"
+            if phase == "complete"
+            else "active"
+        )
+        size_label = "Parquet size" if phase == "complete" else "Temporary Parquet"
 
         return f"""
 <div class="al-dataset-loader-conversion-summary {state_class}">
@@ -1715,7 +1799,7 @@ class DatasetLoaderController:
     <dt>Est. remaining</dt><dd>{eta_text}</dd>
     <dt>Current rate</dt><dd>{rate_text}</dd>
     <dt>Average rate</dt><dd>{average_text}</dd>
-    <dt>Temporary Parquet</dt><dd>{format_bytes(tmp_size)}</dd>
+    <dt>{size_label}</dt><dd>{format_bytes(tmp_size)}</dd>
     <dt>RSS</dt><dd>{f'{rss:.2f} GiB' if rss is not None else '—'}</dd>
   </dl>
 </div>
@@ -1880,12 +1964,9 @@ class DatasetLoaderController:
         digest = sha256(identity.encode("utf-8")).hexdigest()[:20]
         return f"dataset.import:{digest}"
 
-
-
 # ----------------------------------------------------------------------
 # Module helpers / compatibility exports
 # ----------------------------------------------------------------------
-
 
 def discover_dataset_sources(data_directory: str | Path) -> list[DatasetSourceInfo]:
     root = Path(data_directory).expanduser()
@@ -1897,7 +1978,6 @@ def discover_dataset_sources(data_directory: str | Path) -> list[DatasetSourceIn
         if info is not None:
             sources.append(info)
     return sources
-
 
 def dataset_source_info(path: str | Path) -> Optional[DatasetSourceInfo]:
     candidate = Path(path).expanduser()
@@ -1924,20 +2004,17 @@ def dataset_source_info(path: str | Path) -> Optional[DatasetSourceInfo]:
         modified_ns=modified_ns,
     )
 
-
 def normalise_dataset_id(value: Any) -> str:
     text = str(value or "dataset").strip().lower()
     text = re.sub(r"[^a-z0-9_]+", "_", text)
     text = re.sub(r"_+", "_", text).strip("_")
     return text or "dataset"
 
-
 def canonical_path(value: str | Path) -> str:
     try:
         return str(Path(value).expanduser().resolve())
     except Exception:
         return str(Path(value).expanduser().absolute())
-
 
 def format_bytes(value: Optional[int]) -> str:
     if value is None:
@@ -1949,7 +2026,6 @@ def format_bytes(value: Optional[int]) -> str:
             return f"{size:,.0f} {unit}" if unit == "B" else f"{size:,.1f} {unit}"
         size /= 1024.0
     return f"{value:,} B"
-
 
 def _format_duration(value: Optional[float]) -> str:
     if value is None:
@@ -1966,7 +2042,6 @@ def _format_duration(value: Optional[float]) -> str:
     days, hour = divmod(hours, 24)
     return f"{days}d {hour:02d}h"
 
-
 def _optional_int(value: Any) -> Optional[int]:
     if value in (None, ""):
         return None
@@ -1974,7 +2049,6 @@ def _optional_int(value: Any) -> Optional[int]:
         return int(value)
     except (TypeError, ValueError, OverflowError):
         return None
-
 
 def _optional_float(value: Any) -> Optional[float]:
     if value in (None, ""):
@@ -1987,7 +2061,6 @@ def _optional_float(value: Any) -> Optional[float]:
         return None
     return number
 
-
 def format_dimensions(rows: Optional[int], columns: Optional[int]) -> str:
     if rows is not None and columns is not None:
         return f"{rows:,} rows · {columns:,} columns"
@@ -1997,7 +2070,6 @@ def format_dimensions(rows: Optional[int], columns: Optional[int]) -> str:
         return f"{columns:,} columns"
     return "Available after registration"
 
-
 def _safe_row_count(datasets: Any, dataset_id: str) -> Optional[int]:
     try:
         value = datasets.row_count(dataset_id)
@@ -2005,13 +2077,11 @@ def _safe_row_count(datasets: Any, dataset_id: str) -> Optional[int]:
     except Exception:
         return None
 
-
 def _safe_columns(datasets: Any, dataset_id: str) -> list[str]:
     try:
         return [str(column) for column in datasets.list_columns(dataset_id)]
     except Exception:
         return []
-
 
 def _safe_meta(datasets: Any, dataset_id: str) -> dict[str, Any]:
     try:
@@ -2019,7 +2089,6 @@ def _safe_meta(datasets: Any, dataset_id: str) -> dict[str, Any]:
         return dict(value or {})
     except Exception:
         return {}
-
 
 def _read_json(path: Path) -> dict[str, Any]:
     if not path.is_file():
@@ -2032,7 +2101,6 @@ def _read_json(path: Path) -> dict[str, Any]:
         return {}
     return dict(value) if isinstance(value, dict) else {}
 
-
 def _metadata_columns(meta: dict[str, Any]) -> Optional[list[str]]:
     raw = meta.get("columns")
     if isinstance(raw, dict):
@@ -2040,7 +2108,6 @@ def _metadata_columns(meta: dict[str, Any]) -> Optional[list[str]]:
     if isinstance(raw, (list, tuple)):
         return [str(value) for value in raw]
     return None
-
 
 def _metadata_row_count(meta: dict[str, Any]) -> Optional[int]:
     for key in ("row_count", "rows", "n_rows"):
@@ -2053,12 +2120,10 @@ def _metadata_row_count(meta: dict[str, Any]) -> Optional[int]:
             pass
     return None
 
-
 def _optional_text(value: Any) -> Optional[str]:
     if value in (None, ""):
         return None
     return str(value)
-
 
 def _extract_job_result(args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
     if "result" in kwargs:
@@ -2076,7 +2141,6 @@ def _extract_job_result(args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
         return args[-1]
     raise RuntimeError("Dataset import completed without a result.")
 
-
 def _extract_job_error(args: tuple[Any, ...], kwargs: dict[str, Any]) -> BaseException:
     for key in ("error", "exception", "exc"):
         value = kwargs.get(key)
@@ -2088,7 +2152,6 @@ def _extract_job_error(args: tuple[Any, ...], kwargs: dict[str, Any]) -> BaseExc
     if args:
         return RuntimeError(str(args[-1]))
     return RuntimeError("Dataset import failed without an error message.")
-
 
 __all__ = [
     "DatasetImportRequest",
@@ -2106,4 +2169,3 @@ __all__ = [
     "source_format_label",
     "source_stem",
 ]
-

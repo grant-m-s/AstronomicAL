@@ -531,7 +531,7 @@ def estimate_parquet_size(
         return None
 
     factor = {
-        "fits": 1.25,
+        "fits": 0.5,
         "csv": 1.10,
         "tsv": 1.10,
         "jsonl": 1.10,

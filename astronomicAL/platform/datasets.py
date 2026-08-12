@@ -28,6 +28,10 @@ from astronomicAL.utils.debug import (
 )
 
 
+class UnsafeDatasetMaterializationError(RuntimeError):
+    """Raised when compatibility access would materialise an entire lazy dataset."""
+
+
 @dataclass
 class Dataset:
     dataset_id: str
@@ -37,11 +41,23 @@ class Dataset:
 
     @property
     def df(self) -> pd.DataFrame:
-        """Compatibility shim for older code.
+        """Compatibility shim for older in-memory datasets.
 
-        New code should use ``Dataset.source`` or ``DatasetManager.get_source()``.
+        ``Dataset.df`` is intentionally blocked for lazy/non-pandas sources. A
+        property access cannot express a row/column bound or record telemetry,
+        so allowing it to materialise a large Parquet-backed dataset would let a
+        plugin exhaust the host process. Use ``DatasetManager.get_df()`` with
+        explicit bounds, or use the backend-neutral source/manager APIs instead.
         """
 
+        if not isinstance(self.source, PandasDatasetSource):
+            backend = str(getattr(self.source, "backend_name", "unknown"))
+            raise UnsafeDatasetMaterializationError(
+                f"Dataset.df is blocked for lazy dataset {self.dataset_id!r} "
+                f"(backend={backend!r}). Use DatasetManager row lookup, scans, "
+                "bounded get_df(columns=..., limit=...), or explicitly opt in via "
+                "DatasetManager.get_df(..., allow_full_materialization=True)."
+            )
         return self.source.to_pandas()
 
     @df.setter
@@ -53,7 +69,6 @@ class Dataset:
         """
 
         self.source = PandasDatasetSource(value)
-
 
 @dataclass(frozen=True)
 class MaterializationRecord:
@@ -100,7 +115,6 @@ class MaterializationRecord:
             "error": self.error,
         }
 
-
 def _json_safe_metadata(value: Any) -> Any:
     if value is None:
         return None
@@ -115,7 +129,6 @@ def _json_safe_metadata(value: Any) -> Any:
         return [_json_safe_metadata(item) for item in value]
     return str(value)
 
-
 class DatasetManager:
     """Own datasets and expose backend-neutral access contracts.
 
@@ -123,9 +136,11 @@ class DatasetManager:
 
     Compatibility:
     - ``register(..., df=...)`` still works.
-    - ``get_df(...)`` still works but materialises a pandas view and records
-      materialisation telemetry.
-    - ``Dataset.df`` still works but should be treated as legacy.
+    - ``get_df(...)`` still works for bounded views and records materialisation
+      telemetry. Full-table materialisation of a lazy source requires explicit
+      opt-in.
+    - ``Dataset.df`` remains available for pandas-backed datasets only; lazy
+      sources are blocked because a property cannot express safe bounds.
     """
 
     def __init__(
@@ -307,7 +322,6 @@ class DatasetManager:
             "backend",
             getattr(ds.source, "backend_name", "unknown"),
         )
-
 
     def upsert_column_overlay(
         self,
@@ -602,11 +616,18 @@ class DatasetManager:
         where_sql: Optional[str] = None,
         params: Optional[Sequence[Any]] = None,
         origin: str = "platform.datasets.get_df",
+        allow_full_materialization: bool = False,
     ) -> pd.DataFrame:
         """Materialise a pandas view and record platform telemetry.
 
         New code should prefer ``iter_batches()``, ``list_columns()``,
         ``row_count()``, row lookup methods, or bounded source summaries.
+
+        A request for every row and every column of a lazy/non-pandas source is
+        blocked by default. This is a host-safety boundary: a plugin should not
+        be able to OOM the AstronomicAL process through an accidental legacy
+        ``get_df()`` call. Truly intentional compatibility code may opt in with
+        ``allow_full_materialization=True``.
         """
 
         resolved_dataset_id = dataset_id or self.active_id()
@@ -634,6 +655,27 @@ class DatasetManager:
         output: Optional[pd.DataFrame] = None
         error: Optional[str] = None
         try:
+            if (
+                full_dataset_materialization
+                and not isinstance(source, PandasDatasetSource)
+                and not bool(allow_full_materialization)
+            ):
+                row_summary = (
+                    "unknown rows"
+                    if source_rows is None
+                    else f"{int(source_rows):,} rows"
+                )
+                raise UnsafeDatasetMaterializationError(
+                    "Blocked full materialisation of lazy dataset "
+                    f"{resolved_dataset_id!r} "
+                    f"(backend={getattr(source, 'backend_name', 'unknown')!r}, "
+                    f"{row_summary}, {len(source_columns):,} columns). "
+                    "Request only the columns/rows required, use row lookup or "
+                    "iter_batches(), or explicitly pass "
+                    "allow_full_materialization=True for an intentional legacy "
+                    "operation."
+                )
+
             output = source.to_pandas(
                 columns=columns,
                 limit=limit,

@@ -2178,6 +2178,8 @@ class DatasetColumnOverlaySource(DatasetSource):
         log_x: bool = False,
         log_y: bool = False,
     ) -> dict[str, Any]:
+        """Return a bounded-memory 2D count grid.
+        """
         if (
             self._overlay_for_column(x_col) is None
             and self._overlay_for_column(y_col) is None
@@ -2191,16 +2193,368 @@ class DatasetColumnOverlaySource(DatasetSource):
                 log_x=log_x,
                 log_y=log_y,
             )
-        frame = self.to_pandas(columns=[x_col, y_col])
-        return PandasDatasetSource(frame).aggregate_2d(
-            x_col=x_col,
-            y_col=y_col,
-            bins=bins,
-            x_range=x_range,
-            y_range=y_range,
-            log_x=log_x,
-            log_y=log_y,
+
+        bins = max(
+            5,
+            min(500, int(bins)),
         )
+
+        available = set(
+            self.columns()
+        )
+
+        if (
+            x_col not in available
+            or y_col not in available
+        ):
+            raise KeyError(
+                f"Unknown aggregate columns: "
+                f"{x_col!r}, {y_col!r}"
+            )
+
+        requested_columns = tuple(
+            dict.fromkeys(
+                (
+                    str(x_col),
+                    str(y_col),
+                )
+            )
+        )
+
+        batch_size = 8192
+
+        requested_x_range = None
+
+        if x_range is not None:
+            requested_x_range = tuple(
+                sorted(
+                    (
+                        float(x_range[0]),
+                        float(x_range[1]),
+                    )
+                )
+            )
+
+        requested_y_range = None
+
+        if y_range is not None:
+            requested_y_range = tuple(
+                sorted(
+                    (
+                        float(y_range[0]),
+                        float(y_range[1]),
+                    )
+                )
+            )
+
+        if (
+            log_x
+            and requested_x_range is not None
+            and requested_x_range[0] <= 0
+        ):
+            raise ValueError(
+                "Log X aggregation requires a positive X range"
+            )
+
+        if (
+            log_y
+            and requested_y_range is not None
+            and requested_y_range[0] <= 0
+        ):
+            raise ValueError(
+                "Log Y aggregation requires a positive Y range"
+            )
+
+        data_x_min = np.inf
+        data_x_max = -np.inf
+        data_y_min = np.inf
+        data_y_max = -np.inf
+
+        eligible_rows = 0
+
+        def _filtered_xy(
+            frame: pd.DataFrame,
+        ) -> tuple[np.ndarray, np.ndarray]:
+            if (
+                frame is None
+                or frame.empty
+            ):
+                return (
+                    np.empty(0, dtype=float),
+                    np.empty(0, dtype=float),
+                )
+
+            x = pd.to_numeric(
+                frame[x_col],
+                errors="coerce",
+            ).to_numpy(
+                dtype=float
+            )
+
+            y = pd.to_numeric(
+                frame[y_col],
+                errors="coerce",
+            ).to_numpy(
+                dtype=float
+            )
+
+            mask = (
+                np.isfinite(x)
+                & np.isfinite(y)
+            )
+
+            if log_x:
+                mask &= x > 0
+
+            if log_y:
+                mask &= y > 0
+
+            if requested_x_range is not None:
+                mask &= (
+                    x >= requested_x_range[0]
+                )
+                mask &= (
+                    x <= requested_x_range[1]
+                )
+
+            if requested_y_range is not None:
+                mask &= (
+                    y >= requested_y_range[0]
+                )
+                mask &= (
+                    y <= requested_y_range[1]
+                )
+
+            if not np.any(mask):
+                return (
+                    np.empty(0, dtype=float),
+                    np.empty(0, dtype=float),
+                )
+
+            return (
+                x[mask],
+                y[mask],
+            )
+
+        # Pass 1:
+        # determine exact plotting extents and count eligible rows without
+        # retaining source-scale arrays.
+        for batch in self.iter_batches(
+            DatasetScan(
+                columns=requested_columns,
+                batch_size=batch_size,
+            )
+        ):
+            x, y = _filtered_xy(
+                batch.frame
+            )
+
+            if len(x) == 0:
+                continue
+
+            eligible_rows += int(
+                len(x)
+            )
+
+            data_x_min = min(
+                data_x_min,
+                float(np.min(x)),
+            )
+
+            data_x_max = max(
+                data_x_max,
+                float(np.max(x)),
+            )
+
+            data_y_min = min(
+                data_y_min,
+                float(np.min(y)),
+            )
+
+            data_y_max = max(
+                data_y_max,
+                float(np.max(y)),
+            )
+
+        if eligible_rows <= 0:
+            raise ValueError(
+                "No finite X/Y rows available for 2D aggregation"
+            )
+
+        raw_x0, raw_x1 = (
+            requested_x_range
+            if requested_x_range is not None
+            else (
+                float(data_x_min),
+                float(data_x_max),
+            )
+        )
+
+        raw_y0, raw_y1 = (
+            requested_y_range
+            if requested_y_range is not None
+            else (
+                float(data_y_min),
+                float(data_y_max),
+            )
+        )
+
+        if not all(
+            np.isfinite(value)
+            for value in (
+                raw_x0,
+                raw_x1,
+                raw_y0,
+                raw_y1,
+            )
+        ):
+            raise ValueError(
+                "Aggregate ranges are not finite"
+            )
+
+        if log_x:
+            if raw_x0 <= 0 or raw_x1 <= 0:
+                raise ValueError(
+                    "Log X aggregation requires positive values"
+                )
+
+            plot_x0 = float(
+                np.log10(raw_x0)
+            )
+
+            plot_x1 = float(
+                np.log10(raw_x1)
+            )
+
+        else:
+            plot_x0 = float(
+                raw_x0
+            )
+
+            plot_x1 = float(
+                raw_x1
+            )
+
+        if log_y:
+            if raw_y0 <= 0 or raw_y1 <= 0:
+                raise ValueError(
+                    "Log Y aggregation requires positive values"
+                )
+
+            plot_y0 = float(
+                np.log10(raw_y0)
+            )
+
+            plot_y1 = float(
+                np.log10(raw_y1)
+            )
+
+        else:
+            plot_y0 = float(
+                raw_y0
+            )
+
+            plot_y1 = float(
+                raw_y1
+            )
+
+        if (
+            plot_x1 <= plot_x0
+            or plot_y1 <= plot_y0
+        ):
+            raise ValueError(
+                "Invalid aggregate range"
+            )
+
+        counts = np.zeros(
+            (bins, bins),
+            dtype="float64",
+        )
+
+        # Pass 2:
+        # accumulate each joined source batch directly into the final fixed-size
+        # histogram. No batch survives beyond this iteration.
+        for batch in self.iter_batches(
+            DatasetScan(
+                columns=requested_columns,
+                batch_size=batch_size,
+            )
+        ):
+            x, y = _filtered_xy(
+                batch.frame
+            )
+
+            if len(x) == 0:
+                continue
+
+            plot_x = (
+                np.log10(x)
+                if log_x
+                else x
+            )
+
+            plot_y = (
+                np.log10(y)
+                if log_y
+                else y
+            )
+
+            batch_counts, _, _ = np.histogram2d(
+                plot_y,
+                plot_x,
+                bins=[
+                    bins,
+                    bins,
+                ],
+                range=[
+                    [
+                        plot_y0,
+                        plot_y1,
+                    ],
+                    [
+                        plot_x0,
+                        plot_x1,
+                    ],
+                ],
+            )
+
+            counts += batch_counts
+
+        return {
+            "counts": counts,
+            "x_edges": np.linspace(
+                plot_x0,
+                plot_x1,
+                bins + 1,
+                dtype=float,
+            ),
+            "y_edges": np.linspace(
+                plot_y0,
+                plot_y1,
+                bins + 1,
+                dtype=float,
+            ),
+            "raw_x_range": (
+                float(raw_x0),
+                float(raw_x1),
+            ),
+            "raw_y_range": (
+                float(raw_y0),
+                float(raw_y1),
+            ),
+            "plot_x_range": (
+                plot_x0,
+                plot_x1,
+            ),
+            "plot_y_range": (
+                plot_y0,
+                plot_y1,
+            ),
+            "row_count": int(
+                eligible_rows
+            ),
+            "backend": self.backend_name,
+        }
 
     def metadata(self) -> dict[str, Any]:
         return {

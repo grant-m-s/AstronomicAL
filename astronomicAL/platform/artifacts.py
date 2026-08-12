@@ -168,42 +168,104 @@ class ArtifactStore:
         ] = None,
         params: Optional[Dict[str, Any]] = None,
         persist: bool = False,
+        row_ids_inline_limit: Optional[int] = None,
     ) -> str:
+
         artifact_id = uuid.uuid4().hex
         now = time.time()
         params = dict(params or {})
-        row_ids_list = (
-            [str(row_id) for row_id in row_ids]
-            if row_ids is not None
-            else None
-        )
+
+        inline_limit = None
+        if row_ids_inline_limit is not None:
+            inline_limit = int(row_ids_inline_limit)
+            if inline_limit < 0:
+                raise ValueError(
+                    "row_ids_inline_limit must be zero or greater"
+                )
+
+        row_ids_list: Optional[List[str]] = None
+        observed_row_count: Optional[int] = None
+
+        if row_ids is not None:
+            if inline_limit is None:
+                row_ids_list = [
+                    str(row_id)
+                    for row_id in row_ids
+                ]
+                observed_row_count = len(row_ids_list)
+            else:
+                row_ids_list = []
+                observed_row_count = 0
+
+                for row_id in row_ids:
+                    if len(row_ids_list) < inline_limit:
+                        row_ids_list.append(str(row_id))
+                    observed_row_count += 1
+
         resolved_row_ids_ref = (
             None
             if row_ids_ref is None
             else ArtifactRowIdsRef.from_value(row_ids_ref)
         )
+
+        effective_row_count = row_count
+        if (
+            effective_row_count is None
+            and observed_row_count is not None
+        ):
+            effective_row_count = observed_row_count
+
         resolved_row_count = self._resolve_row_count(
             row_ids=row_ids_list,
-            row_count=row_count,
+            row_count=effective_row_count,
             row_ids_ref=resolved_row_ids_ref,
         )
+
+        if (
+            observed_row_count is not None
+            and resolved_row_count is not None
+            and observed_row_count > resolved_row_count
+        ):
+            raise ValueError(
+                "Supplied row_ids contain more rows than row_count: "
+                f"{observed_row_count} > {resolved_row_count}"
+            )
 
         uri = None
         has_payload = True
         persisted = bool(persist and self._cache_dir)
+
         if persisted:
-            uri = os.path.join(str(self._cache_dir), f"{artifact_id}.json")
+            uri = os.path.join(
+                str(self._cache_dir),
+                f"{artifact_id}.json",
+            )
             temp_uri = f"{uri}.tmp"
+
             try:
-                with open(temp_uri, "w", encoding="utf-8") as handle:
-                    json.dump(payload, handle, default=str)
-                os.replace(temp_uri, uri)
+                with open(
+                    temp_uri,
+                    "w",
+                    encoding="utf-8",
+                ) as handle:
+                    json.dump(
+                        payload,
+                        handle,
+                        default=str,
+                    )
+
+                os.replace(
+                    temp_uri,
+                    uri,
+                )
+
             except Exception:
                 try:
                     os.unlink(temp_uri)
                 except OSError:
                     pass
                 raise
+
             has_payload = False
 
         ref = ArtifactRef(
@@ -225,6 +287,7 @@ class ArtifactStore:
             self._meta[artifact_id] = ref
 
         self._publish_created(ref)
+
         return artifact_id
 
     def _publish_created(self, ref: ArtifactRef) -> None:

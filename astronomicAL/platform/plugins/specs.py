@@ -121,11 +121,46 @@ class ArtifactResult:
 
 @dataclass
 class DatasetResult:
+    """Dataset output produced by a plugin action.
+
+    Exactly one of ``dataframe`` or ``source`` must be supplied.
+
+    ``dataframe`` is retained for backwards compatibility with existing
+    pandas-oriented actions.
+
+    ``source`` is the preferred output for scalable actions that produce a
+    backend-neutral DatasetSource without materialising the complete result
+    into pandas.
+
+    ``source`` intentionally appears after the existing fields so older
+    positional construction remains compatible, for example::
+
+        DatasetResult("derived", dataframe, "Derived Dataset")
+    """
+
     id: str
-    dataframe: Any
+    dataframe: Any = None
     name: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
     set_active: bool = False
+    source: Any = None
+
+    def __post_init__(self) -> None:
+        if not str(self.id or "").strip():
+            raise ValueError("DatasetResult.id must be a non-empty string.")
+
+        has_dataframe = self.dataframe is not None
+        has_source = self.source is not None
+
+        if has_dataframe and has_source:
+            raise ValueError(
+                "DatasetResult must provide either dataframe or source, not both."
+            )
+
+        if not has_dataframe and not has_source:
+            raise ValueError(
+                "DatasetResult must provide either dataframe or source."
+            )
 
 @dataclass
 class EventResult:
