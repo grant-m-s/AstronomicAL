@@ -238,28 +238,103 @@ class DatasetImportService:
                     "The generated Parquet is stale. Use Regenerate Parquet before loading it."
                 )
 
-            should_convert = request.regenerate or not parquet.is_file()
+            should_convert = (
+                request.regenerate
+                or not parquet.is_file()
+            )
+
             if should_convert:
-                conversion = convert_source_to_parquet(
-                    source,
-                    parquet_path=parquet,
-                    source_format=detected_format,
-                    dataset_id=dataset_id,
-                    source_subresource=request.source_subresource,
-                    overwrite=bool(request.regenerate),
-                    progress_callback=progress_callback,
-                    progress_state_callback=progress_state_callback,
-                    cancel_token=cancel_token,
+                try:
+                    source_size_bytes = int(
+                        source.stat().st_size
+                    )
+                except OSError:
+                    source_size_bytes = None
+
+                estimated_output = (
+                    estimate_parquet_size(
+                        detected_format,
+                        source_size_bytes,
+                        existing_parquet_path=(
+                            str(parquet)
+                            if parquet.is_file()
+                            else None
+                        ),
+                    )
                 )
-                cache_created = bool(conversion.created)
-                registration_meta.update(dict(conversion.metadata or {}))
+
+                disk = assess_disk_space(
+                    parquet,
+                    estimated_output,
+                )
+
+                if disk.enough_space is False:
+                    operation = (
+                        "regenerate"
+                        if request.regenerate
+                        else "create"
+                    )
+
+                    raise RuntimeError(
+                        "Insufficient estimated free disk space to "
+                        f"{operation} the Parquet cache at {parquet}. "
+                        f"{disk.message}"
+                    )
+
+                conversion = (
+                    convert_source_to_parquet(
+                        source,
+                        parquet_path=parquet,
+                        source_format=detected_format,
+                        dataset_id=dataset_id,
+                        source_subresource=(
+                            request.source_subresource
+                        ),
+                        overwrite=bool(
+                            request.regenerate
+                        ),
+                        progress_callback=(
+                            progress_callback
+                        ),
+                        progress_state_callback=(
+                            progress_state_callback
+                        ),
+                        cancel_token=cancel_token,
+                    )
+                )
+
+                cache_created = bool(
+                    conversion.created
+                )
+
+                registration_meta.update(
+                    dict(
+                        conversion.metadata
+                        or {}
+                    )
+                )
+
             else:
-                metadata_path = metadata_path_for_parquet(parquet)
-                registration_meta.update(_read_json(metadata_path))
+                metadata_path = (
+                    metadata_path_for_parquet(
+                        parquet
+                    )
+                )
+
+                registration_meta.update(
+                    _read_json(
+                        metadata_path
+                    )
+                )
+
                 cache_created = False
+
                 self._progress(
                     progress_callback,
-                    f"Reusing verified/generated Parquet cache: {parquet}",
+                    (
+                        "Reusing verified/generated "
+                        f"Parquet cache: {parquet}"
+                    ),
                 )
 
             registration_meta.update(
@@ -1010,119 +1085,331 @@ class DatasetLoaderController:
 
     def _refresh_state(self) -> None:
         source = self._selected_source()
+
         self._existing_dataset_id = (
-            self._registered_dataset_for_source(source.path) if source is not None else None
+            self._registered_dataset_for_source(
+                source.path
+            )
+            if source is not None
+            else None
         )
-        if source is not None and not self._parquet_path_user_edited:
+
+        if (
+            source is not None
+            and not self._parquet_path_user_edited
+        ):
             self._set_default_parquet_path()
 
-        cache = self._cache_assessment(source)
-        disk = self._disk_assessment(source, cache)
-        self.source_summary.object = self._source_summary_html(source)
-        self.behaviour_summary.object = self._behaviour_html(source)
-        self.cache_summary.object = self._cache_summary_html(source, cache)
-        self.disk_summary.object = self._disk_summary_html(source, disk)
+        cache = self._cache_assessment(
+            source
+        )
+        disk = self._disk_assessment(
+            source,
+            cache,
+        )
 
-        duplicate = self._existing_dataset_id is not None
-        problem = None if duplicate else self._validation_problem(source, disk)
-        self.validation_alert.visible = problem is not None
-        self.validation_alert.object = problem or ""
-
-        stale = cache is not None and cache.requires_regeneration
-        self.cache_alert.visible = bool(stale or self._regen_armed)
-        if self._regen_armed:
-            self.cache_alert.alert_type = "warning"
-            self.cache_alert.object = (
-                "Regeneration will replace the existing generated Parquet at the path above. "
-                "Click ‘Confirm regenerate’ to continue. The source file is never modified."
+        cache_reusable = (
+            self._cache_reusable_for_import(
+                source,
+                cache,
             )
+        )
+
+        self.source_summary.object = (
+            self._source_summary_html(
+                source
+            )
+        )
+        self.behaviour_summary.object = (
+            self._behaviour_html(
+                source
+            )
+        )
+        self.cache_summary.object = (
+            self._cache_summary_html(
+                source,
+                cache,
+            )
+        )
+        self.disk_summary.object = (
+            self._disk_summary_html(
+                source,
+                disk,
+            )
+        )
+
+        duplicate = (
+            self._existing_dataset_id
+            is not None
+        )
+
+        problem = (
+            None
+            if duplicate
+            else self._validation_problem(
+                source,
+                disk,
+            )
+        )
+
+        self.validation_alert.visible = (
+            problem is not None
+        )
+        self.validation_alert.object = (
+            problem or ""
+        )
+
+        stale = bool(
+            cache is not None
+            and cache.requires_regeneration
+        )
+
+        self.cache_alert.visible = bool(
+            stale
+            or self._regen_armed
+        )
+
+        if self._regen_armed:
+            self.cache_alert.alert_type = (
+                "warning"
+            )
+            self.cache_alert.object = (
+                "Regeneration will replace the existing "
+                "generated Parquet at the path above. "
+                "Click ‘Confirm regenerate’ to continue. "
+                "The source file is never modified."
+            )
+
         elif stale:
-            self.cache_alert.alert_type = "danger"
-            self.cache_alert.object = cache.message
+            self.cache_alert.alert_type = (
+                "danger"
+            )
+            self.cache_alert.object = (
+                cache.message
+            )
+
         else:
             self.cache_alert.object = ""
 
-        existing_is_active = self._existing_dataset_is_active()
-        self.activate_existing_button.visible = duplicate and not self._busy
-        self.activate_existing_button.disabled = self._busy or existing_is_active or stale
+        existing_is_active = (
+            self._existing_dataset_is_active()
+        )
+
+        self.activate_existing_button.visible = (
+            duplicate
+            and not self._busy
+        )
+
+        self.activate_existing_button.disabled = (
+            self._busy
+            or existing_is_active
+            or stale
+        )
+
         if duplicate:
-            existing_name = self._dataset_name(self._existing_dataset_id)
-            self.activate_existing_button.name = (
-                f"{existing_name} is active" if existing_is_active else f"Activate {existing_name}"
+            existing_name = self._dataset_name(
+                self._existing_dataset_id
             )
 
-        convertible = source is not None and is_convertible_format(source.source_format)
-        cache_exists = cache is not None and cache.exists
-        self.regen_button.visible = bool(convertible)
+            self.activate_existing_button.name = (
+                f"{existing_name} is active"
+                if existing_is_active
+                else f"Activate {existing_name}"
+            )
+
+        convertible = bool(
+            source is not None
+            and is_convertible_format(
+                source.source_format
+            )
+        )
+
+        cache_exists = bool(
+            cache is not None
+            and cache.exists
+        )
+
+        self.regen_button.visible = (
+            convertible
+        )
+
+        # Regeneration always writes a new Parquet, so insufficient disk space
+        # continues to block this action even when a usable cache already exists.
         self.regen_button.disabled = (
             self._busy
             or not convertible
             or not cache_exists
-            or (disk is not None and disk.enough_space is False)
+            or (
+                disk is not None
+                and disk.enough_space
+                is False
+            )
         )
-        self.regen_button.name = "Confirm regenerate" if self._regen_armed else "Regenerate Parquet"
 
+        self.regen_button.name = (
+            "Confirm regenerate"
+            if self._regen_armed
+            else "Regenerate Parquet"
+        )
+
+        # Disk capacity is represented by `problem` only when this import would
+        # actually need to create a Parquet cache. A usable existing cache needs
+        # no write and therefore remains importable on a nearly-full volume.
         self.import_button.disabled = (
             self._busy
             or problem is not None
             or duplicate
             or stale
-            or (disk is not None and disk.enough_space is False)
         )
+
         self.directory_path_input.disabled = self._busy
         self.refresh_button.disabled = self._busy
+
         self.source_select.disabled = self._busy or not bool(self._sources)
-        self.dataset_name_input.disabled = self._busy or source is None or duplicate
-        self.dataset_id_input.disabled = self._busy or source is None or duplicate
-        self.parquet_path_input.disabled = self._busy or source is None or source.source_format == "parquet"
+        
+        self.dataset_name_input.disabled = (
+            self._busy
+            or source is None
+            or duplicate
+        )
+        self.dataset_id_input.disabled = (
+            self._busy
+            or source is None
+            or duplicate
+        )
+        self.parquet_path_input.disabled = (
+            self._busy
+            or source is None
+            or source.source_format == "parquet"
+        )
         self.subresource_select.disabled = self._busy
 
         if self._busy:
             return
-        if duplicate and existing_is_active:
+
+        if (duplicate and existing_is_active):
             copy = (
-                f"This source is registered as {self._dataset_name(self._existing_dataset_id)} "
+                "This source is registered as "
+                f"{self._dataset_name(self._existing_dataset_id)} "
                 f"({self._existing_dataset_id}) and is already active."
             )
+
             if stale:
-                copy += " Its generated Parquet is stale; regenerate it before continuing analysis."
-            self.status_pane.object = self._status_html("Dataset already active", copy, "warning" if stale else "success")
+                copy += (
+                    " Its generated Parquet is stale; regenerate it "
+                    "before continuing analysis."
+                )
+
+            self.status_pane.object = (
+                self._status_html(
+                    "Dataset already active",
+                    copy,
+                    (
+                        "warning"
+                        if stale
+                        else "success"
+                    ),
+                )
+            )
+
         elif duplicate:
             copy = (
-                f"This source is already registered as {self._dataset_name(self._existing_dataset_id)} "
+                "This source is already registered as "
+                f"{self._dataset_name(self._existing_dataset_id)} "
                 f"({self._existing_dataset_id})."
             )
+
             if stale:
-                copy += " Its generated Parquet is stale; regenerate it before activating."
+                copy += (
+                    " Its generated Parquet is stale; regenerate it "
+                    "before activating."
+                )
             else:
-                copy += " Activate the existing dataset rather than creating a duplicate registration."
-            self.status_pane.object = self._status_html("Source already registered", copy, "warning")
+                copy += (
+                    " Activate the existing dataset rather than "
+                    "creating a duplicate registration."
+                )
+
+            self.status_pane.object = (
+                self._status_html(
+                    "Source already registered",
+                    copy,
+                    "warning",
+                )
+            )
+
         elif stale:
-            self.status_pane.object = self._status_html(
-                "Parquet regeneration required",
-                cache.message,
-                "warning",
+            self.status_pane.object = (
+                self._status_html(
+                    "Parquet regeneration required",
+                    cache.message,
+                    "warning",
+                )
             )
+
         elif problem:
-            self.status_pane.object = self._status_html("Import not ready", problem, "warning")
-        elif source is not None:
-            self.status_pane.object = self._status_html(
-                "Ready to import",
-                "Review the cache and disk checks, then start the background import.",
-                "idle",
+            self.status_pane.object = (
+                self._status_html(
+                    "Import not ready",
+                    problem,
+                    "warning",
+                )
             )
+
+        elif (
+            source is not None
+            and cache_reusable
+            and disk is not None
+            and disk.enough_space is False
+        ):
+            self.status_pane.object = (
+                self._status_html(
+                    "Ready to import from cache",
+                    (
+                        "The existing Parquet cache passed the cache checks "
+                        "and can be registered without creating a new file. "
+                        "Import is available. Regeneration remains disabled "
+                        "until sufficient disk space is available."
+                    ),
+                    "success",
+                )
+            )
+
+        elif source is not None:
+            self.status_pane.object = (
+                self._status_html(
+                    "Ready to import",
+                    (
+                        "Review the cache and disk checks, then start "
+                        "the background import."
+                    ),
+                    "idle",
+                )
+            )
+
         else:
             directory = self._effective_source_directory
             if self._source_directory_error:
                 copy = self._source_directory_error
             elif directory is not None:
-                copy = f"No supported tabular files were found in {directory}."
+                copy = (
+                    "No supported tabular files were "
+                    f"found in {directory}."
+                )
+
             else:
-                copy = f"Add supported data to {self.data_directory.resolve()} or choose another server-visible folder."
-            self.status_pane.object = self._status_html(
-                "No supported source",
-                copy,
-                "warning",
+                copy = (
+                    "Add supported data to "
+                    f"{self.data_directory.resolve()} "
+                    "or choose another server-visible folder."
+                )
+
+            self.status_pane.object = (
+                self._status_html(
+                    "No supported source",
+                    copy,
+                    "warning",
+                )
             )
 
     def _validation_problem(
@@ -1134,39 +1421,106 @@ class DatasetLoaderController:
             if self._source_directory_error:
                 return self._source_directory_error
             return "Choose a supported dataset source."
+
         if not source.path.is_file():
-            return "The selected source is no longer available. Refresh the file list."
+            return (
+                "The selected source is no longer available. "
+                "Refresh the file list."
+            )
+
         if self._subresource_error:
             return self._subresource_error
-        if self.subresource_select.visible and not self.subresource_select.value:
-            return "Choose the spreadsheet sheet, HDF5 key, or SQLite table to import."
+
+        if (
+            self.subresource_select.visible
+            and not self.subresource_select.value
+        ):
+            return (
+                "Choose the spreadsheet, HDF5 key, "
+                "or SQLite table to import."
+            )
 
         name = self.dataset_name_input.value.strip()
         if not name:
             return "Enter a dataset name."
+
         raw_id = self.dataset_id_input.value.strip()
         if not raw_id:
             return "Enter a dataset ID."
-        normalised = normalise_dataset_id(raw_id)
+
+        normalised = normalise_dataset_id(
+            raw_id
+        )
+
         if raw_id != normalised:
             return (
-                "Dataset IDs may contain lowercase letters, numbers, and underscores. "
+                "Dataset IDs may contain lowercase letters, numbers, "
+                "and underscores. "
                 f"Use `{normalised}`."
             )
-        if normalised in set(self.context.datasets.list_ids()):
-            return f"Dataset ID `{normalised}` is already registered."
 
-        if is_convertible_format(source.source_format):
-            raw_parquet = str(self.parquet_path_input.value or "").strip()
+        if normalised in set(
+            self.context.datasets.list_ids()
+        ):
+            return (
+                f"Dataset ID `{normalised}` "
+                "is already registered."
+            )
+
+        if is_convertible_format(
+            source.source_format
+        ):
+            raw_parquet = str(
+                self.parquet_path_input.value
+                or ""
+            ).strip()
+
             if not raw_parquet:
-                return "Choose a Parquet output location."
-            parquet = Path(raw_parquet).expanduser()
-            if canonical_path(parquet) == canonical_path(source.path):
-                return "The generated Parquet path must differ from the source file."
-            if parquet.suffix.lower() not in {".parquet", ".pq"}:
-                return "The generated cache path must end in .parquet or .pq."
-            if disk is not None and disk.enough_space is False:
-                return "The selected Parquet destination does not have enough estimated free space."
+                return (
+                    "Choose a Parquet output location."
+                )
+
+            parquet = Path(
+                raw_parquet
+            ).expanduser()
+
+            if (
+                canonical_path(parquet)
+                == canonical_path(source.path)
+            ):
+                return (
+                    "The generated Parquet path must "
+                    "differ from the source file."
+                )
+
+            if parquet.suffix.lower() not in {
+                ".parquet",
+                ".pq",
+            }:
+                return (
+                    "The generated cache path must end "
+                    "in .parquet or .pq."
+                )
+
+            if (
+                disk is not None
+                and disk.enough_space is False
+            ):
+                cache = self._cache_assessment(
+                    source
+                )
+
+                if self._parquet_write_required(
+                    source,
+                    cache,
+                    regenerate=False,
+                ):
+                    return (
+                        "The selected Parquet destination "
+                        "does not have enough estimated free "
+                        "space to create the required cache."
+                    )
+
         return None
 
     def _cache_assessment(self, source: Optional[DatasetSourceInfo]) -> Optional[CacheAssessment]:
@@ -1228,6 +1582,63 @@ class DatasetLoaderController:
         )
         return assess_disk_space(raw_parquet, estimate)
 
+    @staticmethod
+    def _cache_reusable_for_import(
+        source: Optional[DatasetSourceInfo],
+        cache: Optional[CacheAssessment],
+    ) -> bool:
+        """Return whether import can reuse an existing generated Parquet.
+
+        A reusable cache already exists and has passed the cache assessment:
+        it does not require regeneration. Importing such a cache performs no
+        Parquet write, so insufficient free space for a new/regenerated cache
+        must not block dataset registration.
+        """
+
+        return bool(
+            source is not None
+            and is_convertible_format(
+                source.source_format
+            )
+            and cache is not None
+            and cache.exists
+            and not cache.requires_regeneration
+        )
+
+    def _parquet_write_required(
+        self,
+        source: Optional[DatasetSourceInfo],
+        cache: Optional[CacheAssessment],
+        *,
+        regenerate: bool,
+    ) -> bool:
+        """Return whether the requested operation must write a Parquet file.
+
+        Direct Parquet sources never need generated-cache space.
+
+        Regeneration always writes.
+
+        A normal import writes only when there is no reusable cache. This keeps
+        the disk-space policy aligned with DatasetImportService, which reuses an
+        existing valid cache without rewriting it.
+        """
+
+        if (
+            source is None
+            or not is_convertible_format(
+                source.source_format
+            )
+        ):
+            return False
+
+        if regenerate:
+            return True
+
+        return not self._cache_reusable_for_import(
+            source,
+            cache,
+        )
+
     # ------------------------------------------------------------------
     # Import / regeneration
     # ------------------------------------------------------------------
@@ -1249,39 +1660,109 @@ class DatasetLoaderController:
             return
         self._start_import(regenerate=True)
 
-    def _start_import(self, *, regenerate: bool) -> None:
+    def _start_import(
+        self,
+        *,
+        regenerate: bool,
+    ) -> None:
         if self._busy:
             return
+
         source = self._selected_source()
-        disk = self._disk_assessment(source, self._cache_assessment(source))
-        problem = None if self._existing_dataset_id else self._validation_problem(source, disk)
-        if source is None or problem is not None:
-            self._refresh_state()
-            return
-        if disk is not None and disk.enough_space is False:
+        cache = self._cache_assessment(
+            source
+        )
+        disk = self._disk_assessment(
+            source,
+            cache,
+        )
+
+        problem = (
+            None
+            if self._existing_dataset_id
+            else self._validation_problem(
+                source,
+                disk,
+            )
+        )
+
+        if (
+            source is None
+            or problem is not None
+        ):
             self._refresh_state()
             return
 
-        replace_dataset_id = self._existing_dataset_id if regenerate else None
+        # Low disk space blocks only operations that actually write Parquet.
+        #
+        # Normal import of a valid existing cache is registration-only and is
+        # therefore allowed. Regeneration and missing-cache imports still fail
+        # closed because both require a new Parquet write.
+        if (
+            disk is not None
+            and disk.enough_space is False
+            and self._parquet_write_required(
+                source,
+                cache,
+                regenerate=regenerate,
+            )
+        ):
+            self._refresh_state()
+            return
+
+        replace_dataset_id = (
+            self._existing_dataset_id
+            if regenerate
+            else None
+        )
+
         request = DatasetImportRequest(
-            source_path=str(source.path),
-            source_format=source.source_format,
-            dataset_id=(replace_dataset_id or self.dataset_id_input.value.strip()),
-            dataset_name=(self._dataset_name(replace_dataset_id) if replace_dataset_id else self.dataset_name_input.value.strip()),
-            parquet_path=(
-                None if source.source_format == "parquet" else str(self.parquet_path_input.value).strip()
+            source_path=str(
+                source.path
             ),
-            source_subresource=self._source_subresource(),
+            source_format=(
+                source.source_format
+            ),
+            dataset_id=(
+                replace_dataset_id
+                or self.dataset_id_input.value.strip()
+            ),
+            dataset_name=(
+                self._dataset_name(
+                    replace_dataset_id
+                )
+                if replace_dataset_id
+                else self.dataset_name_input.value.strip()
+            ),
+            parquet_path=(
+                None
+                if source.source_format
+                == "parquet"
+                else str(
+                    self.parquet_path_input.value
+                ).strip()
+            ),
+            source_subresource=(
+                self._source_subresource()
+            ),
             regenerate=regenerate,
-            replace_dataset_id=replace_dataset_id,
+            replace_dataset_id=(
+                replace_dataset_id
+            ),
         )
 
         self._regen_armed = False
         self._clear_progress()
+
         self._set_conversion_progress(
             {
                 "phase": "starting",
-                "label": "Starting dataset conversion" if source.source_format != "parquet" else "Registering Parquet source",
+                "label": (
+                    "Starting dataset conversion"
+                    if source.source_format
+                    != "parquet"
+                    else "Registering Parquet source"
+                ),
                 "rows_completed": 0,
                 "rows_total": None,
                 "elapsed_seconds": 0.0,
@@ -1292,47 +1773,88 @@ class DatasetLoaderController:
                 "rss_gib": None,
             }
         )
+
         self._append_progress(
-            f"{'Regenerating' if regenerate else 'Importing'} {request.source_path}"
-        )
-        self._set_busy(True)
-        self._job_document = self._current_document()
-        self._start_progress_timer()
-        self.status_pane.object = self._status_html(
-            "Regenerating Parquet" if regenerate else "Import in progress",
             (
-                "The operation is running through the platform job runner. This modal mirrors "
-                "converter progress; Runtime Status remains the application-wide job monitor."
-            ),
-            "busy",
+                "Regenerating"
+                if regenerate
+                else "Importing"
+            )
+            + f" {request.source_path}"
         )
+
+        self._set_busy(
+            True
+        )
+        self._job_document = (
+            self._current_document()
+        )
+        self._start_progress_timer()
+
+        self.status_pane.object = (
+            self._status_html(
+                (
+                    "Regenerating Parquet"
+                    if regenerate
+                    else "Import in progress"
+                ),
+                (
+                    "The operation is running through the platform job runner. "
+                    "This modal mirrors converter progress; Runtime Status "
+                    "remains the application-wide job monitor."
+                ),
+                "busy",
+            )
+        )
+
         self.result_pane.visible = False
 
-        jobs = getattr(self.context, "jobs", None)
-        if jobs is not None and hasattr(jobs, "submit"):
+        jobs = getattr(
+            self.context,
+            "jobs",
+            None,
+        )
+
+        if (
+            jobs is not None
+            and hasattr(
+                jobs,
+                "submit",
+            )
+        ):
             try:
-                self._job_handle = jobs.submit(
-                    self._run_import_job,
-                    title=(
-                        f"Regenerate dataset cache: {request.dataset_name}"
-                        if regenerate
-                        else f"Import dataset: {request.dataset_name}"
-                    ),
-                    key=self._job_key(request),
-                    on_done=self._on_job_done,
-                    on_error=self._on_job_error,
-                    request=request,
+                self._job_handle = (
+                    jobs.submit(
+                        self._run_import_job,
+                        title=(
+                            f"Regenerate dataset cache: {request.dataset_name}"
+                            if regenerate
+                            else f"Import dataset: {request.dataset_name}"
+                        ),
+                        key=self._job_key(request),
+                        on_done=self._on_job_done,
+                        on_error=self._on_job_error,
+                        request=request,
+                    )
                 )
                 return
+
             except Exception as exc:
                 self._job_handle = None
                 self._finish_error(exc)
                 return
 
         try:
-            result = self._run_import_job(request=request, cancel_token=None)
+            result = (
+                self._run_import_job(
+                    request=request,
+                    cancel_token=None,
+                )
+            )
+
         except BaseException as exc:
             self._finish_error(exc)
+
         else:
             self._finish_success(result)
 
@@ -1690,17 +2212,96 @@ class DatasetLoaderController:
         source: Optional[DatasetSourceInfo],
         disk: Optional[DiskSpaceAssessment],
     ) -> str:
-        if source is None or source.source_format == "parquet":
+        if (
+            source is None
+            or source.source_format
+            == "parquet"
+        ):
             return ""
+
         if disk is None:
-            return '<div class="al-dataset-loader-section-copy">Disk-space estimate unavailable until a Parquet path is selected.</div>'
-        state = "Enough space" if disk.enough_space is True else "Insufficient estimated space" if disk.enough_space is False else "Unknown"
+            return (
+                '<div class="al-dataset-loader-section-copy">'
+                "Disk-space estimate unavailable until a "
+                "Parquet path is selected."
+                "</div>"
+            )
+
+        cache = self._cache_assessment(
+            source
+        )
+
+        cache_reusable = (
+            self._cache_reusable_for_import(
+                source,
+                cache,
+            )
+        )
+
+        assessment = str(
+            disk.message
+            or ""
+        )
+
+        if disk.enough_space is True:
+            state = "Enough space"
+
+        elif disk.enough_space is False:
+            if cache_reusable:
+                state = (
+                    "Existing cache can be reused"
+                )
+
+                assessment = (
+                    assessment.rstrip()
+                    + (
+                        " "
+                        if assessment
+                        else ""
+                    )
+                    + (
+                        "The existing Parquet cache passed the cache "
+                        "checks, so importing it does not require a new "
+                        "Parquet write. Import remains available; "
+                        "regeneration is disabled until sufficient disk "
+                        "space is available."
+                    )
+                )
+
+            else:
+                state = (
+                    "Insufficient estimated space"
+                )
+
+        else:
+            state = "Unknown"
+
         return self._kv_html(
             (
-                ("Disk check", state, False),
-                ("Free", format_bytes(disk.free_bytes), False),
-                ("Estimated output", format_bytes(disk.estimated_output_bytes), False),
-                ("Assessment", disk.message, False),
+                (
+                    "Disk check",
+                    state,
+                    False,
+                ),
+                (
+                    "Free",
+                    format_bytes(
+                        disk.free_bytes
+                    ),
+                    False,
+                ),
+                (
+                    "Estimated output",
+                    format_bytes(
+                        disk.estimated_output_bytes
+                    ),
+                    False,
+                ),
+                (
+                    "Assessment",
+                    assessment,
+                    False,
+                ),
             )
         )
 
