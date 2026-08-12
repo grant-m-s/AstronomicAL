@@ -36,7 +36,8 @@ def materialise_active_selection_as_dataset(
     if state is None:
         raise ValueError("There is no active selection set.")
 
-    row_ids = [str(r) for r in list(getattr(state, "row_ids", []) or [])]
+    row_ids = (getattr(state, "row_ids", [],) or [] )
+
     if not row_ids:
         raise ValueError("The active selection set is empty.")
 
@@ -1251,89 +1252,210 @@ class SelectionSetPanel:
     # ------------------------------------------------------------------
 
     def _get_preview_df(self) -> pd.DataFrame:
-        state = self._get_active_selection_set_state()
+        state = (self._get_active_selection_set_state())
+
         if state is None:
             return pd.DataFrame(columns=["focus", "row_id"])
 
-        dataset_id = getattr(state, "dataset_id", None) or self._active_dataset_id()
-        row_ids = [str(r) for r in list(getattr(state, "row_ids", []) or [])]
-        focus_row_id = self._get_focus_row_id()
-
-        if not row_ids:
-            return pd.DataFrame(columns=["focus", "row_id"])
-
-        if self.datasets is None:
-            return self._fallback_preview(row_ids, focus_row_id)
-
-        try:
-            columns = _dataset_columns(self.datasets, dataset_id)
-            id_col = _resolve_id_column_from_columns(self.context, dataset_id, columns)
-            label_col = _resolve_label_column_from_columns(self.context, dataset_id, columns)
-
-            preview_columns = _safe_preview_columns(
-                columns=columns,
-                id_col=id_col,
-                label_col=label_col,
+        dataset_id = (
+            getattr(state,"dataset_id",None,) or self._active_dataset_id()
             )
 
-            source = _dataset_get_source(self.datasets, dataset_id)
+        row_ids = (
+            getattr(state,"row_ids", [],)
+            or []
+        )
+
+        focus_row_id = (
+            self._get_focus_row_id()
+        )
+
+        if not row_ids:
+            return pd.DataFrame(
+                columns=["focus", "row_id"]
+            )
+
+        # Preview cost must scale with the preview limit, not the complete
+        # selection size.
+        preview_row_ids = [
+            str(row_id)
+            for row_id in row_ids[
+                :SELECTION_PREVIEW_LIMIT
+            ]
+        ]
+
+        if self.datasets is None:
+            return self._fallback_preview(
+                preview_row_ids,
+                focus_row_id,
+            )
+
+        try:
+            columns = _dataset_columns(
+                self.datasets,
+                dataset_id,
+            )
+
+            id_col = (
+                _resolve_id_column_from_columns(
+                    self.context,
+                    dataset_id,
+                    columns,
+                )
+            )
+
+            label_col = (
+                _resolve_label_column_from_columns(
+                    self.context,
+                    dataset_id,
+                    columns,
+                )
+            )
+
+            preview_columns = (
+                _safe_preview_columns(
+                    columns=columns,
+                    id_col=id_col,
+                    label_col=label_col,
+                )
+            )
+
+            source = _dataset_get_source(
+                self.datasets,
+                dataset_id,
+            )
+
             if source is None:
-                return self._fallback_preview(row_ids, focus_row_id)
+                return self._fallback_preview(
+                    preview_row_ids,
+                    focus_row_id,
+                )
 
-            preview_row_ids = row_ids[:SELECTION_PREVIEW_LIMIT]
-
-            preview = _rows_from_source_by_selection_ids(
-                source,
-                row_ids=preview_row_ids,
-                id_col=id_col,
-                columns=preview_columns,
+            preview = (
+                _rows_from_source_by_selection_ids(
+                    source,
+                    row_ids=preview_row_ids,
+                    id_col=id_col,
+                    columns=preview_columns,
+                )
             )
 
             if preview.empty:
-                return self._fallback_preview(row_ids, focus_row_id)
+                return self._fallback_preview(
+                    preview_row_ids,
+                    focus_row_id,
+                )
 
-            preview["row_id"] = preview["_selection_row_id"].astype(str)
-            preview = preview.drop(columns=["_selection_row_id"], errors="ignore")
+            preview["row_id"] = preview[
+                "_selection_row_id"
+            ].astype(str)
+
+            preview = preview.drop(
+                columns=[
+                    "_selection_row_id"
+                ],
+                errors="ignore",
+            )
 
             preview.insert(
                 0,
                 "focus",
                 [
-                    "▶" if str(row_id) == str(focus_row_id) else ""
-                    for row_id in preview["row_id"]
+                    (
+                        "▶"
+                        if str(row_id)
+                        == str(focus_row_id)
+                        else ""
+                    )
+                    for row_id
+                    in preview["row_id"]
                 ],
             )
 
-            preferred_cols = ["focus", "row_id"]
+            preferred_cols = [
+                "focus",
+                "row_id",
+            ]
 
             if (
-                label_col not in (None, "", "No Labels", "Use Index")
-                and label_col in preview.columns
-                and label_col not in preferred_cols
+                label_col
+                not in (
+                    None,
+                    "",
+                    "No Labels",
+                    "Use Index",
+                )
+                and label_col
+                in preview.columns
+                and label_col
+                not in preferred_cols
             ):
-                preferred_cols.append(label_col)
+                preferred_cols.append(
+                    label_col
+                )
 
             for column in preview.columns:
                 if column not in preferred_cols:
-                    preferred_cols.append(column)
+                    preferred_cols.append(
+                        column
+                    )
 
-            return preview[preferred_cols].head(SELECTION_PREVIEW_LIMIT).reset_index(drop=True)
+            return (
+                preview[
+                    preferred_cols
+                ]
+                .head(
+                    SELECTION_PREVIEW_LIMIT
+                )
+                .reset_index(
+                    drop=True
+                )
+            )
+
         except Exception:
             traceback.print_exc()
-            return self._fallback_preview(row_ids, focus_row_id)
+
+            return self._fallback_preview(
+                preview_row_ids,
+                focus_row_id,
+            )
 
     @staticmethod
     def _fallback_preview(
         row_ids: List[str],
         focus_row_id: Optional[str],
     ) -> pd.DataFrame:
-        preview = pd.DataFrame({"row_id": row_ids})
+        preview_row_ids = [
+            str(row_id)
+            for row_id in row_ids[
+                :SELECTION_PREVIEW_LIMIT
+            ]
+        ]
+
+        preview = pd.DataFrame(
+            {
+                "row_id": (
+                    preview_row_ids
+                )
+            }
+        )
+
         preview.insert(
             0,
             "focus",
-            ["▶" if str(row_id) == str(focus_row_id) else "" for row_id in row_ids],
+            [
+                (
+                    "▶"
+                    if str(row_id)
+                    == str(focus_row_id)
+                    else ""
+                )
+                for row_id
+                in preview_row_ids
+            ],
         )
-        return preview.head(50)
+
+        return preview
 
     def _get_geometry_text(self) -> str:
         state = self._get_active_selection_set_state()
@@ -1380,46 +1502,112 @@ class SelectionSetPanel:
 
         self.schedule_refresh()
 
-    def _focus_relative(self, delta: int) -> None:
+    def _focus_relative(
+        self,
+        delta: int,
+    ) -> None:
         if self.selection is None:
             return
 
-        state = self._get_active_selection_set_state()
+        state = (
+            self._get_active_selection_set_state()
+        )
+
         if state is None:
             return
 
-        row_ids = [str(r) for r in list(getattr(state, "row_ids", []) or [])]
+        row_ids = (
+            getattr(
+                state,
+                "row_ids",
+                [],
+            )
+            or []
+        )
+
         if not row_ids:
             return
 
-        focus_row_id = self._get_focus_row_id()
+        focus_row_id = (
+            self._get_focus_row_id()
+        )
 
-        if focus_row_id in row_ids:
-            idx = row_ids.index(focus_row_id)
-            idx = (idx + delta) % len(row_ids)
+        focus_key = (
+            None
+            if focus_row_id is None
+            else str(focus_row_id)
+        )
+
+        current_index: Optional[int] = None
+
+        if focus_key is not None:
+            for position, row_id in enumerate(
+                row_ids
+            ):
+                if str(row_id) == focus_key:
+                    current_index = position
+                    break
+
+        if current_index is not None:
+            idx = (
+                current_index
+                + int(delta)
+            ) % len(row_ids)
+
         else:
-            idx = 0 if delta >= 0 else len(row_ids) - 1
+            idx = (
+                0
+                if delta >= 0
+                else len(row_ids) - 1
+            )
 
-        dataset_id = getattr(state, "dataset_id", None) or self._active_dataset_id()
-        selection_set_id = getattr(state, "selection_set_id", None)
+        target_row_id = str(
+            row_ids[idx]
+        )
+
+        dataset_id = (
+            getattr(
+                state,
+                "dataset_id",
+                None,
+            )
+            or self._active_dataset_id()
+        )
+
+        selection_set_id = getattr(
+            state,
+            "selection_set_id",
+            None,
+        )
 
         try:
             self.selection.set_focus(
                 dataset_id=dataset_id,
-                row_id=row_ids[idx],
-                origin="selection.set.panel.focus",
+                row_id=target_row_id,
+                origin=(
+                    "selection.set.panel.focus"
+                ),
                 panel_id=self.panel_id,
-                selection_set_id=selection_set_id,
+                selection_set_id=(
+                    selection_set_id
+                ),
             )
+
         except TypeError:
             try:
                 self.selection.set_focus(
                     dataset_id=dataset_id,
-                    row_id=row_ids[idx],
-                    origin="selection.set.panel.focus",
+                    row_id=target_row_id,
+                    origin=(
+                        "selection.set.panel.focus"
+                    ),
                 )
+
             except TypeError:
-                self.selection.set_focus(dataset_id, row_ids[idx])
+                self.selection.set_focus(
+                    dataset_id,
+                    target_row_id,
+                )
 
         self.schedule_refresh()
 

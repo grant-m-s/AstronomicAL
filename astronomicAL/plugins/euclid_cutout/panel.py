@@ -1872,26 +1872,30 @@ class EuclidCutoutPanel:
         return None
 
     def _columns(self, dataset_id: str) -> List[str]:
+        """Return schema columns without materialising dataset rows."""
+
         datasets = getattr(self.context, "datasets", None)
         if datasets is None:
             return []
+
         for method_name in ("list_columns", "columns"):
             method = getattr(datasets, method_name, None)
-            if callable(method):
+            if not callable(method):
+                continue
+            try:
+                return [str(column) for column in method(dataset_id)]
+            except TypeError:
                 try:
-                    return list(method(dataset_id))
-                except TypeError:
-                    try:
-                        return list(method())
-                    except Exception:
-                        pass
+                    return [str(column) for column in method()]
                 except Exception:
-                    pass
-        try:
-            df = datasets.get_df(dataset_id)
-            return list(df.columns)
-        except Exception:
-            return []
+                    continue
+            except Exception:
+                continue
+
+        # Do not fall back to get_df(). Schema discovery must remain metadata-only
+        # for lazy/large datasets. If the current DatasetManager contract is not
+        # available, fail closed and let mapping validation report the problem.
+        return []
 
     def _guess_column(self, dataset_id: str, candidates: Iterable[str]) -> Optional[str]:
         columns = self._columns(dataset_id)
@@ -2009,6 +2013,22 @@ class EuclidCutoutPanel:
                     row = dict(candidate)
                     break
 
+        if row is None and row_id is None and row_pos is None:
+            # A plugin-native Euclid request is defined by platform focus. With no
+            # focus there is nothing to resolve, so fail before touching dataset
+            # row data. A directly supplied legacy row dict is still accepted for
+            # compatibility, but an arbitrary first row is never selected.
+            row = self._row_from_legacy_data(
+                id_column=id_column,
+                row_id=None,
+                allow_first_row=False,
+            )
+            if row is None:
+                raise RuntimeError(
+                    "No focused row is available for the Euclid cutout panel. "
+                    "Select a source in a focus-producing panel first."
+                )
+
         if row is None:
             row = self._fetch_row(
                 dataset_id,
@@ -2022,11 +2042,14 @@ class EuclidCutoutPanel:
             row = self._row_from_legacy_data(
                 id_column=id_column,
                 row_id=row_id,
-                allow_first_row=(row_id is None),
+                allow_first_row=False,
             )
 
         if row is None:
-            raise RuntimeError("No focused row is available for the Euclid cutout panel.")
+            raise RuntimeError(
+                "The focused Euclid row could not be resolved from the active "
+                "dataset using bounded row lookup."
+            )
 
         if row_id is None and id_column and id_column != "Use Index" and id_column in row:
             row_id = row.get(id_column)
@@ -2091,6 +2114,14 @@ class EuclidCutoutPanel:
         row_pos: Any,
         required_columns: Optional[List[str]] = None,
     ) -> Optional[Dict[str, Any]]:
+        """Resolve exactly one row through DatasetManager's bounded APIs.
+
+        This method deliberately does not call ``get_df()`` and does not probe
+        source-private methods. The platform manager owns backend-neutral row
+        lookup; a plugin that cannot resolve the focused row must fail closed
+        rather than materialising the catalogue.
+        """
+
         datasets = getattr(self.context, "datasets", None)
         if datasets is None:
             return None
@@ -2098,45 +2129,42 @@ class EuclidCutoutPanel:
         columns: List[str] = []
         for col in [id_column, *(required_columns or [])]:
             if col and col != "Use Index" and col not in columns:
-                columns.append(col)
+                columns.append(str(col))
 
-        source = None
-        for method_name in ("get_source", "source"):
-            method = getattr(datasets, method_name, None)
-            if callable(method):
+        if row_id is not None and id_column and id_column != "Use Index":
+            get_row_by_id = getattr(datasets, "get_row_by_id", None)
+            if callable(get_row_by_id):
                 try:
-                    source = method(dataset_id)
-                    break
+                    row = self._normalise_rows(
+                        get_row_by_id(
+                            dataset_id,
+                            row_id,
+                            id_column=id_column,
+                            columns=columns or None,
+                        )
+                    )
+                    if row is not None:
+                        return row
                 except Exception:
-                    pass
-        if source is not None:
-            row = self._fetch_row_from_source(
-                source,
-                id_column=id_column,
-                row_id=row_id,
-                row_pos=row_pos,
-                columns=columns,
-            )
-            if row is not None:
-                return row
+                    traceback.print_exc()
 
-        try:
-            df = datasets.get_df(dataset_id)
-            if row_id is not None and id_column:
-                if id_column == "Use Index":
-                    matches = df.loc[df.index.astype(str) == str(row_id)]
-                    if len(matches) > 0:
-                        return matches.iloc[0].to_dict()
-                elif id_column in df.columns:
-                    matches = df[df[id_column].astype(str) == str(row_id)]
-                    if len(matches) > 0:
-                        return matches.iloc[0].to_dict()
-            if row_pos is not None:
-                return df.iloc[int(row_pos)].to_dict()
-            return None
-        except Exception:
-            traceback.print_exc()
-            return None
+        if row_pos is not None:
+            get_row_by_position = getattr(datasets, "get_row_by_position", None)
+            if callable(get_row_by_position):
+                try:
+                    row = self._normalise_rows(
+                        get_row_by_position(
+                            dataset_id,
+                            int(row_pos),
+                            columns=columns or None,
+                        )
+                    )
+                    if row is not None:
+                        return row
+                except Exception:
+                    traceback.print_exc()
+
+        return None
 
     @staticmethod
     def _normalise_rows(result: Any) -> Optional[Dict[str, Any]]:
@@ -2158,58 +2186,6 @@ class EuclidCutoutPanel:
                 return first
         if isinstance(result, dict):
             return result
-        return None
-
-    def _fetch_row_from_source(
-        self,
-        source: Any,
-        *,
-        id_column: Optional[str],
-        row_id: Any,
-        row_pos: Any,
-        columns: List[str],
-    ) -> Optional[Dict[str, Any]]:
-        if row_id is not None and id_column:
-            for name, kwargs in [
-                ("get_row_by_id", {"row_id": row_id, "id_column": id_column, "columns": columns or None}),
-                ("get_rows_by_ids", {"row_ids": [row_id], "id_column": id_column, "columns": columns or None}),
-                ("get_rows_by_id", {"row_ids": [row_id], "id_column": id_column, "columns": columns or None}),
-                ("read_rows_by_id", {"row_ids": [row_id], "id_column": id_column, "columns": columns or None}),
-                ("rows_by_id", {"row_ids": [row_id], "id_column": id_column, "columns": columns or None}),
-                ("get_rows", {"row_ids": [row_id], "id_column": id_column, "columns": columns or None}),
-            ]:
-                method = getattr(source, name, None)
-                if not callable(method):
-                    continue
-                for call_kwargs in (kwargs, {k: v for k, v in kwargs.items() if k != "columns"}):
-                    try:
-                        row = self._normalise_rows(method(**call_kwargs))
-                        if row is not None:
-                            return row
-                    except TypeError:
-                        continue
-                    except Exception:
-                        continue
-
-        if row_pos is not None:
-            for name, kwargs in [
-                ("get_row_by_position", {"row_pos": int(row_pos), "columns": columns or None}),
-                ("get_rows", {"row_positions": [row_pos], "columns": columns or None}),
-                ("read_rows", {"row_positions": [row_pos], "columns": columns or None}),
-                ("take", {"indices": [row_pos], "columns": columns or None}),
-            ]:
-                method = getattr(source, name, None)
-                if not callable(method):
-                    continue
-                for call_kwargs in (kwargs, {k: v for k, v in kwargs.items() if k != "columns"}):
-                    try:
-                        row = self._normalise_rows(method(**call_kwargs))
-                        if row is not None:
-                            return row
-                    except TypeError:
-                        continue
-                    except Exception:
-                        continue
         return None
 
     # ------------------------------------------------------------------

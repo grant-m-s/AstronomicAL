@@ -189,14 +189,11 @@ class RecordBrowserPanel(param.Parameterized):
             return None
 
     def _active_df(self) -> Optional[pd.DataFrame]:
-        datasets = getattr(self.context, "datasets", None)
-        dataset_id = self._dataset_id()
-        if datasets is None or dataset_id is None:
-            return None
-        try:
-            return datasets.get_df(dataset_id)
-        except Exception:
-            return None
+        raise RuntimeError(
+            "RecordBrowserPanel must not materialise the full active dataset. "
+            "Use _active_columns(), _get_current_row_df(), row lookup, or "
+            "DatasetManager.iter_batches() instead."
+        )
 
     def _active_source(self):
         datasets = getattr(self.context, "datasets", None)
@@ -358,108 +355,162 @@ class RecordBrowserPanel(param.Parameterized):
         *,
         max_values: int = 21,
     ) -> tuple[list[Any], str, bool]:
-        """
-        Return unique non-null values for a label column.
-
-        The boolean says whether the column exceeded max_values.
-        This must not use self.df, because self.df is schema-only for
-        Parquet-backed datasets.
+        """Return a bounded set of non-null label values.
         """
         if not column or column not in self.columns:
             return [], "string", False
 
+        max_values = max(1, int(max_values))
+        display_limit = max(0, max_values - 1)
+
         datasets = getattr(self.context, "datasets", None)
         dataset_id = self._dataset_id()
 
-        # Preferred dataset-level API.
+        # Canonical platform API.
         if datasets is not None and dataset_id is not None:
-            for method_name in (
-                "unique_values",
-                "get_unique_values",
-                "column_unique_values",
-            ):
-                method = getattr(datasets, method_name, None)
-                if callable(method):
-                    try:
-                        values = method(
-                            dataset_id,
-                            column,
-                            max_values=max_values,
-                            dropna=True,
-                        )
-                        values = list(values)
-                        exceeded = len(values) > max_values - 1
-                        return values[: max_values - 1], self._infer_label_type(values), exceeded
-                    except TypeError:
-                        try:
-                            values = method(dataset_id, column)
-                            values = list(values)
-                            exceeded = len(values) > max_values - 1
-                            return values[: max_values - 1], self._infer_label_type(values), exceeded
-                        except Exception:
-                            pass
-                    except Exception:
-                        pass
+            distinct_values = getattr(
+                datasets,
+                "distinct_values",
+                None,
+            )
 
-        # Preferred source-level API.
+            if callable(distinct_values):
+                try:
+                    result = distinct_values(
+                        dataset_id,
+                        column,
+                        limit=max_values,
+                        include_null=False,
+                    )
+
+                    values = list(
+                        getattr(result, "values", ()) or ()
+                    )
+
+                    exceeded = bool(
+                        getattr(result, "truncated", False)
+                        or len(values) > display_limit
+                    )
+
+                    return (
+                        values[:display_limit],
+                        self._infer_label_type(values),
+                        exceeded,
+                    )
+
+                except Exception as exc:
+                    print(
+                        "[AstronomicAL record_browser] Bounded distinct lookup "
+                        f"failed for label column {column!r}: {exc}",
+                        flush=True,
+                    )
+
+        # Source-level fallback for compatible DatasetSource implementations.
         if self.source is not None:
-            for method_name in (
-                "unique_values",
-                "get_unique_values",
-                "column_unique_values",
-            ):
-                method = getattr(self.source, method_name, None)
-                if callable(method):
-                    try:
-                        values = method(
-                            column,
-                            max_values=max_values,
-                            dropna=True,
-                        )
-                        values = list(values)
-                        exceeded = len(values) > max_values - 1
-                        return values[: max_values - 1], self._infer_label_type(values), exceeded
-                    except TypeError:
-                        try:
-                            values = method(column)
-                            values = list(values)
-                            exceeded = len(values) > max_values - 1
-                            return values[: max_values - 1], self._infer_label_type(values), exceeded
-                        except Exception:
-                            pass
-                    except Exception:
-                        pass
+            distinct_values = getattr(
+                self.source,
+                "distinct_values",
+                None,
+            )
 
-        # Fallback: read one column only. This is not ideal for huge columns, but
-        # still avoids materialising the whole 274-column dataset.
+            if callable(distinct_values):
+                try:
+                    result = distinct_values(
+                        column,
+                        limit=max_values,
+                        include_null=False,
+                    )
+
+                    values = list(
+                        getattr(result, "values", ()) or ()
+                    )
+
+                    exceeded = bool(
+                        getattr(result, "truncated", False)
+                        or len(values) > display_limit
+                    )
+
+                    return (
+                        values[:display_limit],
+                        self._infer_label_type(values),
+                        exceeded,
+                    )
+
+                except Exception:
+                    pass
+
+        # Safe generic fallback for custom sources that do not implement
+        # bounded distinct values. Scan one column in bounded batches and
+        # retain only enough values to decide whether the label set is small.
+        if datasets is None or dataset_id is None:
+            return [], "string", False
+
+        iter_batches = getattr(
+            datasets,
+            "iter_batches",
+            None,
+        )
+
+        if not callable(iter_batches):
+            return [], "string", False
+
+        seen: "OrderedDict[tuple[str, str], Any]" = OrderedDict()
+
         try:
-            df = self.source.to_pandas(columns=[column])
+            batches = iter_batches(
+                dataset_id,
+                columns=[column],
+                batch_size=8192,
+            )
+
+            for batch in batches:
+                frame = getattr(batch, "frame", None)
+
+                if (
+                    frame is None
+                    or frame.empty
+                    or column not in frame.columns
+                ):
+                    continue
+
+                for value in pd.unique(
+                    frame[column].dropna()
+                ):
+                    key = (
+                        type(value).__name__,
+                        repr(value),
+                    )
+
+                    if key in seen:
+                        continue
+
+                    seen[key] = value
+
+                    if len(seen) >= max_values:
+                        values = list(seen.values())
+
+                        return (
+                            values[:display_limit],
+                            self._infer_label_type(values),
+                            True,
+                        )
+
         except Exception as exc:
             print(
-                "[AstronomicAL record_browser] Could not read label column "
+                "[AstronomicAL record_browser] Could not scan label column "
                 f"{column!r}: {exc}",
                 flush=True,
             )
+
             return [], "string", False
 
-        if df.empty or column not in df.columns:
-            return [], "string", False
+        values = list(seen.values())
 
-        series = df[column]
-
-        label_type = get_series_type(series)
-
-        if label_type == "mixed":
-            series = series.astype(str)
-            label_type = "string"
-        elif label_type == "bool":
-            series = series.astype("Int64")
-            label_type = "int"
-
-        unique_values = list(series.dropna().unique())
-        exceeded = len(unique_values) > max_values - 1
-
-        return unique_values[: max_values - 1], label_type, exceeded
+        return (
+            values[:display_limit],
+            self._infer_label_type(values),
+            False,
+        )
 
 
     def _infer_label_type(self, values: list[Any]) -> str:
@@ -1392,12 +1443,15 @@ class RecordBrowserPanel(param.Parameterized):
         return None
 
     def _find_from_id(self, sourceid):
-        sourceid = sourceid.strip()
+        sourceid = str(sourceid or "").strip()
 
         if not sourceid or self.row_count <= 0:
             return
 
-        exact_position = self._find_index_for_row_id(sourceid)
+        # Exact lookup stays on the source/backend-specific fast path.
+        exact_position = self._find_index_for_row_id(
+            sourceid
+        )
 
         if exact_position is not None:
             self.index = exact_position
@@ -1407,51 +1461,153 @@ class RecordBrowserPanel(param.Parameterized):
             print("No matches found")
             return
 
-        if not self.record_id_col or self.record_id_col not in self.columns:
+        if (
+            not self.record_id_col
+            or self.record_id_col not in self.columns
+        ):
             print("No record ID column is mapped")
             return
 
-        # Partial search fallback. This reads only the ID column, not the full table.
-        try:
-            id_df = self.source.to_pandas(
-                columns=[self.record_id_col],
+        datasets = getattr(
+            self.context,
+            "datasets",
+            None,
+        )
+        dataset_id = self._dataset_id()
+
+        iter_batches = getattr(
+            datasets,
+            "iter_batches",
+            None,
+        )
+
+        if (
+            datasets is None
+            or dataset_id is None
+            or not callable(iter_batches)
+        ):
+            print(
+                "Record ID partial search requires batch-scan support"
             )
-        except Exception:
-            print("Could not search record IDs")
             return
 
-        if id_df.empty or self.record_id_col not in id_df.columns:
-            print("No matches found")
+        # Partial lookup can require scanning the ID column, but it must remain
+        # bounded in memory. Keep only counters and the first matching position;
+        # never construct a dataframe containing every record ID.
+        n_matches = 0
+        first_match_position: Optional[int] = None
+
+        n_exact = 0
+        first_exact_position: Optional[int] = None
+
+        try:
+            batches = iter_batches(
+                dataset_id,
+                columns=[self.record_id_col],
+                batch_size=8192,
+            )
+
+            for batch in batches:
+                frame = getattr(
+                    batch,
+                    "frame",
+                    None,
+                )
+
+                if (
+                    frame is None
+                    or frame.empty
+                    or self.record_id_col not in frame.columns
+                ):
+                    continue
+
+                id_series = frame[
+                    self.record_id_col
+                ].astype(str)
+
+                contains = id_series.str.contains(
+                    sourceid,
+                    case=True,
+                    regex=False,
+                    na=False,
+                )
+
+                contains_positions = np.flatnonzero(
+                    contains.to_numpy()
+                )
+
+                if len(contains_positions):
+                    if first_match_position is None:
+                        first_match_position = int(
+                            batch.row_offset
+                            + int(contains_positions[0])
+                        )
+
+                    n_matches += int(
+                        len(contains_positions)
+                    )
+
+                # Normally the source-native exact lookup above will already
+                # have resolved this case. Retain exact detection here so the
+                # generic batch fallback is still correct for custom sources
+                # whose find_position_by_id() is unavailable.
+                exact = id_series == sourceid
+
+                exact_positions = np.flatnonzero(
+                    exact.to_numpy()
+                )
+
+                if len(exact_positions):
+                    if first_exact_position is None:
+                        first_exact_position = int(
+                            batch.row_offset
+                            + int(exact_positions[0])
+                        )
+
+                    n_exact += int(
+                        len(exact_positions)
+                    )
+
+        except Exception as exc:
+            print(
+                f"Could not search record IDs: {exc}"
+            )
             return
 
-        id_series = id_df[self.record_id_col].astype(str)
+        if (
+            n_exact == 1
+            and first_exact_position is not None
+        ):
+            self._row_position_cache_set(
+                sourceid,
+                first_exact_position,
+            )
 
-        matches = id_series.str.contains(sourceid, case=True, na=False)
-        n_matches = int(matches.sum())
+            self.index = first_exact_position
+            return
 
-        if n_matches == 1:
-            self.index = int(np.flatnonzero(matches.to_numpy())[0])
+        if n_exact > 1:
+            print(
+                f"There are {n_exact} records which exactly match the "
+                "provided record ID."
+            )
+            return
+
+        if (
+            n_matches == 1
+            and first_match_position is not None
+        ):
+            self.index = first_match_position
             return
 
         if n_matches == 0:
             print("No matches found")
             return
 
-        exact_matches = id_series == sourceid
-        n_exact = int(exact_matches.sum())
-
-        if n_exact == 1:
-            self.index = int(np.flatnonzero(exact_matches.to_numpy())[0])
-        elif n_exact > 1:
-            print(
-                f"There are {n_exact} records which exactly match the "
-                "provided record ID."
-            )
-        else:
-            print(
-                f"There are {n_matches} records containing the provided "
-                "record ID; be more specific."
-            )
+        print(
+            f"There are {n_matches} records containing the provided "
+            "record ID; be more specific."
+        )
 
     def _update_navigation_flags(self):
         if not hasattr(self, "prev_button") or not hasattr(self, "next_button"):

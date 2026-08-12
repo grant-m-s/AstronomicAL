@@ -17,17 +17,14 @@ from .utils import (
     _dataset_columns,
     _dataset_dtypes,
     _default_colour_map,
-    _get_dataset_view_for_columns,
     _mapped_column,
     _numeric_columns_from_dataset,
 )
-
 
 NONE_COLOUR_OPTION = "None"
 AUTO_COLOUR_MODE = "auto"
 CATEGORICAL_COLOUR_MODE = "categorical"
 CONTINUOUS_COLOUR_MODE = "continuous"
-
 
 class VisualisationState(param.Parameterized):
     """Live UI state for visualisation plugin panels."""
@@ -129,6 +126,9 @@ class VisualisationState(param.Parameterized):
         self.colour_value_colours: Dict[Any, str] = {}
 
         self._colour_column_kind: Dict[str, str] = {}
+        self._colour_column_dtype: Dict[str, str] = {}
+        self._refined_integer_colour_kinds: set[str] = set()
+        self._bounded_distinct_cache: Dict[tuple[str, str, int], Optional[List[Any]]] = {}
         self._suppress_colour_state_refresh = False
 
         self._colour_watchers = []
@@ -237,6 +237,7 @@ class VisualisationState(param.Parameterized):
     def _on_colour_param_changed(self, _event=None) -> None:
         if self._suppress_colour_state_refresh:
             return
+        self._ensure_selected_colour_kind(self.dataset_id)
         self._refresh_colour_state_for_dataset(self.dataset_id)
 
     def _reset_labels(self) -> None:
@@ -293,49 +294,184 @@ class VisualisationState(param.Parameterized):
             else:
                 self.color_by = NONE_COLOUR_OPTION
 
+        # Only the active colour column needs cardinality inspection. Performing
+        # a 100k-row sample for every integer column made mapping updates scale
+        # with catalogue width. Resolve the selected column lazily through the
+        # platform's bounded distinct-value contract instead.
+        self._ensure_selected_colour_kind(dataset_id)
+
     def _infer_colour_column_kinds(
         self,
         dataset_id: Optional[str],
         columns: List[Any],
     ) -> Dict[str, str]:
+        """Infer cheap schema-level colour modes without row materialisation.
+
+        Float-like numeric columns are continuous. Strings/categories and bools
+        are categorical. Integer columns are provisionally continuous and are
+        refined only when the user actually selects one for colouring.
+        """
+
         dtypes = _dataset_dtypes(self.context, dataset_id)
-        numeric = set(_numeric_columns_from_dataset(self.context, dataset_id))
+        self._colour_column_dtype = {
+            str(column): str(dtypes.get(str(column), "") or "").lower()
+            for column in columns
+        }
+        self._refined_integer_colour_kinds.clear()
+        self._bounded_distinct_cache.clear()
         kinds: Dict[str, str] = {}
+
+        numeric_markers = (
+            "int",
+            "integer",
+            "bigint",
+            "smallint",
+            "tinyint",
+            "hugeint",
+            "uint",
+            "float",
+            "double",
+            "real",
+            "decimal",
+            "numeric",
+        )
 
         for column in columns:
             column_str = str(column)
-            dtype_name = str(dtypes.get(column_str, "")).lower()
-
-            if column_str not in numeric:
-                kinds[column_str] = CATEGORICAL_COLOUR_MODE
-                continue
+            dtype_name = self._colour_column_dtype.get(column_str, "")
 
             if "bool" in dtype_name:
                 kinds[column_str] = CATEGORICAL_COLOUR_MODE
                 continue
 
-            # Integer columns are often class IDs. Treat genuinely low-cardinality
-            # integer-like columns as categorical, otherwise continuous.
-            if any(marker in dtype_name for marker in ("int", "integer", "uint", "bigint", "smallint", "tinyint")):
-                try:
-                    sample = _get_dataset_view_for_columns(
-                        self.context,
-                        dataset_id,
-                        [column],
-                        limit=100_000,
-                    )
-                    values = pd.unique(_safe_series(sample, column).dropna())
-                    if 0 < len(values) <= int(self.max_label_values):
-                        kinds[column_str] = CATEGORICAL_COLOUR_MODE
-                    else:
-                        kinds[column_str] = CONTINUOUS_COLOUR_MODE
-                except Exception:
-                    kinds[column_str] = CONTINUOUS_COLOUR_MODE
+            if any(marker in dtype_name for marker in numeric_markers):
+                # Integer columns are refined lazily when selected. Float-like
+                # numerics are continuous without any data scan.
+                kinds[column_str] = CONTINUOUS_COLOUR_MODE
                 continue
 
-            kinds[column_str] = CONTINUOUS_COLOUR_MODE
+            # Strings, categories, dates and unknown scalar types are safer as
+            # categorical defaults. Rendering code can still be overridden by
+            # the explicit colour-mode control.
+            kinds[column_str] = CATEGORICAL_COLOUR_MODE
 
         return kinds
+
+    @staticmethod
+    def _is_integer_dtype_name(dtype_name: Any) -> bool:
+        dtype_name = str(dtype_name or "").lower()
+        return any(
+            marker in dtype_name
+            for marker in (
+                "int",
+                "integer",
+                "uint",
+                "bigint",
+                "smallint",
+                "tinyint",
+                "hugeint",
+            )
+        )
+
+    def _bounded_distinct_values(
+        self,
+        dataset_id: Optional[str],
+        column: Any,
+    ) -> Optional[List[Any]]:
+        """Return at most ``max_label_values`` distinct values.
+
+        ``None`` means the column has more values than the categorical limit or
+        the source could not provide a bounded answer. The preferred path uses
+        DatasetManager.distinct_values(), which keeps lazy Parquet data inside
+        the backend and returns only a tiny result.
+        """
+
+        if dataset_id is None or column is None:
+            return []
+
+        datasets = getattr(self.context, "datasets", None)
+        if datasets is None:
+            return []
+
+        max_values = max(1, int(self.max_label_values))
+        cache_key = (str(dataset_id), str(column), max_values)
+        if cache_key in self._bounded_distinct_cache:
+            cached = self._bounded_distinct_cache[cache_key]
+            return None if cached is None else list(cached)
+
+        distinct_values = getattr(datasets, "distinct_values", None)
+        if callable(distinct_values):
+            try:
+                result = distinct_values(
+                    dataset_id,
+                    str(column),
+                    limit=max_values,
+                    include_null=False,
+                )
+                if bool(getattr(result, "truncated", False)):
+                    self._bounded_distinct_cache[cache_key] = None
+                    return None
+                values = sorted(
+                    list(getattr(result, "values", ()) or ()),
+                    key=lambda value: str(value),
+                )
+                self._bounded_distinct_cache[cache_key] = list(values)
+                return values
+            except Exception:
+                # Compatibility fallback below remains bounded to one column.
+                pass
+
+        # Compatibility with older DatasetManager implementations. This path is
+        # deliberately bounded and never requests the entire catalogue schema.
+        get_df = getattr(datasets, "get_df", None)
+        if not callable(get_df):
+            return []
+        try:
+            sample = get_df(
+                dataset_id,
+                columns=[column],
+                limit=100_000,
+                origin="core.visualisation.distinct_compat",
+            )
+        except TypeError:
+            try:
+                sample = get_df(
+                    dataset_id,
+                    columns=[column],
+                    limit=100_000,
+                )
+            except Exception:
+                return []
+        except Exception:
+            return []
+
+        values = _safe_unique_labels(sample, column, max_values)
+        self._bounded_distinct_cache[cache_key] = (
+            None if values is None else list(values)
+        )
+        return values
+
+    def _ensure_selected_colour_kind(
+        self,
+        dataset_id: Optional[str],
+    ) -> None:
+        column = self.colour_column()
+        if dataset_id is None or column is None:
+            return
+
+        column_str = str(column)
+        dtype_name = self._colour_column_dtype.get(column_str, "")
+        if not self._is_integer_dtype_name(dtype_name):
+            return
+        if column_str in self._refined_integer_colour_kinds:
+            return
+
+        values = self._bounded_distinct_values(dataset_id, column)
+        if values is not None and 0 < len(values) <= int(self.max_label_values):
+            self._colour_column_kind[column_str] = CATEGORICAL_COLOUR_MODE
+        else:
+            self._colour_column_kind[column_str] = CONTINUOUS_COLOUR_MODE
+        self._refined_integer_colour_kinds.add(column_str)
 
     def effective_colour_mode(self) -> str:
         colour_col = self.colour_column()
@@ -346,6 +482,7 @@ class VisualisationState(param.Parameterized):
         if requested in {CATEGORICAL_COLOUR_MODE, CONTINUOUS_COLOUR_MODE}:
             return requested
 
+        self._ensure_selected_colour_kind(self.dataset_id)
         return self._colour_column_kind.get(str(colour_col), CATEGORICAL_COLOUR_MODE)
 
     def colour_column(self) -> Optional[Any]:
@@ -369,20 +506,9 @@ class VisualisationState(param.Parameterized):
             self._reset_colour_values()
             return
 
-        try:
-            colour_df = _get_dataset_view_for_columns(
-                self.context,
-                dataset_id,
-                [colour_col],
-                limit=100_000,
-            )
-        except Exception:
-            colour_df = pd.DataFrame(columns=[colour_col])
-
-        raw_values = _safe_unique_labels(
-            colour_df,
+        raw_values = self._bounded_distinct_values(
+            dataset_id,
             colour_col,
-            self.max_label_values,
         )
 
         if raw_values is None:
@@ -463,16 +589,17 @@ class VisualisationState(param.Parameterized):
             self._reset_labels()
             return
 
-        try:
-            label_df = _get_dataset_view_for_columns(
-                self.context,
-                dataset_id,
-                [self.label_col],
-                limit=100_000,
-            )
-        except Exception:
-            label_df = pd.DataFrame(columns=[self.label_col])
+        raw_labels = self._bounded_distinct_values(
+            dataset_id,
+            self.label_col,
+        )
+        if raw_labels is None:
+            self._reset_labels()
+            return
 
+        # Reuse the legacy/config label mapping logic with a tiny in-memory frame
+        # containing only the bounded distinct values, never catalogue rows.
+        label_df = pd.DataFrame({self.label_col: list(raw_labels or [])})
         self._refresh_label_state(label_df)
 
     def apply_label_settings(self, payload: Optional[Dict[str, Any]]) -> None:
@@ -635,13 +762,11 @@ class VisualisationState(param.Parameterized):
 
         self._refresh_colour_state_for_dataset(self.dataset_id)
 
-
 def _safe_series(df: pd.DataFrame, column: Any) -> pd.Series:
     values = df[column]
     if isinstance(values, pd.DataFrame):
         return values.iloc[:, 0]
     return values
-
 
 def _safe_unique_labels(
     df: pd.DataFrame,

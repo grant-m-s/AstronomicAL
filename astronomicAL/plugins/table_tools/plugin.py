@@ -13,6 +13,9 @@ import numpy as np
 import pandas as pd
 import panel as pn
 
+from astronomicAL.platform.dataset_sources import (
+    DatasetSource,
+)
 from astronomicAL.platform.parquet_cache import (
     default_cache_dir_for_context,
     normalise_dataset_id,
@@ -1436,7 +1439,9 @@ def _is_duckdb_parquet_source(source: Any) -> bool:
         and callable(getattr(source, "_path_argument", None))
     )
 
-class LazyDerivedColumnDuckDBSource:
+class LazyDerivedColumnDuckDBSource(
+    DatasetSource
+):
     """
     Lazy derived-column view over a DuckDB/Parquet-compatible source.
 
@@ -1679,7 +1684,9 @@ class LazyDerivedColumnDuckDBSource:
             "materialized": False,
         }
 
-class FilteredDuckDBParquetDatasetSource:
+class FilteredDuckDBParquetDatasetSource(
+    DatasetSource
+):
     """
     Lazy filtered view over a DuckDB/Parquet source.
 

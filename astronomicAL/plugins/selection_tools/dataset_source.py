@@ -32,28 +32,42 @@ class SelectionSubsetDatasetSource(DatasetSource):
     ) -> None:
         self.base_source = base_source
         self.id_column = str(id_column)
-        self._columns = [str(column) for column in columns]
+        self._columns = [
+            str(column)
+            for column in columns
+        ]
 
-        if self.id_column != "Use Index" and self.id_column not in self._columns:
+        if (
+            self.id_column != "Use Index"
+            and self.id_column
+            not in self._columns
+        ):
             raise ValueError(
-                f"Selection subset ID column {self.id_column!r} is not present "
+                "Selection subset ID column "
+                f"{self.id_column!r} is not present "
                 "in the source columns."
             )
 
-        self.row_ids = list(row_ids)
-        self._row_id_by_key: dict[str, Any] = {}
-        self._position_by_key: dict[str, int] = {}
+        # Keep one ordered sequence plus one membership set. The previous
+        # implementation retained two dictionaries in addition to the row-ID
+        # list, which multiplies memory use for very large selections.
+        self.row_ids = tuple(row_ids)
+        self._row_id_keys: set[str] = set()
 
-        for position, row_id in enumerate(self.row_ids):
-            key = self._row_id_key(row_id)
-            if key in self._position_by_key:
+        for row_id in self.row_ids:
+            key = self._row_id_key(
+                row_id
+            )
+
+            if key in self._row_id_keys:
                 raise ValueError(
                     "Selection subset row IDs must be unique; duplicate ID "
                     f"{key!r} was found."
                 )
 
-            self._row_id_by_key[key] = row_id
-            self._position_by_key[key] = position
+            self._row_id_keys.add(
+                key
+            )
 
     @staticmethod
     def _row_id_key(row_id: Any) -> str:
@@ -180,17 +194,33 @@ class SelectionSubsetDatasetSource(DatasetSource):
         row_id: Any,
         *,
         id_column: str,
-        columns: Optional[Sequence[str]] = None,
+        columns: Optional[
+            Sequence[str]
+        ] = None,
     ) -> pd.DataFrame:
-        requested_columns = self._validated_columns(columns)
-        self._validate_lookup_column(id_column)
+        requested_columns = (
+            self._validated_columns(
+                columns
+            )
+        )
 
-        key = self._row_id_key(row_id)
-        if key not in self._row_id_by_key:
-            return pd.DataFrame(columns=requested_columns)
+        self._validate_lookup_column(
+            id_column
+        )
 
+        key = self._row_id_key(
+            row_id
+        )
+
+        if key not in self._row_id_keys:
+            return pd.DataFrame(
+                columns=requested_columns
+            )
+
+        # Membership is established by the subset set above. The base source
+        # performs the actual typed lookup.
         return self._fetch_rows(
-            [self._row_id_by_key[key]],
+            [row_id],
             columns=requested_columns,
         )
 
@@ -199,7 +229,9 @@ class SelectionSubsetDatasetSource(DatasetSource):
         row_ids: Sequence[Any],
         *,
         id_column: str,
-        columns: Optional[Sequence[str]] = None,
+        columns: Optional[
+            Sequence[str]
+        ] = None,
     ) -> pd.DataFrame:
         """Fetch requested rows that belong to this subset.
 
@@ -207,23 +239,40 @@ class SelectionSubsetDatasetSource(DatasetSource):
         collapsed because record IDs are required to be unique dataset identity.
         """
 
-        requested_columns = self._validated_columns(columns)
-        self._validate_lookup_column(id_column)
+        requested_columns = (
+            self._validated_columns(
+                columns
+            )
+        )
+
+        self._validate_lookup_column(
+            id_column
+        )
 
         selected_ids: list[Any] = []
         seen: set[str] = set()
 
         for row_id in row_ids:
-            key = self._row_id_key(row_id)
+            key = self._row_id_key(
+                row_id
+            )
 
-            if key in seen or key not in self._row_id_by_key:
+            if (
+                key in seen
+                or key
+                not in self._row_id_keys
+            ):
                 continue
 
             seen.add(key)
-            selected_ids.append(self._row_id_by_key[key])
+            selected_ids.append(
+                row_id
+            )
 
         if not selected_ids:
-            return pd.DataFrame(columns=requested_columns)
+            return pd.DataFrame(
+                columns=requested_columns
+            )
 
         return self._fetch_rows(
             selected_ids,
@@ -236,8 +285,31 @@ class SelectionSubsetDatasetSource(DatasetSource):
         *,
         id_column: str,
     ) -> Optional[int]:
-        self._validate_lookup_column(id_column)
-        return self._position_by_key.get(self._row_id_key(row_id))
+        self._validate_lookup_column(
+            id_column
+        )
+
+        key = self._row_id_key(
+            row_id
+        )
+
+        if key not in self._row_id_keys:
+            return None
+
+        # Avoid retaining an additional full key->position dictionary solely
+        # for occasional navigation lookups.
+        for position, candidate in enumerate(
+            self.row_ids
+        ):
+            if (
+                self._row_id_key(
+                    candidate
+                )
+                == key
+            ):
+                return position
+
+        return None
 
     def metadata(self) -> dict[str, Any]:
         return {
