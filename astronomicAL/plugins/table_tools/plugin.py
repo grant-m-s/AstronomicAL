@@ -31,19 +31,22 @@ from astronomicAL.platform.plugins.specs import (
     InputSpec,
 )
 
+from .union_source import (
+    LazyUnionByNameDuckDBSource,
+    UnionBranch,
+)
 
 manifest = PluginManifest(
     id="core.table_tools",
     name="Table Tools",
-    version="0.2.0",
+    version="0.3.0",
     description=(
-        "Expression-based table transforms: add derived columns and create "
-        "subset datasets from boolean pandas expressions."
+        "Lazy table transforms: add derived columns, create filtered subsets, "
+        "and combine compatible datasets by column name."
     ),
     capabilities=["panel", "actions", "datasets", "table-transform"],
     tags=["core", "table", "datasets", "transforms"],
 )
-
 
 def register(api) -> None:
     api.register_panel(
@@ -51,8 +54,8 @@ def register(api) -> None:
         title="Table Transform",
         factory=create_table_transform_panel,
         description=(
-            "Create derived columns with pandas-style expressions and create "
-            "subset datasets with boolean expressions."
+            "Create derived columns, filtered subsets, and lazy vertical unions "
+            "of compatible datasets without full-table materialisation."
         ),
         category="Data tools",
         icon="table",
@@ -103,6 +106,45 @@ def register(api) -> None:
         tags=["table", "subset"],
     )
 
+    api.register_action(
+        id="combine_datasets",
+        title="Combine datasets",
+        handler=combine_datasets_action,
+        inputs=InputSpec(dataset=False, selection="none", columns="optional"),
+        outputs=["dataset.loaded", "dataset.active.changed"],
+        params_schema={
+            "type": "object",
+            "properties": {
+                "dataset_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "minItems": 2,
+                    "uniqueItems": True,
+                },
+                "combined_name": {"type": "string"},
+                "combined_dataset_id": {"type": "string"},
+                "set_active": {"type": "boolean", "default": True},
+                "add_source_column": {"type": "boolean", "default": False},
+                "source_column_name": {
+                    "type": "string",
+                    "default": "__source_dataset",
+                },
+            },
+            "required": [
+                "dataset_ids",
+                "combined_name",
+                "combined_dataset_id",
+            ],
+            "additionalProperties": False,
+        },
+        run_in_job=False,
+        description=(
+            "Register a lazy UNION ALL BY NAME over two or more existing "
+            "DuckDB-backed datasets."
+        ),
+        category="Data tools",
+        tags=["table", "combine", "union"],
+    )
 
 def create_table_transform_panel(context, data=None, **kwargs):
     controller = TableTransformPanel(
@@ -110,7 +152,6 @@ def create_table_transform_panel(context, data=None, **kwargs):
         data=data,
     )
     return controller.view, controller
-
 
 # ---------------------------------------------------------------------
 # Plugin actions
@@ -284,13 +325,165 @@ def create_subset_action(context, request: ActionRequest, **_kwargs) -> ActionRe
         events=events,
     )
 
+def combine_datasets_action(
+    context,
+    request: ActionRequest,
+    **_kwargs,
+) -> ActionResult:
+    """Register a lazy vertical union over existing DuckDB relation datasets.
 
+    The operation is schema-only at creation time. Input rows stay in their
+    existing sources and are read lazily by downstream DatasetSource calls.
+    """
 
+    datasets = getattr(context, "datasets", None)
+    if datasets is None:
+        raise RuntimeError("DatasetManager is required to combine datasets.")
+
+    params = request.params or {}
+    dataset_ids = _normalise_combined_dataset_ids(params.get("dataset_ids"))
+    combined_name = str(params.get("combined_name", "")).strip()
+    raw_combined_id = str(params.get("combined_dataset_id", "")).strip()
+    set_active = bool(params.get("set_active", True))
+    add_source_column = bool(params.get("add_source_column", False))
+    source_column_name = str(
+        params.get("source_column_name", "__source_dataset") or ""
+    ).strip()
+
+    if len(dataset_ids) < 2:
+        raise ValueError("Choose at least two datasets to combine.")
+    if not combined_name:
+        raise ValueError("Please provide a combined dataset name.")
+    if not raw_combined_id:
+        raise ValueError("Please provide a combined dataset ID.")
+
+    combined_dataset_id = normalise_dataset_id(raw_combined_id)
+    if raw_combined_id != combined_dataset_id:
+        raise ValueError(
+            "Combined dataset IDs may contain lowercase letters, numbers, and "
+            f"underscores. Use `{combined_dataset_id}`."
+        )
+
+    existing_ids = {str(dataset_id) for dataset_id in datasets.list_ids()}
+    missing_ids = [dataset_id for dataset_id in dataset_ids if dataset_id not in existing_ids]
+    if missing_ids:
+        raise KeyError(
+            "Cannot combine datasets that are no longer registered: "
+            + ", ".join(missing_ids)
+        )
+    if combined_dataset_id in existing_ids:
+        raise ValueError(
+            f"Dataset ID `{combined_dataset_id}` is already registered."
+        )
+
+    if add_source_column and not source_column_name:
+        raise ValueError("Provide a source-dataset column name or disable that option.")
+
+    plan = _build_union_plan(
+        context,
+        dataset_ids=dataset_ids,
+        combined_name=combined_name,
+        source_column_name=(source_column_name if add_source_column else None),
+    )
+
+    consensus_mappings, mapping_conflicts = _dataset_consensus_mappings(
+        datasets,
+        dataset_ids=dataset_ids,
+        available_columns=plan["columns"],
+    )
+
+    row_count = plan["row_count"]
+    registration_meta: Dict[str, Any] = {
+        "backend": plan["source"].backend_name,
+        "source_format": "duckdb_union_by_name_view",
+        "derived_from": list(dataset_ids),
+        "input_dataset_ids": list(dataset_ids),
+        "derivation_type": "table_union",
+        "union_mode": "all_by_name",
+        "materialized": False,
+        "columns": list(plan["columns"]),
+        "created_by": manifest.id,
+        "source_backends": dict(plan["source_backends"]),
+        "source_dataset_column": plan["source_column_name"],
+        "mapping_conflicts": mapping_conflicts,
+    }
+    if row_count is not None:
+        registration_meta["row_count"] = int(row_count)
+        registration_meta["rows"] = int(row_count)
+
+    datasets.register_source(
+        combined_dataset_id,
+        plan["source"],
+        name=combined_name,
+        **registration_meta,
+    )
+
+    inherited_mappings = _apply_dataset_mappings(
+        datasets,
+        target_dataset_id=combined_dataset_id,
+        mappings=consensus_mappings,
+    )
+
+    previous_dataset_id = None
+    try:
+        previous_dataset_id = datasets.active_id()
+    except Exception:
+        pass
+
+    events = [
+        EventResult(
+            "dataset.loaded",
+            {
+                "dataset_id": combined_dataset_id,
+                "derived_from": list(dataset_ids),
+                "input_dataset_ids": list(dataset_ids),
+                "derivation_type": "table_union",
+                "union_mode": "all_by_name",
+                "origin": manifest.id,
+                "materialized": False,
+                "backend": plan["source"].backend_name,
+            },
+        )
+    ]
+
+    if set_active:
+        datasets.set_active(
+            combined_dataset_id,
+            origin=manifest.id,
+            publish=False,
+        )
+        events.append(
+            EventResult(
+                "dataset.active.changed",
+                {
+                    "dataset_id": combined_dataset_id,
+                    "previous_dataset_id": previous_dataset_id,
+                    "origin": manifest.id,
+                },
+            )
+        )
+
+    return ActionResult(
+        value={
+            "dataset_id": combined_dataset_id,
+            "name": combined_name,
+            "rows": row_count,
+            "columns": list(plan["columns"]),
+            "input_dataset_ids": list(dataset_ids),
+            "input_rows": dict(plan["input_rows"]),
+            "set_active": set_active,
+            "materialized": False,
+            "backend": plan["source"].backend_name,
+            "source_column_name": plan["source_column_name"],
+            "inherited_mappings": inherited_mappings,
+            "mapping_conflicts": mapping_conflicts,
+        },
+        events=events,
+    )
 
 # ---------------------------------------------------------------------
 # Panel
 # ---------------------------------------------------------------------
-
 
 class TableTransformPanel:
     """Plugin version of the original context-core TableTransformPanel.
@@ -302,7 +495,8 @@ class TableTransformPanel:
     - add the derived column to the active dataset
     - preview a boolean subset expression
     - register a subset dataset
-    - optionally make that subset active
+    - combine multiple compatible datasets as one lazy vertical union
+    - optionally make derived datasets active
     """
 
     def __init__(self, context, data=None):
@@ -316,8 +510,8 @@ class TableTransformPanel:
 
         self.help_text = pn.pane.Markdown(
             (
-                "Create derived columns with pandas-style expressions and create "
-                "subset datasets with boolean filters.\n\n"
+                "Create derived columns, filter subsets, and combine existing "
+                "datasets as lazy by-name vertical unions.\n\n"
                 "**Examples**\n"
                 "- `col1 + col2`\n"
                 "- `col1 ** 2`\n"
@@ -434,6 +628,66 @@ class TableTransformPanel:
             margin=0,
         )
 
+        self.combine_dataset_select = pn.widgets.MultiChoice(
+            name="Datasets to combine",
+            options=[],
+            value=[],
+            placeholder="Choose two or more datasets",
+            sizing_mode="stretch_width",
+            margin=common_margin,
+        )
+
+        self.combine_name = pn.widgets.TextInput(
+            name="Combined dataset name",
+            placeholder="e.g. Euclid Q1 combined",
+            sizing_mode="stretch_width",
+            margin=common_margin,
+        )
+
+        self.combine_dataset_id = pn.widgets.TextInput(
+            name="Combined dataset ID",
+            placeholder="e.g. euclid_q1_combined",
+            sizing_mode="stretch_width",
+            margin=common_margin,
+        )
+
+        self.combine_add_source_column = pn.widgets.Checkbox(
+            name="Add source-dataset column",
+            value=False,
+            margin=common_margin,
+        )
+
+        self.combine_source_column_name = pn.widgets.TextInput(
+            name="Source dataset column",
+            value="__source_dataset",
+            placeholder="__source_dataset",
+            disabled=True,
+            sizing_mode="stretch_width",
+            margin=common_margin,
+        )
+
+        self.combine_set_active = pn.widgets.Checkbox(
+            name="Set combined dataset as active dataset",
+            value=True,
+            margin=common_margin,
+        )
+
+        self.inspect_combine_button = pn.widgets.Button(
+            name="Inspect Combination",
+            button_type="default",
+            height=32,
+            sizing_mode="stretch_width",
+            margin=0,
+        )
+
+        self.combine_button = pn.widgets.Button(
+            name="Combine Datasets",
+            button_type="primary",
+            height=32,
+            sizing_mode="stretch_width",
+            margin=0,
+        )
+
         self.preview = pn.pane.DataFrame(
             pd.DataFrame(),
             height=140,
@@ -444,11 +698,18 @@ class TableTransformPanel:
 
         self._watch(self.column_filter, self._on_column_filter_change, "value_input")
         self._watch(self.column_filter, self._on_column_filter_change, "value")
+        self._watch(
+            self.combine_add_source_column,
+            self._on_combine_source_column_toggle,
+            "value",
+        )
 
         self.preview_column_button.on_click(self._preview_column)
         self.add_column_button.on_click(self._add_column)
         self.preview_subset_button.on_click(self._preview_subset)
         self.create_subset_button.on_click(self._create_subset_dataset)
+        self.inspect_combine_button.on_click(self._inspect_combination)
+        self.combine_button.on_click(self._combine_datasets)
 
         try:
             self._last_active_dataset_id: Optional[str] = (
@@ -491,6 +752,22 @@ class TableTransformPanel:
             height=245,
         )
 
+        combine_section = self._section(
+            "Combine datasets",
+            pn.pane.Markdown(
+                "Append selected datasets by column name. Missing columns remain NULL; "
+                "no combined Parquet file is created.",
+                margin=(0, 0, 6, 0),
+            ),
+            self.combine_dataset_select,
+            self.combine_name,
+            self.combine_dataset_id,
+            self.combine_add_source_column,
+            self.combine_source_column_name,
+            self.combine_set_active,
+            self._button_row(self.inspect_combine_button, self.combine_button),
+        )
+
         preview_section = self._section(
             "Preview / Output",
             self.status,
@@ -512,6 +789,7 @@ class TableTransformPanel:
             active_section,
             derived_section,
             subset_section,
+            combine_section,
             preview_section,
             sizing_mode="stretch_width",
             scroll=True,
@@ -574,6 +852,7 @@ class TableTransformPanel:
             "dataset.loaded",
             "dataset.active.changed",
             "dataset.updated",
+            "dataset.removed",
             "dataset.mapping.updated",
         ):
             try:
@@ -687,6 +966,32 @@ class TableTransformPanel:
         )
 
         self._update_available_columns_view()
+        self._refresh_combine_dataset_options()
+
+    def _refresh_combine_dataset_options(self) -> None:
+        datasets = getattr(self.context, "datasets", None)
+        if datasets is None:
+            self.combine_dataset_select.options = []
+            self.combine_dataset_select.value = []
+            return
+
+        try:
+            dataset_ids = [str(dataset_id) for dataset_id in datasets.list_ids()]
+        except Exception:
+            dataset_ids = []
+
+        selected = [
+            str(dataset_id)
+            for dataset_id in (self.combine_dataset_select.value or [])
+            if str(dataset_id) in dataset_ids
+        ]
+        self.combine_dataset_select.options = dataset_ids
+        self.combine_dataset_select.value = selected
+
+    def _on_combine_source_column_toggle(self, _event=None) -> None:
+        self.combine_source_column_name.disabled = not bool(
+            self.combine_add_source_column.value
+        )
 
     def _on_column_filter_change(self, _event=None) -> None:
         self._update_available_columns_view()
@@ -933,6 +1238,141 @@ class TableTransformPanel:
             self.create_subset_button.disabled = False
 
     # ------------------------------------------------------------------
+    # Actions: combine datasets
+    # ------------------------------------------------------------------
+
+    def _combine_params(self) -> Dict[str, Any]:
+        return {
+            "dataset_ids": list(self.combine_dataset_select.value or []),
+            "combined_name": self.combine_name.value,
+            "combined_dataset_id": self.combine_dataset_id.value,
+            "set_active": bool(self.combine_set_active.value),
+            "add_source_column": bool(self.combine_add_source_column.value),
+            "source_column_name": self.combine_source_column_name.value,
+        }
+
+    def _inspect_combination(self, _event=None) -> None:
+        try:
+            params = self._combine_params()
+            dataset_ids = _normalise_combined_dataset_ids(params["dataset_ids"])
+            if len(dataset_ids) < 2:
+                raise ValueError("Choose at least two datasets to combine.")
+
+            source_column_name = None
+            if params["add_source_column"]:
+                source_column_name = str(params["source_column_name"] or "").strip()
+                if not source_column_name:
+                    raise ValueError(
+                        "Provide a source-dataset column name or disable that option."
+                    )
+
+            self.inspect_combine_button.disabled = True
+            self.status.object = "Inspecting dataset schemas..."
+
+            plan = _build_union_plan(
+                self.context,
+                dataset_ids=dataset_ids,
+                combined_name=str(params["combined_name"] or "").strip() or "Combined dataset",
+                source_column_name=source_column_name,
+            )
+
+            preview_rows = []
+            for dataset_id in dataset_ids:
+                preview_rows.append(
+                    {
+                        "dataset_id": dataset_id,
+                        "name": _active_dataset_name(self.context, dataset_id),
+                        "rows": plan["input_rows"].get(dataset_id),
+                        "columns": plan["input_column_counts"].get(dataset_id),
+                        "backend": plan["source_backends"].get(dataset_id),
+                    }
+                )
+
+            self._set_preview_df(pd.DataFrame(preview_rows))
+
+            row_text = (
+                "unknown"
+                if plan["row_count"] is None
+                else f"{int(plan['row_count']):,}"
+            )
+            sparse_count = int(plan["partial_column_count"])
+            self.status.object = (
+                f"Combination is compatible: **{len(dataset_ids)} datasets**, "
+                f"**{row_text} rows**, **{len(plan['columns']):,} columns**. "
+                f"**{plan['shared_column_count']:,}** columns are shared by every input; "
+                f"**{sparse_count:,}** occur in only some inputs. "
+                "Inspection used schemas/row-count metadata only; source rows were not "
+                "materialised."
+            )
+
+        except Exception as exc:
+            self.status.object = f"Combination inspection failed: `{exc}`"
+
+        finally:
+            self.inspect_combine_button.disabled = False
+
+    def _combine_datasets(self, _event=None) -> None:
+        try:
+            params = self._combine_params()
+            manager = getattr(self.context, "plugins", None)
+
+            self.combine_button.disabled = True
+            self.status.object = "Registering lazy combined dataset..."
+            self._set_preview_df(pd.DataFrame())
+
+            request = ActionRequest(
+                dataset_id=None,
+                params=params,
+                origin="core.table_tools.transform_panel",
+            )
+
+            if manager is not None:
+                result = manager.run_action(
+                    "core.table_tools.combine_datasets",
+                    self.context,
+                    request,
+                    return_processed=True,
+                )
+                value = getattr(result, "value", None) or {}
+            else:
+                action_result = combine_datasets_action(self.context, request)
+                value = action_result.value or {}
+
+            new_dataset_id = value.get("dataset_id")
+            combined_name = value.get("name", params["combined_name"])
+            row_count = value.get("rows")
+            columns = list(value.get("columns") or [])
+            input_dataset_ids = list(value.get("input_dataset_ids") or [])
+            backend = value.get("backend") or "duckdb_union_by_name"
+
+            if new_dataset_id:
+                preview_columns = columns[:12] or None
+                self._set_preview_df(
+                    _dataset_head(
+                        self.context,
+                        new_dataset_id,
+                        n=20,
+                        columns=preview_columns,
+                    )
+                )
+
+            self._refresh_metadata_panes()
+
+            row_text = "unknown" if row_count is None else f"{int(row_count):,}"
+            self.status.object = (
+                f"Created lazy combined dataset `{combined_name}` "
+                f"(`{new_dataset_id}`) from **{len(input_dataset_ids)}** inputs, "
+                f"with **{row_text}** rows and **{len(columns):,}** columns "
+                f"(`{backend}`). No combined Parquet file was written."
+            )
+
+        except Exception as exc:
+            self.status.object = f"Combine datasets failed: `{exc}`"
+
+        finally:
+            self.combine_button.disabled = False
+
+    # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
@@ -959,7 +1399,6 @@ class TableTransformPanel:
                 pass
 
         self._watchers.clear()
-
 
 # ---------------------------------------------------------------------
 # Shared helpers
@@ -988,7 +1427,6 @@ def _request_dataset_id(context, request: Optional[ActionRequest] = None) -> str
     if request is not None and request.dataset_id:
         return str(request.dataset_id)
     return _active_dataset_id(context)
-
 
 def _active_dataset_id(context) -> str:
     datasets = getattr(context, "datasets", None)
@@ -1019,7 +1457,6 @@ def _active_source(context, dataset_id: Optional[str] = None):
         return get_source(dataset_id)
 
     return None
-
 
 def _active_df(
     context,
@@ -1062,7 +1499,6 @@ def _active_df(
 
     return pd.DataFrame()
 
-
 def _dataset_columns(context, dataset_id: Optional[str] = None) -> list[str]:
     datasets = getattr(context, "datasets", None)
     if datasets is not None:
@@ -1086,7 +1522,6 @@ def _dataset_columns(context, dataset_id: Optional[str] = None) -> list[str]:
         return [str(col) for col in df.columns]
 
     return []
-
 
 def _dataset_row_count(context, dataset_id: Optional[str] = None) -> Optional[int]:
     datasets = getattr(context, "datasets", None)
@@ -1116,7 +1551,6 @@ def _dataset_row_count(context, dataset_id: Optional[str] = None) -> Optional[in
 
     return None
 
-
 def _dataset_head(
     context,
     dataset_id: Optional[str] = None,
@@ -1139,7 +1573,6 @@ def _dataset_head(
 
     return _active_df(context, dataset_id, limit=n, columns=columns)
 
-
 def _active_dataset_name(context, dataset_id: Optional[str] = None) -> str:
     datasets = getattr(context, "datasets", None)
     if datasets is not None:
@@ -1150,7 +1583,6 @@ def _active_dataset_name(context, dataset_id: Optional[str] = None) -> str:
 
     return str(dataset_id or _active_dataset_id(context))
 
-
 def _active_dataset_meta(context, dataset_id: Optional[str] = None) -> Dict[str, Any]:
     datasets = getattr(context, "datasets", None)
     if datasets is not None:
@@ -1160,7 +1592,6 @@ def _active_dataset_meta(context, dataset_id: Optional[str] = None) -> Dict[str,
             pass
 
     return {}
-
 
 # def _sync_config_main_df(
 #     context,
@@ -1189,18 +1620,14 @@ def _active_dataset_meta(context, dataset_id: Optional[str] = None) -> Dict[str,
 #     except Exception:
 #         pass
 
-
 def _quote_identifier(identifier: str) -> str:
     return '"' + str(identifier).replace('"', '""') + '"'
-
 
 def _quote_sql_string(value: Any) -> str:
     return "'" + str(value).replace("'", "''") + "'"
 
-
 def _is_identifier_like(value: str) -> bool:
     return bool(re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", str(value)))
-
 
 def _expression_to_sql(expr: str, columns: Sequence[str]) -> str:
     """
@@ -1262,30 +1689,42 @@ def _expression_to_sql(expr: str, columns: Sequence[str]) -> str:
     return sql
 
 def _is_duckdb_relation_source(source: Any) -> bool:
-    """
-    True for any source that can expose a DuckDB relation over Parquet-backed
-    data.
+    """Return whether a DatasetSource can participate in a lazy DuckDB relation.
 
-    This includes:
-    - plain DuckDBParquetDatasetSource
-    - lazy filtered Parquet views
-    - lazy derived-column Parquet views
+    Relation sources need a connection plus relation SQL. Parameters may be
+    supplied either through an explicit ``_relation_params()`` method or the
+    historical single-path ``_path_argument()`` contract. This includes plain
+    Parquet sources, filtered/derived views, and Table Tools union sources.
     """
     if source is None:
         return False
 
+    has_params = (
+        callable(getattr(source, "_relation_params", None))
+        or callable(getattr(source, "_path_argument", None))
+    )
+
     return (
         callable(getattr(source, "_connect", None))
         and callable(getattr(source, "_relation_sql", None))
-        and callable(getattr(source, "_path_argument", None))
+        and has_params
     )
 
-
 def _duckdb_relation_params(source: Any) -> list[Any]:
-
     if source is None:
         return []
 
+    explicit = getattr(source, "_relation_params", None)
+    if callable(explicit):
+        return list(explicit())
+
+    path_argument = getattr(source, "_path_argument", None)
+    if callable(path_argument):
+        return [path_argument()]
+
+    # Compatibility for older lazy relation sources that expose only a base
+    # source and optional filter parameters. New sources should implement
+    # _relation_params() directly.
     seen: set[int] = set()
 
     def _walk(src: Any) -> list[Any]:
@@ -1296,29 +1735,22 @@ def _duckdb_relation_params(source: Any) -> list[Any]:
         if obj_id in seen:
             raise RuntimeError(
                 "Cycle detected in DuckDB dataset source chain while building "
-                "SQL parameters. A lazy source probably has base_source pointing "
-                "to itself or to one of its descendants."
+                "SQL parameters."
             )
-
         seen.add(obj_id)
 
         base_source = getattr(src, "base_source", None)
-
-        if base_source is not None:
-            params = _walk(base_source)
-            where_params = getattr(src, "where_params", None)
-            if where_params:
-                params.extend(list(where_params))
+        if base_source is None:
             seen.remove(obj_id)
-            return params
+            return []
 
-        path_argument = getattr(src, "_path_argument", None)
-        if callable(path_argument):
-            seen.remove(obj_id)
-            return [path_argument()]
+        params = _walk(base_source)
+        where_params = getattr(src, "where_params", None)
+        if where_params:
+            params.extend(list(where_params))
 
         seen.remove(obj_id)
-        return []
+        return params
 
     return _walk(source)
 
@@ -1756,7 +2188,6 @@ class FilteredDuckDBParquetDatasetSource(
         params.extend(self.where_params)
         return params
 
-
     def _params(self, extra: Optional[Sequence[Any]] = None) -> list[Any]:
         params = self._relation_params()
         if extra:
@@ -1986,7 +2417,6 @@ def _duckdb_query_df(
     finally:
         con.close()
 
-
 def _duckdb_fetchone(
     source: Any,
     sql: str,
@@ -1997,7 +2427,6 @@ def _duckdb_fetchone(
         return con.execute(sql, list(params or [])).fetchone()
     finally:
         con.close()
-
 
 def _duckdb_copy_query_to_parquet(
     source: Any,
@@ -2052,7 +2481,6 @@ def _new_cache_path(context, dataset_id: str, suffix: str) -> Path:
 
     safe_id = normalise_dataset_id(f"{dataset_id}__{suffix}")
     return cache_dir / f"{safe_id}.parquet"
-
 
 def _register_parquet_dataset(
     context,
@@ -2343,7 +2771,6 @@ def _create_subset_duckdb_parquet(
         row_count=matched_count,
     )
 
-
 def _create_subset_pandas_fallback(
     context,
     *,
@@ -2492,7 +2919,6 @@ def _preview_subset_expression(
 
     return filtered.head(limit).copy(), int(len(filtered)), int(len(df))
 
-
 def _require_pandas_dataframe(context, dataset_id: Optional[str] = None) -> pd.DataFrame:
     source = _active_source(context, dataset_id)
 
@@ -2521,7 +2947,6 @@ def _require_pandas_dataframe(context, dataset_id: Optional[str] = None) -> pd.D
         "already in-memory pandas dataset. Refusing to materialise the full "
         "dataset through get_df()."
     )
-
 
 def _evaluate_expression(expr: str, df: pd.DataFrame) -> pd.Series:
     expr = (expr or "").strip()
@@ -2561,7 +2986,6 @@ def _evaluate_expression(expr: str, df: pd.DataFrame) -> pd.Series:
         return pd.Series(result, index=df.index)
 
     return pd.Series([result] * len(df), index=df.index)
-
 
 def _evaluate_boolean_expression(expr: str, df: pd.DataFrame) -> pd.Series:
     result = _evaluate_expression(expr, df)
@@ -2603,7 +3027,6 @@ def _dataset_get_mappings(datasets, dataset_id: str) -> Dict[str, str]:
 
     return {}
 
-
 def _copy_dataset_mappings(
     datasets,
     *,
@@ -2621,3 +3044,198 @@ def _copy_dataset_mappings(
                 set_mapping(target_dataset_id, semantic_name, column_name)
             except Exception:
                 pass
+
+def _normalise_combined_dataset_ids(values: Any) -> list[str]:
+    if values is None:
+        return []
+    if isinstance(values, str):
+        values = [values]
+
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        dataset_id = str(value or "").strip()
+        if not dataset_id or dataset_id in seen:
+            continue
+        seen.add(dataset_id)
+        result.append(dataset_id)
+    return result
+
+def _build_union_plan(
+    context,
+    *,
+    dataset_ids: Sequence[str],
+    combined_name: str,
+    source_column_name: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Build and schema-check a lazy union without reading source-scale rows."""
+
+    dataset_ids = _normalise_combined_dataset_ids(dataset_ids)
+    if len(dataset_ids) < 2:
+        raise ValueError("Choose at least two datasets to combine.")
+
+    combined_columns: list[str] = []
+    seen_columns: set[str] = set()
+    column_presence: Dict[str, int] = {}
+    branches: list[UnionBranch] = []
+    input_rows: Dict[str, Optional[int]] = {}
+    input_column_counts: Dict[str, int] = {}
+    source_backends: Dict[str, str] = {}
+
+    for dataset_id in dataset_ids:
+        source = _active_source(context, dataset_id)
+        if not _is_duckdb_relation_source(source):
+            backend = getattr(source, "backend_name", "unknown") if source is not None else "missing"
+            raise RuntimeError(
+                f"Dataset `{dataset_id}` uses backend `{backend}` and cannot be "
+                "combined lazily. Table Tools combine currently requires each "
+                "input to expose a DuckDB relation."
+            )
+
+        columns = [str(column) for column in _dataset_columns(context, dataset_id)]
+        if source_column_name and source_column_name in columns:
+            raise ValueError(
+                f"Cannot add source column `{source_column_name}` because it already "
+                f"exists in dataset `{dataset_id}`."
+            )
+
+        for column in columns:
+            column_presence[column] = column_presence.get(column, 0) + 1
+            if column not in seen_columns:
+                seen_columns.add(column)
+                combined_columns.append(column)
+
+        row_count = _dataset_row_count(context, dataset_id)
+        input_rows[dataset_id] = row_count
+        input_column_counts[dataset_id] = len(columns)
+        source_backends[dataset_id] = str(
+            getattr(source, "backend_name", "unknown") or "unknown"
+        )
+
+        branches.append(
+            UnionBranch(
+                dataset_id=dataset_id,
+                source=source,
+                query_sql=_duckdb_relation_query_sql(source),
+                params=tuple(_duckdb_relation_params(source)),
+                columns=tuple(columns),
+                row_count=row_count,
+            )
+        )
+
+    if source_column_name:
+        combined_columns.append(str(source_column_name))
+
+    row_count_hint: Optional[int]
+    if all(value is not None for value in input_rows.values()):
+        row_count_hint = sum(int(value or 0) for value in input_rows.values())
+    else:
+        row_count_hint = None
+
+    union_source = LazyUnionByNameDuckDBSource(
+        branches=branches,
+        dataset_name=combined_name or None,
+        columns_hint=combined_columns,
+        row_count_hint=row_count_hint,
+        source_column_name=source_column_name,
+    )
+
+    # DESCRIBE validates shared-column type compatibility and resolves DuckDB's
+    # final output types without scanning or materialising the complete datasets.
+    dtypes = union_source.dtypes()
+    resolved_columns = union_source.columns()
+
+    input_count = len(dataset_ids)
+    shared_column_count = sum(
+        1 for count in column_presence.values() if count == input_count
+    )
+    partial_column_count = sum(
+        1 for count in column_presence.values() if count < input_count
+    )
+    unique_column_count = sum(
+        1 for count in column_presence.values() if count == 1
+    )
+
+    return {
+        "source": union_source,
+        "columns": resolved_columns,
+        "dtypes": dtypes,
+        "row_count": row_count_hint,
+        "input_rows": input_rows,
+        "input_column_counts": input_column_counts,
+        "source_backends": source_backends,
+        "source_column_name": source_column_name,
+        "shared_column_count": shared_column_count,
+        "partial_column_count": partial_column_count,
+        "unique_column_count": unique_column_count,
+    }
+
+def _dataset_consensus_mappings(
+    datasets,
+    *,
+    dataset_ids: Sequence[str],
+    available_columns: Sequence[str],
+) -> tuple[Dict[str, str], Dict[str, Dict[str, Optional[str]]]]:
+    """Return only mappings that agree across every input dataset.
+
+    Missing or conflicting mappings are deliberately left unresolved on the
+    combined dataset so the platform mapping UI remains authoritative.
+    """
+
+    ids = [str(dataset_id) for dataset_id in dataset_ids]
+    per_dataset = {
+        dataset_id: _dataset_get_mappings(datasets, dataset_id)
+        for dataset_id in ids
+    }
+    semantic_names = sorted(
+        {
+            str(name)
+            for mappings in per_dataset.values()
+            for name in mappings.keys()
+        }
+    )
+    available = {str(column) for column in available_columns}
+
+    consensus: Dict[str, str] = {}
+    conflicts: Dict[str, Dict[str, Optional[str]]] = {}
+
+    for semantic_name in semantic_names:
+        values: Dict[str, Optional[str]] = {}
+        for dataset_id in ids:
+            raw = per_dataset[dataset_id].get(semantic_name)
+            values[dataset_id] = None if raw in (None, "") else str(raw)
+
+        nonempty = [value for value in values.values() if value is not None]
+        distinct = set(nonempty)
+
+        if len(nonempty) != len(ids) or len(distinct) != 1:
+            conflicts[semantic_name] = values
+            continue
+
+        column_name = nonempty[0]
+        if column_name == "Use Index" or column_name not in available:
+            conflicts[semantic_name] = values
+            continue
+
+        consensus[semantic_name] = column_name
+
+    return consensus, conflicts
+
+def _apply_dataset_mappings(
+    datasets,
+    *,
+    target_dataset_id: str,
+    mappings: Dict[str, str],
+) -> Dict[str, str]:
+    set_mapping = getattr(datasets, "set_mapping", None)
+    if not callable(set_mapping) or not mappings:
+        return {}
+
+    applied: Dict[str, str] = {}
+    for semantic_name, column_name in mappings.items():
+        try:
+            set_mapping(target_dataset_id, semantic_name, column_name)
+        except Exception:
+            continue
+        applied[str(semantic_name)] = str(column_name)
+    return applied
