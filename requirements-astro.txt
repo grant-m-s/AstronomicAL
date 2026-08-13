@@ -4,6 +4,7 @@ astropy>=7.2
 astropy-healpix>=1.1
 astroquery>=0.4
 cdshealpix>=0.8
+fitsio>=1.4.2
 gwcs>=1.0
 mocpy>=0.17
 ndcube>=2.4
