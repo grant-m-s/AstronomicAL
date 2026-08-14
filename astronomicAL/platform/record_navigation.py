@@ -158,18 +158,32 @@ class RecordNavigationManager:
 
     def previous(self, *, origin: str = "toolbar") -> NavigationState:
         state = self.refresh()
+
         if state.position is None:
+            if state.has_focus and state.scope == "dataset":
+                raise NavigationError(
+                    "The focused record position is still being resolved."
+                )
             return self.go_to_position(0, origin=origin)
+
         if not state.can_previous:
             raise NavigationError("Already at the first record in this scope.")
+
         return self.go_to_position(state.position - 1, origin=origin)
 
     def next(self, *, origin: str = "toolbar") -> NavigationState:
         state = self.refresh()
+
         if state.position is None:
+            if state.has_focus and state.scope == "dataset":
+                raise NavigationError(
+                    "The focused record position is still being resolved."
+                )
             return self.go_to_position(0, origin=origin)
+
         if not state.can_next:
             raise NavigationError("Already at the last record in this scope.")
+
         return self.go_to_position(state.position + 1, origin=origin)
 
     def first(self, *, origin: str = "toolbar") -> NavigationState:
@@ -538,7 +552,8 @@ class RecordNavigationManager:
 
         if topic == "dataset.active.changed":
             self._invalidate_all_positions()
-        elif topic in {"dataset.updated", "dataset.mapping.updated"}:
+
+        elif topic == "dataset.updated":
             dataset_id = self._dataset_id_from_event(payload)
             if dataset_id is None:
                 try:
@@ -547,7 +562,84 @@ class RecordNavigationManager:
                     dataset_id = None
 
             if dataset_id is not None:
-                self._invalidate_dataset_positions(str(dataset_id))
+                dataset_id = str(dataset_id)
+
+                preserves_positions = False
+
+                if isinstance(payload, dict):
+                    change = str(payload.get("change") or "")
+                    overlay_name = payload.get("overlay_name")
+
+                    if overlay_name and change in {
+                        "column.added",
+                        "column.updated",
+                        "column.removed",
+                    }:
+                        changed_columns = {
+                            str(column)
+                            for column in (payload.get("changed_columns") or [])
+                        }
+
+                        try:
+                            id_column = self.datasets.get_mapping(
+                                dataset_id,
+                                "record_id",
+                                default=None,
+                            )
+                        except Exception:
+                            id_column = None
+
+                        preserves_positions = (
+                            id_column is None
+                            or str(id_column) not in changed_columns
+                        )
+
+                if not preserves_positions:
+                    self._invalidate_dataset_positions(dataset_id)
+
+        elif topic == "dataset.mapping.updated":
+            dataset_id = self._dataset_id_from_event(payload)
+            if dataset_id is None:
+                try:
+                    dataset_id = self.datasets.active_id()
+                except Exception:
+                    dataset_id = None
+
+            if dataset_id is not None:
+                dataset_id = str(dataset_id)
+
+                try:
+                    current_id_column = self.datasets.get_mapping(
+                        dataset_id,
+                        "record_id",
+                        default=None,
+                    )
+                except Exception:
+                    current_id_column = None
+
+                state = self.get_state()
+                state_matches_dataset = (
+                    state.dataset_id is not None
+                    and str(state.dataset_id) == dataset_id
+                )
+                previous_id_column = (
+                    state.id_column
+                    if state_matches_dataset
+                    else None
+                )
+
+                record_id_mapping_changed = (
+                    not state_matches_dataset
+                    or (
+                        None if current_id_column is None else str(current_id_column)
+                    )
+                    != (
+                        None if previous_id_column is None else str(previous_id_column)
+                    )
+                )
+
+                if record_id_mapping_changed:
+                    self._invalidate_dataset_positions(dataset_id)
 
         self.refresh()
 
