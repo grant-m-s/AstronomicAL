@@ -88,7 +88,9 @@ In practice, this means the same AstronomicAL installation can support very diff
 
 Core functionality is implemented using the same plugin model so that the extension mechanism is not reserved only for third-party code. The aim is for new features to integrate through shared platform contracts rather than through direct coupling between panels.
 
-We are actively developing a plugin marketplace that will allow users to create and share domain-specific plugins, and discover and install plugins directly from within AstronomicAL.
+Instructions for creating and publishing a plugin can be found with our ![hello world plugin example](https://github.com/grant-m-s/AstronomicAL-Hello-World)!
+
+Our ![Plugin Marketplace](https://github.com/grant-m-s/AstronomicAL-Marketplace) is where the catalogue of external plugins is housed. The builtin plugin manager which allows you to search, install and enable custom plugins reads from this catalogue.
 
 ---
 
