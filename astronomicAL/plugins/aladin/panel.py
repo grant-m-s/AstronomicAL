@@ -10,10 +10,8 @@ import uuid
 import numpy as np
 import panel as pn
 
-
 PLUGIN_ID = "astro.aladin"
 SETTINGS_HEIGHT = 72
-
 
 SURVEY_GROUPS: Dict[str, Dict[str, str]] = {
     "X-rays": {
@@ -44,6 +42,25 @@ SURVEY_GROUPS: Dict[str, Dict[str, str]] = {
     },
 }
 
+# Direct HiPS endpoints for catalogues whose CDS-ID resolution currently depends
+# on services that may be unavailable. These mirrors publish the same creator_did.
+# Keep the user-facing survey IDs unchanged for settings and workspace snapshots.
+SURVEY_MIRRORS: Dict[str, List[str]] = {
+    "P/DSS2/color": [
+        "https://cdn.skies.esac.esa.int/DSSColor",
+        "https://stpubdata.s3.us-east-1.amazonaws.com/mast/skybackgrounds/DSSColor",
+    ],
+    "CDS/P/SDSS9/color": [
+        "https://irsa.ipac.caltech.edu/data/hips/CDS/SDSS/DR9/color",
+        "https://hips.china-vo.org/m/CDS_P_SDSS9_color",
+    ],
+    "P/2MASS/color": [
+        "https://irsa.ipac.caltech.edu/data/hips/CDS/2MASS/Color",
+    ],
+    "P/allWISE/color": [
+        "https://irsa.ipac.caltech.edu/data/hips/CDS/AllWISE/RGB-W4-W2-W1",
+    ],
+}
 
 def _style_widget(
     widget: Any,
@@ -60,7 +77,6 @@ def _style_widget(
     except Exception:
         pass
     return widget
-
 
 def _settings_box(*controls: Any) -> pn.FlexBox:
     return pn.FlexBox(
@@ -81,7 +97,6 @@ def _settings_box(*controls: Any) -> pn.FlexBox:
         },
     )
 
-
 def _small_label(text: str, *, width: int = 76) -> pn.pane.HTML:
     return pn.pane.HTML(
         f"<div style='font-size:11px;font-weight:600;color:#555;"
@@ -91,7 +106,6 @@ def _small_label(text: str, *, width: int = 76) -> pn.pane.HTML:
         sizing_mode="fixed",
         margin=(0, 2, 0, 6),
     )
-
 
 def _safe_float(value: Any) -> Optional[float]:
     try:
@@ -105,7 +119,6 @@ def _safe_float(value: Any) -> Optional[float]:
         return out
     except Exception:
         return None
-
 
 def make_srcdoc_aladin_lite(
     *,
@@ -125,6 +138,7 @@ def make_srcdoc_aladin_lite(
     """
 
     survey_json = json.dumps(str(survey_id))
+    survey_mirrors_json = json.dumps(SURVEY_MIRRORS.get(str(survey_id), []))
     target_json = json.dumps(f"{float(ra)} {float(dec)}")
     ra_json = json.dumps(float(ra))
     dec_json = json.dumps(float(dec))
@@ -142,15 +156,6 @@ def make_srcdoc_aladin_lite(
     name="viewport"
     content="width=device-width, initial-scale=1, maximum-scale=1"
   />
-  <link
-    rel="stylesheet"
-    href="https://aladin.cds.unistra.fr/AladinLite/api/v3/latest/aladin.min.css"
-  />
-  <script
-    type="text/javascript"
-    src="https://aladin.cds.unistra.fr/AladinLite/api/v3/latest/aladin.js"
-    charset="utf-8"
-  ></script>
   <style>
     html, body {{
       width: 100%;
@@ -182,6 +187,7 @@ def make_srcdoc_aladin_lite(
   <div id="aladin-lite-div"></div>
   <script>
     const surveyId = {survey_json};
+    const surveyMirrors = {survey_mirrors_json};
     const target = {target_json};
     const ra = {ra_json};
     const dec = {dec_json};
@@ -197,23 +203,30 @@ def make_srcdoc_aladin_lite(
       error.textContent = message;
     }}
 
-    function addCentreMarker(aladin) {{
+    function addCentreMarker(api, aladin) {{
       try {{
-        const overlay = A.graphicOverlay({{name: "Selected source"}});
-        aladin.addOverlay(overlay);
-        overlay.add(A.marker(ra, dec, {{
+        // A.marker returns a Source, not a graphic footprint. A Source must
+        // be registered in a Catalog, not a GraphicOverlay.
+        const catalog = api.catalog({{
+          name: "Selected source",
+          color: "#ff9900",
+          sourceSize: 12,
+          onClick: "showPopup"
+        }});
+        aladin.addCatalog(catalog);
+        catalog.addSources([api.marker(ra, dec, {{
           popupTitle: "Selected source",
           popupDesc: "RA: " + ra.toFixed(6) + ", Dec: " + dec.toFixed(6)
-        }}));
+        }})]);
       }} catch (err) {{
         console.warn("Could not add centre marker", err);
       }}
     }}
 
-    function addCatalogueLayers(aladin) {{
+    function addCatalogueLayers(api, aladin) {{
       if (showSimbad) {{
         try {{
-          aladin.addCatalog(A.catalogFromSimbad(target, 0.05, {{
+          aladin.addCatalog(api.catalogFromSimbad(target, 0.05, {{
             name: "Simbad",
             sourceSize: 12
           }}));
@@ -224,7 +237,7 @@ def make_srcdoc_aladin_lite(
 
       if (showNed) {{
         try {{
-          aladin.addCatalog(A.catalogFromNED(target, 0.05, {{
+          aladin.addCatalog(api.catalogFromNED(target, 0.05, {{
             name: "NED",
             sourceSize: 12
           }}));
@@ -234,10 +247,54 @@ def make_srcdoc_aladin_lite(
       }}
     }}
 
-    try {{
-      A.init.then(() => {{
-        const aladin = A.aladin("#aladin-lite-div", {{
-          survey: surveyId,
+    // The npm dist/aladin.min.js file is an ES module, not a window.A build.
+    // Pin the release for reproducible installs. The secondary URL hosts the
+    // same module as an availability fallback if the first CDN cannot be reached.
+    const aladinModuleURLs = [
+      "https://cdn.jsdelivr.net/npm/aladin-lite@3.8.2/dist/aladin.min.js",
+      "https://unpkg.com/aladin-lite@3.8.2/dist/aladin.min.js"
+    ];
+
+    // If a known external mirror exists, verify its HiPS properties before
+    // handing it to Aladin. This avoids an unsuccessful CDS lookup followed
+    // by a misleading localhost/<CDS ID>/properties 404.
+    async function resolveSurvey() {{
+      if (!surveyMirrors.length) return surveyId;
+
+      const failures = [];
+      for (const url of surveyMirrors) {{
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 5000);
+        try {{
+          const response = await fetch(url + "/properties", {{
+            mode: "cors",
+            signal: controller.signal
+          }});
+          if (!response.ok) throw new Error("HTTP " + response.status);
+          const properties = await response.text();
+          if (!/^hips_order\\s*=/m.test(properties)) {{
+            throw new Error("Response is not a HiPS properties file");
+          }}
+          console.info("Aladin using HiPS mirror:", surveyId, url);
+          return url;
+        }} catch (err) {{
+          failures.push(url + " (" + String(err) + ")");
+          console.warn("Aladin HiPS mirror unavailable:", url, err);
+        }} finally {{
+          clearTimeout(timeout);
+        }}
+      }}
+      throw new Error(
+        "No accessible HiPS mirror for " + surveyId + ". " +
+        "Check network/CORS access to: " + failures.join("; ")
+      );
+    }}
+
+    function initialiseAladin(api) {{
+      Promise.resolve(api.init).then(async () => {{
+        const resolvedSurvey = await resolveSurvey();
+        const aladin = api.aladin("#aladin-lite-div", {{
+          survey: resolvedSurvey,
           target: target,
           fov: fov,
           cooFrame: "ICRSd",
@@ -252,18 +309,48 @@ def make_srcdoc_aladin_lite(
           showLayerBox: true
         }});
 
-        addCentreMarker(aladin);
-        addCatalogueLayers(aladin);
+        addCatalogueLayers(api, aladin);
       }}).catch((err) => {{
+        console.error("Aladin Lite initialisation failed:", err);
         showError("Could not initialise Aladin Lite: " + err);
       }});
-    }} catch (err) {{
-      showError("Could not initialise Aladin Lite: " + err);
     }}
+
+    async function loadAladinModule() {{
+      for (const url of aladinModuleURLs) {{
+        let module;
+        try {{
+          // Dynamic import parses `export` declarations correctly and provides
+          // the API namespace directly, without expecting a global window.A.
+          module = await import(url);
+        }} catch (err) {{
+          console.warn("Could not import Aladin Lite module:", url, err);
+          continue;
+        }}
+
+        const api = module.default ?? module.A;
+        if (!api || !api.init || typeof api.aladin !== "function") {{
+          console.warn("Aladin Lite module has no usable API:", url, Object.keys(module));
+          continue;
+        }}
+
+        initialiseAladin(api);
+        return;
+      }}
+
+      showError(
+        "Could not load Aladin Lite as an ES module. " +
+        "Check the browser Network tab and console for CDN/CORS/CSP failures."
+      );
+    }}
+
+    loadAladinModule().catch((err) => {{
+      console.error("Aladin Lite module loader failed:", err);
+      showError("Could not initialise Aladin Lite: " + err);
+    }});
   </script>
 </body>
 </html>"""
-
 
 def make_iframe_html(
     *,
@@ -305,7 +392,6 @@ def make_iframe_html(
 ></iframe>
 """
 
-
 @dataclass
 class _ResolvedTarget:
     dataset_id: str
@@ -316,7 +402,6 @@ class _ResolvedTarget:
     ra_column: str
     dec_column: str
     id_column: Optional[str]
-
 
 class AladinPanel:
     """Platform-native Aladin Lite panel."""
@@ -1251,11 +1336,9 @@ class AladinPanel:
             },
         )
 
-
 # ----------------------------------------------------------------------
 # Plugin factory
 # ----------------------------------------------------------------------
-
 
 def create_aladin_panel(
     context: Any,
