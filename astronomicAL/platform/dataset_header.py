@@ -36,6 +36,11 @@ class DatasetHeaderController:
         self._subs: list[Any] = []
         self._updating_select = False
         self._disposed = False
+        self._document: Any = None
+        try:
+            self._document = pn.state.curdoc
+        except Exception:
+            self._document = None
 
         _install_application_chrome_css()
 
@@ -136,14 +141,86 @@ class DatasetHeaderController:
                 subscription = events.subscribe(topic, self._on_dataset_event)
             self._subs.append(subscription)
 
+    def _resolve_document(self) -> Any:
+        for panel_object in (
+            getattr(self, "view", None),
+            getattr(self, "active_dataset_select", None),
+            getattr(self, "dataset_stats", None),
+        ):
+            models = getattr(panel_object, "_models", None)
+            if not isinstance(models, dict):
+                continue
+            for value in models.values():
+                model = value[0] if isinstance(value, tuple) and value else value
+                document = getattr(model, "document", None)
+                if document is not None:
+                    self._document = document
+                    return document
+
+        document = getattr(self, "_document", None)
+        if document is not None:
+            return document
+
+        try:
+            document = pn.state.curdoc
+        except Exception:
+            document = None
+
+        if document is not None:
+            self._document = document
+
+        return document
+
+    def _has_attached_models(self) -> bool:
+        for panel_object in (
+            getattr(self, "view", None),
+            getattr(self, "active_dataset_select", None),
+            getattr(self, "dataset_stats", None),
+        ):
+            models = getattr(panel_object, "_models", None)
+            if not isinstance(models, dict):
+                continue
+            for value in models.values():
+                model = value[0] if isinstance(value, tuple) and value else value
+                if getattr(model, "document", None) is not None:
+                    return True
+
+        return False
+
+    def _schedule(self, callback: Any) -> None:
+        if self._disposed:
+            return
+
+        def run() -> None:
+            if not self._disposed:
+                callback()
+
+        document = self._resolve_document()
+        add_next_tick = getattr(document, "add_next_tick_callback", None)
+
+        if callable(add_next_tick):
+            try:
+                add_next_tick(run)
+                return
+            except Exception:
+                # If models are already attached, a rejected callback normally
+                # means the document is closing. Do not mutate those models
+                # directly from the current worker thread.
+                if self._has_attached_models():
+                    return
+
+        run()
+
     def _on_dataset_event(self, topic: str, payload: Any) -> None:
         del payload
         if self._disposed:
             return
+
         if topic == "dataset.open_requested":
-            self._open_modal()
+            self._schedule(self._open_modal)
             return
-        self._refresh_header()
+
+        self._schedule(self._refresh_header)
 
     def dispose(self) -> None:
         if self._disposed:
