@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import panel as pn
-
 # Layout styling is applied directly to Panel layout models so it remains
 # reliable across Panel/Bokeh shadow-root changes.
 ROOT_STYLES = {
@@ -11,6 +9,7 @@ ROOT_STYLES = {
     "min-width": "0",
     "padding": "10px",
     "background": "#f3f5f8",
+    "color": "#263244",
     "overflow": "visible",
 }
 
@@ -335,7 +334,6 @@ input[type="checkbox"] {
 }
 """
 
-
 BUTTON_PRIMARY_STYLESHEET = """
 :host {
   box-sizing: border-box !important;
@@ -470,132 +468,17 @@ progress,
 }
 """
 
-# Only lightweight page-level rules live here. Widget internals are styled with
-# component-local stylesheets above so they work inside shadow roots.
-HF_BROWSER_CSS = """
-.al-hf-root-v3 {
-  color: #263244;
-}
-.al-hf-root-v3,
-.al-hf-root-v3 * {
-  box-sizing: border-box;
-  min-width: 0;
-}
-.al-hf-root-v3 .bk-HTML,
-.al-hf-root-v3 .bk-Markup,
-.al-hf-root-v3 .al-hf-safe-content {
-  width: 100% !important;
-  max-width: 100% !important;
-  min-width: 0 !important;
-}
-.al-hf-root-v3 code,
-.al-hf-root-v3 pre {
-  max-width: 100%;
-  overflow-wrap: anywhere;
-  word-break: break-word;
-  white-space: pre-wrap;
-}
-.al-hf-root-v3 .al-hf-preview-grid {
-  box-sizing: border-box !important;
-  display: flex !important;
-  flex-direction: column !important;
-  gap: 10px !important;
-  width: 100% !important;
-  max-width: 100% !important;
-  min-width: 0 !important;
-  overflow: visible !important;
-  position: static !important;
-}
-.al-hf-root-v3 .al-hf-preview-card-pane,
-.al-hf-root-v3 .al-hf-preview-card-pane > div {
-  box-sizing: border-box !important;
-  display: block !important;
-  width: 100% !important;
-  max-width: 100% !important;
-  min-width: 0 !important;
-  height: 260px !important;
-  min-height: 260px !important;
-  overflow: hidden !important;
-  position: static !important;
-}
-.al-hf-root-v3 .al-hf-preview-card {
-  box-sizing: border-box;
-  width: 100%;
-  height: 260px;
-  padding: 8px;
-  border: 1px solid #d8dee8;
-  border-radius: 8px;
-  background: #ffffff;
-  overflow: hidden;
-}
-.al-hf-root-v3 .al-hf-preview-card img {
-  display: block;
-  width: 100%;
-  max-width: 100%;
-  height: 180px;
-  object-fit: contain;
-  background: #111111;
-}
-.al-hf-root-v3 .al-hf-preview-card-copy {
-  min-width: 0;
-  padding-top: 7px;
-  overflow: hidden;
-}
-.al-hf-root-v3 .al-hf-preview-record,
-.al-hf-root-v3 .al-hf-preview-label,
-.al-hf-root-v3 .al-hf-preview-meta {
-  min-width: 0;
-  max-width: 100%;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.al-hf-root-v3 .al-hf-preview-record {
-  color: #263244;
-  font-size: 11px;
-  font-weight: 720;
-  line-height: 1.35;
-}
-.al-hf-root-v3 .al-hf-preview-label {
-  color: #263244;
-  font-size: 10.5px;
-  line-height: 1.35;
-}
-.al-hf-root-v3 .al-hf-preview-meta {
-  color: #687386;
-  font-size: 9.5px;
-  line-height: 1.35;
-}
-.al-hf-root-v3 .al-hf-preview-note,
-.al-hf-root-v3 .al-hf-preview-empty {
-  box-sizing: border-box;
-  width: 100%;
-  max-width: 100%;
-  padding: 8px 10px;
-  border: 1px solid #d8e3ec;
-  border-radius: 7px;
-  background: #f7fafc;
-  color: #526071;
-  font-size: 9.8px;
-  line-height: 1.45;
-  overflow-wrap: anywhere;
-}
-"""
-
-_HF_STYLES_INSTALLED = False
-
+# Do not install plugin CSS through ``pn.config.raw_css``.  That registry is
+# process-global and survives an individual panel instance, so plugin-owned
+# styling must remain on HF-owned Panel models or inside their HTML content.
+#
+# These names remain for compatibility with development snapshots that imported
+# them directly, but they intentionally have no global side effect.
+HF_BROWSER_CSS = ""
 
 def install_huggingface_styles() -> None:
-    global _HF_STYLES_INSTALLED
-    if _HF_STYLES_INSTALLED:
-        return
-
-    marker = ".al-hf-root-v3"
-    if not any(marker in css for css in pn.config.raw_css):
-        pn.config.raw_css.append(HF_BROWSER_CSS)
-
-    _HF_STYLES_INSTALLED = True
-
+    """Deprecated no-op; Hugging Face panel styling is instance-local."""
+    return None
 
 __all__ = [
     "BUTTON_PRIMARY_STYLESHEET",
