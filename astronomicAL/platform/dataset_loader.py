@@ -1266,7 +1266,7 @@ class DatasetLoaderController:
         self.refresh_button.disabled = self._busy
 
         self.source_select.disabled = self._busy or not bool(self._sources)
-        
+
         self.dataset_name_input.disabled = (
             self._busy
             or source is None
@@ -1932,9 +1932,11 @@ class DatasetLoaderController:
         self._last_result = result
         self._cache_assessment_memo.clear()
         try:
-            self._clear_selection_for_dataset_switch()
             topic = "dataset.updated" if result.updated_existing else "dataset.loaded"
             self._publish(topic, result.event_payload())
+            if result.updated_existing:
+                # Replacing rows under the same dataset ID invalidates old record selections.
+                self._clear_selection_for_dataset_regeneration()
             self.context.datasets.set_active(result.dataset_id, origin=_LOADER_ID, force=result.updated_existing)
         except BaseException as exc:
             self._set_busy(False)
@@ -2123,7 +2125,6 @@ class DatasetLoaderController:
             self._refresh_state()
             return
         try:
-            self._clear_selection_for_dataset_switch()
             self.context.datasets.set_active(dataset_id, origin=_LOADER_ID)
         except BaseException as exc:
             self._finish_error(exc)
@@ -2527,18 +2528,15 @@ class DatasetLoaderController:
     def _existing_dataset_is_active(self) -> bool:
         return self._existing_dataset_id is not None and self._active_dataset_id() == self._existing_dataset_id
 
-    def _clear_selection_for_dataset_switch(self) -> None:
+    def _clear_selection_for_dataset_regeneration(self) -> None:
         selection = getattr(self.context, "selection", None)
         if selection is None:
             return
-        try:
-            selection.clear_focus(origin="dataset.active.changed")
-        except Exception:
-            pass
-        try:
-            selection.clear_selection_set(origin="dataset.active.changed")
-        except Exception:
-            pass
+        for method_name in ("clear_focus", "clear_selection_set"):
+            try:
+                getattr(selection, method_name)(origin="dataset.source.regenerated")
+            except Exception:
+                pass
 
     def _publish(self, topic: str, payload: dict[str, Any]) -> None:
         events = getattr(self.context, "events", None)

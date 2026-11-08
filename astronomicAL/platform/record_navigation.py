@@ -12,7 +12,6 @@ RecordIdKey = tuple[str, Any]
 class NavigationError(RuntimeError):
     """Raised when a requested record-navigation operation is unavailable."""
 
-
 @dataclass(frozen=True)
 class NavigationState:
     dataset_id: Optional[str] = None
@@ -33,7 +32,6 @@ class NavigationState:
 
     def to_payload(self) -> dict[str, Any]:
         return asdict(self)
-
 
 class RecordNavigationManager:
     """Owns global record navigation while SelectionManager owns focus.
@@ -64,6 +62,8 @@ class RecordNavigationManager:
         self._subscriptions: list[Any] = []
         self._disposed = False
         self._state = NavigationState()
+        self._switching_dataset = False
+        self._pending_first_focus_dataset_id: Optional[str] = None
 
         for topic in self.EVENT_TOPICS:
             self._subscriptions.append(
@@ -90,22 +90,30 @@ class RecordNavigationManager:
             raise ValueError(f"Unknown navigation scope: {scope!r}")
         with self._lock:
             self._scope = scope
-        state = self.refresh(force_publish=True)
+        state = self.refresh(force_publish=True, emit_scope_change=False)
+        # Publish the effective scope, not the rejected empty-selection request.
         self.events.publish(
             "navigation.scope.changed",
-            {
-                "scope": scope,
-                "dataset_id": state.dataset_id,
-                "origin": origin,
-            },
+            {"scope": state.scope, "dataset_id": state.dataset_id, "origin": origin},
         )
         return state
 
-    def refresh(self, *, force_publish: bool = False) -> NavigationState:
+    def refresh(
+        self,
+        *,
+        force_publish: bool = False,
+        emit_scope_change: bool = True,
+        scope_origin: str = "platform.record_navigation.empty_selection",
+    ) -> NavigationState:
         previous = self.get_state()
         state = self._build_state()
         with self._lock:
             self._state = state
+        if emit_scope_change and state.scope != previous.scope:
+            self.events.publish(
+                "navigation.scope.changed",
+                {"scope": state.scope, "dataset_id": state.dataset_id, "origin": scope_origin},
+            )
         if force_publish or state != previous:
             self.events.publish("navigation.state.changed", state.to_payload())
         return state
@@ -328,7 +336,9 @@ class RecordNavigationManager:
         except Exception:
             dataset_id = None
         if not dataset_id:
-            return NavigationState(scope=self._scope)
+            with self._lock:
+                self._scope = "dataset"
+            return NavigationState(scope="dataset")
 
         try:
             dataset_row_count = max(0, int(self.datasets.row_count(dataset_id)))
@@ -349,6 +359,11 @@ class RecordNavigationManager:
         selected_ids = self._selection_row_ids(dataset_id)
         selection_count = len(selected_ids)
         scope = self._scope
+        if scope == "selection" and selection_count == 0:
+            # An empty selection must not strand Previous/Next on a zero-row scope.
+            with self._lock:
+                self._scope = "dataset"
+            scope = "dataset"
         scope_count = dataset_row_count if scope == "dataset" else selection_count
 
         position: Optional[int] = None
@@ -547,11 +562,22 @@ class RecordNavigationManager:
         return cls._record_id_key(left) == cls._record_id_key(right)
 
     def _on_platform_event(self, topic: str, payload: Any) -> None:
-        if self._disposed:
+        if self._disposed or self._switching_dataset:
             return
 
         if topic == "dataset.active.changed":
             self._invalidate_all_positions()
+            try:
+                current_id = str(self.datasets.active_id())
+            except Exception:
+                current_id = None
+            previous_id = (
+                payload.get("previous_dataset_id", self.get_state().dataset_id)
+                if isinstance(payload, dict) else self.get_state().dataset_id
+            )
+            if (None if previous_id is None else str(previous_id)) != current_id:
+                self._reset_for_dataset_change(current_id)
+                return
 
         elif topic == "dataset.updated":
             dataset_id = self._dataset_id_from_event(payload)
@@ -642,6 +668,57 @@ class RecordNavigationManager:
                     self._invalidate_dataset_positions(dataset_id)
 
         self.refresh()
+        if topic in {"dataset.updated", "dataset.mapping.updated"}:
+            self._focus_first_if_pending()
+        elif topic == "selection.focus.changed" and self._pending_first_focus_dataset_id:
+            # A user's scatter/table focus wins over deferred auto-focus.
+            focus = self.selection.get_focus()
+            if focus is not None and str(getattr(focus, "dataset_id", "")) == self._pending_first_focus_dataset_id:
+                self._pending_first_focus_dataset_id = None
+
+    def _reset_for_dataset_change(self, dataset_id: Optional[str]) -> None:
+        """Reset transient navigation state for any dataset activation source."""
+        origin = "platform.record_navigation.dataset_switch"
+        existing_focus = self.selection.get_focus()
+        preserve_target_focus = bool(
+            dataset_id is not None
+            and existing_focus is not None
+            and str(getattr(existing_focus, "dataset_id", "")) == dataset_id
+        )
+        with self._lock:
+            self._scope = "dataset"
+            self._pending_first_focus_dataset_id = None if preserve_target_focus else dataset_id
+            self._switching_dataset = True
+        try:
+            # Preserve a focus already restored for the target dataset. Otherwise
+            # clear the old dataset's focus before selecting the first new row.
+            if not preserve_target_focus:
+                self.selection.clear_focus(origin=origin)
+            self.selection.clear_selection_set(origin=origin)
+        finally:
+            self._switching_dataset = False
+        self.refresh(force_publish=True, scope_origin=origin)
+        self._focus_first_if_pending()
+
+    def _focus_first_if_pending(self) -> None:
+        dataset_id = self._pending_first_focus_dataset_id
+        if dataset_id is None:
+            return
+        state = self.get_state()
+        if state.dataset_id != dataset_id:
+            self._pending_first_focus_dataset_id = None
+            return
+        if state.has_focus:
+            self._pending_first_focus_dataset_id = None
+            return
+        if state.id_column is None or state.dataset_row_count <= 0:
+            return  # Wait for record_id mapping or rows to become available.
+        try:
+            # Bounded first-row lookup; never materialize the full dataset.
+            self.go_to_position(0, origin="platform.record_navigation.dataset_switch")
+        except (NavigationError, KeyError, IndexError, ValueError, RuntimeError):
+            return  # Keep the pending request for a later mapping/dataset update.
+        self._pending_first_focus_dataset_id = None
 
     def _dataset_revision(self, dataset_id: Any) -> int:
         key = str(dataset_id)

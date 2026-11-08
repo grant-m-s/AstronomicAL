@@ -14,13 +14,11 @@ from astronomicAL.platform.application_chrome_styles import (
 from astronomicAL.platform.dataset_loader import DatasetLoaderController
 from astronomicAL.platform.modal_utils import open_template_modal
 
-
 def _install_application_chrome_css() -> None:
     marker = "--al-application-chrome-v7"
     if any(marker in css for css in pn.config.raw_css):
         return
     pn.config.raw_css.append(APPLICATION_CHROME_CSS)
-
 
 class DatasetHeaderController:
     """Global active-dataset switcher and entry point to the dataset loader."""
@@ -337,7 +335,6 @@ class DatasetHeaderController:
         return ""
 
     def _set_active_dataset(self, dataset_id: str) -> None:
-        self._clear_selection_for_dataset_switch()
         self.context.datasets.set_active(
             dataset_id,
             origin="platform.dataset_header",
@@ -357,19 +354,6 @@ class DatasetHeaderController:
             self.modal_root,
             close_on_backdrop=True,
         )
-
-    def _clear_selection_for_dataset_switch(self) -> None:
-        selection = getattr(self.context, "selection", None)
-        if selection is None:
-            return
-        try:
-            selection.clear_focus(origin="dataset.active.changed")
-        except Exception:
-            pass
-        try:
-            selection.clear_selection_set(origin="dataset.active.changed")
-        except Exception:
-            pass
 
     def has_active_dataset(self) -> bool:
         dataset_id = self._active_dataset_id_or_none()
@@ -392,6 +376,5 @@ class DatasetHeaderController:
         except Exception:
             return None
         return str(value) if value not in (None, "") else None
-
 
 __all__ = ["DatasetHeaderController"]
