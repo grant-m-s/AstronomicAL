@@ -1,17 +1,44 @@
 Plugin Manifests
 ================
 
-Required Fields
----------------
+This page describes the manifest formats implemented at AstronomicAL
+commit ``90a912c``. The old root-level ``PLUGIN_CONTRACT.md`` showed an
+untyped Python dictionary with fields such as ``dependencies`` and
+``python_requires``. That is **not** the authoritative manifest schema.
+The current runtime format is ``PluginManifest``; managed community
+packages use a static manifest read without executing plugin code.
 
-A :class:`PluginManifest` requires:
+Choose the manifest for your distribution path
+----------------------------------------------
 
-* :code:`id`;
-* :code:`name`;
-* :code:`version`.
+.. list-table:: Manifest and entry-point forms
+   :header-rows: 1
+   :widths: 30 35 35
 
-:code:`description` is optional but strongly recommended for user-facing
-plugins.
+   * - Plugin origin
+     - Discovery metadata
+     - Runtime entry
+   * - Bundled / development directory
+     - Usually a Python ``PluginManifest`` object in ``plugin.py``;
+       can also supply a static manifest
+     - ``register(api)``
+   * - Installed Python package
+     - Python entry point, optionally an entry point for static metadata
+     - Python module providing ``manifest`` and ``register(api)``
+   * - Managed community ``.alplugin``
+     - Static ``astronomical-plugin.json`` at archive root
+     - ``plugin.py`` implementing ``register(api)``; no module-level
+       Python manifest is necessary for this path
+
+A local development plugin may be discovered by importing ``plugin.py``;
+therefore import-time code must remain cheap and side-effect free. Managed
+community plugin metadata can be inspected without importing untrusted
+plugin code. See :doc:`package_structure` and :doc:`packaging`.
+
+Python ``PluginManifest``
+-------------------------
+
+Bundled and development plugins normally use:
 
 .. code-block:: python
 
@@ -19,121 +46,163 @@ plugins.
 
    manifest = PluginManifest(
        id="astro.example",
-       name="Example Astronomy Tool",
+       name="Example Plugin",
        version="0.1.0",
-       description="Adds an example domain panel.",
+       description="Adds an example panel and action.",
+       requires=["pillow>=10"],
+       optional_requires=["av>=12"],
+       requires_plugins=[],
+       optional_plugins=["core.video>=0.2"],
+       capabilities=["panel", "action"],
+       tags=["example"],
    )
 
-Keep the module-level manifest cheap to import. Do not import heavyweight
-optional libraries merely to construct it.
+   def register(api):
+       ...
 
-Plugin IDs
-----------
+The ``PluginManifest`` dataclass requires ``id``, ``name`` and ``version``.
+``description`` is optional but strongly recommended. Supported fields:
 
-Use a stable identifier containing only letters, numbers, dots, underscores or
-hyphens. A dotted namespace is recommended:
+.. list-table:: Current manifest fields
+   :header-rows: 1
+   :widths: 30 70
+
+   * - Field
+     - Meaning
+   * - ``id``, ``name``, ``version``
+     - Stable ID, display name and plugin version (required).
+   * - ``description``
+     - User-facing description.
+   * - ``author``, ``homepage``, ``package``
+     - Attribution, project URL and package metadata.
+   * - ``min_astronomical``, ``max_astronomical``
+     - Optional host-version compatibility bounds.
+   * - ``requires``, ``optional_requires``
+     - Required and optional **Python package requirements** as PEP 508
+       strings, such as ``"pillow>=10"``.
+   * - ``requires_plugins``, ``optional_plugins``
+     - Required and optional **AstronomicAL plugin** dependencies. May use
+       version specifiers such as ``"core.video>=0.2"``.
+   * - ``capabilities``, ``tags``
+     - Informational feature and discovery labels.
+   * - ``metadata``
+     - Optional dictionary for additional descriptive metadata.
+
+Do not confuse ``requires`` (Python packages) with ``requires_plugins``
+(AstronomicAL extensions). An optional plugin is not guaranteed to be
+installed or enabled; check for its action/service before using it.
+
+Plugin IDs may contain letters, digits, dots, underscores and hyphens,
+and must start with an alphanumeric character. Use stable dotted IDs, for
+example ``community.example`` or ``astro.spectra``. IDs must be unique
+within the discovered plugin set. Do not change a published ID merely to
+rename the display title; layouts and other integrations can refer to it.
+
+Use semantic-style release versions and explicit host bounds where needed.
+The host can validate Python and plugin dependency versions, but a plugin
+must still handle incompatible optional integrations gracefully.
+
+Static manifest for managed plugins
+-----------------------------------
+
+The independently distributed
+`Hello World template <https://github.com/grant-m-s/AstronomicAL-Hello-World>`_
+uses this structure:
 
 .. code-block:: text
 
-   core.record_browser
-   workflow.review
-   astro.example
-   integrations.example
+   astronomical-plugin.json
+   plugin.py
+   README.md
 
-The first character must be alphanumeric. Plugin IDs must also be unique across
-the discovered plugin set.
+Its manifest has the following form:
 
-Versions
---------
+.. code-block:: json
 
-Use semantic-style versions where possible.
+   {
+     "id": "community.example",
+     "name": "Example Plugin",
+     "version": "1.0.0",
+     "description": "An example external AstronomicAL plugin.",
+     "author": "Plugin Author",
+     "requires": [],
+     "optional_requires": [],
+     "requires_plugins": [],
+     "optional_plugins": [],
+     "capabilities": ["panel"],
+     "tags": ["example"]
+   }
 
-The manifest can declare AstronomicAL compatibility with
-:code:`min_astronomical` and :code:`max_astronomical`. When the host version is
-provided during validation, plugins outside those bounds are rejected.
+The runtime ``plugin.py`` for this managed-package pattern need only expose
+``register(api)`` and any optional lifecycle hooks. The static manifest is
+the source of discovery metadata; its plugin ID and version must match the
+release metadata and package identity.
 
-Requirements
-------------
+Development and local directory discovery also recognise static JSON or
+TOML manifest filenames, including ``astronomical-plugin.json``,
+``astronomical-plugin.toml``, ``plugin.json`` and ``plugin.toml``. The
+managed ``.alplugin`` release template uses the root
+``astronomical-plugin.json`` convention; use that for Marketplace packages
+rather than relying on a more permissive development-path alias.
 
-Required Python packages belong in :code:`requires` as PEP 508 requirement
-strings:
+Compatibility and dependencies
+------------------------------
 
-.. code-block:: python
+Required Python requirements go in ``requires`` as PEP 508 strings. Put
+optional packages in ``optional_requires``. The application reports
+missing/incompatible required packages and can reject enablement;
+optional packages do not make an entire plugin unavailable.
 
-   requires=[
-       "astropy>=6",
-       "requests",
-   ]
-
-Optional Python packages belong in :code:`optional_requires`. Missing required
-packages prevent enablement; missing optional packages are reported as warnings.
-
-Environment markers and version specifiers are supported where the Python
-:mod:`packaging` library is available.
-
-Heavy astronomy, image or ML packages should remain dependencies of the plugin
-or individual contribution that needs them rather than being moved into the
-platform core for convenience.
-
-Plugin Dependencies
--------------------
-
-Use :code:`requires_plugins` when the plugin cannot function unless another
-AstronomicAL plugin is present and enabled:
-
-.. code-block:: python
-
-   requires_plugins=[
-       "core.image",
-   ]
-
-A missing or disabled required plugin prevents enablement.
-
-The manifest also exposes :code:`optional_plugins` for describing optional
-relationships. The current PluginManager does not treat those entries as
-required enablement dependencies, so code using an optional integration must
-still detect its availability and degrade gracefully.
-
-Capabilities and Tags
----------------------
-
-:code:`capabilities` and :code:`tags` are free-form discoverability metadata.
-
-Capabilities normally describe the kinds of contributions or platform features
-the plugin provides, while tags help Plugin Manager and other UI group or
-describe the plugin.
+Use ``requires_plugins`` only for hard dependencies. It supports bare IDs
+or versioned specifiers, for example:
 
 .. code-block:: python
 
-   capabilities=["panel", "service", "artifact_viewer"]
-   tags=["astronomy", "spectra"]
+   requires_plugins=["core.image", "core.video>=0.2,<1"]
 
-They are descriptive metadata rather than permission grants.
+``optional_plugins`` is metadata for possible integrations, not a promise
+that those plugins will be active. At the contribution level, the API can
+also declare its own Python requirements with ``requires`` and
+``optional_requires``; see :doc:`plugin_api`.
 
-Other Metadata
---------------
+Avoid importing heavyweight optional libraries in order to create the
+manifest. Import them only when the relevant action, panel or service is
+actually used.
 
-A manifest may also provide:
+Discovery, validation and activation
+------------------------------------
 
-* :code:`author`;
-* :code:`homepage`;
-* :code:`package`;
-* :code:`metadata` for additional JSON-like descriptive values.
+A plugin can be *discovered* without being *enabled*. This distinction is
+particularly important for installed community plugins, whose Python code
+must not execute merely for metadata inspection. Installation and
+activation are separate operations. Community activation is subject to
+global and per-plugin preferences.
 
-Managed or community plugin discovery may read the same manifest information
-from a static manifest before importing the plugin's Python code.
+The system may report:
 
-Validation Errors
------------------
+* invalid IDs or duplicate plugin identities;
+* missing or incompatible Python requirements;
+* invalid dependency specifiers;
+* an incompatible host version;
+* absent or disabled required plugins;
+* duplicate contribution registrations;
+* import, registration or lifecycle-hook failures.
 
-Plugin validation and registration can report problems such as:
+A static manifest, successful archive verification and Marketplace listing
+do not constitute a code security audit. When enabled, the plugin executes
+Python inside the AstronomicAL host process; see :doc:`packaging`.
 
-* invalid or duplicate plugin IDs;
-* missing or incompatible required Python packages;
-* invalid PEP 508 requirement strings;
-* incompatible AstronomicAL versions;
-* missing or disabled entries in :code:`requires_plugins`;
-* duplicate panel, action, workflow, service or artifact-viewer registrations;
-* import or :code:`register(api)` failures.
+Versioning and author responsibilities
+--------------------------------------
 
-Optional Python requirements produce warnings rather than blocking enablement.
+There is no independent ``plugin_contract_version`` field in the current
+manifest dataclass. Publish compatibility assumptions in the plugin's
+release notes and use ``min_astronomical`` / ``max_astronomical`` for
+host-version compatibility when needed. Version saved panel state
+independently with the registration's ``state_version``; automatic state
+migration is not implemented at this baseline. See :doc:`persistence`.
+
+The static manifest and Python runtime manifest (where a plugin has both)
+should describe the same plugin identity, version, dependencies and
+compatibility information. Test the exact discovery and installation path
+used by your users, not just import-based local discovery.

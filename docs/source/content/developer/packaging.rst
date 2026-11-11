@@ -1,188 +1,209 @@
 Packaging and Distributing Plugins
 ==================================
 
-Distribution Options
---------------------
+AstronomicAL supports normal Python distributions with plugin entry points,
+managed ``.alplugin`` archives installed through Plugin Manager, and local
+development search paths. The external
+`Hello World repository <https://github.com/grant-m-s/AstronomicAL-Hello-World>`_
+is the maintained starter template for the managed Marketplace workflow.
 
-AstronomicAL currently supports two main distribution paths:
+.. important::
 
-* a normal installed Python package discovered through Python entry points;
-* an AstronomicAL-managed :code:`.alplugin` archive installed through
-  **Plugin Manager**.
+   The managed ``.alplugin`` format and the normal Python-package
+   entry-point route use different discovery/packaging conventions. Choose
+   one release path and test it end to end. See :doc:`manifests`.
 
-Development plugins can also be loaded directly from configured local plugin
-paths, but that is normally an authoring workflow rather than a release format.
+Local development
+-----------------
 
-Package Metadata
-----------------
+During development, place a directory containing ``plugin.py`` in a
+configured local plugin search path. A bundled plugin lives under
+``astronomicAL/plugins/``; a normal third-party plugin should not need to
+edit the main repository. A local development plugin can use a
+module-level ``PluginManifest`` and ``register(api)``; a static JSON/TOML
+manifest is also supported by the discovery layer.
 
-For a Python distribution, use normal package metadata with an explicit package
-version and licence. Keep the AstronomicAL plugin manifest version aligned with
-the released plugin version where practical.
+Development plugins may be imported to inspect their metadata. Keep
+import-time code cheap, avoid network calls and only create long-lived
+objects when the platform enables or instantiates the relevant feature.
 
-The runtime plugin module must expose a :class:`PluginManifest` and
-:code:`register(api)`.
+Python package distribution
+---------------------------
 
-Entry Points
-------------
-
-Installed Python packages are discovered through the
-:code:`astronomical.plugins` entry-point group.
-
-For example, with :file:`pyproject.toml`:
+Installable Python packages are discovered from the
+``astronomical.plugins`` entry-point group. Example project metadata:
 
 .. code-block:: toml
 
    [project]
    name = "astronomical-example-plugin"
    version = "0.1.0"
-   dependencies = [
-       "AstronomicAL",
-   ]
+   dependencies = ["AstronomicAL"]
 
    [project.entry-points."astronomical.plugins"]
    example = "astronomical_example_plugin.plugin"
 
-The referenced module can expose the normal runtime entry points:
+The referenced module should expose a ``PluginManifest`` and
+``register(api)``:
 
 .. code-block:: python
 
+   from astronomicAL.platform.plugins import PluginManifest
+
    manifest = PluginManifest(
        id="astro.example",
-       name="Example Astronomy Tool",
+       name="Example Tool",
        version="0.1.0",
    )
 
    def register(api):
        ...
 
-AstronomicAL also recognises the
-:code:`astronomical.plugin_manifests` entry-point group for static-manifest
-discovery. Static manifests let the host inspect plugin metadata without first
-executing the plugin runtime.
+The host also recognises an ``astronomical.plugin_manifests`` entry-point
+group for static-manifest discovery. These are **Python packaging entry
+points**, not files expected in a managed ``.alplugin`` release. A Python
+distribution should declare its dependencies in standard packaging
+metadata as well as the plugin manifest where applicable.
 
-Static Manifests
-----------------
+Managed ``.alplugin`` release layout
+------------------------------------
 
-A static JSON or TOML manifest is especially important for community or managed
-plugins, where AstronomicAL may need to inspect the plugin before allowing its
-Python code to run.
-
-Supported local manifest names include:
+The managed plugin archive is a ZIP with a static root manifest and the
+plugin's Python entry module. An example minimal archive contains:
 
 .. code-block:: text
 
    astronomical-plugin.json
-   astronomical_plugin.json
-   plugin.json
-   manifest.json
-   astronomical-plugin.toml
-   astronomical_plugin.toml
-   plugin.toml
-   manifest.toml
+   plugin.py
+   README.md
 
-The static manifest should describe the same plugin identity, version,
-requirements and compatibility information as the runtime manifest.
+The root ``astronomical-plugin.json`` supplies plugin identity,
+compatibility and dependency metadata for static validation. The runtime
+``plugin.py`` implements ``register(api)`` and may implement
+``on_enable(...)`` and ``on_disable(...)``. A separate Python
+``PluginManifest`` is not required by the Hello World managed-plugin
+pattern. See :doc:`manifests` for the current field names.
 
-Managed ``.alplugin`` Packages
+Installing a managed archive validates its structure and records the
+package without automatically enabling its Python code. Managed updates
+are staged and verify the target plugin identity; enabled plugins are
+disabled before replacement rather than being silently restarted.
+Uninstalling plugin code should not remove user data written to an
+appropriate location outside the installed plugin directory.
+
+Building a Marketplace release
 ------------------------------
 
-Plugin Manager can install a local :code:`.alplugin` archive into AstronomicAL's
-managed user-plugin area.
+The
+`Hello World template <https://github.com/grant-m-s/AstronomicAL-Hello-World>`_
+provides ``astronomical-plugin.json``, ``plugin.py``, a release build script
+and a GitHub Actions workflow. For a new external plugin:
 
-Installation validates and records the package without enabling or executing the
-plugin. Managed updates verify that the archive belongs to the selected plugin;
-a running plugin is disabled before replacement and is not restarted
-automatically.
+#. Create a repository from the template.
+#. Update ``astronomical-plugin.json`` with your stable plugin ID, version,
+   Python requirements, required/optional plugins and descriptive metadata.
+#. Implement ``register(api)`` in ``plugin.py``. Keep local tests and any
+   needed assets in the repository.
+#. Verify discovery, enablement, panel/action operation, disablement,
+   cleanup and workspace restoration against the supported host version.
+#. Build and inspect a local archive before tagging a release.
+#. Tag a version consistent with the manifest, and publish the GitHub
+   release assets.
+#. Submit the GitHub *release page URL* to the Marketplace's plugin-release
+   submission process.
 
-Managed uninstall removes the installed plugin code while preserving plugin
-data managed outside that code directory.
+With the template's release script, a local build uses:
 
-Use the managed package format when distribution should be handled by
-AstronomicAL itself. Use a normal Python package and entry point when the plugin
-should be installed and upgraded through the Python packaging environment.
+.. code-block:: console
 
-Dependencies
-------------
+   python tools/build_release.py --repository YOUR-USERNAME/YOUR-PLUGIN
 
-Put required Python dependencies in the plugin manifest's :code:`requires`
-field using PEP 508 requirement strings. Optional packages belong in
-:code:`optional_requires`.
+For a manifest with ID ``community.example`` and version ``1.0.0``, the
+script produces an ``.alplugin`` archive and ``marketplace-release.json``
+release metadata in ``dist/``. The metadata records the versioned release
+asset URL, SHA-256 digest, archive size and plugin manifest. Do not
+manually substitute unverified values in this metadata.
 
-A separately distributed Python package should also declare the dependencies
-needed to import and run that package in its normal package metadata.
+The template's release workflow is triggered by a version tag such as
+``v1.0.0`` and publishes the distributable archive and release metadata as
+GitHub release assets. The Marketplace submission workflow validates the
+release, compares the package and manifest to the metadata, and prepares a
+catalogue change for review. Submission verification does not execute the
+plugin's Python code.
 
-For AstronomicAL-managed plugins, compatible Python dependencies can be placed
-in the managed plugin dependency environment. The host environment takes
-precedence, and dependency conflicts with host-owned packages are rejected
-rather than silently replacing the application's versions.
+For the authoritative template steps, see its
+`README <https://github.com/grant-m-s/AstronomicAL-Hello-World/blob/master/README.md>`_
+and the
+`Marketplace repository <https://github.com/grant-m-s/AstronomicAL-Marketplace>`_.
 
-Heavy astronomy, image and machine-learning dependencies should stay with the
-plugin that requires them rather than being added to the platform core.
+Python and plugin dependencies
+------------------------------
+
+Required Python requirements go in the manifest's ``requires`` list as
+PEP 508 strings, and optional packages in ``optional_requires``. Host-owned
+packages must not be silently replaced by an external plugin's dependency
+installation. The managed dependency environment can supply compatible
+additional packages, but host dependency conflicts can reject the install.
+
+Declare AstronomicAL plugin dependencies separately with
+``requires_plugins`` and ``optional_plugins``. The latter must be handled
+at runtime when absent or disabled. Heavy astronomy, image and
+machine-learning packages should stay with the feature that uses them,
+not be added to the platform for convenience.
 
 Compatibility
 -------------
 
-Declare host-version bounds in the plugin manifest where required:
+Specify host-version bounds if a plugin relies on a particular platform
+release:
 
 .. code-block:: python
 
    manifest = PluginManifest(
        id="astro.example",
-       name="Example Astronomy Tool",
+       name="Example Tool",
        version="0.1.0",
        min_astronomical="0.8.0",
        max_astronomical="0.9.99",
    )
 
-Release documentation should also describe:
+These numbers are illustrative, not an assertion of compatibility with
+those host versions. Document support ranges, migration notes, required
+plugins, optional integrations and large-data requirements in release
+notes. There is no separate plugin-contract-version manifest field at
+``90a912c``.
 
-* supported AstronomicAL versions;
-* required and optional Python packages;
-* required AstronomicAL plugins;
-* any workspace, settings or artifact migrations;
-* optional external integrations and services.
+Trust and permissions
+---------------------
 
-There is no separate manifest field for a plugin-contract version in the
-current API, so document contract assumptions in the release notes when they
-matter.
+Installed third-party plugins run Python in the AstronomicAL application
+process. The static manifest and checksum checks protect parts of the
+installation pipeline; **they do not sandbox or audit enabled code**.
 
-Trust
------
+A third-party plugin should document its filesystem access, network
+requests, authentication/credential use, native dependencies and any
+ability to execute user-provided or remote code. Community plugin
+activation is separately controlled by the host's global community-plugin
+setting and individual enablement preference.
 
-A plugin executes Python code inside the AstronomicAL process. It is not a
-sandbox.
-
-Distribution pages should clearly state:
-
-* files and directories the plugin reads or writes;
-* network services it contacts;
-* credentials, tokens or authentication it can use;
-* external executables or native libraries it invokes;
-* whether remote code or user-provided code can be executed.
-
-Community plugins remain subject to AstronomicAL's activation policy even when
-they have already been discovered or installed.
-
-Release Checklist
+Release checklist
 -----------------
 
-Before release:
+Before publishing or updating an external plugin:
 
-* validate the runtime and static manifests;
-* test discovery from the intended distribution format;
-* test enablement, disablement and cleanup;
-* test required and optional dependency handling;
-* test with community-plugin execution disabled;
-* test installation or entry-point discovery in a clean environment;
-* test workspace restore with the plugin available and unavailable;
-* verify generated files are written outside the installed source directory;
-* build the documentation and changelog;
-* publish a minimal installation and usage example.
+* Verify the manifest ID and version match the release tag and metadata.
+* Test the exact built archive, not only source imports.
+* Test enable, disable, re-enable and cleanup of subscriptions, jobs and
+  owned services.
+* Test missing required and optional Python/plugin dependencies.
+* Test lazy dataset backends if the plugin reads tables.
+* Test workspace restore with and without the plugin installed.
+* Verify that generated data and caches are outside the installed plugin
+  code directory.
+* Test inactive community-plugin discovery (metadata inspection should not
+  execute code) and user-controlled activation.
+* Publish a clear changelog and installation instructions.
 
-.. caution::
-
-   Updating Python packages that contain native extensions may require an
-   application restart before every loaded module reflects the new version.
-   Do not rely on in-process plugin reload as a general replacement for process
-   restart after dependency changes.
+Updates involving already imported Python packages or native extensions
+may require an application restart before all loaded modules reflect the
+new versions.
